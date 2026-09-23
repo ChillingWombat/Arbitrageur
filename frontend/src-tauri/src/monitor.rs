@@ -2248,8 +2248,8 @@ impl SpreadMonitorEngine {
         // --- friction ---------------------------------------------------
         // Static per-unit costs: both taker fees + funding carry (+ exit
         // estimate for two-way). Book-walk slippage is inside the ladder.
-        let fee_bps = fee_map.get(buy_v).copied().unwrap_or(2.0)
-            + fee_map.get(sell_v).copied().unwrap_or(2.0);
+        let fee_bps = fee_map.get(buy_v).copied().unwrap_or(4.0)
+            + fee_map.get(sell_v).copied().unwrap_or(4.0);
         let fr_a = self
             .funding_ema
             .lock()
