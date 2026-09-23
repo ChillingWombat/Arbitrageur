@@ -42,7 +42,7 @@ Raise the target when realized testnet slippage or failed/partial fills exceed t
 
 ### Step size and ticker equity cap
 
-**Partially live (2026-09-24).** The derived `max_accumulated_units` (max steps) persists on the ticker config and now caps concurrently-open matched pairs for that symbol — counted from the durable signal ledger (`balanced` rows), exact after restarts. Entry quantity still comes from the book-depth capacity ladder; `stepSizeMult`/`maxStepUsd` derive the stored step notional but are not yet a sizing input.
+**Partially live (2026-09-23).** The derived `max_accumulated_units` (max steps) persists on the ticker config and now caps concurrently-open matched pairs for that symbol — counted from the durable signal ledger (`balanced` rows), exact after restarts. Entry quantity still comes from the book-depth capacity ladder; `stepSizeMult`/`maxStepUsd` derive the stored step notional but are not yet a sizing input.
 
 - Reduce `maxStepUsd` before increasing the number of opportunities monitored.
 - Keep the ticker equity cap small enough that one unresolved pair cannot dominate the portfolio.
@@ -50,7 +50,7 @@ Raise the target when realized testnet slippage or failed/partial fills exceed t
 
 ### Execution mode
 
-**Live per-ticker override (2026-09-24).** The Ticker Configurator's Single/Two-Way toggle persists on the ticker config and overrides the global Radar Configurator → Execution Mode (`one_way`/`two_way`) for that symbol's exit costing; tickers without a saved config follow the global policy. The strategy-params mirror of the same field remains unconsumed.
+**Live per-ticker override (2026-09-23).** The Ticker Configurator's Single/Two-Way toggle persists on the ticker config and overrides the global Radar Configurator → Execution Mode (`one_way`/`two_way`) for that symbol's exit costing; tickers without a saved config follow the global policy. The strategy-params mirror of the same field remains unconsumed.
 
 - **Single-Way:** One directional divergence at a time. This is the safer default while validating a pair.
 - **Double-Way:** Requires independent evidence that both directional rows mean-revert after all costs. Do not enable merely because the historical mid spread crossed zero.
