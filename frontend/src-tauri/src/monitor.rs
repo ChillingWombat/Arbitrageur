@@ -487,6 +487,26 @@ fn funding_per_hour(rate: &str, interval_hours: u32) -> Option<f64> {
     per_hour.is_finite().then_some(per_hour)
 }
 
+/// Fresh per-hour funding rate for one signal leg, or `None` when the
+/// venue owes a rate and hasn't reported within 5 minutes. Spot legs have
+/// no funding market by design — they contribute 0 rather than blocking
+/// the exit decision.
+fn funding_leg_rate_hourly(
+    ema: &HashMap<(String, String), (f64, Instant)>,
+    venue: &str,
+    symbol: &str,
+    now: Instant,
+) -> Option<f64> {
+    if symbol.to_uppercase().ends_with("-SPOT") {
+        return Some(0.0);
+    }
+    let base = canonical_base(symbol);
+    match ema.get(&(venue.to_string(), base)) {
+        Some((rate, ts)) if now.duration_since(*ts) < Duration::from_secs(300) => Some(*rate),
+        _ => None,
+    }
+}
+
 /// True inside the funding mask of either leg's venue.
 fn pair_in_funding_mask(ts_ms: i64, buy_v: &str, sell_v: &str) -> bool {
     let mut intervals = venue_funding_intervals(buy_v);
@@ -1277,7 +1297,10 @@ pub struct SpreadMonitorEngine {
     /// Ordered-pair runtime keyed (symbol, buy_venue, sell_venue).
     pairs: Mutex<HashMap<(String, String, String), PairRuntime>>,
     /// Funding EMA per (venue, canonical base), fraction per hour.
-    funding_ema: Mutex<HashMap<(String, String), f64>>,
+    /// (venue, canonical base) → (per-hour funding rate, last sample).
+    /// The timestamp keeps the exit supervisor honest: a stale lane can
+    /// never decide a position's fate.
+    funding_ema: Mutex<HashMap<(String, String), (f64, Instant)>>,
     /// Canonical-base watchlist (exempted symbols removed).
     watchlist: Mutex<Vec<String>>,
     /// All canonical bases per venue from the last market refresh.
@@ -1289,6 +1312,9 @@ pub struct SpreadMonitorEngine {
     fast_vol: Mutex<HashMap<(String, String, String), FastVolEwma>>,
     /// Consecutive fast-vol breaches per ordered pair (halve-then-halt).
     vol_halt: Mutex<HashMap<(String, String, String), u32>>,
+    /// Funding-exit supervisor cadence: evaluates open carry positions
+    /// against the entry APR hurdle at most once per 60s.
+    last_funding_exit_check: Mutex<Option<Instant>>,
     /// Last hourly session-rollup pass over the trailing spread log.
     last_rollup_at: Mutex<Option<Instant>>,
     /// Last nightly seasonality-promotion pass (HAR anchors + walk-forward
@@ -1323,6 +1349,7 @@ impl SpreadMonitorEngine {
             last_snapshot: Mutex::new(None),
             fast_vol: Mutex::new(HashMap::new()),
             vol_halt: Mutex::new(HashMap::new()),
+            last_funding_exit_check: Mutex::new(None),
             last_rollup_at: Mutex::new(None),
             last_promotion_at: Mutex::new(None),
             persisted: Mutex::new(HashMap::new()),
@@ -1896,10 +1923,10 @@ impl SpreadMonitorEngine {
                         };
                         let key = (venue.clone(), base);
                         let next = match ema.get(&key) {
-                            Some(prev) => 0.7 * prev + 0.3 * per_hour,
+                            Some((prev, _)) => 0.7 * prev + 0.3 * per_hour,
                             None => per_hour,
                         };
-                        ema.insert(key, next);
+                        ema.insert(key, (next, Instant::now()));
                         state.market_data_hub.update_funding(fr);
                     }
                 }
@@ -1908,6 +1935,87 @@ impl SpreadMonitorEngine {
                     if let Some(lane) = self.lanes.lock().iter_mut().find(|l| l.venue == venue) {
                         lane.note_failure();
                     }
+                }
+            }
+        }
+        self.supervise_funding_exits(state).await;
+    }
+
+    /// Funding-exit supervisor: an open carry/basis position whose
+    /// EMA-smoothed net funding no longer clears the entry hurdle pays (or
+    /// soon pays) to stay open — flatten it through the proven
+    /// symbol-scoped path so the position never rides past its thesis.
+    /// Runs at most once per 60s; evaluates `Balanced` signals only
+    /// (in-flight/imbalanced/unresolved belong to the reconciler).
+    /// A leg with no funding market (spot) reads 0; a perp leg requires a
+    /// fresh (<5min) EMA sample — stale lanes never decide.
+    async fn supervise_funding_exits(&self, state: &AppEngineState) {
+        {
+            let mut last = self.last_funding_exit_check.lock();
+            if last.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
+                return;
+            }
+            *last = Some(Instant::now());
+        }
+        let min_apr = crate::funding::funding_min_apr(state);
+        let signals = match state.state_store.list_signals(None, None) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::debug!("monitor: funding-exit check skipped (signals unreadable): {e}");
+                return;
+            }
+        };
+        let now = Instant::now();
+        let ema = self.funding_ema.lock().clone();
+        for sig in signals.iter().filter(|s| {
+            s.strategy_id.eq_ignore_ascii_case("funding")
+                && s.status == crate::state_store::SignalStatus::Balanced
+                && !s.id.starts_with("flat-")
+        }) {
+            let (long_leg, short_leg) = (
+                sig.legs
+                    .iter()
+                    .find(|l| l.side == crate::state_store::LegSide::Long),
+                sig.legs
+                    .iter()
+                    .find(|l| l.side == crate::state_store::LegSide::Short),
+            );
+            let (Some(long_leg), Some(short_leg)) = (long_leg, short_leg) else {
+                continue;
+            };
+            // net carry = short_leg rate − long_leg rate (same convention
+            // as the entry scanner).
+            let (Some(lr), Some(sr)) = (
+                funding_leg_rate_hourly(&ema, &long_leg.venue, &long_leg.symbol, now),
+                funding_leg_rate_hourly(&ema, &short_leg.venue, &short_leg.symbol, now),
+            ) else {
+                continue;
+            };
+            let net_apr_pct = (sr - lr) * 8760.0 * 100.0;
+            if net_apr_pct < min_apr {
+                tracing::warn!(
+                    "monitor: funding carry {} net APR {:.1}% below the {:.1}% exit hurdle — flattening",
+                    sig.id,
+                    net_apr_pct,
+                    min_apr
+                );
+                match crate::commands::flatten_ticker_positions_impl(
+                    Some(&sig.symbol),
+                    "funding",
+                    state,
+                )
+                .await
+                {
+                    Ok(res) => tracing::info!(
+                        "monitor: funding exit {} flattened ({} closed, {} residual)",
+                        sig.id,
+                        res.signals_closed,
+                        res.residual_signals
+                    ),
+                    Err(e) => tracing::error!(
+                        "monitor: funding exit {} flatten failed: {e} — retrying next pass",
+                        sig.id
+                    ),
                 }
             }
         }
@@ -2254,12 +2362,12 @@ impl SpreadMonitorEngine {
             .funding_ema
             .lock()
             .get(&(buy_v.to_string(), symbol.to_string()))
-            .copied();
+            .map(|(r, _)| *r);
         let fr_b = self
             .funding_ema
             .lock()
             .get(&(sell_v.to_string(), symbol.to_string()))
-            .copied();
+            .map(|(r, _)| *r);
         // t_hold: OU half-life -> empirical median -> None.
         let stats_for_t = if let (Some(m), Some(s)) = (mu, sigma) {
             Some(reversion_stats(&series, m, s, 0.0, 2.0, 3.0, 1))
@@ -3251,6 +3359,37 @@ mod tests {
     }
 
     #[test]
+    fn funding_leg_rate_fresh_spot_and_stale_cases() {
+        let now = Instant::now();
+        let mut ema: HashMap<(String, String), (f64, Instant)> = HashMap::new();
+        ema.insert(("lighter".into(), "BTC".into()), (0.0001, now));
+        // Fresh perp rate resolves by (venue, canonical base).
+        assert_eq!(
+            funding_leg_rate_hourly(&ema, "lighter", "BTC-USDC", now),
+            Some(0.0001)
+        );
+        // Spot legs contribute 0 by design — never blocked, never lying.
+        assert_eq!(
+            funding_leg_rate_hourly(&ema, "lighter", "BTC-SPOT", now),
+            Some(0.0)
+        );
+        // A perp leg on a venue with no sample → None (no decision).
+        assert_eq!(
+            funding_leg_rate_hourly(&ema, "hyperliquid", "BTC-USDC", now),
+            None
+        );
+        // Stale samples (>5min) → None.
+        ema.insert(
+            ("kraken".into(), "BTC".into()),
+            (0.0002, now - Duration::from_secs(600)),
+        );
+        assert_eq!(
+            funding_leg_rate_hourly(&ema, "kraken", "BTC-USDC", now),
+            None
+        );
+    }
+
+    #[test]
     fn execution_gate_blocks_not_ready() {
         let state = AppEngineState::new();
         let (ok, why) = execution_gate(
@@ -4109,11 +4248,11 @@ mod tests {
         engine
             .funding_ema
             .lock()
-            .insert(("a".into(), "BTC".into()), 0.0);
+            .insert(("a".into(), "BTC".into()), (0.0, Instant::now()));
         engine
             .funding_ema
             .lock()
-            .insert(("b".into(), "BTC".into()), 0.0);
+            .insert(("b".into(), "BTC".into()), (0.0, Instant::now()));
         state
             .market_data_hub
             .update_orderbook(book("a", "BTC", 99.8, 100.0, 5));

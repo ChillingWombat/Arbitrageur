@@ -2772,3 +2772,13 @@ The `LIVE_ENTRY_SPATIAL_ONLY` blanket refusal is retired — funding carry/basis
 - Removed: `LIVE_ENTRY_SPATIAL_ONLY` constant, `funding_leg_live_issue` (subsumed by the shared gate's per-venue named refusals).
 - Tests: `e2e_spot_residual_flatten_omits_reduce_only` (spot-venue residual flattens with `reduce_only == false`); `test_funding_carry_live_refusal_names_missing_leg` rewritten to assert the opt-in + locked-vault refusals by name. Full workspace 877 tests; clippy/fmt clean.
 - Docs: SPEC.md entry 32 + current-state lines; CAPABILITIES strategy matrix rows (funding carry, basis, triangle) + footnote + boundary note; RUNBOOK canary section generalized.
+
+## Session 2026-09-23 — Funding min-APR exit supervisor
+
+Live funding entries opened positions with no automated exit — the convergence supervisor is futures-only and the funding rebalance/auto-exit/holding-days knobs are documented-dormant helpers, so a carry position could sit paying negative funding until an operator noticed.
+
+- **`SpreadMonitorEngine::supervise_funding_exits`** runs inside `poll_funding` (≤1 pass per 60s) over `Balanced` funding signals (non-`flat-` children; in-flight/imbalanced/unresolved stay the reconciler's domain). Net carry = EMA-smoothed short-leg rate − long-leg rate in per-hour fractions — the same convention the entry scanner uses; below `funding_min_apr_pct` the position flattens via `flatten_ticker_positions_impl` (the proven symbol-scoped path).
+- **EMA now carries sample timestamps** (`(rate, Instant)`): a perp leg requires a fresh <5min sample to decide — a stale lane can neither close nor hold dishonestly; `-SPOT` legs contribute 0 by design so basis positions exit on the short's funding alone. Failed flattens log + retry next pass (fail-closed to flat); a locked vault refuses at the flatten gate.
+- `funding_min_apr` promoted `pub(crate)`; `funding_leg_rate_hourly` extracted pure for tests (fresh/spot/stale/missing cases pinned). Funding signal records also now persist the scan's cost-adjusted `expected_return_usd` (was `None`).
+- UI copy synced: EngineSettings live-entry label names all four gated paths; FundingRadar empty-state no longer claims live entries are disabled.
+- Workspace 400 tests green; clippy/fmt clean. SPEC.md entry 33; CAPABILITIES funding rows; PARAMETER_GUIDE min-APR row now documents the exit floor.
