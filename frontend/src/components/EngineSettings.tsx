@@ -1457,7 +1457,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                       disabled={!hasApiConnectivity}
                       className="text-accent-strong focus:ring-accent"
                     />
-                    <span className="font-semibold text-slate-800">Testnet Trading</span>
+                    <span className="font-semibold text-slate-800">Paper Trading (Testnet)</span>
                   </label>
                   <label
                     className={`flex items-center space-x-2 ${
@@ -1498,7 +1498,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                       className="text-loss focus:ring-loss"
                     />
                     <span className="font-semibold text-slate-800 flex items-center gap-1.5">
-                      Live Trading
+                      Live Trading (Mainnet)
                     </span>
                   </label>
                 </div>

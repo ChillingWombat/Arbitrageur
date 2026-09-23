@@ -44,6 +44,7 @@ import type {
   WfoOptimizationResult,
   AccountDto,
   AccountUpsertInput,
+  EvmWalletSaveDto,
   StrategyAccountRouteDto,
   StrategyRouteUpsertInput,
   StrategyTickerDto,
@@ -967,6 +968,22 @@ export const api = {
    *  while the vault is locked, unlike the stored-key derivation. */
   async getActiveSignerAddress(venue: string): Promise<string | null> {
     return invokeDesktop<string | null>("get_active_signer_address", { venue });
+  },
+
+  /** Shared EVM wallet fan-out: writes the key to every swap-capable AMM
+   *  venue and only the derived address to market-data venues. Refuses on
+   *  an address/key mismatch and while the vault is locked. */
+  async saveEvmWallet(privateKey: string, walletAddress?: string | null): Promise<EvmWalletSaveDto> {
+    return invokeDesktop<EvmWalletSaveDto>("save_evm_wallet", {
+      privateKey,
+      walletAddress: walletAddress ?? null,
+    });
+  },
+
+  /** Strip wallet material (key + address) from every AMM venue's stored
+   *  credentials — accounts, enabled flags and RPC overrides survive. */
+  async clearEvmWallet(): Promise<number> {
+    return invokeDesktop<number>("clear_evm_wallet");
   },
 
   async setDefaultAccount(venue: string, accountId: string): Promise<void> {

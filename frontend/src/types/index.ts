@@ -993,6 +993,19 @@ export interface AccountUpsertInput {
   credentials?: AccountCredentialInput | null;
 }
 
+/** Result of the shared-EVM-wallet fan-out (`save_evm_wallet`): the derived
+ *  signer plus which AMM venue accounts received key vs. address-only. */
+export interface EvmWalletSaveDto {
+  /** EIP-55 checksum address derived from the submitted private key. */
+  signerAddress: string;
+  /** Swap-capable venues whose accounts now hold the private key. */
+  keyedVenues: string[];
+  /** Market-data venues whose accounts hold only the wallet address. */
+  addressOnlyVenues: string[];
+  /** `{venue}-default` account ids created by this save (start disabled). */
+  createdAccounts: string[];
+}
+
 /** Strategy-level route: maps an enabled account on one exchange to an
  *  enabled account on another. Applies to every ticker using the strategy. */
 export interface StrategyAccountRouteDto {
