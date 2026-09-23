@@ -7023,9 +7023,14 @@ mod tests {
         );
 
         // Flatten the root perp: both legs gone, root closed.
-        let flat = flatten_ticker_positions_impl(Some("BTC-USDC"), "funding", &state)
-            .await
-            .expect("flatten");
+        let flat = flatten_ticker_positions_impl(
+            Some("BTC-USDC"),
+            "funding",
+            arbitrageur_execution::virtual_ledger::CycleStatus::Closed,
+            &state,
+        )
+        .await
+        .expect("flatten");
         assert_eq!(flat.signals_closed, 1, "notes: {:?}", flat.notes);
         let root = state
             .state_store
@@ -8620,12 +8625,24 @@ mod tests {
         .expect("under-cap legs pass");
 
         // 8. Test live flatten: when vault is unlocked, live flatten runs without LIVE_EXECUTION_DISABLED
-        let flat_res = flatten_ticker_positions_impl(Some("BTC-USDC"), "futures", &state).await;
+        let flat_res = flatten_ticker_positions_impl(
+            Some("BTC-USDC"),
+            "futures",
+            arbitrageur_execution::virtual_ledger::CycleStatus::Closed,
+            &state,
+        )
+        .await;
         assert!(flat_res.is_ok());
 
         // 9. When vault is locked, live flatten fails closed
         let _ = lock_vault_impl(&state);
-        let flat_locked = flatten_ticker_positions_impl(Some("BTC-USDC"), "futures", &state).await;
+        let flat_locked = flatten_ticker_positions_impl(
+            Some("BTC-USDC"),
+            "futures",
+            arbitrageur_execution::virtual_ledger::CycleStatus::Closed,
+            &state,
+        )
+        .await;
         assert!(flat_locked.is_err());
         assert!(flat_locked.unwrap_err().contains("vault is locked"));
     }
@@ -12066,9 +12083,14 @@ mod tests {
             dec!(0.05),
         );
 
-        let first = flatten_ticker_positions_impl(Some("BTC-USDC"), "futures", &state)
-            .await
-            .expect("first flatten");
+        let first = flatten_ticker_positions_impl(
+            Some("BTC-USDC"),
+            "futures",
+            arbitrageur_execution::virtual_ledger::CycleStatus::StoppedOut,
+            &state,
+        )
+        .await
+        .expect("first flatten");
         assert_eq!(
             first.residual_signals, 1,
             "partial close must leave exactly one residual root signal"
@@ -12112,9 +12134,14 @@ mod tests {
         );
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
 
-        let second = flatten_ticker_positions_impl(Some("BTC-USDC"), "futures", &state)
-            .await
-            .expect("second flatten");
+        let second = flatten_ticker_positions_impl(
+            Some("BTC-USDC"),
+            "futures",
+            arbitrageur_execution::virtual_ledger::CycleStatus::StoppedOut,
+            &state,
+        )
+        .await
+        .expect("second flatten");
         assert_eq!(
             second.residual_signals, 0,
             "second flatten notes: {:?}",
@@ -12281,9 +12308,14 @@ mod tests {
                 .expect("root fill");
         }
 
-        let res = flatten_ticker_positions_impl(Some("BTC-USDC"), "futures", &state)
-            .await
-            .expect("flatten futures");
+        let res = flatten_ticker_positions_impl(
+            Some("BTC-USDC"),
+            "futures",
+            arbitrageur_execution::virtual_ledger::CycleStatus::Closed,
+            &state,
+        )
+        .await
+        .expect("flatten futures");
 
         let acc = state
             .test_sim("hyperliquid")
@@ -12416,9 +12448,14 @@ mod tests {
         enable_futures_passive(&state, 0.0, 1);
         seed_long_for_flatten(&state).await;
 
-        let res = flatten_ticker_positions_impl(Some("BTC-USDC"), "futures", &state)
-            .await
-            .expect("flatten futures");
+        let res = flatten_ticker_positions_impl(
+            Some("BTC-USDC"),
+            "futures",
+            arbitrageur_execution::virtual_ledger::CycleStatus::Closed,
+            &state,
+        )
+        .await
+        .expect("flatten futures");
         assert_eq!(res.legs_closed, 1);
         assert_eq!(res.signals_closed, 1);
         assert!(
@@ -12451,9 +12488,14 @@ mod tests {
         enable_futures_passive(&state, 100.0, 0);
         seed_long_for_flatten(&state).await;
 
-        let res = flatten_ticker_positions_impl(Some("BTC-USDC"), "futures", &state)
-            .await
-            .expect("flatten futures");
+        let res = flatten_ticker_positions_impl(
+            Some("BTC-USDC"),
+            "futures",
+            arbitrageur_execution::virtual_ledger::CycleStatus::Closed,
+            &state,
+        )
+        .await
+        .expect("flatten futures");
         assert_eq!(res.legs_closed, 1);
         assert_eq!(res.signals_closed, 1);
         assert!(
@@ -13028,9 +13070,14 @@ mod tests {
         // books past that — a scheduling artifact, not leg state.
         seed_triangle_books(&state);
         for sym in ["BTC-USDC", "BTC-ETH", "ETH-USDC"] {
-            let flat = flatten_ticker_positions_impl(Some(sym), "triangle", &state)
-                .await
-                .expect("flatten leg");
+            let flat = flatten_ticker_positions_impl(
+                Some(sym),
+                "triangle",
+                arbitrageur_execution::virtual_ledger::CycleStatus::Closed,
+                &state,
+            )
+            .await
+            .expect("flatten leg");
             assert_eq!(flat.residual_signals, 0, "flatten notes: {:?}", flat.notes);
         }
         let acc = state
@@ -13169,6 +13216,20 @@ mod tests {
         assert_eq!(checks[0].verdict, "exit");
         assert_eq!(checks[0].trigger.as_deref(), Some("converged"));
         assert!(checks[0].unwound);
+        // A convergence exit is a target hit, not a stop — the lot records
+        // the honest terminal status for outcome segmentation.
+        {
+            let ledger = state.virtual_ledger.read();
+            let lot = ledger
+                .lots
+                .values()
+                .find(|l| l.symbol == "BTC-USDC")
+                .expect("cycle lot exists");
+            assert_eq!(
+                lot.status,
+                arbitrageur_execution::virtual_ledger::CycleStatus::Closed
+            );
+        }
 
         // Slot freed: the pair can be re-entered (books still overlap enough
         // for the economics gate? re-seed the wide edge first).
@@ -13240,6 +13301,19 @@ mod tests {
         assert_eq!(checks[0].verdict, "exit");
         assert_eq!(checks[0].trigger.as_deref(), Some("stopped"));
         assert!(checks[0].unwound);
+        {
+            let ledger = state.virtual_ledger.read();
+            let stopped = ledger
+                .lots
+                .values()
+                .filter(|l| {
+                    l.symbol == "BTC-USDC"
+                        && l.status
+                            == arbitrageur_execution::virtual_ledger::CycleStatus::StoppedOut
+                })
+                .count();
+            assert_eq!(stopped, 1, "stop unwind records StoppedOut");
+        }
 
         // Re-open, then backdate the baseline past the hold deadline.
         seed_test_book(
@@ -13293,6 +13367,18 @@ mod tests {
         assert_eq!(checks[0].verdict, "exit");
         assert_eq!(checks[0].trigger.as_deref(), Some("timed_out"));
         assert!(checks[0].unwound);
+        {
+            let ledger = state.virtual_ledger.read();
+            let timed_out = ledger
+                .lots
+                .values()
+                .filter(|l| {
+                    l.symbol == "BTC-USDC"
+                        && l.status == arbitrageur_execution::virtual_ledger::CycleStatus::TimedOut
+                })
+                .count();
+            assert_eq!(timed_out, 1, "deadline unwind records TimedOut");
+        }
     }
 
     #[tokio::test]

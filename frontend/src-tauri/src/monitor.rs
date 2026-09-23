@@ -2002,6 +2002,7 @@ impl SpreadMonitorEngine {
                 match crate::commands::flatten_ticker_positions_impl(
                     Some(&sig.symbol),
                     "funding",
+                    arbitrageur_execution::virtual_ledger::CycleStatus::StoppedOut,
                     state,
                 )
                 .await

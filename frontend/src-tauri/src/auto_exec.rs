@@ -213,6 +213,7 @@ pub trait BotDispatch: Send + Sync {
     fn exit<'a>(
         &'a self,
         symbol: &'a str,
+        trigger: ExitTrigger,
         state: &'a AppEngineState,
     ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>>;
 }
@@ -243,12 +244,24 @@ impl BotDispatch for VenueDispatch {
     fn exit<'a>(
         &'a self,
         symbol: &'a str,
+        trigger: ExitTrigger,
         state: &'a AppEngineState,
     ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
         Box::pin(async move {
+            let close_status = match trigger {
+                ExitTrigger::Converged => {
+                    arbitrageur_execution::virtual_ledger::CycleStatus::Closed
+                }
+                ExitTrigger::TimedOut => {
+                    arbitrageur_execution::virtual_ledger::CycleStatus::TimedOut
+                }
+                // Stopped + StaleUnwind: adverse unwind, not a target exit.
+                _ => arbitrageur_execution::virtual_ledger::CycleStatus::StoppedOut,
+            };
             let res = crate::commands::flatten_ticker_positions_impl(
                 Some(symbol),
                 BOT_STRATEGY_ID,
+                close_status,
                 state,
             )
             .await?;
@@ -902,7 +915,7 @@ impl OpportunityExecutor {
         // Cooldown starts at the exit decision, including failed attempts, so
         // a flapping pair cannot spin the unwind path.
         self.cooldowns.lock().insert(key.clone(), now_ms);
-        match dispatch.exit(&key.symbol, state).await {
+        match dispatch.exit(&key.symbol, trigger, state).await {
             Ok(note) => {
                 self.open.lock().remove(key);
                 let _ = state.state_store.delete_bot_position(
@@ -1149,6 +1162,7 @@ mod tests {
         fn exit<'a>(
             &'a self,
             symbol: &'a str,
+            _trigger: ExitTrigger,
             _state: &'a AppEngineState,
         ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
             Box::pin(async move {
