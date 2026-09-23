@@ -3721,6 +3721,10 @@ async fn maybe_liq_trim_pair(
     match decision {
         PairTrimDecision::Hold => None,
         PairTrimDecision::TrimBoth { qty } => {
+            // Serialize against the manual flatten / residual dispatcher /
+            // extclose paths — a trim decided on a position a concurrent
+            // close is already reducing would double-dispatch.
+            let _exec_guard = state.execution_lock.lock().await;
             state
                 .liq_trim_at
                 .lock()
@@ -3920,6 +3924,7 @@ async fn maybe_liq_trim_pair(
             Some(("trim", "liq_trim", note, false))
         }
         PairTrimDecision::CloseBoth => {
+            let _exec_guard = state.execution_lock.lock().await;
             state
                 .liq_trim_at
                 .lock()
