@@ -232,6 +232,28 @@ pub async fn execute_spatial_arbitrage_impl(
     .await
 }
 
+/// Realized round-trip P&L of a filled-then-unwound leg: entry and unwind
+/// fees plus the price move across the two fills. `entry_side` is the
+/// filled leg's side — a buy unwound by a sell gains (unwind − entry) per
+/// unit; a sell unwound by a buy gains (entry − unwind). Missing average
+/// prices degrade to fee-only rather than inventing a price move.
+pub(crate) fn unwind_round_trip_pnl(
+    entry: &arbitrageur_core::order::OrderResponse,
+    unwind: &arbitrageur_core::order::OrderResponse,
+    entry_side: Side,
+) -> Decimal {
+    let fees = entry.fee + unwind.fee;
+    let qty = entry.filled_qty;
+    let px_pnl = match (entry.avg_fill_price, unwind.avg_fill_price) {
+        (Some(e), Some(u)) => match entry_side {
+            Side::Buy => (u - e) * qty,
+            Side::Sell => (e - u) * qty,
+        },
+        _ => dec!(0),
+    };
+    px_pnl - fees
+}
+
 /// Forecast attached to an entry for the durable calibration log.
 /// `kind` fixes which event `win_probability` describes — only "net_win"
 /// rows score against realized net P&L at close; "reversion" rows persist
@@ -794,10 +816,32 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
     // accounting (fees + slippage included) — identical semantics in both
     // environments. The testnet and live accumulators stay separate so a
     // demo session can never masquerade as real-money performance.
+    // PartialPairKept carries the closed trim's real P&L; unwound variants
+    // carry a real round-trip cost — neither may fall into the 0.0 arm or
+    // the accumulators and execution log understate losses.
     let pnl_f = match &res {
         ArbitrageExecutionResult::Success {
             realized_profit, ..
+        }
+        | ArbitrageExecutionResult::PartialPairKept {
+            realized_profit, ..
         } => realized_profit.to_string().parse::<f64>().unwrap_or(0.0),
+        ArbitrageExecutionResult::LegBFailedUnwound {
+            leg_a_fill,
+            unwind_resp,
+            ..
+        } => unwind_round_trip_pnl(leg_a_fill, unwind_resp, Side::Buy)
+            .to_string()
+            .parse::<f64>()
+            .unwrap_or(0.0),
+        ArbitrageExecutionResult::LegAFailedUnwound {
+            leg_b_fill,
+            unwind_resp,
+            ..
+        } => unwind_round_trip_pnl(leg_b_fill, unwind_resp, Side::Sell)
+            .to_string()
+            .parse::<f64>()
+            .unwrap_or(0.0),
         _ => 0.0,
     };
     let tot_f = {
@@ -3460,5 +3504,47 @@ mod account_read_tests {
             fail: true,
         });
         assert!(live_account_or_cached(&state, "mock", &bad).await.is_err());
+    }
+
+    fn resp_with(
+        filled: Decimal,
+        avg_px: Option<Decimal>,
+        fee: Decimal,
+    ) -> arbitrageur_core::order::OrderResponse {
+        arbitrageur_core::order::OrderResponse {
+            order_id: "o1".into(),
+            client_order_id: "c1".into(),
+            venue: arbitrageur_core::types::VenueId::new("mock"),
+            symbol: "ETH".into(),
+            status: arbitrageur_core::types::OrderStatus::Filled,
+            original_qty: filled,
+            filled_qty: filled,
+            remaining_qty: dec!(0),
+            avg_fill_price: avg_px,
+            fee,
+            fee_currency: "USD".into(),
+            raw_response: None,
+            timestamp: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn unwind_round_trip_charges_price_move_and_fees() {
+        // Buy at 100.0, unwound by a sell at 99.9 on 0.5 units, 0.02 fees:
+        // price loss -0.05, fees -0.02 → -0.07 total.
+        let entry = resp_with(dec!(0.5), Some(dec!(100.0)), dec!(0.01));
+        let unwind = resp_with(dec!(0.5), Some(dec!(99.9)), dec!(0.01));
+        let pnl = unwind_round_trip_pnl(&entry, &unwind, Side::Buy);
+        assert_eq!(pnl, dec!(-0.07));
+        // Sell at 100.0, unwound by a buy at 100.2: same magnitude.
+        let pnl2 = unwind_round_trip_pnl(&entry, &unwind, Side::Sell);
+        // (entry - unwind) * qty = (100 - 99.9) * 0.5 = +0.05 - 0.02 fees
+        assert_eq!(pnl2, dec!(0.03));
+        // Missing prices degrade to fee-only — never invent a move.
+        let blind = resp_with(dec!(0.5), None, dec!(0.01));
+        assert_eq!(
+            unwind_round_trip_pnl(&entry, &blind, Side::Buy),
+            dec!(-0.02)
+        );
     }
 }
