@@ -8427,6 +8427,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_ticker_strategy_config_survives_restart() {
+        let dir =
+            std::env::temp_dir().join(format!("arbitrageur_ticker_cfg_{}", rand::random::<u64>()));
+        let path = dir.join("state.sqlite3");
+        let store = std::sync::Arc::new(crate::state_store::StateStore::open(&path).unwrap());
+        {
+            let state = AppEngineState::new_inner_for_test(store.clone());
+            let cfg = TickerStrategyConfigDto {
+                symbol: "ETH-USDC".into(),
+                target_profit_bps: 6.0,
+                window_percentile: 75,
+                max_accumulated_units: 2,
+                current_accumulated_units: 0,
+                execution_mode: "SINGLE_WAY".into(),
+                unit_size: 0.05,
+                user_target_leverage: 4,
+                sliding_window: "1h".into(),
+            };
+            save_ticker_strategy_config_impl(cfg, &state).expect("save");
+        }
+        // Fresh state over the same store must restore the saved config —
+        // otherwise the grid cap the operator set evaporates on restart.
+        let state2 = AppEngineState::new_inner_for_test(store);
+        let restored =
+            get_ticker_strategy_config_impl("ETH-USDC", &state2).expect("restored config");
+        assert_eq!(restored.max_accumulated_units, 2);
+        assert_eq!(restored.target_profit_bps, 6.0);
+        assert_eq!(restored.sliding_window, "1h");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
     async fn test_save_strategy_params_persists_to_state_store() {
         let state = AppEngineState::new();
         let params = StrategyParamsDto {
@@ -9532,16 +9564,54 @@ mod tests {
         .expect_err("max_units 0 must reject");
         assert!(err.contains("max_units"), "unexpected err: {err}");
 
-        // Ticker already at its accumulated cap rejects even a step-1 entry.
+        // Ticker already holding an open (balanced) pair at the persisted
+        // config cap rejects — even with no caller-supplied max_units, the
+        // ledger-derived unit count is authoritative.
         state.strategy_configs.write().insert(
             "BTC-USDC".to_string(),
             TickerStrategyConfigDto {
                 symbol: "BTC-USDC".into(),
-                current_accumulated_units: 3,
-                max_accumulated_units: 3,
+                max_accumulated_units: 1,
                 ..TickerStrategyConfigDto::default()
             },
         );
+        state
+            .state_store
+            .record_signal_execution(&crate::state_store::NewSignalExecution {
+                id: "grid-open-1".into(),
+                strategy_id: "futures".into(),
+                symbol: "BTC-USDC".into(),
+                route_id: None,
+                expected_net_usd: None,
+                note: None,
+                legs: vec![
+                    crate::state_store::NewSignalLeg {
+                        account_id: None,
+                        venue: "hyperliquid".into(),
+                        side: crate::state_store::LegSide::Long,
+                        symbol: None,
+                        intended_qty: 0.1,
+                        intended_price: Some(100.0),
+                    },
+                    crate::state_store::NewSignalLeg {
+                        account_id: None,
+                        venue: "lighter".into(),
+                        side: crate::state_store::LegSide::Short,
+                        symbol: None,
+                        intended_qty: 0.1,
+                        intended_price: Some(100.5),
+                    },
+                ],
+            })
+            .expect("record signal");
+        state
+            .state_store
+            .update_signal_status(
+                "grid-open-1",
+                crate::state_store::SignalStatus::Balanced,
+                None,
+            )
+            .expect("balance signal");
         let err = execute_spatial_arbitrage_inner(
             "BTC-USDC",
             "hyperliquid",
@@ -9551,7 +9621,7 @@ mod tests {
             None,
             None,
             Some(1),
-            Some(3),
+            None,
             None,
             None,
             "futures",
@@ -9560,7 +9630,7 @@ mod tests {
             &state,
         )
         .await
-        .expect_err("3/3 accumulated must reject");
+        .expect_err("1/1 open pairs must reject");
         assert!(err.contains("Grid cap"), "unexpected err: {err}");
     }
 

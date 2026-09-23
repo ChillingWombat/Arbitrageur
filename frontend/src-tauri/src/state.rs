@@ -108,7 +108,12 @@ pub struct TickerStrategyConfigDto {
     pub symbol: String,
     pub target_profit_bps: f64,
     pub window_percentile: u32,
+    /// Cap on concurrently-open matched pairs for this symbol — enforced at
+    /// entry time against the durable signal ledger's `balanced` count.
     pub max_accumulated_units: u32,
+    /// Legacy field: retained for serde compat with persisted configs. The
+    /// authoritative open-pair count is derived from the signal ledger at
+    /// gate time; this value is never read by execution paths.
     pub current_accumulated_units: u32,
     pub execution_mode: String, // "SINGLE_WAY" or "DOUBLE_WAY"
     pub unit_size: f64,
@@ -1199,8 +1204,8 @@ pub struct AppEngineState {
     pub strategy_configs: RwLock<std::collections::HashMap<String, TickerStrategyConfigDto>>,
     /// Universal per-strategy parameters keyed by strategy_id ("futures" |
     /// "funding" | "spot"). These are the canonical strategy settings — the
-    /// per-symbol strategy_configs map only retains ticker-specific runtime
-    /// state (accumulated units, cached unit size).
+    /// per-symbol strategy_configs map holds ticker-level caps and runtime
+    /// state, persisted under `ticker_config.{symbol}` kv keys.
     pub strategy_params: RwLock<std::collections::HashMap<String, StrategyParamsDto>>,
     pub vault: RwLock<crate::vault::SecureVault>,
     pub state_store: Arc<crate::state_store::StateStore>,
@@ -1345,6 +1350,31 @@ pub(crate) fn load_strategy_params(
                 }
                 _ => {}
             }
+        }
+    }
+    map
+}
+
+/// Restore per-ticker strategy configs saved under `ticker_config.{symbol}`
+/// kv keys. Rows that fail to parse, or whose embedded symbol disagrees with
+/// the key, are skipped rather than failing boot — a corrupt config must not
+/// strand the engine.
+pub(crate) fn load_ticker_strategy_configs(
+    store: &crate::state_store::StateStore,
+) -> std::collections::HashMap<String, TickerStrategyConfigDto> {
+    let mut map = std::collections::HashMap::new();
+    if let Ok(keys) = store.kv_keys_with_prefix("ticker_config.") {
+        for key in keys {
+            let Some(raw) = store.kv_get(&key).ok().flatten() else {
+                continue;
+            };
+            let Ok(cfg) = serde_json::from_str::<TickerStrategyConfigDto>(&raw) else {
+                continue;
+            };
+            if cfg.symbol.is_empty() || cfg.max_accumulated_units < 1 {
+                continue;
+            }
+            map.insert(cfg.symbol.clone(), cfg);
         }
     }
     map
@@ -1683,6 +1713,7 @@ impl AppEngineState {
         let virtual_ledger =
             RwLock::new(arbitrageur_execution::virtual_ledger::VirtualStrategyLedger::new());
         let strategy_params_map = load_strategy_params(&state_store);
+        let ticker_configs_map = load_ticker_strategy_configs(&state_store);
 
         Self {
             live_hl,
@@ -1723,7 +1754,7 @@ impl AppEngineState {
             execution_logs: RwLock::new(initial_logs),
             sim_step_counter: RwLock::new(8),
             settings,
-            strategy_configs: RwLock::new(std::collections::HashMap::new()),
+            strategy_configs: RwLock::new(ticker_configs_map),
             strategy_params: RwLock::new(strategy_params_map),
             vault,
             state_store,

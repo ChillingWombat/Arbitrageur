@@ -2274,8 +2274,17 @@ impl SpreadMonitorEngine {
         // closing spread, the exit half of `compute_route_economics` with no
         // second model. Either reverse side thin at that qty => route
         // uncostable (fail closed below). One-way mode is untouched.
+        // Per-ticker override: the Ticker Configurator's Execution Mode is
+        // persisted on the symbol's ticker config and wins over the global
+        // monitor policy when present (both vocabularies normalize through
+        // `execution_mode_is_two_way`).
+        let ticker_mode = state
+            .strategy_configs
+            .read()
+            .get(symbol)
+            .map(|c| c.execution_mode.clone());
         let exit_est_opt = exit_estimate_for_mode(
-            &cfg.execution_mode,
+            ticker_mode.as_deref().unwrap_or(&cfg.execution_mode),
             &buy_book,
             &sell_book,
             &cfg.capacity_tiers_usd,
@@ -4175,6 +4184,42 @@ mod tests {
                 .contains("persistence"),
             "explicit persistence reason, got {:?}",
             row_f.block_reason
+        );
+    }
+
+    #[test]
+    fn ticker_execution_mode_overrides_global_exit_costing() {
+        // Global one-way prices no exit, so the qualifying window reads as
+        // ready. A persisted DOUBLE_WAY ticker config for the symbol must
+        // win: the reverse depth walk then has to price — on these thin
+        // 5-unit books it cannot, so the row must demote ready → triggered
+        // (exit_uncostable), never silently executable.
+        let state = AppEngineState::new();
+        let now = gate_now_ms();
+        let spreads = window_spreads(now, 60, 30_000, |i| if i % 5 == 4 { 0.0 } else { 12.0 });
+        let cfg = gate_cfg(0.2, 0.0); // execution_mode = "one_way"
+        let engine_one = SpreadMonitorEngine::new(&state);
+        let row_one = gate_eval(&engine_one, &state, &cfg, &spreads, now);
+        assert_eq!(
+            row_one.status, "ready",
+            "one-way must qualify: {:?}",
+            row_one.block_reason
+        );
+
+        state.strategy_configs.write().insert(
+            "BTC".into(),
+            crate::state::TickerStrategyConfigDto {
+                symbol: "BTC".into(),
+                execution_mode: "DOUBLE_WAY".into(),
+                ..crate::state::TickerStrategyConfigDto::default()
+            },
+        );
+        let engine_two = SpreadMonitorEngine::new(&state);
+        let row_two = gate_eval(&engine_two, &state, &cfg, &spreads, now);
+        assert_eq!(
+            row_two.status, "triggered",
+            "ticker two-way override must demote on uncostable exit: {:?}",
+            row_two.block_reason
         );
     }
 

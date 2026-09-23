@@ -41,6 +41,16 @@ pub fn save_ticker_strategy_config_impl(
     if !config.unit_size.is_finite() || config.unit_size <= 0.0 {
         return Err("unit_size must be finite and positive".into());
     }
+    // Persist alongside the in-memory map so caps survive restarts — the
+    // grid-cap gate reads this record at entry time. A failed kv write is
+    // fatal: silently losing the cap would leave the gate weaker than the
+    // operator configured.
+    let json = serde_json::to_string(&config)
+        .map_err(|e| format!("ticker config serialize failed: {e}"))?;
+    state
+        .state_store
+        .kv_set(&format!("ticker_config.{}", config.symbol), &json)
+        .map_err(|e| format!("ticker config persist failed: {e}"))?;
     let mut configs = state.strategy_configs.write();
     configs.insert(config.symbol.clone(), config);
     Ok(())
