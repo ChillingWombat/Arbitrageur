@@ -3699,6 +3699,28 @@ async fn maybe_liq_trim_pair(
                 .liq_trim_at
                 .lock()
                 .insert(sig.symbol.clone(), std::time::Instant::now());
+            // Never stack trims: a prior `trim-` child whose orders are
+            // still working means the cached positions predate its fills —
+            // deciding on them again would double-reduce the same exposure.
+            let trim_in_flight = state
+                .state_store
+                .list_open_signals()
+                .map(|sigs| {
+                    sigs.iter().any(|s| {
+                        s.id.starts_with("trim-")
+                            && crate::state_store::is_flatten_child_id(&s.id, &sig.id)
+                            && s.status.counts_as_open()
+                    })
+                })
+                .unwrap_or(true);
+            if trim_in_flight {
+                return Some((
+                    "hold",
+                    "liq_trim",
+                    "liq trim already in flight — awaiting settlement".into(),
+                    false,
+                ));
+            }
             let trim_dec = Decimal::from_f64_retain(qty)?;
             let mut note = format!(
                 "liq trim: leg within {min_dist_pct:.1}% of liquidation — reducing both legs by {qty}"
