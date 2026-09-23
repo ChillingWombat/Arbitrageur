@@ -151,7 +151,7 @@ const SettingRow: React.FC<SettingRowProps> = ({ label, description, tooltip, ch
       <div className="shrink-0 flex items-center gap-2">{children}</div>
     </div>
     {description && (
-      <p className="text-[11px] font-sans text-slate-400 font-normal leading-normal border-t border-surface-border/60 pt-2">{description}</p>
+      <p className="text-[11px] font-sans text-muted font-normal leading-normal border-t border-surface-border/60 pt-2">{description}</p>
     )}
   </div>
 );
@@ -193,7 +193,7 @@ const NumberInput: React.FC<NumberInputProps> = ({
       className={`h-9 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-xs font-mono font-bold text-slate-900 tabular-nums focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent transition disabled:opacity-40 ${className}`}
     />
     {unit && (
-      <span className="text-[11px] font-mono font-semibold text-slate-400 select-none min-w-[24px]">
+      <span className="text-[11px] font-mono font-semibold text-muted select-none min-w-[24px]">
         {unit}
       </span>
     )}
@@ -655,7 +655,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
               <span className="text-xs font-semibold font-sans text-slate-800">Auto Position Exit</span>
               <InfoTooltip text="Close reduces with reduce-only LIMITs pegged inside the spread (0 = aggressive touch, 50 = mid, 100 = passive edge). Unfilled attempts wait timeoutSecs, re-price to a fresh book, and retry up to maxTries, then fall back to market. Skipped when spread or fast vol exceeds its cap. Inherit uses the global Engine Settings → Execution → Auto Position Exit policy; Custom uses the params below; Off = market exits." />
             </div>
-            <p className="text-[11px] font-sans text-slate-400 font-normal mt-0.5 leading-normal">
+            <p className="text-[11px] font-sans text-muted font-normal mt-0.5 leading-normal">
               timeout-bound · market fallback · emergency exits always market
             </p>
           </div>
@@ -681,12 +681,12 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
         </div>
 
         {mode === "inherit" && (
-          <p className="text-[11px] font-sans text-slate-400 leading-normal">
+          <p className="text-[11px] font-sans text-muted leading-normal">
             Follows the global policy in Engine Settings → Execution → Auto Position Exit.
           </p>
         )}
         {mode === "off" && (
-          <p className="text-[11px] font-sans text-slate-400 leading-normal">
+          <p className="text-[11px] font-sans text-muted leading-normal">
             This strategy always exits at market — the limit-exit method is never used for it.
           </p>
         )}
@@ -707,7 +707,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
           <div className="flex items-center justify-between gap-2 p-2.5 rounded-lg bg-surface-raised/60 border border-surface-border/60">
             <div className="min-w-0 flex-1">
               <span className="text-xs font-medium font-sans text-slate-700 block">Spread Percentile</span>
-              <span className="text-[10px] font-sans text-slate-400">0 aggressive · 50 mid · 100 edge</span>
+              <span className="text-[10px] font-sans text-muted">0 aggressive · 50 mid · 100 edge</span>
             </div>
             <NumberInput
               value={value.spreadPercentile}
@@ -727,7 +727,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
           <div className="flex items-center justify-between gap-2 p-2.5 rounded-lg bg-surface-raised/60 border border-surface-border/60">
             <div className="min-w-0 flex-1">
               <span className="text-xs font-medium font-sans text-slate-700 block">Limit Timeout</span>
-              <span className="text-[10px] font-sans text-slate-400">Wait per unfilled try before re-pricing</span>
+              <span className="text-[10px] font-sans text-muted">Wait per unfilled try before re-pricing</span>
             </div>
             <NumberInput
               value={value.timeoutSecs}
@@ -747,7 +747,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
           <div className="flex items-center justify-between gap-2 p-2.5 rounded-lg bg-surface-raised/60 border border-surface-border/60">
             <div className="min-w-0 flex-1">
               <span className="text-xs font-medium font-sans text-slate-700 block">Max Limit Tries</span>
-              <span className="text-[10px] font-sans text-slate-400">Fallback to market after attempts</span>
+              <span className="text-[10px] font-sans text-muted">Fallback to market after attempts</span>
             </div>
             <NumberInput
               value={value.maxTries}
@@ -767,7 +767,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
           <div className="flex items-center justify-between gap-2 p-2.5 rounded-lg bg-surface-raised/60 border border-surface-border/60">
             <div className="min-w-0 flex-1">
               <span className="text-xs font-medium font-sans text-slate-700 block">Max Spread Cap</span>
-              <span className="text-[10px] font-sans text-slate-400">Skip passive above live spread</span>
+              <span className="text-[10px] font-sans text-muted">Skip passive above live spread</span>
             </div>
             <NumberInput
               value={value.maxSpreadBps}
@@ -786,7 +786,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
           <div className="flex items-center justify-between gap-2 p-2.5 rounded-lg bg-surface-raised/60 border border-surface-border/60 sm:col-span-2">
             <div className="min-w-0 flex-1">
               <span className="text-xs font-medium font-sans text-slate-700 block">Max Fast Volatility Cap</span>
-              <span className="text-[10px] font-sans text-slate-400">Skip passive above fast volatility</span>
+              <span className="text-[10px] font-sans text-muted">Skip passive above fast volatility</span>
             </div>
             <NumberInput
               value={value.maxFastVolBps}
@@ -852,13 +852,13 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                   ? "No tickers are currently hidden."
                   : `${exemptList.length} ticker${exemptList.length === 1 ? "" : "s"} hidden.`}
             </p>
-            <p className="text-[10px] font-sans text-slate-400">Shared list · applies to all strategies after auto-filtering</p>
+            <p className="text-[10px] font-sans text-muted">Shared list · applies to all strategies after auto-filtering</p>
           </div>
           <button
             type="button"
             disabled={revealBusy || !exemptList?.length}
             onClick={() => void handleRevealAll()}
-            className="h-8 px-2 rounded-lg border border-surface-border text-xs font-mono font-semibold text-slate-600 hover:text-accent hover:border-accent/40 bg-surface-raised transition cursor-pointer disabled:opacity-40 shrink-0"
+            className="h-8 px-2 rounded-lg border border-surface-border text-xs font-mono font-semibold text-slate-600 hover:text-accent-strong hover:border-accent/40 bg-surface-raised transition cursor-pointer disabled:opacity-40 shrink-0"
           >
             {revealBusy ? "…" : "Reveal All"}
           </button>
@@ -871,10 +871,10 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                 type="button"
                 onClick={() => void handleUnexempt(base)}
                 title={`Un-hide ${base}`}
-                className="flex items-center gap-1.5 px-2 py-2 rounded-lg border border-surface-border bg-surface-raised text-xs font-mono font-semibold text-slate-700 hover:text-accent hover:border-accent/40 transition cursor-pointer"
+                className="flex items-center gap-1.5 px-2 py-2 rounded-lg border border-surface-border bg-surface-raised text-xs font-mono font-semibold text-slate-700 hover:text-accent-strong hover:border-accent/40 transition cursor-pointer"
               >
                 <span>{base}</span>
-                <span className="text-slate-400 hover:text-loss text-xs">×</span>
+                <span className="text-muted hover:text-loss text-xs">×</span>
               </button>
             ))}
           </div>
@@ -889,14 +889,14 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
       <div className="flex items-center justify-between pb-1 border-b border-surface-border/60">
         <div>
           <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Signal Trigger & Timing</h3>
-          <p className="text-[11px] font-sans text-slate-400 mt-0.5">Thresholds and historical baseline models</p>
+          <p className="text-[11px] font-sans text-muted mt-0.5">Thresholds and historical baseline models</p>
         </div>
         <button
           type="button"
           onClick={handleOpenAutotune}
           disabled={autotuneDisabledReason != null}
           title={autotuneDisabledReason ?? "Walk-forward AutoTune preview (70/30 split; selected READY rows can be applied)"}
-          className="px-2 py-2 rounded-lg font-mono text-[11px] font-semibold border transition cursor-pointer disabled:cursor-not-allowed bg-accent-dim border-accent-line text-accent hover:bg-blue-100 disabled:bg-surface-raised disabled:border-surface-border disabled:text-slate-400 shadow-2xs"
+          className="px-2 py-2 rounded-lg font-mono text-[11px] font-semibold border transition cursor-pointer disabled:cursor-not-allowed bg-accent-dim border-accent-line text-accent-strong hover:bg-blue-100 disabled:bg-surface-raised disabled:border-surface-border disabled:text-muted shadow-2xs"
         >
           AutoTune
         </button>
@@ -967,7 +967,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
             <option value="days">Days</option>
           </select>
         </div>
-        <div className="text-[11px] font-sans text-slate-400">{windowStatusLine}</div>
+        <div className="text-[11px] font-sans text-muted">{windowStatusLine}</div>
       </div>
 
       <SessionProfileCard symbol={tickerSymbol} />
@@ -1030,7 +1030,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
     <div className="space-y-3">
       <div className="pb-1 border-b border-surface-border/60">
         <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Execution & Sizing</h3>
-        <p className="text-[11px] font-sans text-slate-400 mt-0.5">Step size, lot bounds, and capital allocation</p>
+        <p className="text-[11px] font-sans text-muted mt-0.5">Step size, lot bounds, and capital allocation</p>
       </div>
 
       <SettingRow
@@ -1083,7 +1083,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
     <div className="space-y-3">
       <div className="pb-1 border-b border-surface-border/60">
         <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Leverage & Margin Safety</h3>
-        <p className="text-[11px] font-sans text-slate-400 mt-0.5">Per-venue margin caps, liquidation buffers, and trim triggers</p>
+        <p className="text-[11px] font-sans text-muted mt-0.5">Per-venue margin caps, liquidation buffers, and trim triggers</p>
       </div>
 
       <SettingRow
@@ -1103,17 +1103,17 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
 
       <div className="grid grid-cols-2 gap-3">
         <div className="bg-surface p-3.5 rounded-xl border border-surface-border space-y-1 shadow-2xs">
-          <span className="text-[11px] font-sans text-slate-400 font-medium">Effective Safe Leverage</span>
+          <span className="text-[11px] font-sans text-muted font-medium">Effective Safe Leverage</span>
           <div className="text-base font-bold font-mono text-blue-700">{safeLeverage.effectiveLeverage}x</div>
-          <span className="text-[10px] font-sans text-slate-400 block">Max venue: {safeLeverage.maxVenueLeverage}x</span>
+          <span className="text-[10px] font-sans text-muted block">Max venue: {safeLeverage.maxVenueLeverage}x</span>
         </div>
 
         <div className="bg-surface p-3.5 rounded-xl border border-surface-border space-y-1 shadow-2xs">
-          <span className="text-[11px] font-sans text-slate-400 font-medium">Liquidation Buffer</span>
+          <span className="text-[11px] font-sans text-muted font-medium">Liquidation Buffer</span>
           <div className="text-base font-bold font-mono tabular-nums text-profit">
             {safeLeverage.liquidationBufferPct.toFixed(1)}%
           </div>
-          <span className="text-[10px] font-sans text-slate-400 block">Dual-leg safety margin</span>
+          <span className="text-[10px] font-sans text-muted block">Dual-leg safety margin</span>
         </div>
       </div>
 
@@ -1126,7 +1126,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
     <div className="space-y-3">
       <div className="pb-1 border-b border-surface-border/60">
         <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Carry Parameters</h3>
-        <p className="text-[11px] font-sans text-slate-400 mt-0.5">Position sizing and target return hurdle</p>
+        <p className="text-[11px] font-sans text-muted mt-0.5">Position sizing and target return hurdle</p>
       </div>
 
       <SettingRow
@@ -1192,7 +1192,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
     <div className="space-y-3">
       <div className="pb-1 border-b border-surface-border/60">
         <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Execution & Slippage</h3>
-        <p className="text-[11px] font-sans text-slate-400 mt-0.5">Orderbook tolerance limits and convergence exit triggers</p>
+        <p className="text-[11px] font-sans text-muted mt-0.5">Orderbook tolerance limits and convergence exit triggers</p>
       </div>
 
       <SettingRow
@@ -1246,7 +1246,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
     <div className="space-y-3">
       <div className="pb-1 border-b border-surface-border/60">
         <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Risk & Rebalance</h3>
-        <p className="text-[11px] font-sans text-slate-400 mt-0.5">Drift rebalancing, rotation thresholds, and margin trim protection</p>
+        <p className="text-[11px] font-sans text-muted mt-0.5">Drift rebalancing, rotation thresholds, and margin trim protection</p>
       </div>
 
       {renderTrimBlock(fundingLiqTrimPct, setFundingLiqTrimPct, false)}
@@ -1286,7 +1286,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
     <div className="space-y-3">
       <div className="pb-1 border-b border-surface-border/60">
         <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Spatial Spot Parameters</h3>
-        <p className="text-[11px] font-sans text-slate-400 mt-0.5">Capital per flash cycle, net spread hurdles, and slippage</p>
+        <p className="text-[11px] font-sans text-muted mt-0.5">Capital per flash cycle, net spread hurdles, and slippage</p>
       </div>
 
       <SettingRow
@@ -1339,7 +1339,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
     <div className="space-y-3">
       <div className="pb-1 border-b border-surface-border/60">
         <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Risk & Safety</h3>
-        <p className="text-[11px] font-sans text-slate-400 mt-0.5">Liquidation-distance trim protection</p>
+        <p className="text-[11px] font-sans text-muted mt-0.5">Liquidation-distance trim protection</p>
       </div>
 
       {renderTrimBlock(spotLiqTrimPct, setSpotLiqTrimPct, false)}
@@ -1352,7 +1352,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
       <div className="flex items-center justify-between pb-1 border-b border-surface-border/60">
         <div>
           <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Parity Parameters</h3>
-          <p className="text-[11px] font-sans text-slate-400 mt-0.5">Minimum net profit and disabled scaffold gates</p>
+          <p className="text-[11px] font-sans text-muted mt-0.5">Minimum net profit and disabled scaffold gates</p>
         </div>
       </div>
 
@@ -1375,7 +1375,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
     <div className="space-y-3">
       <div className="pb-1 border-b border-surface-border/60">
         <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Cycle Parameters</h3>
-        <p className="text-[11px] font-sans text-slate-400 mt-0.5">Triangular loop capital and round-trip profit hurdle</p>
+        <p className="text-[11px] font-sans text-muted mt-0.5">Triangular loop capital and round-trip profit hurdle</p>
       </div>
 
       <SettingRow
@@ -1414,7 +1414,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
     <div className="space-y-3">
       <div className="pb-1 border-b border-surface-border/60">
         <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Cycle Guardrails</h3>
-        <p className="text-[11px] font-sans text-slate-400 mt-0.5">Per-leg slippage gates and orderbook execution controls</p>
+        <p className="text-[11px] font-sans text-muted mt-0.5">Per-leg slippage gates and orderbook execution controls</p>
       </div>
 
       <SettingRow
@@ -1550,7 +1550,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
         {/* Modal Top Header Bar */}
         <div className="flex items-center justify-between px-6 py-3.5 border-b border-surface-border bg-surface shrink-0">
           <div className="flex items-center space-x-3">
-            <div className="w-8 h-8 rounded-lg bg-accent-dim border border-accent-line flex items-center justify-center text-accent shadow-2xs">
+            <div className="w-8 h-8 rounded-lg bg-accent-dim border border-accent-line flex items-center justify-center text-accent-strong shadow-2xs">
               <SlidersHorizontal className="w-4 h-4" />
             </div>
             <div>
@@ -1567,7 +1567,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
             <button
               type="button"
               onClick={onClose}
-              className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition border border-transparent hover:border-surface-border cursor-pointer"
+              className="p-1.5 rounded-lg text-muted hover:text-slate-700 hover:bg-slate-100 transition border border-transparent hover:border-surface-border cursor-pointer"
               title="Close Configurator (ESC)"
             >
               <X className="w-4 h-4" />
@@ -1581,7 +1581,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
           <div className="w-56 shrink-0 border-r border-surface-border bg-slate-50/70 p-3 flex flex-col justify-between select-none overflow-y-auto">
             <div className="space-y-3">
               <div className="px-2 pt-1 flex items-center justify-between">
-                <span className="text-[11px] font-sans font-bold tracking-wider uppercase text-slate-400">
+                <span className="text-[11px] font-sans font-bold tracking-wider uppercase text-muted">
                   Settings
                 </span>
               </div>
@@ -1600,7 +1600,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                           : "text-slate-600 hover:text-slate-900 bg-surface hover:bg-slate-100/80 border border-surface-border/60 hover:border-surface-border"
                       }`}
                     >
-                      <Icon className={`w-3.5 h-3.5 shrink-0 ${activeSection === s.id ? "text-white" : "text-slate-400"}`} />
+                      <Icon className={`w-3.5 h-3.5 shrink-0 ${activeSection === s.id ? "text-white" : "text-muted"}`} />
                       <div className="min-w-0 flex-1 flex items-center">
                         <span className="truncate">{s.label}</span>
                         <InfoTooltip
@@ -1644,7 +1644,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
               <div className="space-y-3">
                 <div className="pb-1 border-b border-surface-border/60">
                   <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Auto Position Exit</h3>
-                  <p className="text-[11px] font-sans text-slate-400 mt-0.5">Pegged limit order execution with market fallbacks</p>
+                  <p className="text-[11px] font-sans text-muted mt-0.5">Pegged limit order execution with market fallbacks</p>
                 </div>
                 {activeStrategyTab === "futures" && renderPassiveBlock(futuresPassive, setFuturesPassive, futuresPassiveMode, setFuturesPassiveMode)}
                 {activeStrategyTab === "funding" && renderPassiveBlock(fundingPassive, setFundingPassive, fundingPassiveMode, setFundingPassiveMode)}

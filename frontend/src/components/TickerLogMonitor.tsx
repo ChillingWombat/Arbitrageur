@@ -41,13 +41,13 @@ const getLevelBadgeClass = (level: LogItem["level"]) => {
     case "EXEC":
       return "bg-profit-dim text-profit border-profit-border";
     case "TRIGGER":
-      return "bg-blue-50 text-accent border-blue-200";
+      return "bg-blue-50 text-accent-strong border-blue-200";
     case "EVAL":
       return "bg-indigo-50 text-indigo-700 border-indigo-200";
     case "SCAN":
       return "bg-slate-100 text-slate-700 border-slate-200";
     case "WARN":
-      return "bg-warn-dim text-warn border-warn-border";
+      return "bg-warn-dim text-warn-strong border-warn-border";
     case "ERROR":
       return "bg-loss-dim text-loss border-loss-border";
     default:
@@ -108,7 +108,7 @@ const LogRow: React.FC<LogRowProps> = React.memo(
             status === "SUCCESS"
               ? "text-profit"
               : status === "WARNING"
-              ? "text-warn"
+              ? "text-warn-strong"
               : status === "REJECTED"
               ? "text-loss"
               : "text-slate-500"
@@ -447,13 +447,13 @@ function TickerLogMonitorInner({
 
           {/* Search Bar */}
           <div className="relative">
-            <Search className="w-3 h-3 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+            <Search className="w-3 h-3 text-muted absolute left-2.5 top-1/2 -translate-y-1/2" />
             <input
               type="text"
               placeholder="Search logs..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
-              className="pl-7 pr-2.5 py-1 w-32 sm:w-44 bg-surface border border-surface-border rounded-lg text-xs text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-1 focus:ring-accent transition-colors"
+              className="pl-7 pr-2.5 py-1 w-32 sm:w-44 bg-surface border border-surface-border rounded-lg text-xs text-slate-900 placeholder:text-muted focus:outline-none focus:ring-1 focus:ring-accent transition-colors"
             />
           </div>
 
@@ -461,7 +461,7 @@ function TickerLogMonitorInner({
           <button
             type="button"
             onClick={handleClearLogs}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-surface-raised border border-transparent hover:border-surface-border transition cursor-pointer"
+            className="p-1.5 rounded-lg text-muted hover:text-slate-700 hover:bg-surface-raised border border-transparent hover:border-surface-border transition cursor-pointer"
             title="Clear runtime telemetry logs"
           >
             <Trash2 className="w-3.5 h-3.5" />
@@ -523,7 +523,7 @@ function TickerLogMonitorInner({
               type="checkbox"
               checked={autoScroll}
               onChange={(e) => setAutoScroll(e.target.checked)}
-              className="rounded-lg border-surface-border text-accent focus:ring-accent"
+              className="rounded-lg border-surface-border text-accent-strong focus:ring-accent"
             />
             <span className="text-xs">Follow Live Stream</span>
           </label>

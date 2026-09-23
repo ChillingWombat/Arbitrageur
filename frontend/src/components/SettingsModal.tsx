@@ -49,7 +49,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
         {/* Modal Top Header Bar */}
         <div className="flex items-center justify-between px-6 py-3.5 border-b border-surface-border bg-surface shrink-0">
           <div className="flex items-center space-x-3">
-            <div className="w-8 h-8 rounded-lg bg-accent-dim border border-accent-line flex items-center justify-center text-accent shadow-2xs">
+            <div className="w-8 h-8 rounded-lg bg-accent-dim border border-accent-line flex items-center justify-center text-accent-strong shadow-2xs">
               <SettingsIcon className="w-4 h-4" />
             </div>
             <div>
@@ -65,7 +65,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             <button
               type="button"
               onClick={onClose}
-              className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition border border-transparent hover:border-surface-border cursor-pointer"
+              className="p-1.5 rounded-lg text-muted hover:text-slate-700 hover:bg-slate-100 transition border border-transparent hover:border-surface-border cursor-pointer"
               title="Close Settings (ESC)"
             >
               <X className="w-4 h-4" />

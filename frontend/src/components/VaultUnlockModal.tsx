@@ -95,7 +95,7 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
       <div className="bg-surface border border-surface-border rounded-2xl p-6 max-w-lg w-full shadow-2xl space-y-5 animate-in zoom-in-95 duration-150">
         <div className="flex items-start justify-between">
           <div className="flex items-center space-x-3">
-            <div className="w-10 h-10 rounded-xl bg-accent-dim border border-accent-line flex items-center justify-center text-accent shadow-2xs">
+            <div className="w-10 h-10 rounded-xl bg-accent-dim border border-accent-line flex items-center justify-center text-accent-strong shadow-2xs">
               {isInitializing ? <KeyRound className="w-5 h-5" /> : <Lock className="w-5 h-5" />}
             </div>
             <div>
@@ -130,12 +130,12 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
                 onChange={(e) => setPassword(e.target.value)}
                 autoFocus
                 placeholder={isInitializing ? "Create master password (min 12 chars)..." : "Enter master password..."}
-                className="w-full bg-surface border border-surface-border rounded-lg px-3.5 py-2 text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-primary/15 focus:border-primary transition-all shadow-2xs pr-10"
+                className="w-full bg-surface border border-surface-border rounded-lg px-3.5 py-2 text-xs font-mono text-slate-900 placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-primary/15 focus:border-primary transition-all shadow-2xs pr-10"
               />
               <button
                 type="button"
                 onClick={() => setShowPassword(!showPassword)}
-                className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 transition cursor-pointer"
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-muted hover:text-slate-600 transition cursor-pointer"
               >
                 {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
               </button>
@@ -152,7 +152,7 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
                 value={confirmPassword}
                 onChange={(e) => setConfirmPassword(e.target.value)}
                 placeholder="Confirm master password..."
-                className="w-full bg-surface border border-surface-border rounded-lg px-3.5 py-2 text-xs font-mono text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-primary/15 focus:border-primary transition-all shadow-2xs"
+                className="w-full bg-surface border border-surface-border rounded-lg px-3.5 py-2 text-xs font-mono text-slate-900 placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-primary/15 focus:border-primary transition-all shadow-2xs"
               />
               <p className="mt-1.5 text-[11px] text-slate-500 font-sans leading-relaxed">
                 Use at least 12 characters. Letters, numbers, and symbols are supported. Remember this password — it cannot be recovered if lost.
@@ -161,7 +161,7 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
           )}
 
           <div className="p-3 rounded-lg bg-blue-50/60 border border-blue-100 flex items-start space-x-2 text-xs text-slate-600">
-            <Shield className="w-4 h-4 text-accent shrink-0 mt-0.5" />
+            <Shield className="w-4 h-4 text-accent-strong shrink-0 mt-0.5" />
             <span className="font-sans leading-relaxed text-[11px]">
               <span className="block">Credentials are encrypted at rest in vault.enc with AES-256-GCM and Argon2id, and decrypted exclusively in-memory on your local device.</span>
               <span className="block mt-1">Operational state and history are stored locally in SQLite and protected by filesystem permissions, not by vault encryption.</span>

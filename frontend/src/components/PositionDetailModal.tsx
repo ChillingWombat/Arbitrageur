@@ -51,7 +51,7 @@ export const PositionDetailModal: React.FC<PositionDetailModalProps> = React.mem
       <div className="bg-surface border border-surface-border rounded-2xl w-[880px] max-w-[95vw] max-h-[90vh] flex flex-col shadow-2xl overflow-hidden">
         <div className="flex items-center justify-between px-6 py-3.5 border-b border-surface-border bg-surface shrink-0">
           <div className="flex items-center gap-2 min-w-0">
-            <span className="px-2 py-0.5 rounded-md text-xs font-sans font-semibold bg-accent-dim text-accent border border-accent-line">
+            <span className="px-2 py-0.5 rounded-md text-xs font-sans font-semibold bg-accent-dim text-accent-strong border border-accent-line">
               Position
             </span>
             <span className="text-sm font-bold font-sans text-slate-900">{pos.symbol}</span>
@@ -60,7 +60,7 @@ export const PositionDetailModal: React.FC<PositionDetailModalProps> = React.mem
           <button
             type="button"
             onClick={onClose}
-            className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition cursor-pointer"
+            className="p-1.5 rounded-lg text-muted hover:text-slate-700 hover:bg-slate-100 transition cursor-pointer"
             title="Close details (ESC)"
           >
             <X className="w-4 h-4" />
@@ -112,7 +112,7 @@ export const PositionDetailModal: React.FC<PositionDetailModalProps> = React.mem
             />
           </DetailSection>
           <div>
-            <div className="text-[11px] font-sans text-slate-400 font-medium mb-1.5">
+            <div className="text-[11px] font-sans text-muted font-medium mb-1.5">
               Net PnL since entry — solid: realized · dashed: illustrative 24h projection
             </div>
             <svg viewBox={`0 0 ${W} ${H}`} className="w-full rounded-lg border border-surface-border bg-surface-raised" role="img">
@@ -166,7 +166,7 @@ export const PositionDetailModal: React.FC<PositionDetailModalProps> = React.mem
               </text>
             </svg>
             {!hasProjection && (
-              <div className="text-[11px] font-sans text-slate-400 mt-1.5">
+              <div className="text-[11px] font-sans text-muted mt-1.5">
                 No expected-net figure from the backend, so no projection is drawn — nothing fabricated.
               </div>
             )}

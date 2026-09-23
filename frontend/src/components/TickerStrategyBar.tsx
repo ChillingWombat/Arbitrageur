@@ -57,7 +57,7 @@ export const TickerStrategyBar: React.FC<TickerStrategyBarProps> = ({
           </div>
 
           <span
-            className="bg-accent-dim text-accent px-2.5 py-1 rounded-lg border border-accent-line/60 font-semibold tabular-nums"
+            className="bg-accent-dim text-accent-strong px-2.5 py-1 rounded-lg border border-accent-line/60 font-semibold tabular-nums"
             title="Target profit locked in per round-trip after fees and friction"
           >
             TP {config.targetProfitBps.toFixed(1)} bps
@@ -109,7 +109,7 @@ export const TickerStrategyBar: React.FC<TickerStrategyBarProps> = ({
           className="btn-secondary flex items-center gap-2 text-xs font-sans"
           title="Configure Simple Spread strategy parameters (applies to all tickers)"
         >
-          <SlidersHorizontal className="w-3.5 h-3.5 text-accent" />
+          <SlidersHorizontal className="w-3.5 h-3.5 text-accent-strong" />
           <span>Configurator</span>
         </button>
       </div>

@@ -26,7 +26,7 @@ export const ExchangeVenueGadget: React.FC<{ rows: ExchangeRowStats[] | null }> 
     <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
       <div>
         <h2 className="text-[13px] font-mono tracking-wider text-slate-900 font-bold flex items-center space-x-2">
-          <Building2 className="w-5 h-5 text-accent" />
+          <Building2 className="w-5 h-5 text-accent-strong" />
           <span>Per-Exchange Stats</span>
         </h2>
         <p className="text-xs text-slate-600 font-mono mt-1">
@@ -63,7 +63,7 @@ export const ExchangeVenueGadget: React.FC<{ rows: ExchangeRowStats[] | null }> 
                 <td className="py-2.5 px-3 font-bold text-sm text-slate-900">{r.venue}</td>
                 <td className="py-2.5 px-3 text-right text-slate-700">{r.trades}</td>
                 <td className="py-2.5 px-3 text-right">
-                  <span className={`font-bold ${r.avgPnlUsd == null ? "text-slate-400" : r.avgPnlUsd >= 0 ? "text-profit" : "text-loss"}`}>
+                  <span className={`font-bold ${r.avgPnlUsd == null ? "text-muted" : r.avgPnlUsd >= 0 ? "text-profit" : "text-loss"}`}>
                     {r.avgPnlUsd == null ? "—" : fmtMoney(r.avgPnlUsd)}
                   </span>
                 </td>
@@ -78,7 +78,7 @@ export const ExchangeVenueGadget: React.FC<{ rows: ExchangeRowStats[] | null }> 
                 <td className="py-2.5 px-3 text-right text-slate-800" title={r.utilisationPct == null ? "No balance snapshot for this venue." : undefined}>
                   {fmtPct(r.utilisationPct)}
                 </td>
-                <td className="py-2.5 px-3 text-right text-slate-400" title={r.avgUtilisationNote ?? undefined}>
+                <td className="py-2.5 px-3 text-right text-muted" title={r.avgUtilisationNote ?? undefined}>
                   {r.avgUtilisationPct == null ? "—" : fmtPct(r.avgUtilisationPct)}
                 </td>
               </tr>

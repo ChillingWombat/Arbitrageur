@@ -86,7 +86,7 @@ export const TickerTelemetryGadget: React.FC<TickerTelemetryGadgetProps> = ({
 
         <div className="bg-surface-raised border border-surface-border rounded-lg p-2.5 shadow-xs">
           <div className="text-xs text-slate-500 tracking-wider font-semibold">Avg Trigger Spread</div>
-          <div className="text-sm font-bold text-accent tabular-nums mt-1">
+          <div className="text-sm font-bold text-accent-strong tabular-nums mt-1">
             {metrics.avgTrigger > 0 ? `+${metrics.avgTrigger.toFixed(1)} BPS` : "—"}
           </div>
         </div>

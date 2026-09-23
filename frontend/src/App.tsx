@@ -876,7 +876,7 @@ export const App: React.FC = () => {
           >
             <div className="flex items-center space-x-2.5">
               {vaultStatus.auto_locked ? (
-                <ShieldCheck className="w-4 h-4 text-amber-600 shrink-0" />
+                <ShieldCheck className="w-4 h-4 text-amber-700 shrink-0" />
               ) : (
                 <Lock className="w-4 h-4 text-loss shrink-0" />
               )}

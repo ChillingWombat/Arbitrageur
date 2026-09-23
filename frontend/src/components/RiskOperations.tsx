@@ -40,7 +40,7 @@ export const RiskOperations: React.FC<RiskOperationsProps> = ({
           {isTripped ? (
             <button
               onClick={onResetCircuitBreaker}
-              className="px-2 py-2 bg-warn-dim hover:bg-warn-dim/80 text-warn border border-warn-border rounded-lg text-xs font-mono font-medium flex items-center transition shadow-xs cursor-pointer"
+              className="px-2 py-2 bg-warn-dim hover:bg-warn-dim/80 text-warn-strong border border-warn-border rounded-lg text-xs font-mono font-medium flex items-center transition shadow-xs cursor-pointer"
               title="Reset Circuit Breaker — Resume Trading"
             >
               <span>Reset Circuit Breaker</span>
@@ -137,7 +137,7 @@ export const RiskOperations: React.FC<RiskOperationsProps> = ({
         <div className="bg-surface border border-surface-border rounded-xl p-5 space-y-3 shadow-card">
           <div className="flex items-center justify-between">
             <span className="text-xs font-mono text-slate-500">Portfolio Capital</span>
-            <span className="text-xs font-mono text-accent font-semibold">Consolidated</span>
+            <span className="text-xs font-mono text-accent-strong font-semibold">Consolidated</span>
           </div>
 
           <div className="space-y-1">
@@ -166,7 +166,7 @@ export const RiskOperations: React.FC<RiskOperationsProps> = ({
       <div className="bg-surface rounded-xl border border-surface-border p-4 shadow-card">
         <h3 className="text-[13px] font-bold font-mono tracking-wider text-slate-900 mb-4 flex items-center justify-between">
           <span>DeltaGuard Cross-Exchange Signed Net Exposure</span>
-          <span className="text-slate-400 font-normal lowercase">enforcing strict delta-neutrality across positions</span>
+          <span className="text-muted font-normal lowercase">enforcing strict delta-neutrality across positions</span>
         </h3>
 
         <div className="overflow-x-auto">
@@ -192,7 +192,7 @@ export const RiskOperations: React.FC<RiskOperationsProps> = ({
                     <td className="py-3 px-3">
                       <span
                         className={`font-semibold ${
-                          delta.net_exposure_usd >= 0 ? "text-slate-800" : "text-warn"
+                          delta.net_exposure_usd >= 0 ? "text-slate-800" : "text-warn-strong"
                         }`}
                       >
                         ${delta.net_exposure_usd.toFixed(2)}
@@ -205,7 +205,7 @@ export const RiskOperations: React.FC<RiskOperationsProps> = ({
                           Delta Neutral
                         </span>
                       ) : (
-                        <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-warn-dim text-warn border border-warn-border">
+                        <span className="px-2.5 py-0.5 rounded-full text-xs font-semibold bg-warn-dim text-warn-strong border border-warn-border">
                           Exposure Skew
                         </span>
                       )}

@@ -108,7 +108,9 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
   const loadStrategyMetrics = async () => {
     try {
       const data = await api.getStrategyPerformance();
-      setMetrics(data);
+      // A malformed response (e.g. an object instead of a row array) must not
+      // crash the monitor — degrade to the empty list instead.
+      setMetrics(Array.isArray(data) ? data : []);
     } catch (err) {
       console.error("Failed to load strategy performance:", err);
     }
@@ -273,9 +275,9 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
   const verdict = isTripped
     ? { label: "Halted", cls: "bg-loss-dim text-loss border-loss-border" }
     : isPaused
-      ? { label: "Paused", cls: "bg-warn-dim text-warn border-warn-border" }
+      ? { label: "Paused", cls: "bg-warn-dim text-warn-strong border-warn-border" }
       : attention.length > 0
-        ? { label: "Attention", cls: "bg-warn-dim text-warn border-warn-border" }
+        ? { label: "Attention", cls: "bg-warn-dim text-warn-strong border-warn-border" }
         : { label: "Healthy", cls: "bg-profit-dim text-profit border-profit-border" };
 
   const venueTotal = (venueBalances ?? []).reduce((acc, b) => acc + (b.equity_usd > 0 ? b.equity_usd : 0), 0);
@@ -289,13 +291,13 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
       case "spatial_spread":
         return <SpreadGapIcon className="w-4 h-4 text-blue-600" />;
       case "funding_rate":
-        return <Percent className="w-4 h-4 text-emerald-600" />;
+        return <Percent className="w-4 h-4 text-emerald-700" />;
       case "spot_trade":
       case "spot_arb":
-        return <Coins className="w-4 h-4 text-amber-600" />;
+        return <Coins className="w-4 h-4 text-amber-700" />;
       case "triangular_arb":
       case "triangle":
-        return <Triangle className="w-4 h-4 text-teal-600" />;
+        return <Triangle className="w-4 h-4 text-teal-700" />;
       case "prediction_parity":
         return <Target className="w-4 h-4 text-purple-600" />;
       case "stat_arb":
@@ -357,7 +359,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
         {isTripped && (
           <button
             onClick={onResetCircuitBreaker}
-            className="px-2.5 py-1.5 bg-warn-dim hover:bg-amber-100 text-warn border border-warn-border rounded-lg text-xs font-mono font-bold flex items-center transition shadow-xs cursor-pointer shrink-0"
+            className="px-2.5 py-1.5 bg-warn-dim hover:bg-amber-100 text-warn-strong border border-warn-border rounded-lg text-xs font-mono font-bold flex items-center transition shadow-xs cursor-pointer shrink-0"
             title="Reset Circuit Breaker — Resume Trading"
           >
             <span>Reset Circuit Breaker</span>
@@ -368,10 +370,10 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
       {/* 2. Attention: what needs the user, worst first — above capital so halts can't be missed */}
       <div className="bg-surface rounded-xl border border-surface-border p-4 shadow-card space-y-3">
         <h2 className="text-[13px] font-mono tracking-wider text-slate-900 font-bold border-b border-surface-border pb-2.5 flex items-center space-x-2">
-          <Eye className="w-5 h-5 text-accent" />
+          <Eye className="w-5 h-5 text-accent-strong" />
           <span>Needs Attention</span>
           {attention.length > 0 && (
-            <span className="px-1.5 py-0.5 rounded-md text-[11px] font-mono font-bold min-w-[16px] text-center leading-tight bg-accent-dim text-accent border border-accent-line/60">
+            <span className="px-1.5 py-0.5 rounded-md text-[11px] font-mono font-bold min-w-[16px] text-center leading-tight bg-accent-dim text-accent-strong border border-accent-line/60">
               {attention.length}
             </span>
           )}
@@ -385,7 +387,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
                   a.severity === "critical" ? "bg-loss-dim/40 border-loss-border" : "bg-warn-dim/40 border-warn-border"
                 }`}
               >
-                <AlertTriangle className={`w-4 h-4 shrink-0 mt-0.5 ${a.severity === "critical" ? "text-loss" : "text-warn"}`} />
+                <AlertTriangle className={`w-4 h-4 shrink-0 mt-0.5 ${a.severity === "critical" ? "text-loss" : "text-warn-strong"}`} />
                 <div className="min-w-0">
                   <div className="font-bold text-slate-900">{a.title}</div>
                   <div className="text-slate-600 mt-0.5">{a.detail}</div>
@@ -403,7 +405,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
         <div className="xl:col-span-2 bg-surface rounded-xl border border-surface-border p-4 shadow-card space-y-3">
           <h2 className="text-[13px] font-mono tracking-wider text-slate-900 font-bold border-b border-surface-border pb-2.5 flex items-center space-x-2">
-            <Wallet className="w-5 h-5 text-accent" />
+            <Wallet className="w-5 h-5 text-accent-strong" />
             <span>Capital Allocation by Venue</span>
           </h2>
           {sortedVenues.length > 0 ? (
@@ -426,9 +428,9 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
                       </span>
                       <span className="tabular-nums text-slate-700 whitespace-nowrap">
                         {usdPlain(equityUsd)}{" "}
-                        <span className="text-slate-400">({formatShare(share, equityUsd)})</span>
+                        <span className="text-muted">({formatShare(share, equityUsd)})</span>
                         {showFree && (
-                          <span className="text-slate-400"> · {usdPlain(freeUsd)} free</span>
+                          <span className="text-muted"> · {usdPlain(freeUsd)} free</span>
                         )}
                       </span>
                     </div>
@@ -436,10 +438,10 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
                       <div className={`h-full ${barCls} transition-all duration-300`} style={{ width: `${barWidth}%` }} />
                     </div>
                     {b.status !== "HEALTHY" && b.status !== "EMPTY" && b.status !== "STALE" && b.status !== "LOCKED" && b.recommended_action && (
-                      <div className="text-[11px] font-mono text-warn">{b.recommended_action}</div>
+                      <div className="text-[11px] font-mono text-warn-strong">{b.recommended_action}</div>
                     )}
                     {(b.status === "EMPTY" || b.status === "STALE" || b.status === "LOCKED") && b.recommended_action && (
-                      <div className="text-[11px] font-mono text-slate-400">{b.recommended_action}</div>
+                      <div className="text-[11px] font-mono text-muted">{b.recommended_action}</div>
                     )}
                   </div>
                 );
@@ -462,7 +464,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
 
         <div className="bg-surface rounded-xl border border-surface-border p-4 shadow-card space-y-3">
           <h2 className="text-[13px] font-mono tracking-wider text-slate-900 font-bold border-b border-surface-border pb-2.5 flex items-center space-x-2">
-            <TrendingUp className="w-5 h-5 text-accent" />
+            <TrendingUp className="w-5 h-5 text-accent-strong" />
             <span>Deployed vs Idle</span>
           </h2>
           <div className="space-y-1">
@@ -503,7 +505,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
           <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
             <div>
               <h2 className="text-[13px] font-mono tracking-wider text-slate-900 font-bold flex items-center space-x-2">
-                <ShieldCheck className="w-5 h-5 text-accent" />
+                <ShieldCheck className="w-5 h-5 text-accent-strong" />
                 <span>DeltaGuard Cross-Exchange Signed Net Exposure</span>
               </h2>
               <p className="text-xs text-slate-600 font-mono mt-1">
@@ -554,7 +556,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
                               Delta Neutral
                             </span>
                           ) : (
-                            <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-warn-dim text-warn border border-warn-border whitespace-nowrap inline-block">
+                            <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-warn-dim text-warn-strong border border-warn-border whitespace-nowrap inline-block">
                               Residual
                             </span>
                           )}
@@ -602,7 +604,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
               <div className="flex justify-between items-center gap-2">
                 <span className="text-slate-500 whitespace-nowrap">Distance to Liquidation:</span>
                 {!margin ? (
-                  <span className="font-bold text-slate-400 whitespace-nowrap">—</span>
+                  <span className="font-bold text-muted whitespace-nowrap">—</span>
                 ) : margin.status === "FLAT" ? (
                   <span className="font-bold text-slate-500 whitespace-nowrap">flat — no risk</span>
                 ) : (
@@ -639,7 +641,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
             {isTripped ? (
               <button
                 onClick={onResetCircuitBreaker}
-                className="w-full px-2 py-2 bg-warn-dim hover:bg-amber-100 text-warn border border-warn-border rounded-lg text-xs font-mono font-bold flex items-center justify-center transition shadow-xs cursor-pointer"
+                className="w-full px-2 py-2 bg-warn-dim hover:bg-amber-100 text-warn-strong border border-warn-border rounded-lg text-xs font-mono font-bold flex items-center justify-center transition shadow-xs cursor-pointer"
                 title="Reset Circuit Breaker — Resume Trading"
               >
                 <Ban className="w-3.5 h-3.5 mr-1.5" />
@@ -690,7 +692,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
         <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
           <div>
             <h2 className="text-[13px] font-mono tracking-wider text-slate-900 font-bold flex items-center space-x-2">
-              <TrendingUp className="w-5 h-5 text-accent" />
+              <TrendingUp className="w-5 h-5 text-accent-strong" />
               <span>Multi-Strategy PnL & Cycle Attribution</span>
             </h2>
             <p className="text-xs text-slate-600 font-mono mt-1">
@@ -717,11 +719,11 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
                       <h3 className="text-[13px] font-bold font-mono tracking-wider text-slate-900" title={formatStrategyName(m.strategy_id)}>
                         {formatStrategyName(m.strategy_id)}
                       </h3>
-                      <span className="text-xs font-mono text-slate-400 capitalize">{m.strategy_id.replace("_", " ")}</span>
+                      <span className="text-xs font-mono text-muted capitalize">{m.strategy_id.replace("_", " ")}</span>
                     </div>
                     {open && open.count > 0 && (
                       <span
-                        className="px-1.5 py-0.5 rounded-md text-[11px] font-mono font-bold min-w-[16px] text-center leading-tight bg-accent-dim text-accent border border-accent-line/60"
+                        className="px-1.5 py-0.5 rounded-md text-[11px] font-mono font-bold min-w-[16px] text-center leading-tight bg-accent-dim text-accent-strong border border-accent-line/60"
                         title={`${open.count} open position(s)`}
                       >
                         {open.count} open
@@ -750,7 +752,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
                     </div>
                     <div className="flex justify-between">
                       <span className="text-slate-500">Sharpe Ratio:</span>
-                      <span className="font-bold text-accent">{m.sharpe_ratio.toFixed(2)}</span>
+                      <span className="font-bold text-accent-strong">{m.sharpe_ratio.toFixed(2)}</span>
                     </div>
                     <div className="flex justify-between">
                       <span className="text-slate-500">APR:</span>

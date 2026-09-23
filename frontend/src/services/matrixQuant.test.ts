@@ -689,7 +689,7 @@ test("buildCrossVenueMatrix fails closed when route economics are missing", () =
   assert.equal(cell.requiredGrossBps, undefined);
   const visuals = getMatrixCellVisuals(cell, 1.0);
   assert.equal(visuals.highlightRing, "");
-  assert.ok(visuals.textClass.includes("slate-400"));
+  assert.ok(visuals.textClass.includes("text-muted"));
 });
 
 test("buildCrossVenueMatrix honors backend slippage, depth, and required-gross gates", () => {

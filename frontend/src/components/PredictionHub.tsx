@@ -40,14 +40,14 @@ const PredictionDetailModal: React.FC<PredictionDetailModalProps> = React.memo(
           <div className="flex items-center justify-between px-6 py-3.5 border-b border-surface-border bg-surface shrink-0">
             <div className="flex items-center gap-2 min-w-0">
               <span className="text-sm font-bold font-sans text-slate-900 truncate">{opp.market_title}</span>
-              <span className="px-2 py-0.5 rounded-md text-xs font-sans font-semibold border bg-accent-dim text-accent border-accent-line">
+              <span className="px-2 py-0.5 rounded-md text-xs font-sans font-semibold border bg-accent-dim text-accent-strong border-accent-line">
                 {opp.strategy}
               </span>
             </div>
             <button
               type="button"
               onClick={onClose}
-              className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 transition cursor-pointer"
+              className="p-1.5 rounded-lg text-muted hover:text-slate-700 hover:bg-slate-100 transition cursor-pointer"
               title="Close details (ESC)"
             >
               <X className="w-4 h-4" />
@@ -93,7 +93,7 @@ const PredictionDetailModal: React.FC<PredictionDetailModalProps> = React.memo(
               {(opp.depth_curve?.length ?? 0) >= 2 ? (
                 <CapacityChart points={opp.depth_curve ?? []} />
               ) : (
-                <span className="text-slate-400 text-xs">
+                <span className="text-muted text-xs">
                   no depth data — prediction venue books are not wired yet
                 </span>
               )}
@@ -199,22 +199,22 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
             className="ribbon-pill"
             title="Minimum net profit required for auto-execution"
           >
-            <span className="text-slate-400">Min Net</span>
+            <span className="text-muted">Min Net</span>
             <span className="font-bold text-slate-900 tabular-nums">1.0</span>
-            <span className="text-slate-400">¢</span>
+            <span className="text-muted">¢</span>
           </div>
           <div
             className="ribbon-pill opacity-60"
             title="Min event volume filter (auto_min_event_volume_usd) is defined but disabled: no venue volume data — prediction adapters are scaffolds"
           >
-            <span className="text-slate-400">Min Vol</span>
+            <span className="text-muted">Min Vol</span>
             <span className="font-bold text-slate-500">no venue volume data</span>
           </div>
           <div
             className="ribbon-pill opacity-60"
             title="Max slippage gate (prediction_max_slippage_bps) is defined but disabled: no execution path — prediction adapters are scaffolds"
           >
-            <span className="text-slate-400">Max Slip</span>
+            <span className="text-muted">Max Slip</span>
             <span className="font-bold text-slate-500">no execution path</span>
           </div>
         </div>
@@ -226,7 +226,7 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
             className="btn-secondary !text-xs !py-2 !px-2 font-sans cursor-pointer gap-2"
             title="Configure Prediction Market strategy parameters"
           >
-            <SlidersHorizontal className="w-3.5 h-3.5 text-accent" />
+            <SlidersHorizontal className="w-3.5 h-3.5 text-accent-strong" />
             <span>Configurator</span>
           </button>
           {/* Filter Search */}
@@ -239,7 +239,7 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
                 onChange={(e) => setSearchTerm(e.target.value)}
                 className="input-field !w-56 !pl-8 !pr-3 !py-1.5 !text-xs font-mono"
               />
-              <Filter className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2.5" />
+              <Filter className="w-3.5 h-3.5 text-muted absolute left-2.5 top-2.5" />
             </div>
             <button
               type="submit"
@@ -288,7 +288,7 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
             >
               <div>
                 <div className="flex items-center justify-between mb-2">
-                  <span className="px-2.5 py-0.5 rounded-md font-mono text-xs font-semibold bg-accent-dim text-accent border border-accent-line">
+                  <span className="px-2.5 py-0.5 rounded-md font-mono text-xs font-semibold bg-accent-dim text-accent-strong border border-accent-line">
                     {opp.market_title}
                   </span>
                   <span className="font-mono text-xs font-bold text-profit tabular-nums">

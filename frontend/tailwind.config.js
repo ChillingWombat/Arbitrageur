@@ -17,18 +17,27 @@ export default {
         "primary-dim": "#edf4ff",
         accent: "#1677ff",
         "accent-hover": "#0958d9",
+        // Text-weight accent: #1677ff reads 4.0:1 on white — too light for
+        // small text. accent-strong is the same hue a step darker (5.9:1).
+        "accent-strong": "#0958d9",
         "accent-dim": "#edf4ff",
         "accent-line": "#bae0ff",
-        profit: "#00a86b",
+        // Semantic tokens carry AA contrast (≥4.5:1) as *text* colors on
+        // white and on their own dim surfaces; the matching fills read
+        // near-identically at dot/button scale.
+        profit: "#047857",
         "profit-dim": "rgba(0, 168, 107, 0.08)",
         "profit-border": "rgba(0, 168, 107, 0.25)",
-        loss: "#ef4444",
+        loss: "#b91c1c",
         "loss-dim": "rgba(239, 68, 68, 0.08)",
         "loss-border": "rgba(239, 68, 68, 0.25)",
         warn: "#f59e0b",
+        // warn stays bright for indicator fills; warn-strong is the text
+        // weight (amber-500 at 2.15:1 is unreadable as copy).
+        "warn-strong": "#92400e",
         "warn-dim": "rgba(245, 158, 11, 0.08)",
         "warn-border": "rgba(245, 158, 11, 0.25)",
-        muted: "#6c7b8a",
+        muted: "#57687a",
       },
       boxShadow: {
         "2xs": "0 1px 2px 0 rgba(0, 0, 0, 0.03)",

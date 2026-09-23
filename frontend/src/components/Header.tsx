@@ -47,7 +47,7 @@ export const Header: React.FC<HeaderProps> = ({
             title={refreshing ? "ARBITRAGEUR — Syncing telemetry..." : "ARBITRAGEUR Quant Platform"}
           >
             <div className="relative flex items-center justify-center">
-              <ArbitrageurLogo className="w-5 h-5 text-accent shrink-0 drop-shadow-xs" />
+              <ArbitrageurLogo className="w-5 h-5 text-accent-strong shrink-0 drop-shadow-xs" />
             </div>
             <div className="flex items-center">
               <span className="font-black tracking-tight text-sm font-sans text-slate-900">

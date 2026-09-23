@@ -15,7 +15,7 @@ const GAP = 8;
 export const InfoTooltip: React.FC<InfoTooltipProps> = ({
   text,
   className = "",
-  iconClassName = "text-slate-400 hover:text-accent",
+  iconClassName = "text-muted hover:text-accent-strong",
   position = "bottom",
 }) => {
   const [isOpen, setIsOpen] = useState(false);
