@@ -27,6 +27,7 @@ use arbitrageur_execution::passive_unwind::{
     PassiveBookRefresh, PassiveOutcome, PassiveUnwindConfig,
 };
 use arbitrageur_execution::smart_routing::SmartOrderRouter;
+use arbitrageur_execution::virtual_ledger::CycleStatus;
 use arbitrageur_risk::margin_monitor::{MarginHealthStatus, MarginMonitor, MarginMonitorConfig};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -2171,9 +2172,9 @@ fn close_flattened_spatial_lot(
     state: &AppEngineState,
     sig: &crate::state_store::SignalExecution,
     family: &[crate::state_store::SignalExecution],
+    close_status: CycleStatus,
 ) -> Option<(f64, f64)> {
     use crate::state_store::LegSide;
-    use arbitrageur_execution::virtual_ledger::CycleStatus;
 
     let venue_of = |side: LegSide| {
         sig.legs
@@ -2247,7 +2248,7 @@ fn close_flattened_spatial_lot(
                 long_exit.px_qty / long_exit.qty,
                 short_exit.px_qty / short_exit.qty,
                 exit_fees,
-                CycleStatus::StoppedOut,
+                close_status,
             )
             .and_then(|l| match (l.realized_pnl_usd, l.realized_pnl_bps) {
                 (Some(usd), Some(bps)) => Some((usd, bps)),
@@ -2273,18 +2274,24 @@ fn close_flattened_spatial_lot(
 /// mark the original `closed` only once its attributed legs are neutralized.
 /// Bypasses pause/circuit-breaker because it is strictly risk-reducing;
 /// in live mode, dispatches reduce-only market orders to live authenticated adapters.
+/// `close_status` labels the virtual-ledger lot's terminal state — pass the
+/// honest exit reason (`Closed` for profit/operator exits, `StoppedOut` for
+/// stop/liquidation/stale unwinds, `TimedOut` for max-hold) so durable cycle
+/// analytics can segment outcomes by cause rather than PnL sign alone.
 pub async fn flatten_ticker_positions_impl(
     symbol: Option<&str>,
     strategy_id: &str,
+    close_status: CycleStatus,
     state: &AppEngineState,
 ) -> Result<FlattenResultDto, String> {
-    flatten_ticker_positions_with_type_impl(symbol, strategy_id, None, state).await
+    flatten_ticker_positions_with_type_impl(symbol, strategy_id, None, close_status, state).await
 }
 
 pub async fn flatten_ticker_positions_with_type_impl(
     symbol: Option<&str>,
     strategy_id: &str,
     execution_type: Option<&str>,
+    close_status: CycleStatus,
     state: &AppEngineState,
 ) -> Result<FlattenResultDto, String> {
     use crate::state_store::{LegSide, NewSignalExecution, NewSignalLeg, SignalStatus};
@@ -2542,7 +2549,7 @@ pub async fn flatten_ticker_positions_with_type_impl(
         if targets.is_empty() {
             close_family(&format!("flatten {}: no residual venue position", sig.id))?;
             out.signals_closed += 1;
-            close_flattened_spatial_lot(state, &sig, &family);
+            close_flattened_spatial_lot(state, &sig, &family, close_status);
             continue;
         }
 
@@ -2705,7 +2712,7 @@ pub async fn flatten_ticker_positions_with_type_impl(
         if fully_flat {
             close_family(&note)?;
             out.signals_closed += 1;
-            flatten_realized = close_flattened_spatial_lot(state, &sig, &family_now);
+            flatten_realized = close_flattened_spatial_lot(state, &sig, &family_now, close_status);
             if let Some(bot) = state.radar_bot.lock().clone() {
                 bot.forget_position(&sig.symbol, &venue_a, &venue_b);
                 let _ = state
@@ -2958,6 +2965,12 @@ pub async fn flatten_ticker_positions(
         symbol.as_deref(),
         &strategy_id,
         execution_type.as_deref(),
+        // Emergency market flattens are risk-driven unwinds; a plain
+        // operator flatten is an orderly exit.
+        match execution_type.as_deref() {
+            Some("emergency_market") => CycleStatus::StoppedOut,
+            _ => CycleStatus::Closed,
+        },
         &state,
     )
     .await
@@ -3248,8 +3261,13 @@ async fn maybe_liq_trim_pair(
                 .liq_trim_at
                 .lock()
                 .insert(sig.symbol.clone(), std::time::Instant::now());
-            let reason = match flatten_ticker_positions_impl(Some(&sig.symbol), "futures", state)
-                .await
+            let reason = match flatten_ticker_positions_impl(
+                Some(&sig.symbol),
+                "futures",
+                CycleStatus::StoppedOut,
+                state,
+            )
+            .await
             {
                 Ok(r) => format!(
                     "liq trim: leg within {min_dist_pct:.1}% of liquidation and remainder below one step — closed pair ({} signals)",
@@ -3270,7 +3288,7 @@ pub async fn check_spatial_convergence_impl(
     state: &AppEngineState,
 ) -> Result<Vec<ConvergenceCheckDto>, String> {
     use arbitrageur_strategy::spatial_exit::{
-        evaluate_spatial_exit, SpatialExitConfig, SpatialExitVerdict,
+        evaluate_spatial_exit, SpatialExitConfig, SpatialExitTrigger, SpatialExitVerdict,
     };
     let sid = crate::state_store::normalize_strategy_id(strategy_id).map_err(|e| e.to_string())?;
     if sid != "futures" {
@@ -3393,7 +3411,14 @@ pub async fn check_spatial_convergence_impl(
                 // Convergence unwinds route through the symbol-scoped flatten
                 // path, so the leftover sweep (sub-step residual guard) and
                 // the paper-flat reconciliation apply here unchanged.
-                match flatten_ticker_positions_impl(Some(&sig.symbol), &sid, state).await {
+                let close_status = match trigger {
+                    SpatialExitTrigger::Converged => CycleStatus::Closed,
+                    SpatialExitTrigger::Stopped => CycleStatus::StoppedOut,
+                    SpatialExitTrigger::TimedOut => CycleStatus::TimedOut,
+                };
+                match flatten_ticker_positions_impl(Some(&sig.symbol), &sid, close_status, state)
+                    .await
+                {
                     Ok(r) if r.residual_signals == 0 => out.push(verdict_of(
                         "exit",
                         Some(trigger.as_str().to_string()),
