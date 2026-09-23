@@ -27,16 +27,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::State;
 
-/// Live strategy-entry gate. Live mode without `live_entry_enabled` stays
-/// read + risk-reducing closes. Entry is admitted only when the operator
-/// opted in, the vault is unlocked, and every leg's adapter both submits
-/// and polls orders (the reconciler requires `fetch_order`). Applies to
-/// spatial, funding, and triangle entries; the opt-in remains the
-/// operator accepting the residual one-sided-exposure risk.
+/// Live strategy-entry gate. Entry is admitted when the vault is unlocked
+/// and every leg's adapter both submits and polls orders (the reconciler
+/// requires `fetch_order`). Applies to spatial, funding, and triangle
+/// entries — Trading Mode = Live is the operator's opt-in, and the
+/// reconciliation machinery (poll supervisor, residual auto-flatten,
+/// bounded cancel retry) covers every entry that lands imbalanced.
 pub(crate) fn live_entry_gate(state: &AppEngineState, venues: &[&str]) -> Result<(), String> {
-    if !state.settings.read().live_entry_enabled {
-        return Err("Live strategy entries are disabled — enable 'live_entry_enabled' in Engine Settings (Risk Control) to opt in. Entries reconcile via venue order polling; a partially-filled entry unwinds the filled leg automatically".into());
-    }
     if !state.vault.write().is_unlocked() {
         return Err("Live strategy entries require an unlocked credential vault".into());
     }
@@ -59,28 +56,6 @@ pub(crate) fn live_entry_gate(state: &AppEngineState, venues: &[&str]) -> Result
         }
         if !adapter.has_live_credentials() {
             return Err(format!("Venue '{venue}' has no live credentials loaded"));
-        }
-    }
-    Ok(())
-}
-
-/// Per-leg notional cap for live entries — refuses (never clamps) when any
-/// leg's qty × entry VWAP exceeds the configured maximum. A cap of 0
-/// refuses every live entry even with `live_entry_enabled`.
-pub(crate) fn live_entry_notional_guard(
-    state: &AppEngineState,
-    legs: &[(&str, Decimal)],
-) -> Result<(), String> {
-    let cap = state.settings.read().live_entry_max_notional_usd;
-    if !cap.is_finite() || cap <= 0.0 {
-        return Err("live_entry_max_notional_usd is not configured — set a per-leg USD cap in Engine Settings (Safety) before live entries".into());
-    }
-    for (venue, notional) in legs {
-        let n = notional.to_string().parse::<f64>().unwrap_or(f64::INFINITY);
-        if !n.is_finite() || n <= 0.0 || n > cap {
-            return Err(format!(
-                "Live entry leg on {venue} has notional ${n:.2} outside the $0.01–${cap:.2} per-leg cap — refused (caps never clamp)"
-            ));
         }
     }
     Ok(())
@@ -2099,8 +2074,7 @@ pub fn get_venue_execution_capabilities_impl(state: &AppEngineState) -> Vec<Venu
             let strategy_entry_ready = is_unlocked
                 && adapter.live_order_reconciliation_implemented()
                 && adapter.live_strategy_entry_implemented()
-                && has_credentials
-                && state.settings.read().live_entry_enabled;
+                && has_credentials;
             let live_ready = strategy_entry_ready;
             VenueCapabilityDto {
                 venue: vid.to_string(),
@@ -6807,17 +6781,8 @@ mod tests {
     async fn test_funding_carry_live_refusal_names_missing_leg() {
         let state = setup_test_state_with_venues();
         state.set_environment(crate::state::TradingEnvironment::Live);
-        let err =
-            execute_funding_carry_impl("LINK-USDC", "lighter", "hyperliquid", 500.0, &state, false)
-                .await
-                .expect_err("live funding must refuse without the operator opt-in");
-        assert!(
-            err.contains("live_entry_enabled"),
-            "refusal must name the opt-in gate: {err}"
-        );
-        // Opted in but with a locked vault: the gate must still refuse —
-        // never a silent dispatch past a named blocker.
-        state.settings.write().live_entry_enabled = true;
+        // Locked vault: the gate must refuse — never a silent dispatch
+        // past a named blocker.
         let err =
             execute_funding_carry_impl("LINK-USDC", "lighter", "hyperliquid", 500.0, &state, false)
                 .await
@@ -6826,17 +6791,15 @@ mod tests {
             err.contains("vault") || err.contains("credentials") || err.contains("polling"),
             "refusal must name the missing live capability: {err}"
         );
-        state.settings.write().live_entry_enabled = false;
         state.set_environment(crate::state::TradingEnvironment::Testnet);
     }
 
     #[tokio::test]
     async fn test_funding_carry_auto_entry_testnet_only_in_live() {
-        // Autonomous entries stay testnet-only in live mode regardless of
-        // the opt-in — the same policy as the radar bot's live hard-block.
+        // Autonomous entries stay testnet-only in live mode — the same
+        // policy as the radar bot's live hard-block.
         let state = setup_test_state_with_venues();
         state.set_environment(crate::state::TradingEnvironment::Live);
-        state.settings.write().live_entry_enabled = true;
         let err =
             execute_funding_carry_impl("LINK-USDC", "lighter", "hyperliquid", 500.0, &state, true)
                 .await
@@ -6845,7 +6808,6 @@ mod tests {
             err.contains("testnet-only") || err.contains("manual Execute"),
             "refusal must name the autonomous-entry policy: {err}"
         );
-        state.settings.write().live_entry_enabled = false;
         state.set_environment(crate::state::TradingEnvironment::Testnet);
     }
 
@@ -8523,17 +8485,18 @@ mod tests {
         state.sync_vault_credentials_to_adapters();
 
         // 5. Capabilities report: submission readiness is distinct from
-        // strategy-entry readiness; no adapter has reconciliation yet.
-        // Capabilities describe the ACTIVE environment — aster has no
-        // testnet endpoint, so switch to Live first.
+        // strategy-entry readiness. Capabilities describe the ACTIVE
+        // environment — aster has no testnet endpoint, so switch to Live
+        // first. Vault is unlocked here, so credentialed adapters with
+        // submission + polling + strategy-entry support report ready.
         state.set_environment(crate::state::TradingEnvironment::Live);
         let caps = get_venue_execution_capabilities_impl(&state);
         let aster_cap = caps.iter().find(|c| c.venue == "aster").expect("aster cap");
         assert!(aster_cap.supports_live);
         assert!(aster_cap.has_credentials);
-        assert!(!aster_cap.live_ready);
+        assert!(aster_cap.live_ready);
         assert!(aster_cap.submission_ready);
-        assert!(!aster_cap.strategy_entry_ready);
+        assert!(aster_cap.strategy_entry_ready);
 
         let popdex_cap = caps
             .iter()
@@ -8551,9 +8514,9 @@ mod tests {
             .expect("hl cap");
         assert!(hl_cap.supports_live);
         assert!(hl_cap.has_credentials);
-        assert!(!hl_cap.live_ready);
+        assert!(hl_cap.live_ready);
         assert!(hl_cap.submission_ready);
-        assert!(!hl_cap.strategy_entry_ready);
+        assert!(hl_cap.strategy_entry_ready);
 
         let vanta_cap = caps.iter().find(|c| c.venue == "vanta").expect("vanta cap");
         assert!(vanta_cap.supports_live);
@@ -8567,17 +8530,19 @@ mod tests {
         assert!(live_ok);
         assert!(state.is_live());
 
-        // 7a. Live strategy entry refuses while `live_entry_enabled` is off,
-        // before any signal is inserted or any account/book/order work is
-        // dispatched.
+        // 7a. Live strategy entry refuses on venue eligibility — vanta
+        // has no credentials loaded — before any signal is inserted or
+        // any account/book/order work is dispatched.
         let sim_err = execute_spatial_arbitrage_inner(
             "BTC-USDC", "aster", "vanta", 100.0, None, None, None, None, None, None, None,
             "futures", None, None, &state,
         )
         .await;
-        assert!(sim_err
-            .unwrap_err()
-            .contains("Live strategy entries are disabled"));
+        let sim_err = sim_err.unwrap_err();
+        assert!(
+            sim_err.contains("credentials") || sim_err.contains("polling"),
+            "refusal must name the missing live capability: {sim_err}"
+        );
         assert!(state
             .state_store
             .blocking_signals("BTC-USDC")
@@ -8591,22 +8556,19 @@ mod tests {
             "futures", None, None, &state,
         )
         .await;
-        assert!(decibel_err
-            .unwrap_err()
-            .contains("Live strategy entries are disabled"));
+        assert!(decibel_err.is_err());
 
-        // 7c. Opt-in path: with the flag on, the vault unlocked, and both
-        // venues credentialed + submission/polling-capable, the gate passes
-        // — unit-level so no orderbook network call is made.
-        assert!(live_entry_gate(&state, &["aster", "hyperliquid"]).is_err());
-        state.settings.write().live_entry_enabled = true;
-        live_entry_gate(&state, &["aster", "hyperliquid"]).expect("gate opens on opt-in");
+        // 7c. With the vault unlocked and both venues credentialed +
+        // submission/polling-capable, the gate passes — unit-level so no
+        // orderbook network call is made.
+        live_entry_gate(&state, &["aster", "hyperliquid"])
+            .expect("gate passes with vault + capable venues");
         // A venue with submission but no loaded credentials still refuses.
         assert!(live_entry_gate(&state, &["aster", "popdex"])
             .unwrap_err()
             .contains("no live credentials"));
-        // strategy_entry_ready now reflects the opt-in for credentialed
-        // submission+polling venues, and stays off for uncredentialed ones.
+        // strategy_entry_ready tracks credentialed submission+polling
+        // venues, and stays off for uncredentialed ones.
         let caps = get_venue_execution_capabilities_impl(&state);
         assert!(
             caps.iter()
@@ -8621,23 +8583,6 @@ mod tests {
                 .expect("popdex")
                 .strategy_entry_ready
         );
-        state.settings.write().live_entry_enabled = false;
-
-        // 7d. The per-leg notional cap refuses (never clamps) — cap unset,
-        // cap exceeded, and a sane under-cap leg.
-        let guard_err = live_entry_notional_guard(&state, &[("aster", dec!(10))]);
-        assert!(guard_err
-            .unwrap_err()
-            .contains("live_entry_max_notional_usd"));
-        state.settings.write().live_entry_max_notional_usd = 25.0;
-        assert!(live_entry_notional_guard(&state, &[("aster", dec!(30))])
-            .unwrap_err()
-            .contains("per-leg cap"));
-        live_entry_notional_guard(
-            &state,
-            &[("aster", dec!(12.5)), ("hyperliquid", dec!(11.0))],
-        )
-        .expect("under-cap legs pass");
 
         // 8. Test live flatten: when vault is unlocked, live flatten runs without LIVE_EXECUTION_DISABLED
         let flat_res = flatten_ticker_positions_impl(
@@ -13690,11 +13635,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_triangle_auto_entry_testnet_only_in_live() {
-        // Autonomous entries stay testnet-only in live mode regardless of
-        // the opt-in — the same policy as radar/funding autonomous paths.
+        // Autonomous entries stay testnet-only in live mode — the same
+        // policy as radar/funding autonomous paths.
         let state = lighter_only_state();
         state.set_environment(crate::state::TradingEnvironment::Live);
-        state.settings.write().live_entry_enabled = true;
         let err = execute_triangle_arbitrage_impl(
             TriangleExecutionParams {
                 id: "lighter-TRI-BTC-ETH-USDC".into(),
@@ -13713,7 +13657,6 @@ mod tests {
             err.contains("testnet-only") || err.contains("manual"),
             "refusal must name the autonomous-entry policy: {err}"
         );
-        state.settings.write().live_entry_enabled = false;
         state.set_environment(crate::state::TradingEnvironment::Testnet);
     }
 

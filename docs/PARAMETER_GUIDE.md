@@ -181,7 +181,7 @@ These values initialize missing settings; they are not universal recommendations
 | Triangle min profit | — | Live — cycle hurdle |
 | Triangle max leg slippage | 5 BPS | Dormant |
 
-Review and reduce these values for the actual account before any testnet run. Live strategy entries are additionally opt-in gated (`live_entry_enabled`) with a per-leg notional cap.
+Review and reduce these values for the actual account before any testnet run. Live strategy entries dispatch in Live mode through `live_entry_gate` (unlocked vault + per-venue submission/polling/strategy-entry/credential eligibility); entry size follows the per-strategy size settings.
 
 ## Storage retention
 

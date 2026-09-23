@@ -781,10 +781,6 @@ export interface EngineSettingsDto {
   margin_critical_usage_pct?: number;
   margin_min_liquidation_distance_pct?: number;
   max_leverage?: number;
-  /** Opt-in live strategy-entry switch (spatial path only). */
-  live_entry_enabled?: boolean;
-  /** Per-leg USD notional cap for live entries; 0 refuses all. */
-  live_entry_max_notional_usd?: number;
   /** Global Auto Position Exit policy (Execution section). Strategies on
    * `*PassiveMode = "inherit"` use this; the popup's Auto Limit mode runs
    * it too. Serialized camelCase like PassiveUnwindDto. */

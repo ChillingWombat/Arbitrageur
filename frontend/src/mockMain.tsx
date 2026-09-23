@@ -69,7 +69,6 @@ const FIXTURES: Record<string, (args?: Record<string, unknown>) => unknown> = {
     margin_warning_usage_pct: 70, margin_critical_usage_pct: 85,
     margin_min_liquidation_distance_pct: 15,
     max_leverage: 10,
-    live_entry_enabled: true, live_entry_max_notional_usd: 2000,
     auto_exit_max_hold_secs: 86400, balance_stale_warn_secs: 300,
     configured_venues: ["hyperliquid", "lighter", "vanta", "binance", "okx", "decibel"],
     referral_lighter: "", referral_robinhood: "", sponsor_link: "",

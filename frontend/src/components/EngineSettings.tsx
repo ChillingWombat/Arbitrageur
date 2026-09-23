@@ -268,8 +268,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   const [marginCritPct, setMarginCritPct] = useState(85);
   const [marginMinLiqPct, setMarginMinLiqPct] = useState(15);
   const [maxLeverage, setMaxLeverage] = useState(10);
-  const [liveEntryEnabled, setLiveEntryEnabled] = useState(false);
-  const [liveEntryMaxNotional, setLiveEntryMaxNotional] = useState(0);
   // Canary run state (Safety → live entries)
   const [canarySymbol, setCanarySymbol] = useState("ETH-USDC");
   const [canaryBuyVenue, setCanaryBuyVenue] = useState("hyperliquid");
@@ -567,8 +565,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         setMarginCritPct(s.margin_critical_usage_pct ?? 85);
         setMarginMinLiqPct(s.margin_min_liquidation_distance_pct ?? 15);
         setMaxLeverage(s.max_leverage ?? 10);
-        setLiveEntryEnabled(s.live_entry_enabled ?? false);
-        setLiveEntryMaxNotional(s.live_entry_max_notional_usd ?? 0);
         setStaleWarnSecs(s.balance_stale_warn_secs ?? 300);
 
         setHyperliquidWallet(s.hyperliquid_wallet || "");
@@ -735,8 +731,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
           margin_critical_usage_pct: Number(marginCritPct) || 0,
           margin_min_liquidation_distance_pct: Number(marginMinLiqPct) || 0,
           max_leverage: Math.trunc(Number(maxLeverage)) || 0,
-          live_entry_enabled: liveEntryEnabled,
-          live_entry_max_notional_usd: Number(liveEntryMaxNotional) || 0,
           passive_unwind: {
             enabled: passiveUnwind.enabled,
             spreadPercentile: Number(passiveUnwind.spreadPercentile) || 0,
@@ -1448,7 +1442,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   Trading Mode
                   <InfoTooltip
                     position="bottom"
-                    text={"Testnet Trading executes real orders against each venue's public demo/test endpoints — order flow, signing, and reconciliation run exactly like production, with demo balances instead of real funds. Venues without a public testnet are unavailable in this mode.\n\nLive Trading connects your exchange accounts for real-money execution, account monitoring, and risk-reducing closes such as flattening existing positions. Order status is reconciled at startup and continuously thereafter. Strategy entries are off by default and require the explicit opt-in in Safety with a per-leg notional cap. Live mode requires an unlocked credential vault and at least two submission-capable venues."}
+                    text={"Testnet Trading executes real orders against each venue's public demo/test endpoints — order flow, signing, and reconciliation run exactly like production, with demo balances instead of real funds. Venues without a public testnet are unavailable in this mode.\n\nLive Trading connects your exchange accounts for real-money strategy entries, account monitoring, and risk-reducing closes such as flattening existing positions. Order status is reconciled at startup and continuously thereafter, and a partially-filled entry unwinds the filled leg automatically. Live mode requires an unlocked credential vault and at least two submission-capable venues."}
                   />
                 </label>
                 <p className="text-xs text-slate-500">
@@ -1518,7 +1512,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                 </div>
 
                 <p className="text-xs text-warn-strong">
-                  Live Trading covers account monitoring, risk-reducing closes, and strategy entries when the opt-in below is enabled. Entries stay off by default — enable them explicitly in Risk Control with a per-leg notional cap.
+                  Live Trading enables real-money strategy entries on credentialed, submission-capable venues — spatial pairs, radar manual entries, funding carry, and triangle cycles — alongside account monitoring and risk-reducing closes. Every entry reconciles via venue order polling; a partial fill auto-unwinds.
                 </p>
 
               </div>
@@ -1810,39 +1804,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               </p>
             </div>
 
-            <div className="flex items-start gap-2.5 pt-1 border-t border-slate-200 mt-2">
-              <input type="checkbox" id="live-entry-enabled" disabled={loading}
-                checked={liveEntryEnabled}
-                onChange={(e) => setLiveEntryEnabled(e.target.checked)}
-                className="mt-0.5 accent-red-600" />
-              <label htmlFor="live-entry-enabled" className="text-xs text-slate-700 leading-snug">
-                <span className="font-bold text-red-700">Enable live strategy entries.</span>{" "}
-                Permits REAL-money strategy entries — spatial pairs, Spread
-                Radar manual entries, funding carry/basis, and single-venue
-                triangle cycles — while Trading Mode is Live. Every leg is
-                refused above the notional cap below — caps are never
-                clamped. Order status is reconciled via authoritative venue
-                polling, residual auto-flatten and cancel retry run
-                continuously, and a partially-filled entry unwinds the
-                filled leg automatically. Residual risk remains: a venue
-                outage at the wrong moment can still leave one-sided
-                exposure you must close manually. Keep the cap small.
-              </label>
-            </div>
-            <div>
-              <label className="text-xs font-semibold text-slate-600">Live max notional per leg (USD)</label>
-              <input type="number" min="0" step="1" disabled={loading}
-                value={liveEntryMaxNotional}
-                onChange={(e) => setLiveEntryMaxNotional(Number(e.target.value))}
-                className="w-full mt-1 rounded border border-slate-300 px-2 py-1 text-sm" />
-              <p className="text-xs text-slate-500 mt-0.5">
-                Hard cap on each leg's qty × entry VWAP. 0 refuses every live
-                entry. For a canary set it just above both venues' minimum
-                notionals (e.g. 15–25).
-              </p>
-            </div>
-
-            {liveEntryEnabled && tradingMode === "live" && (
+            {tradingMode === "live" && (
               <div className="rounded border border-red-300 bg-red-50 p-2.5 space-y-2">
                 <p className="text-[11px] font-bold text-red-700 tracking-wide">
                   LIVE CANARY — one minimal two-leg entry
@@ -1862,8 +1824,8 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                 <p className="text-[11px] text-slate-600 leading-snug">
                   Submits ONE IOC pair on real venues with the profit hurdle
                   relaxed down to the accepted loss above (spread+fees are the
-                  test cost, ≤ 50 bps). All other checks still apply: notional
-                  cap, margin, depth, delta-neutrality, ticker blocking,
+                  test cost, ≤ 50 bps). All other checks still apply: vault
+                  unlocked, margin, depth, delta-neutrality, ticker blocking,
                   reconciliation. Pick a symbol with NO open position — a leg
                   fill may stay open and need a manual close.
                 </p>
@@ -2125,7 +2087,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               <span>REAL CAPITAL AT RISK</span>
             </p>
             <p className="text-slate-700 leading-normal font-sans text-xs">
-              You are enabling authenticated account monitoring and explicit risk-reducing close submissions. Open orders are polled for authoritative fill state at startup and every few seconds. New live strategy entries stay disabled unless the canary opt-in in Safety is enabled with a per-leg notional cap.
+              You are enabling real-capital strategy entries — spatial pairs, Spread Radar manual entries, funding carry/basis, and single-venue triangle cycles — plus authenticated account monitoring and risk-reducing close submissions. Entries dispatch only on venues whose adapters submit orders, poll order status for authoritative reconciliation, and hold credentials in your unlocked vault. Position sizes follow your per-strategy size settings; the margin, depth, and circuit-breaker checks apply to every entry.
             </p>
           </div>
 
