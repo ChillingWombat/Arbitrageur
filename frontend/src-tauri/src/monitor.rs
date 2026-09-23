@@ -1971,6 +1971,7 @@ impl SpreadMonitorEngine {
             s.strategy_id.eq_ignore_ascii_case("funding")
                 && s.status == crate::state_store::SignalStatus::Balanced
                 && !s.id.starts_with("flat-")
+                && !s.id.starts_with("trim-")
         }) {
             let (long_leg, short_leg) = (
                 sig.legs
