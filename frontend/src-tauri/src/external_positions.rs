@@ -439,9 +439,12 @@ async fn close_book_levels(
             }
         }
     }
+    let merge_usd = state.usd_merge_quotes();
     let mut aliases: Vec<String> = Vec::new();
     for s in symbols {
-        for alias in crate::state_store::spread_symbol_aliases(s) {
+        // Under `separate` the pair key is the identity — expanding to the
+        // USD-quote family could price a BTC-USDT close off a BTC-USDC book.
+        for alias in crate::state_store::sample_keys(s, merge_usd) {
             if !aliases.contains(&alias) {
                 aliases.push(alias);
             }

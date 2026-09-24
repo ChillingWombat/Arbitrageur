@@ -156,10 +156,19 @@ const STATIC_SUBMIT_CAPABLE = new Set([
   // still requires has_live_credentials() before any submission.
   "aevo",
   "derive",
+  "dydx",
+  "edgex",
+  "evedex",
+  "extended",
   "grvt",
+  "helix",
+  "nado",
   "ondoperps",
   "pacifica",
+  "paradex",
+  "qfex",
   "standx",
+  "vest",
   // EVM spot AMMs and arcus/ibkr/ig/prediction venues are omitted — no
   // implemented order submission transport.
 ]);

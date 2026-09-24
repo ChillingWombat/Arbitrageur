@@ -44,6 +44,7 @@ import type {
   WfoOptimizationResult,
   AccountDto,
   AccountUpsertInput,
+  EvmKeyCustodyDto,
   EvmWalletSaveDto,
   StrategyAccountRouteDto,
   StrategyRouteUpsertInput,
@@ -68,6 +69,7 @@ import type {
   SessionProfileDto,
   VenueCapabilityDto,
   ReconcileSummaryDto,
+  StablecoinHealthDto,
 } from "../types/index.ts";
 import { DEFAULT_PASSIVE_UNWIND } from "../types/index.ts";
 
@@ -731,8 +733,8 @@ export const api = {
     return invokeDesktop<TickerMarketQuoteDto[]>("fetch_multi_market_quotes", { symbols });
   },
 
-  async executeFundingCarry(symbol: string, longVenue: string, shortVenue: string, tradeSizeUsd: number, auto = false): Promise<SimStepResultDto> {
-    return invokeDesktop<SimStepResultDto>("execute_funding_carry", { symbol, longVenue, shortVenue, tradeSizeUsd, auto });
+  async executeFundingCarry(symbol: string, longVenue: string, shortVenue: string, tradeSizeUsd: number, auto = false, kind?: string): Promise<SimStepResultDto> {
+    return invokeDesktop<SimStepResultDto>("execute_funding_carry", { symbol, longVenue, shortVenue, tradeSizeUsd, auto, kind: kind ?? null });
   },
 
   async executePredictionArbitrage(marketTitle: string, buyYesVenue: string, buyNoVenue: string, quantity: number): Promise<SimStepResultDto> {
@@ -749,6 +751,10 @@ export const api = {
 
   async getStorageStats(): Promise<StorageStatsDto> {
     return invokeDesktop<StorageStatsDto>("get_storage_stats");
+  },
+
+  async getStablecoinHealth(): Promise<StablecoinHealthDto> {
+    return invokeDesktop<StablecoinHealthDto>("get_stablecoin_health");
   },
 
   async getRiskOverview(): Promise<RiskOverviewDto> {
@@ -984,6 +990,13 @@ export const api = {
    *  credentials — accounts, enabled flags and RPC overrides survive. */
   async clearEvmWallet(): Promise<number> {
     return invokeDesktop<number>("clear_evm_wallet");
+  },
+
+  /** Custody status of the shared EVM wallet key: whether records carry a
+   *  Stronghold sentinel vs raw key material, and whether the snapshot is
+   *  loaded and holds the key. Errors while the vault is locked. */
+  async getEvmKeyCustody(): Promise<EvmKeyCustodyDto> {
+    return invokeDesktop<EvmKeyCustodyDto>("get_evm_key_custody");
   },
 
   async setDefaultAccount(venue: string, accountId: string): Promise<void> {

@@ -414,6 +414,18 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
     if is_live {
         live_entry_gate(state, &[buy_venue, sell_venue])?;
     }
+    // Stablecoin depeg gate — applies to every environment, not just live:
+    // a paper-mode spread measured against a depegged quote is the same
+    // phantom edge. Stable-vs-USD books are exempt (they ARE the depeg
+    // arbitrage — the base-is-family check lives inside the gate).
+    for (v, q) in [
+        (buy_venue, state.book_quote(buy_venue, symbol)),
+        (sell_venue, state.book_quote(sell_venue, symbol)),
+    ] {
+        state
+            .stablecoin_gate(symbol, &q)
+            .map_err(|e| format!("{v}: {e}"))?;
+    }
     let _ = trigger_spread_bps; // caller-supplied spread is never trusted for eligibility
 
     // Durable per-ticker gate: an in-flight, imbalanced, or unresolved signal
@@ -797,7 +809,9 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
     let mut equity_before_by_venue = HashMap::new();
     let env_str = state.env().as_str();
     for (vid, acc) in [(buy_vid.as_str(), &acc_buy), (sell_vid.as_str(), &acc_sell)] {
-        if let Ok(f) = acc.equity.to_string().parse::<f64>() {
+        let mut acc_usd = (*acc).clone();
+        state.normalize_account_usd(vid, &mut acc_usd);
+        if let Ok(f) = acc_usd.equity.to_string().parse::<f64>() {
             if f.is_finite() {
                 equity_before_by_venue.insert(format!("{env_str}-{vid}"), f);
             }
@@ -1712,7 +1726,7 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
     };
     for (vid, _name, adapter) in state.get_venues() {
         match live_account_or_cached(state, vid, &adapter).await {
-            Ok((acc, stale_age)) => {
+            Ok((mut acc, stale_age)) => {
                 if let Some(age) = stale_age {
                     if manual_locked {
                         if locked_warn_due() {
@@ -1728,6 +1742,10 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
                         );
                     }
                 }
+                // USD-quote policy: a venue settling in USDT reports equity
+                // in USDT — convert to the USD basis before portfolio sums
+                // so a depeg shows as real drawdown, not noise.
+                state.normalize_account_usd(vid, &mut acc);
                 accounts.push(acc);
             }
             Err(e) => {

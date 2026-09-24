@@ -112,6 +112,10 @@ const FIXTURES: Record<string, (args?: Record<string, unknown>) => unknown> = {
   scan_triangle_opportunities: () => [],
   scan_funding_opportunities: () => [
     { symbol: "ETH-USDC", long_venue: "lighter", short_venue: "hyperliquid", long_venue_id: "lighter", short_venue_id: "hyperliquid", funding_apr_pct: 14.2, funding_spread_bps_8h: 1.8, mark_price: 4412, is_executable: true },
+    { symbol: "ETH-USDC", long_venue: "lighter", short_venue: "hyperliquid", long_venue_id: "lighter", short_venue_id: "hyperliquid", funding_apr_pct: 9.8, funding_spread_bps_8h: 1.2, mark_price: 4412, is_executable: true, kind: "fixed_yield", fixed_apr_pct: 9.8, lock_until_ms: now + 90 * 86400_000, yu_hedge_cost_bps: 11.4, boros_margin_usd: 12400, boros_gas_usd: 0.07, yu_legs: [
+      { venue_id: "lighter", yu_market_id: 214, yu_symbol: "LIGHTER-ETH-30OCT2026", yu_side: "long", fixed_apr_pct: 2.1, fee_bps: 5, maturity_unix: Math.floor(now / 1000) + 90 * 86400 },
+      { venue_id: "hyperliquid", yu_market_id: 201, yu_symbol: "HYPERLIQUID-BTC-30OCT2026", yu_side: "short", fixed_apr_pct: 11.9, fee_bps: 5, maturity_unix: Math.floor(now / 1000) + 90 * 86400 },
+    ] },
   ],
   scan_prediction_opportunities: () => [],
   get_risk_overview: () => ({

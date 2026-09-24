@@ -196,7 +196,16 @@ pub async fn get_autotune_recommendation_impl(
         .next()
         .unwrap_or(symbol)
         .to_ascii_uppercase();
-    let keys = [base.clone(), format!("{base}-USDC"), format!("{base}-USD")];
+    // Quote policy: merged modes read the historical alias spellings (the
+    // same series regardless of which quote it was sampled under);
+    // `separate` mode keeps the requested pair quote-strict — BTC-USDT
+    // evidence never mixes with BTC-USDC.
+    let merge_usd = state.usd_merge_quotes();
+    let keys: Vec<String> = if merge_usd {
+        vec![base.clone(), format!("{base}-USDC"), format!("{base}-USD")]
+    } else {
+        vec![symbol.trim().to_uppercase()]
+    };
     let now_ms = Utc::now().timestamp_millis();
     let since_ms = now_ms - BASELINE_RETENTION_MS;
     let store = state.state_store.clone();
@@ -215,7 +224,7 @@ pub async fn get_autotune_recommendation_impl(
     let evidence = tokio::task::spawn_blocking(move || {
         let mut all = Vec::new();
         for k in &keys {
-            if let Ok(mut rows) = store.spread_samples(k, since_ms, now_ms) {
+            if let Ok(mut rows) = store.spread_samples_mode(k, merge_usd, since_ms, now_ms) {
                 all.append(&mut rows);
             }
         }
@@ -693,10 +702,13 @@ pub async fn apply_autotune_rows_inner(
         "skipped_held": skipped_held.clone(),
     })
     .to_string();
-    match state
-        .state_store
-        .record_autotune_apply_event(symbol, &applied_json, &detail_json, now_ms)
-    {
+    match state.state_store.record_autotune_apply_event_mode(
+        symbol,
+        &applied_json,
+        &detail_json,
+        now_ms,
+        state.usd_merge_quotes(),
+    ) {
         Ok(audit_id) => Ok(AutotuneApplyResultDto {
             symbol: symbol.to_string(),
             applied: applied_names,

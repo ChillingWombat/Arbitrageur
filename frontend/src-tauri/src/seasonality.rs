@@ -74,7 +74,7 @@ fn daily_rv_series(
     }
     let samples = state
         .state_store
-        .spread_samples(symbol, start_ms, now_ms)
+        .spread_samples_mode(symbol, state.usd_merge_quotes(), start_ms, now_ms)
         .ok()?;
     let mut mids_by_venue: std::collections::HashMap<String, Vec<(i64, f64)>> =
         std::collections::HashMap::new();
@@ -160,7 +160,7 @@ fn run_one_symbol(
             let trailing: f64 = kept_rv.iter().sum::<f64>() / kept_rv.len() as f64;
             let forecast = har_forecast_next(&a, &kept_rv).unwrap_or(trailing);
             let row = HarAnchorRow {
-                symbol: crate::state_store::canonical_base(symbol),
+                symbol: arbitrageur_core::symbol::pair_key(symbol, state.usd_merge_quotes()),
                 intercept: a.intercept,
                 b_daily: a.b_daily,
                 b_weekly: a.b_weekly,
@@ -171,7 +171,10 @@ fn run_one_symbol(
                 trailing_mean_rv_bps: trailing,
                 updated_ts: now_ms,
             };
-            state.state_store.phase2_upsert_har_anchor(&row).is_ok()
+            state
+                .state_store
+                .phase2_upsert_har_anchor_mode(&row, state.usd_merge_quotes())
+                .is_ok()
         }
         None => false,
     };
@@ -199,7 +202,7 @@ fn run_one_symbol(
     let val_delta = val_med - fit_med;
     let decision = decide_promotion(fit_delta, val_delta);
     let row = PromotionStateRow {
-        symbol: crate::state_store::canonical_base(symbol),
+        symbol: arbitrageur_core::symbol::pair_key(symbol, state.usd_merge_quotes()),
         status: decision.status.as_str().to_string(),
         fit_delta_bps: decision.fit_delta_bps,
         val_delta_bps: decision.val_delta_bps,
@@ -208,7 +211,7 @@ fn run_one_symbol(
     };
     if state
         .state_store
-        .phase2_upsert_promotion_state(&row)
+        .phase2_upsert_promotion_state_mode(&row, state.usd_merge_quotes())
         .is_err()
     {
         return (anchor_written, PromotionStatus::Held);
@@ -225,7 +228,7 @@ pub fn run_seasonality_promotion(
     }
     let symbols = state
         .state_store
-        .distinct_sample_symbols()
+        .distinct_sample_symbols_mode(state.usd_merge_quotes())
         .map_err(|e| e.to_string())?;
     let stress_json = state
         .state_store
@@ -251,14 +254,15 @@ pub fn run_seasonality_promotion(
             PromotionStatus::Promoted => out.promoted += 1,
             PromotionStatus::Demoted => out.demoted += 1,
             PromotionStatus::Held => {
+                let merge_usd = state.usd_merge_quotes();
                 let has_anchor = state
                     .state_store
-                    .phase2_har_anchor(symbol)
+                    .phase2_har_anchor_mode(symbol, merge_usd)
                     .map(|a| a.is_some())
                     .unwrap_or(false);
                 let has_promo = state
                     .state_store
-                    .phase2_promotion_state(symbol)
+                    .phase2_promotion_state_mode(symbol, merge_usd)
                     .map(|p| p.is_some())
                     .unwrap_or(false);
                 if has_anchor || has_promo {
@@ -284,7 +288,10 @@ pub fn session_coupling_for(state: &AppEngineState, symbol: &str, now_ms: i64) -
     if now_ms <= 0 {
         return neutral;
     }
-    let profiles = match state.state_store.session_profiles(symbol) {
+    let profiles = match state
+        .state_store
+        .session_profiles_mode(symbol, state.usd_merge_quotes())
+    {
         Ok(p) => p,
         Err(_) => return neutral,
     };

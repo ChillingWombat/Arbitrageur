@@ -37,6 +37,23 @@ rand = { workspace = true }
 argon2 = { workspace = true }
 zeroize = { workspace = true }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
+# EVM wallet key custody: the shared-wallet secp256k1 key lives inside an
+# IOTA Stronghold snapshot (guarded memory, encrypted at rest) instead of
+# being decrypted into process memory. We use the plugin's Rust-side
+# `stronghold` wrapper only — no JS commands are registered — and the
+# `iota_stronghold` crate for the procedure types (WriteVault,
+# Secp256k1EcdsaSign, GetEvmAddress). Versions must stay aligned: the
+# plugin's `stronghold::Stronghold` derefs to `iota_stronghold::Stronghold`.
+tauri-plugin-stronghold = "2.3.2"
+iota_stronghold = "2"
+# Alloy sub-crates for the `TxSigner` impl that bridges Stronghold into
+# the exchange adapter's `Arc<dyn TxSigner<Signature>>` slot. Pinned to the
+# same major series as arbitrageur-exchanges' `alloy = "2"` so Cargo unifies
+# them into one version — the trait object types are identical.
+alloy-network = "2"
+alloy-consensus = "2"
+alloy-primitives = "1"
+alloy-signer = "2"
 reqwest = { workspace = true }
 # Single process-wide rustls crypto provider (alloy pulls providers that
 # otherwise leave auto-detection ambiguous → runtime panic on first TLS).
@@ -53,3 +70,5 @@ custom-protocol = ["tauri/custom-protocol"]
 
 [dev-dependencies]
 tauri = { version = "2.1", features = ["test"] }
+alloy-signer-local = "2"
+hex-literal = "1"

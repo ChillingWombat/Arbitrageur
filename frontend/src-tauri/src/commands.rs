@@ -400,6 +400,29 @@ pub(crate) fn venue_fee_bps(vid: &str) -> Decimal {
         "grvt" => dec!(5.0),
         "derive" => dec!(2.0),
         "aevo" => dec!(2.0),
+        // Vest charges a flat 1bp on API transactions (crypto perps;
+        // equity/forex symbols currently carry takerFee 0 — the market
+        // parser uses the per-symbol rate when it matters).
+        "vest" => dec!(1.0),
+        // Nado base taker tier is 3.5bps (verified from the live symbols
+        // query); per-symbol rates ride market metadata when they differ.
+        "nado" => dec!(3.5),
+        "qfex" => dec!(4.0),
+        // EVEDEX verified /api/market fee schedule: taker 4.5bps, maker 1.5bps.
+        "evedex" => dec!(4.5),
+        // Paradex spec-published taker.
+        "paradex" => dec!(2.0),
+        // edgeX v2 defaultTakerFeeRate (per-contract — BTC 4.5bps).
+        "edgex" => dec!(4.5),
+        // Extended standard taker tier.
+        "extended" => dec!(2.0),
+        // dYdX base-tier taker.
+        "dydx" => dec!(2.0),
+        // Injective derivative markets: taker_fee_rate 0.000001 = 0.01bps.
+        "helix" => dec!(0.01),
+        // Pendle Boros YU taker fee: 5bps of notional (market `takerFee`
+        // field; the scanner also reads it per-market).
+        "boros" => dec!(5.0),
         _ => dec!(4.0),
     }
 }
@@ -1477,11 +1500,38 @@ pub async fn fetch_orderbooks_impl(
             asks: asks_dto,
         });
         if mid > 0.0 {
+            // Persist on the USD basis: displayed quotes stay venue-native,
+            // but the stored series is what pair math compares — under
+            // fx_adjusted a USDT-quoted book converts through the rate table.
+            // Quote resolution: the book's own spelling, else the monitor's
+            // refreshed per-venue quote map, else the USD baseline.
+            let book_q = arbitrageur_core::symbol::symbol_quote(&book.symbol);
+            let key_q = arbitrageur_core::symbol::symbol_quote(symbol);
+            // Quote-strict sampling: under `separate` a book whose written
+            // quote disagrees with the requested key is a different
+            // instrument — don't fold its mids into this series.
+            if !state.usd_merge_quotes() {
+                if let (Some(kq), Some(bq)) = (&key_q, &book_q) {
+                    if kq != bq {
+                        continue;
+                    }
+                }
+            }
+            let quote = book_q
+                .or_else(|| {
+                    state
+                        .monitor
+                        .lock()
+                        .as_ref()
+                        .and_then(|m| m.book_quote(vid, symbol, state.usd_merge_quotes()))
+                })
+                .unwrap_or_else(|| "USD".into());
+            let scale = state.fx_price_factor(Some(vid), &quote);
             sample_entries.push(crate::state_store::VenueSampleEntry {
                 venue_id: vid.into(),
-                mid,
-                best_bid,
-                best_ask,
+                mid: mid * scale,
+                best_bid: best_bid * scale,
+                best_ask: best_ask * scale,
                 bid_depth: (total_bid_depth > 0.0).then_some(total_bid_depth),
                 ask_depth: (total_ask_depth > 0.0).then_some(total_ask_depth),
             });
@@ -1492,9 +1542,11 @@ pub async fn fetch_orderbooks_impl(
     // dislocation series can be sliced over arbitrary windows. Best-effort —
     // a store failure must never break the market-data path.
     let now_ms = Utc::now().timestamp_millis();
-    let _ = state
-        .state_store
-        .record_spread_samples(symbol, now_ms, &sample_entries);
+    let merge_usd = state.usd_merge_quotes();
+    let _ =
+        state
+            .state_store
+            .record_spread_samples_mode(symbol, merge_usd, now_ms, &sample_entries);
 
     // Hourly retention pass: settings-driven time cutoff + GB budget.
     // Both unset -> no-op. Best-effort, never breaks ingestion.
@@ -1698,10 +1750,12 @@ pub async fn scan_spatial_opportunities_impl(
     let scan_history_secs = monitor_cfg.history_window_secs.clamp(3600, 30 * 86400);
     let scan_history_from = now_ms.saturating_sub((scan_history_secs as i64).saturating_mul(1000));
     let mut scan_mids_by_venue: HashMap<String, Vec<(i64, f64)>> = HashMap::new();
-    if let Ok(samples) = state
-        .state_store
-        .spread_samples(symbol, scan_history_from, now_ms)
-    {
+    if let Ok(samples) = state.state_store.spread_samples_mode(
+        symbol,
+        state.usd_merge_quotes(),
+        scan_history_from,
+        now_ms,
+    ) {
         for s in &samples {
             if s.mid.is_finite() && s.mid > 0.0 {
                 scan_mids_by_venue
@@ -2273,6 +2327,11 @@ fn transition_environment(
         // mainnet prices are not executable on testnet venues and vice
         // versa. Feeds re-populate from the newly admitted adapter set.
         state.market_data_hub.clear();
+        // Venue-local stablecoin rates were learned from the previous env's
+        // markets (testnet quotes are not mainnet truth) — re-derive them
+        // from the new env's watchlist refresh. Global rates stay: the FX
+        // table is venue-independent.
+        state.stablecoin_fx.clear_venue();
     }
     Ok(target == crate::state::TradingEnvironment::Live)
 }
@@ -2411,6 +2470,26 @@ pub fn save_engine_settings_impl(
     }
     if !(60..=604_800).contains(&settings.auto_exit_max_hold_secs) {
         return Err("Auto-exit max hold must be within 60 seconds–7 days".into());
+    }
+    // USD-quote policy: only the three documented spellings persist —
+    // an unknown mode must fail the save, not silently coerce.
+    if !matches!(
+        settings.usd_quote_mode.trim().to_ascii_lowercase().as_str(),
+        "separate" | "parity" | "fx_adjusted"
+    ) {
+        return Err("usd_quote_mode must be 'separate', 'parity', or 'fx_adjusted'".into());
+    }
+    settings.usd_quote_mode =
+        crate::stablecoin_fx::normalize_usd_quote_mode(&settings.usd_quote_mode).to_string();
+    if !settings.stablecoin_warn_bps.is_finite()
+        || !settings.stablecoin_halt_bps.is_finite()
+        || settings.stablecoin_warn_bps <= 0.0
+        || settings.stablecoin_warn_bps >= settings.stablecoin_halt_bps
+        || settings.stablecoin_halt_bps > 10_000.0
+    {
+        return Err(
+            "Stablecoin thresholds must be positive with warn < halt (halt ≤ 10000 bps)".into(),
+        );
     }
     let submitted = settings.submitted_credentials();
     if !submitted.is_empty() {
@@ -2637,6 +2716,20 @@ pub fn save_engine_settings_impl(
     let _ = state
         .state_store
         .kv_set("engine.trading_mode", &sanitized.trading_mode);
+    // USD-quote policy + depeg thresholds persist like the other Execution
+    // settings — a restart must not silently revert to a different pairing
+    // or protection level.
+    let _ = state
+        .state_store
+        .kv_set("engine.usd_quote_mode", &sanitized.usd_quote_mode);
+    let _ = state.state_store.kv_set(
+        "risk.stablecoin_warn_bps",
+        &sanitized.stablecoin_warn_bps.to_string(),
+    );
+    let _ = state.state_store.kv_set(
+        "risk.stablecoin_halt_bps",
+        &sanitized.stablecoin_halt_bps.to_string(),
+    );
     // Persist Safety limits so restarts keep the operator's values.
     let _ = state.state_store.kv_set(
         "risk.cb_max_dd_usd",
@@ -2777,6 +2870,12 @@ pub fn save_engine_settings_impl(
                 .set_max_unhedged_usd_per_asset(limit);
         }
     }
+    // Keep the hub's slot keying in step with the quote policy: under
+    // `separate`, BASE-QUOTE variants must not share a cached book.
+    state.market_data_hub.set_merge_usd_quotes(
+        crate::stablecoin_fx::normalize_usd_quote_mode(&sanitized.usd_quote_mode)
+            != crate::stablecoin_fx::USD_QUOTE_MODE_SEPARATE,
+    );
     *state.settings.write() = sanitized;
     Ok("Configuration applied to the current session".into())
 }
@@ -2845,10 +2944,11 @@ pub(crate) async fn cached_venue_volumes(
     // store failure must never break the market-data path.
     {
         let now_ms = chrono::Utc::now().timestamp_millis();
+        let merge_usd = state.usd_merge_quotes();
         for (venue, vols) in &map {
             let _ = state
                 .state_store
-                .record_venue_volume_samples(venue, now_ms, vols);
+                .record_venue_volume_samples_mode(venue, now_ms, vols, merge_usd);
         }
     }
     *state.volume_cache.lock() = Some((std::time::Instant::now(), map.clone()));
@@ -2914,9 +3014,10 @@ pub async fn get_signal_series_impl(
 
     let store = state.state_store.clone();
     let sym = symbol.to_string();
+    let merge_usd = state.usd_merge_quotes();
     let (raw, earliest_ts_ms) = tokio::task::spawn_blocking(move || {
-        let rows = store.spread_samples(&sym, since_ms, now_ms)?;
-        let earliest = store.earliest_spread_sample_ts(&sym)?;
+        let rows = store.spread_samples_mode(&sym, merge_usd, since_ms, now_ms)?;
+        let earliest = store.earliest_spread_sample_ts_mode(&sym, merge_usd)?;
         Ok::<_, anyhow::Error>((rows, earliest))
     })
     .await
@@ -3207,7 +3308,15 @@ pub async fn get_matrix_baselines_impl(
         .next()
         .unwrap_or(symbol)
         .to_ascii_uppercase();
-    let keys = [base.clone(), format!("{base}-USDC"), format!("{base}-USD")];
+    // Under `separate` USD-quote mode the requested pair ("BTC-USDT") is its
+    // own instrument — only its exact key is read. Merged modes keep the
+    // legacy alias sweep so bare-base and quoted rows combine.
+    let merge_usd = state.usd_merge_quotes();
+    let keys: Vec<String> = if merge_usd {
+        vec![base.clone(), format!("{base}-USDC"), format!("{base}-USD")]
+    } else {
+        vec![symbol.trim().to_string()]
+    };
     let now_ms = Utc::now().timestamp_millis();
     let since_ms = now_ms - BASELINE_RETENTION_MS;
     let store = state.state_store.clone();
@@ -3216,7 +3325,7 @@ pub async fn get_matrix_baselines_impl(
     let snapshot = tokio::task::spawn_blocking(move || {
         let mut all = Vec::new();
         for k in &keys {
-            if let Ok(mut rows) = store.spread_samples(k, since_ms, now_ms) {
+            if let Ok(mut rows) = store.spread_samples_mode(k, merge_usd, since_ms, now_ms) {
                 all.append(&mut rows);
             }
         }
@@ -3485,6 +3594,23 @@ pub async fn save_engine_settings(
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<String, String> {
     save_engine_settings_impl(settings, &state)
+}
+
+/// Stablecoin FX health for System Settings → Execution: per-quote
+/// effective USD rates, deviation from parity, and which quotes are
+/// currently past the halt threshold.
+#[tauri::command]
+pub async fn get_stablecoin_health(
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<crate::stablecoin_fx::StablecoinHealthDto, String> {
+    let s = state.settings.read().clone();
+    let mode = crate::stablecoin_fx::normalize_usd_quote_mode(&s.usd_quote_mode);
+    Ok(state.stablecoin_fx.health(
+        mode,
+        Utc::now().timestamp_millis(),
+        s.stablecoin_warn_bps,
+        s.stablecoin_halt_bps,
+    ))
 }
 
 /// Live storage footprint behind the Historical Price Data retention
@@ -3970,7 +4096,10 @@ pub(crate) async fn maybe_record_margin_snapshots(state: &AppEngineState, now_ms
         // Uncredentialed venues fail the account read and skip — same
         // best-effort semantics the old simulator loop had.
         let account = match adapter.fetch_account().await {
-            Ok(acc) => acc,
+            Ok(mut acc) => {
+                state.normalize_account_usd(vid, &mut acc);
+                acc
+            }
             Err(_) => continue,
         };
         let equity = match account.equity.to_string().parse::<f64>() {
@@ -4006,7 +4135,8 @@ pub(crate) async fn snapshot_venue_equity(state: &AppEngineState) -> HashMap<Str
     let mut map = HashMap::new();
     let env_str = state.env().as_str();
     for (vid, _name, adapter) in state.get_venues() {
-        if let Ok(acc) = adapter.fetch_account().await {
+        if let Ok(mut acc) = adapter.fetch_account().await {
+            state.normalize_account_usd(vid, &mut acc);
             if let Ok(f) = acc.equity.to_string().parse::<f64>() {
                 if f.is_finite() {
                     map.insert(format!("{env_str}-{vid}"), f);
@@ -4042,7 +4172,12 @@ pub(crate) async fn refresh_equity_expectations_after_fills(
             .last_good_accounts
             .lock()
             .insert(key.clone(), (acc.clone(), now_ms));
-        let Ok(after) = acc.equity.to_string().parse::<f64>() else {
+        // The delta is measured on the USD basis — `before` snapshots and
+        // stored expectations are USD-normalized, so the post-fill read is
+        // too. The cache above keeps the venue-denominated snapshot.
+        let mut acc_usd = acc.clone();
+        state.normalize_account_usd(vid, &mut acc_usd);
+        let Ok(after) = acc_usd.equity.to_string().parse::<f64>() else {
             continue;
         };
         if !after.is_finite() {
@@ -4104,17 +4239,18 @@ pub(crate) fn get_session_profile_impl(
     // Symbol-level display mask covers the common 8h + 4h stamps; per-pair
     // hourly masks apply inside the monitor evaluation itself.
     let mask = in_funding_mask(now_ms, &[8, 4]);
+    let merge_usd = state.usd_merge_quotes();
     let rows = state
         .state_store
-        .session_profiles(symbol)
+        .session_profiles_mode(symbol, merge_usd)
         .map_err(|e| e.to_string())?;
     let promotion_row = state
         .state_store
-        .phase2_promotion_state(symbol)
+        .phase2_promotion_state_mode(symbol, merge_usd)
         .map_err(|e| e.to_string())?;
     let anchor_row = state
         .state_store
-        .phase2_har_anchor(symbol)
+        .phase2_har_anchor_mode(symbol, merge_usd)
         .map_err(|e| e.to_string())?;
     let rescaled =
         crate::seasonality::promotion_active(promotion_row.as_ref(), anchor_row.as_ref(), now_ms);
@@ -4172,7 +4308,7 @@ pub(crate) fn get_session_profile_impl(
         }
     });
     Ok(crate::monitor::SessionProfileDto {
-        symbol: crate::monitor::canonical_base(symbol),
+        symbol: arbitrageur_core::symbol::pair_key(symbol, merge_usd),
         current_session: session.as_str().to_string(),
         is_weekend: weekend,
         in_funding_mask: mask,
@@ -5824,6 +5960,10 @@ mod tests {
         assert_eq!(res.keyed_venues.len(), 6);
         assert_eq!(res.address_only_venues.len(), 5);
         assert_eq!(res.created_accounts.len(), 11);
+        assert_eq!(
+            res.key_storage, "stronghold",
+            "an unlocked vault opens the stronghold — the key must land there"
+        );
 
         let data = state.vault.write().get_data().expect("vault data").clone();
         for vid in arbitrageur_exchanges::evm_amm::ADMITTED_EVM_AMM_VENUE_IDS {
@@ -5847,8 +5987,8 @@ mod tests {
             if arbitrageur_exchanges::evm_amm::LIVE_EVM_AMM_VENUE_IDS.contains(vid) {
                 assert_eq!(
                     rec.private_key.as_deref(),
-                    Some(EVM_WALLET_TEST_KEY),
-                    "{vid} is swap-capable and must hold the key"
+                    Some(crate::stronghold::EVM_STRONGHOLD_KEY_REF),
+                    "{vid} is swap-capable and must hold the custody sentinel"
                 );
             } else {
                 assert!(
@@ -5858,6 +5998,22 @@ mod tests {
             }
             assert!(!rec.enabled, "disabled profile => disabled record");
         }
+        // The stronghold itself holds the key and derives the right address.
+        {
+            let guard = state.evm_stronghold.read();
+            let sh = guard.as_ref().expect("stronghold loaded");
+            assert!(sh.has_key());
+            assert_eq!(
+                sh.evm_address()
+                    .expect("derive address")
+                    .to_string()
+                    .to_lowercase(),
+                EVM_WALLET_TEST_ADDR
+            );
+        }
+        let custody = get_evm_key_custody_impl(&state).expect("custody");
+        assert_eq!(custody.custody, "stronghold");
+        assert!(custody.stronghold_loaded);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -5952,7 +6108,10 @@ mod tests {
         assert!(rec.private_key.is_none());
         assert!(rec.wallet_address.is_none());
         assert_eq!(rec.base_url.as_deref(), Some("https://example-rpc.invalid"));
-        assert!(rec.enabled, "clearing the wallet must not disable the venue");
+        assert!(
+            rec.enabled,
+            "clearing the wallet must not disable the venue"
+        );
         assert!(uni.wallet_address_hex().is_none(), "adapter signer dropped");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -5966,8 +6125,7 @@ mod tests {
         initialize_vault_impl("test password", &state).expect("init vault");
         state.set_environment(crate::state::TradingEnvironment::Live);
 
-        let legacy_key =
-            "0x0000000000000000000000000000000000000000000000000000000000000002";
+        let legacy_key = "0x0000000000000000000000000000000000000000000000000000000000000002";
         let legacy = upsert_account_impl(
             AccountUpsertInput {
                 environment: None,
@@ -5994,14 +6152,19 @@ mod tests {
 
         let res = save_evm_wallet_impl(EVM_WALLET_TEST_KEY, None, &state).expect("save");
         // The venue's resolving default adopts the shared key in place — no
-        // stray `{venue}-default` row is created alongside it.
+        // stray `{venue}-default` row is created alongside it. With the
+        // stronghold loaded the record carries the custody sentinel, never
+        // key bytes.
         let data = state.vault.write().get_data().expect("vault data").clone();
         let rec = data
             .credentials
             .iter()
             .find(|c| c.profile_id.as_deref() == Some(legacy.id.as_str()))
             .expect("record for legacy account");
-        assert_eq!(rec.private_key.as_deref(), Some(EVM_WALLET_TEST_KEY));
+        assert_eq!(
+            rec.private_key.as_deref(),
+            Some(crate::stronghold::EVM_STRONGHOLD_KEY_REF)
+        );
         assert_eq!(
             rec.wallet_address.as_deref().map(|a| a.to_lowercase()),
             Some(EVM_WALLET_TEST_ADDR.to_string())
@@ -6011,12 +6174,133 @@ mod tests {
             .get_account("uniswap-default")
             .expect("lookup")
             .is_none());
-        assert!(!res.created_accounts.iter().any(|id| id == "uniswap-default"));
+        assert!(!res
+            .created_accounts
+            .iter()
+            .any(|id| id == "uniswap-default"));
         assert_eq!(res.created_accounts.len(), 10, "other venues gain rows");
         assert_eq!(
             get_active_signer_address_impl("uniswap", &state).expect("signer"),
             Some(res.signer_address.clone())
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A vault seeded pre-Stronghold holds raw hex keys in its records.
+    /// Unlock must move that key into the snapshot and rewrite every AMM
+    /// record to the sentinel — the raw bytes stop persisting.
+    #[tokio::test]
+    async fn test_unlock_migrates_raw_evm_key_to_stronghold() {
+        let (state, dir) = test_state_with_vault("evm-migrate");
+        initialize_vault_impl("test password", &state).expect("init vault");
+
+        // Seed a legacy raw-key record directly (bypassing the accounts
+        // hooks, which would migrate it immediately).
+        state
+            .vault
+            .write()
+            .upsert_credentials(vec![ExchangeCredentials {
+                venue: "uniswap".into(),
+                profile_id: None,
+                api_key: String::new(),
+                api_secret: String::new(),
+                passphrase: None,
+                account_id: None,
+                wallet_address: Some(EVM_WALLET_TEST_ADDR_CHECKSUM.into()),
+                account_index: None,
+                subaccount_index: None,
+                api_key_index: None,
+                private_key: Some(EVM_WALLET_TEST_KEY.into()),
+                base_url: None,
+                enabled: true,
+            }])
+            .expect("seed raw key");
+        {
+            let data = state.vault.write().get_data().expect("data").clone();
+            assert_eq!(
+                data.credentials[0].private_key.as_deref(),
+                Some(EVM_WALLET_TEST_KEY)
+            );
+        }
+
+        let _ = lock_vault_impl(&state);
+        unlock_vault_impl("test password", &state).expect("unlock migrates");
+
+        let data = state.vault.write().get_data().expect("data").clone();
+        assert_eq!(
+            data.credentials[0].private_key.as_deref(),
+            Some(crate::stronghold::EVM_STRONGHOLD_KEY_REF),
+            "raw key must be rewritten to the sentinel after migration"
+        );
+        let custody = get_evm_key_custody_impl(&state).expect("custody");
+        assert_eq!(custody.custody, "stronghold");
+        assert!(custody.stronghold_loaded);
+        assert_eq!(
+            state
+                .evm_stronghold
+                .read()
+                .as_ref()
+                .expect("stronghold")
+                .evm_address()
+                .expect("address")
+                .to_string()
+                .to_lowercase(),
+            EVM_WALLET_TEST_ADDR
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Two AMM records carrying DIFFERENT raw keys can never share the one
+    /// stronghold record — migration refuses rather than silently picking
+    /// a winner; both records keep their vault-held keys.
+    #[tokio::test]
+    async fn test_divergent_evm_keys_stay_vault_held() {
+        let (state, dir) = test_state_with_vault("evm-diverge");
+        initialize_vault_impl("test password", &state).expect("init vault");
+
+        let cred = |venue: &str, key: &str| ExchangeCredentials {
+            venue: venue.into(),
+            profile_id: None,
+            api_key: String::new(),
+            api_secret: String::new(),
+            passphrase: None,
+            account_id: None,
+            wallet_address: None,
+            account_index: None,
+            subaccount_index: None,
+            api_key_index: None,
+            private_key: Some(key.into()),
+            base_url: None,
+            enabled: true,
+        };
+        state
+            .vault
+            .write()
+            .upsert_credentials(vec![
+                cred("uniswap", EVM_WALLET_TEST_KEY),
+                cred(
+                    "sushiswap",
+                    "0x0000000000000000000000000000000000000000000000000000000000000002",
+                ),
+            ])
+            .expect("seed divergent keys");
+
+        let _ = lock_vault_impl(&state);
+        unlock_vault_impl("test password", &state).expect("unlock");
+
+        let data = state.vault.write().get_data().expect("data").clone();
+        assert!(
+            data.credentials
+                .iter()
+                .all(|c| c.private_key.as_deref().is_some_and(|k| k.starts_with('0'))),
+            "divergent keys must remain vault-held, got {:?}",
+            data.credentials
+                .iter()
+                .map(|c| c.private_key.clone())
+                .collect::<Vec<_>>()
+        );
+        let custody = get_evm_key_custody_impl(&state).expect("custody");
+        assert_eq!(custody.custody, "vault");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -6106,6 +6390,66 @@ mod tests {
             "manual lock must clear the provisioned signer"
         );
 
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Sentinel custody end-to-end: a Stronghold-backed record resolves the
+    /// signer address from inside the vault (never from key bytes), the
+    /// provisioned adapter reports the same signer, and clearing revokes
+    /// the record so it cannot sign again.
+    #[tokio::test]
+    async fn test_evm_sentinel_signer_resolution_and_revoke() {
+        let (state, dir) = test_state_with_vault("evm-sentinel");
+        initialize_vault_impl("test password", &state).expect("init vault");
+        state.set_environment(crate::state::TradingEnvironment::Live);
+
+        let res = save_evm_wallet_impl(EVM_WALLET_TEST_KEY, None, &state).expect("save wallet");
+        assert_eq!(res.key_storage, "stronghold");
+
+        // Enable uniswap so credential sync provisions the signer.
+        upsert_account_impl(
+            AccountUpsertInput {
+                environment: None,
+                account_tier: None,
+                max_leverage: None,
+                id: Some("uniswap-default".into()),
+                venue: "uniswap".into(),
+                label: "EVM Wallet".into(),
+                enabled: true,
+                make_default: true,
+                credentials: None,
+            },
+            &state,
+        )
+        .expect("enable uniswap");
+
+        // The record's signer address is derived inside the stronghold —
+        // the sentinel itself contains no key material.
+        assert_eq!(
+            get_account_signer_address_impl("uniswap-default", &state).expect("sentinel derive"),
+            EVM_WALLET_TEST_ADDR_CHECKSUM
+        );
+        assert_eq!(
+            get_active_signer_address_impl("uniswap", &state).expect("active signer"),
+            Some(EVM_WALLET_TEST_ADDR_CHECKSUM.to_string()),
+            "the provisioned adapter must report the stronghold signer"
+        );
+
+        // Clear: records stripped AND the stronghold record revoked.
+        let cleared = clear_evm_wallet_impl(&state).expect("clear");
+        assert_eq!(cleared, 11);
+        {
+            let guard = state.evm_stronghold.read();
+            let sh = guard.as_ref().expect("stronghold still loaded");
+            assert!(
+                !sh.has_key(),
+                "clear must revoke the stronghold record, not just the vault rows"
+            );
+        }
+        let custody = get_evm_key_custody_impl(&state).expect("custody");
+        assert_eq!(custody.custody, "none");
+        assert!(!custody.stronghold_loaded);
+        assert!(get_account_signer_address_impl("uniswap-default", &state).is_err());
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -6950,10 +7294,17 @@ mod tests {
             });
 
         // $20 notional fits the seeded 10-lot test books on both legs.
-        let res =
-            execute_funding_carry_impl("DOT-USDC", "lighter", "hyperliquid", 20.0, &state, false)
-                .await
-                .expect("paper funding carry should dispatch");
+        let res = execute_funding_carry_impl(
+            "DOT-USDC",
+            "lighter",
+            "hyperliquid",
+            20.0,
+            &state,
+            false,
+            None,
+        )
+        .await
+        .expect("paper funding carry should dispatch");
         assert!(res.execution_success);
         assert_eq!(res.trade_type, "Funding");
 
@@ -6996,10 +7347,17 @@ mod tests {
         state.set_environment(crate::state::TradingEnvironment::Live);
         // Locked vault: the gate must refuse — never a silent dispatch
         // past a named blocker.
-        let err =
-            execute_funding_carry_impl("LINK-USDC", "lighter", "hyperliquid", 500.0, &state, false)
-                .await
-                .expect_err("live funding must refuse while the vault is locked");
+        let err = execute_funding_carry_impl(
+            "LINK-USDC",
+            "lighter",
+            "hyperliquid",
+            500.0,
+            &state,
+            false,
+            None,
+        )
+        .await
+        .expect_err("live funding must refuse while the vault is locked");
         assert!(
             err.contains("vault") || err.contains("credentials") || err.contains("polling"),
             "refusal must name the missing live capability: {err}"
@@ -7013,10 +7371,17 @@ mod tests {
         // policy as the radar bot's live hard-block.
         let state = setup_test_state_with_venues();
         state.set_environment(crate::state::TradingEnvironment::Live);
-        let err =
-            execute_funding_carry_impl("LINK-USDC", "lighter", "hyperliquid", 500.0, &state, true)
-                .await
-                .expect_err("autonomous live funding entry must refuse");
+        let err = execute_funding_carry_impl(
+            "LINK-USDC",
+            "lighter",
+            "hyperliquid",
+            500.0,
+            &state,
+            true,
+            None,
+        )
+        .await
+        .expect_err("autonomous live funding entry must refuse");
         assert!(
             err.contains("testnet-only") || err.contains("manual Execute"),
             "refusal must name the autonomous-entry policy: {err}"
@@ -7046,10 +7411,17 @@ mod tests {
                     timestamp: Utc::now(),
                 });
         }
-        let err =
-            execute_funding_carry_impl("DOT-USDC", "lighter", "hyperliquid", 500.0, &state, false)
-                .await
-                .expect_err("dust carry must be refused");
+        let err = execute_funding_carry_impl(
+            "DOT-USDC",
+            "lighter",
+            "hyperliquid",
+            500.0,
+            &state,
+            false,
+            None,
+        )
+        .await
+        .expect_err("dust carry must be refused");
         assert!(err.contains("hurdle"), "unexpected err: {err}");
     }
 
@@ -7141,6 +7513,7 @@ mod tests {
             20.0,
             &state,
             false,
+            None,
         )
         .await
         .expect("basis paper dispatch");
@@ -7279,6 +7652,7 @@ mod tests {
             500_000.0,
             &state,
             false,
+            None,
         )
         .await
         .expect_err("same-venue margin must refuse");
@@ -7321,6 +7695,7 @@ mod tests {
             20.0,
             &state,
             false,
+            None,
         )
         .await
         .expect_err("wide entry cross must refuse");
@@ -7339,6 +7714,7 @@ mod tests {
             2_000_000.0,
             &state,
             false,
+            None,
         )
         .await
         .expect_err("thin-book dispatch must refuse");
@@ -9026,6 +9402,7 @@ mod tests {
             25000.0,
             &state,
             false,
+            None,
         )
         .await;
         assert!(funding.is_err());
@@ -11377,6 +11754,61 @@ mod tests {
             Some("3600")
         );
         assert_eq!(state.settings.read().auto_exit_max_hold_secs, 3600);
+
+        // USD-quote policy: unknown modes, non-finite/inverted/absurd
+        // depeg thresholds are refused; valid values persist + reload.
+        let bad = EngineSettingsDto {
+            usd_quote_mode: "merge".into(),
+            ..base.clone()
+        };
+        assert!(save_engine_settings_impl(bad, &state).is_err());
+        let bad = EngineSettingsDto {
+            stablecoin_warn_bps: 0.0,
+            ..base.clone()
+        };
+        assert!(save_engine_settings_impl(bad, &state).is_err());
+        let bad = EngineSettingsDto {
+            stablecoin_warn_bps: 200.0,
+            stablecoin_halt_bps: 100.0,
+            ..base.clone()
+        };
+        assert!(save_engine_settings_impl(bad, &state).is_err());
+        let bad = EngineSettingsDto {
+            stablecoin_halt_bps: f64::NAN,
+            ..base.clone()
+        };
+        assert!(save_engine_settings_impl(bad, &state).is_err());
+        let bad = EngineSettingsDto {
+            stablecoin_halt_bps: 20_000.0,
+            ..base.clone()
+        };
+        assert!(save_engine_settings_impl(bad, &state).is_err());
+        // Alias spelling normalizes to the canonical mode and persists.
+        let good = EngineSettingsDto {
+            usd_quote_mode: "SEPARATE".into(),
+            stablecoin_warn_bps: 75.0,
+            stablecoin_halt_bps: 150.0,
+            ..base.clone()
+        };
+        assert!(save_engine_settings_impl(good, &state).is_ok());
+        assert_eq!(state.settings.read().usd_quote_mode, "separate");
+        assert_eq!(state.settings.read().stablecoin_warn_bps, 75.0);
+        assert_eq!(
+            state
+                .state_store
+                .kv_get("engine.usd_quote_mode")
+                .unwrap()
+                .as_deref(),
+            Some("separate")
+        );
+        assert_eq!(
+            state
+                .state_store
+                .kv_get("risk.stablecoin_halt_bps")
+                .unwrap()
+                .as_deref(),
+            Some("150")
+        );
 
         let ok = save_engine_settings_impl(base, &state);
         assert!(ok.is_ok());

@@ -283,10 +283,13 @@ pub async fn run_wfo_calibration_impl(
     // Rebuild the executable cross-venue edge series from recorded book
     // samples: at each timestamp, buy the cheapest ask and sell the richest
     // bid across *different* venues — the same edge the spread radar trades.
+    // Under `separate` USD-quote mode the requested pair's own series is the
+    // honest input — merging sibling quotes would calibrate on instruments
+    // the user chose to keep distinct.
     let now_ms = chrono::Utc::now().timestamp_millis();
     let samples = state
         .state_store
-        .spread_samples(&sym, 0, now_ms)
+        .spread_samples_mode(symbol.trim(), state.usd_merge_quotes(), 0, now_ms)
         .map_err(|e| e.to_string())?;
 
     let mut groups: std::collections::BTreeMap<i64, Vec<&crate::state_store::SpreadSample>> =

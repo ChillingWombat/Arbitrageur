@@ -15,6 +15,20 @@ impl StateStore {
         ts_ms: i64,
         entries: &[VenueSampleEntry],
     ) -> anyhow::Result<()> {
+        self.record_spread_samples_mode(symbol, true, ts_ms, entries)
+    }
+
+    /// Mode-aware variant of [`Self::record_spread_samples`]: under the
+    /// `separate` USD-quote policy (`merge_usd = false`) a quoted key like
+    /// "BTC-USDT" is its own instrument — the same-instrument anchor must
+    /// not consult sibling quote spellings.
+    pub fn record_spread_samples_mode(
+        &self,
+        symbol: &str,
+        merge_usd: bool,
+        ts_ms: i64,
+        entries: &[VenueSampleEntry],
+    ) -> anyhow::Result<()> {
         let symbol = normalize_symbol(symbol)?;
         if entries.is_empty() || ts_ms < 0 {
             return Ok(());
@@ -24,7 +38,7 @@ impl StateStore {
         // irreconcilable with it are a symbol collision at the source —
         // refuse to persist them at all. A fresh key has no incumbent yet,
         // so its first cells still bind the instrument freely.
-        let anchor = incumbent_anchor(&conn, &spread_symbol_aliases(&symbol))?;
+        let anchor = incumbent_anchor(&conn, &sample_keys(&symbol, merge_usd))?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         {
             let mut stmt = tx.prepare(
@@ -83,8 +97,21 @@ impl StateStore {
         from_ts_ms: i64,
         to_ts_ms: i64,
     ) -> anyhow::Result<Vec<SpreadSample>> {
+        self.spread_samples_mode(symbol, true, from_ts_ms, to_ts_ms)
+    }
+
+    /// Mode-aware variant of [`Self::spread_samples`]: `merge_usd = false`
+    /// (the `separate` USD-quote policy) reads only the exact key spelling —
+    /// "BTC-USDT" never sees "BTC-USDC" or bare "BTC" rows.
+    pub fn spread_samples_mode(
+        &self,
+        symbol: &str,
+        merge_usd: bool,
+        from_ts_ms: i64,
+        to_ts_ms: i64,
+    ) -> anyhow::Result<Vec<SpreadSample>> {
         let symbol = normalize_symbol(symbol)?;
-        let keys = spread_symbol_aliases(&symbol);
+        let keys = sample_keys(&symbol, merge_usd);
         let placeholders = keys.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
             "SELECT symbol, venue_id, ts_ms, mid, best_bid, best_ask, bid_depth, ask_depth
@@ -122,8 +149,17 @@ impl StateStore {
     /// Earliest recorded sample timestamp for a symbol (history depth indicator).
     /// Alias-aware, matching [`Self::spread_samples`].
     pub fn earliest_spread_sample_ts(&self, symbol: &str) -> anyhow::Result<Option<i64>> {
+        self.earliest_spread_sample_ts_mode(symbol, true)
+    }
+
+    /// Mode-aware variant matching [`Self::spread_samples_mode`].
+    pub fn earliest_spread_sample_ts_mode(
+        &self,
+        symbol: &str,
+        merge_usd: bool,
+    ) -> anyhow::Result<Option<i64>> {
         let symbol = normalize_symbol(symbol)?;
-        let keys = spread_symbol_aliases(&symbol);
+        let keys = sample_keys(&symbol, merge_usd);
         let placeholders = keys.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!("SELECT MIN(ts_ms) FROM spread_samples WHERE symbol IN ({placeholders})");
         let conn = self.conn.lock();
@@ -180,6 +216,18 @@ impl StateStore {
         ts_ms: i64,
         volumes: &HashMap<String, f64>,
     ) -> anyhow::Result<()> {
+        self.record_venue_volume_samples_mode(venue, ts_ms, volumes, true)
+    }
+
+    /// Mode-aware variant: under `separate` volume rows keep their pair key
+    /// so sibling quotes never share a depth series.
+    pub fn record_venue_volume_samples_mode(
+        &self,
+        venue: &str,
+        ts_ms: i64,
+        volumes: &HashMap<String, f64>,
+        merge_usd: bool,
+    ) -> anyhow::Result<()> {
         let venue = normalize_venue(venue)?;
         if volumes.is_empty() || ts_ms < 0 {
             return Ok(());
@@ -195,7 +243,7 @@ impl StateStore {
                 if !vol.is_finite() || *vol <= 0.0 {
                     continue;
                 }
-                let symbol = canonical_base(asset);
+                let symbol = arbitrageur_core::symbol::pair_key(asset, merge_usd);
                 if symbol.is_empty() {
                     continue;
                 }
@@ -215,9 +263,22 @@ impl StateStore {
         from_ts_ms: i64,
         to_ts_ms: i64,
     ) -> anyhow::Result<Vec<(i64, f64)>> {
+        self.venue_volume_series_mode(symbol, venue, from_ts_ms, to_ts_ms, true)
+    }
+
+    /// Mode-aware variant: under `separate` the pair key is the series —
+    /// sibling quotes never satisfy the read.
+    pub fn venue_volume_series_mode(
+        &self,
+        symbol: &str,
+        venue: &str,
+        from_ts_ms: i64,
+        to_ts_ms: i64,
+        merge_usd: bool,
+    ) -> anyhow::Result<Vec<(i64, f64)>> {
         let symbol = normalize_symbol(symbol)?;
         let venue = normalize_venue(venue)?;
-        let keys = spread_symbol_aliases(&symbol);
+        let keys = sample_keys(&symbol, merge_usd);
         let placeholders = keys.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
             "SELECT ts_ms, vol_usd FROM venue_volume_samples
@@ -265,14 +326,25 @@ impl StateStore {
 
     /// Distinct canonical symbols present in the spread log (rollup driver).
     pub fn distinct_sample_symbols(&self) -> anyhow::Result<Vec<String>> {
+        self.distinct_sample_symbols_mode(true)
+    }
+
+    /// Mode-aware variant: under `separate` the stored keys ARE the series
+    /// identity — collapsing "BTC-USDT"/"BTC-USDC" to "BTC" would make the
+    /// rollup driver read a key with no samples and merge sibling series.
+    pub fn distinct_sample_symbols_mode(&self, merge_usd: bool) -> anyhow::Result<Vec<String>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare("SELECT DISTINCT symbol FROM spread_samples")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         let mut out: Vec<String> = Vec::new();
         for raw in rows.collect::<rusqlite::Result<Vec<_>>>()? {
-            let base = canonical_base(&raw);
-            if !base.is_empty() && !out.contains(&base) {
-                out.push(base);
+            let key = if merge_usd {
+                canonical_base(&raw)
+            } else {
+                raw.trim().to_uppercase()
+            };
+            if !key.is_empty() && !out.contains(&key) {
+                out.push(key);
             }
         }
         out.sort();
@@ -393,6 +465,22 @@ impl StateStore {
 /* ------------------------------------------------------------------------ */
 /* Cross-venue sample consistency                                            */
 /* ------------------------------------------------------------------------ */
+
+/// Storage keys a sample read/write consults. Merged modes use
+/// [`spread_symbol_aliases`] (canonical base + quoted UI forms + index
+/// siblings); `separate` mode is quote-strict — only the key's own
+/// spellings, so "BTC-USDT" and "BTC-USDC" stay independent series.
+pub(crate) fn sample_keys(symbol: &str, merge_usd: bool) -> Vec<String> {
+    if merge_usd {
+        return spread_symbol_aliases(symbol);
+    }
+    let mut keys = vec![symbol.to_string()];
+    let up = symbol.to_uppercase();
+    if !keys.contains(&up) {
+        keys.push(up);
+    }
+    keys
+}
 
 /// A canonical symbol must price within this ratio across venues to be the
 /// same instrument. Real cross-venue dislocations are basis points; a 3x

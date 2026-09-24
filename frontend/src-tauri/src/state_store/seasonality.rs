@@ -9,8 +9,18 @@ impl StateStore {
     /// Read shrunk session aggregates for a symbol (alias-aware). Missing
     /// sessions simply have no row — callers read that as neutral x1.0.
     pub fn session_profiles(&self, symbol: &str) -> anyhow::Result<Vec<SessionProfileRow>> {
+        self.session_profiles_mode(symbol, true)
+    }
+
+    /// Mode-aware variant: `merge_usd = false` (the `separate` policy) is
+    /// quote-strict — a pair key reads only its own series.
+    pub fn session_profiles_mode(
+        &self,
+        symbol: &str,
+        merge_usd: bool,
+    ) -> anyhow::Result<Vec<SessionProfileRow>> {
         let symbol = normalize_symbol(symbol)?;
-        let keys = spread_symbol_aliases(&symbol);
+        let keys = crate::state_store::samples::sample_keys(&symbol, merge_usd);
         let placeholders = keys.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
             "SELECT symbol, session_id, n_episodes, med_abs_spread_bps, p90_spread_bps,
@@ -41,8 +51,17 @@ impl StateStore {
 
     /// Read hour-bin modulators for a symbol (alias-aware).
     pub fn session_hour_bins(&self, symbol: &str) -> anyhow::Result<Vec<SessionHourBinRow>> {
+        self.session_hour_bins_mode(symbol, true)
+    }
+
+    /// Mode-aware variant matching [`Self::session_profiles_mode`].
+    pub fn session_hour_bins_mode(
+        &self,
+        symbol: &str,
+        merge_usd: bool,
+    ) -> anyhow::Result<Vec<SessionHourBinRow>> {
         let symbol = normalize_symbol(symbol)?;
-        let keys = spread_symbol_aliases(&symbol);
+        let keys = crate::state_store::samples::sample_keys(&symbol, merge_usd);
         let placeholders = keys.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
             "SELECT symbol, hour, n_obs, med_spread_bps, modulator, provisional, updated_ts
@@ -79,17 +98,33 @@ impl StateStore {
         to_ts_ms: i64,
         now_ms: i64,
     ) -> anyhow::Result<usize> {
+        self.rollup_session_profiles_mode(symbol, true, from_ts_ms, to_ts_ms, now_ms)
+    }
+
+    /// Mode-aware variant: under the `separate` USD-quote policy a quoted
+    /// key reads only its own series — sibling quote spellings never mix.
+    pub fn rollup_session_profiles_mode(
+        &self,
+        symbol: &str,
+        merge_usd: bool,
+        from_ts_ms: i64,
+        to_ts_ms: i64,
+        now_ms: i64,
+    ) -> anyhow::Result<usize> {
         use arbitrageur_math::pair_monitor::{build_pair_series, reversion_stats, PairObservation};
         use arbitrageur_math::session::{
             hour_modulator, hour_of_day_utc, percentile_sorted, session_of, session_stats,
             winsorized_median, SessionId, SESSION_MIN_EPISODES,
         };
 
-        let canonical = canonical_base(symbol);
+        // Write key follows the quote policy: merged modes keep the
+        // canonical base; `separate` writes per-pair so BTC-USDT and
+        // BTC-USDC profiles never overwrite each other.
+        let canonical = arbitrageur_core::symbol::pair_key(symbol, merge_usd);
         if canonical.is_empty() {
             anyhow::bail!("invalid symbol: expected 1-64 non-control characters");
         }
-        let samples = self.spread_samples(symbol, from_ts_ms, to_ts_ms)?;
+        let samples = self.spread_samples_mode(symbol, merge_usd, from_ts_ms, to_ts_ms)?;
         let mut mids_by_venue: HashMap<String, Vec<(i64, f64)>> = HashMap::new();
         for s in &samples {
             if s.mid.is_finite() && s.mid > 0.0 {
@@ -290,8 +325,17 @@ impl StateStore {
     }
 
     pub fn phase2_har_anchor(&self, symbol: &str) -> anyhow::Result<Option<HarAnchorRow>> {
+        self.phase2_har_anchor_mode(symbol, true)
+    }
+
+    /// Mode-aware variant matching [`Self::session_profiles_mode`].
+    pub fn phase2_har_anchor_mode(
+        &self,
+        symbol: &str,
+        merge_usd: bool,
+    ) -> anyhow::Result<Option<HarAnchorRow>> {
         let symbol = normalize_symbol(symbol)?;
-        let keys = spread_symbol_aliases(&symbol);
+        let keys = crate::state_store::samples::sample_keys(&symbol, merge_usd);
         let placeholders = keys.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
             "SELECT symbol, intercept, b_daily, b_weekly, b_monthly, r2, n_days,
@@ -323,7 +367,17 @@ impl StateStore {
     }
 
     pub fn phase2_upsert_har_anchor(&self, row: &HarAnchorRow) -> anyhow::Result<()> {
-        let symbol = canonical_base(&row.symbol);
+        self.phase2_upsert_har_anchor_mode(row, true)
+    }
+
+    /// Mode-aware variant: under `separate` the pair key is the row's
+    /// identity — sibling quotes never share an anchor row.
+    pub fn phase2_upsert_har_anchor_mode(
+        &self,
+        row: &HarAnchorRow,
+        merge_usd: bool,
+    ) -> anyhow::Result<()> {
+        let symbol = arbitrageur_core::symbol::pair_key(&row.symbol, merge_usd);
         if symbol.is_empty() {
             anyhow::bail!("invalid symbol: expected 1-64 non-control characters");
         }
@@ -380,8 +434,17 @@ impl StateStore {
         &self,
         symbol: &str,
     ) -> anyhow::Result<Option<PromotionStateRow>> {
+        self.phase2_promotion_state_mode(symbol, true)
+    }
+
+    /// Mode-aware variant matching [`Self::session_profiles_mode`].
+    pub fn phase2_promotion_state_mode(
+        &self,
+        symbol: &str,
+        merge_usd: bool,
+    ) -> anyhow::Result<Option<PromotionStateRow>> {
         let symbol = normalize_symbol(symbol)?;
-        let keys = spread_symbol_aliases(&symbol);
+        let keys = crate::state_store::samples::sample_keys(&symbol, merge_usd);
         let placeholders = keys.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
             "SELECT symbol, status, fit_delta_bps, val_delta_bps, reason, updated_ts
@@ -408,7 +471,17 @@ impl StateStore {
     }
 
     pub fn phase2_upsert_promotion_state(&self, row: &PromotionStateRow) -> anyhow::Result<()> {
-        let symbol = canonical_base(&row.symbol);
+        self.phase2_upsert_promotion_state_mode(row, true)
+    }
+
+    /// Mode-aware variant: under `separate` the pair key is the row's
+    /// identity — sibling quotes never share a promotion row.
+    pub fn phase2_upsert_promotion_state_mode(
+        &self,
+        row: &PromotionStateRow,
+        merge_usd: bool,
+    ) -> anyhow::Result<()> {
+        let symbol = arbitrageur_core::symbol::pair_key(&row.symbol, merge_usd);
         if symbol.is_empty() {
             anyhow::bail!("invalid symbol: expected 1-64 non-control characters");
         }

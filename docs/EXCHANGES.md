@@ -37,9 +37,10 @@ The runtime admits only enabled adapters in `get_venues`; capability remains end
 - Aster, PopDEX, Binance, OKX, Coinbase, Kraken, Decibel
 - Long-tail perp venues via `DexPerpAdapter` (account-enabled admission;
   market data for all, implemented signed order paths on Pacifica /
-  StandX / Ondo Perps / GRVT / Derive / Aevo): dYdX, Paradex, GMX V2
-  (prices only), ApeX Omni, Extended, Helix, edgeX, QFEX (markets only),
-  Vest, Antarctic, EVEDEX, BULK, Ostium, SoDEX, AlphaX, Nado, IO Trader,
+  StandX / Ondo Perps / GRVT / Derive / Aevo / Vest / QFEX / Nado /
+  EVEDEX / Paradex / edgeX / Extended / dYdX / Helix): GMX V2
+  (prices only), ApeX Omni,
+  Antarctic, BULK, Ostium, SoDEX, AlphaX, IO Trader,
   Niza, Astros, Gate DEX
 - EVM spot AMMs via `EvmAmmAdapter` (account-enabled admission; onchain
   quotes for all 11, local-wallet swap execution on the six standard
@@ -52,6 +53,10 @@ The runtime admits only enabled adapters in `get_venues`; capability remains end
   Market-data-only venues load no private key (an optional wallet
   address enables balance reads). Blackhole is
   spec'd but not admitted — its legacy deployment holds no live pools.
+- Pendle Boros (`boros`, Arbitrum) — YU fixed-rate hedge venue for the
+  funding strategy's 4-leg `fixed_yield` variant; account-enabled
+  admission (agent key + root address + accountId). Not a perp venue: no
+  ticker/orderbook/funding feeds — it emits no ordinary opportunity rows.
 - Arcus plus Polymarket/Kalshi remain research/scaffold surfaces outside the admitted strategy path
 
 Submission transport is not terminal fill reconciliation. Every live-submission adapter now exposes `fetch_order` and the desktop reconciliation supervisor polls persisted working orders every 5s and re-scans them at startup; automated residual-leg resolution (opt-in) and bounded cancel retry are implemented, but without venue sandbox/canary evidence no listed venue is live-strategy-entry ready.
@@ -344,10 +349,32 @@ default to USDT — every live GRVT perp is USDT-quoted).
 
 ## 9. edgeX (StarkEx Perp DEX)
 
-Registered-but-**unadmitted** adapter (`EdgeXAdapter`, venue `edgex`): same
-status as GRVT — registered with probe + fee, admission withheld pending a
-confirmed harness sweep. Public REST only, no auth. All responses are
-enveloped `{"code": "SUCCESS", "data": ...}`; any other code fails closed.
+**LIVE** via `DexPerpAdapter` (venue `edgex`). All responses are enveloped
+`{"code": "SUCCESS", "data": ...}`; any other code fails closed.
+
+- **Auth model:** HMAC api-key trio — `X-edgeX-Api-Key`,
+  `X-edgeX-Passphrase`, `X-edgeX-Signature`, `X-edgeX-Timestamp` headers.
+  Signature = `hex(HMAC-SHA256(key=base64(secret), ts+METHOD+path+canonical))`
+  where `canonical` is the SDK's `get_value` form (sorted `k=v` pairs,
+  arrays `&`-joined) of the GET query or the POST body fields — not the
+  wire JSON itself.
+- **Order signing:** EIP-712 `LimitOrderParams` (secp256k1 — no Stark
+  curve in the v2 path), domain `EdgeX`/`1`/`global.nativeChainId` (3343)
+  /`global.contractAddress` (`0xeeb3fb…fac8`, metadata-derived — never
+  hardcoded). Nested `OrderBase{nonce,signer,accountId,
+  expirationTimestamp}`; `nonce` = top 32 bits of sha256(clientOrderId);
+  `expireTime` = now+30d ms, `l2ExpireTime` = +8d more; signature amounts
+  are scaled by contract `resolution` / quote-coin `resolution` and the
+  fee cap is `ceil(l2Value × takerFeeRate)` in whole quote units.
+- **Trading endpoints:** `POST /api/v2/private/order/createOrder`
+  (`data.orderId`), `POST …/cancelOrderById` / `…/cancelOrderByClientOrderId`,
+  `GET …/getOrderById` / `…/getOrderByClientOrderId` (statuses
+  PENDING/OPEN/FILLED/CANCELING/CANCELED/UNTRIGGERED),
+  `GET /api/v2/private/account/getAccountAsset`, `POST …/updateLeverageSetting`.
+- **Credentials:** apiKey + apiPassphrase + apiSecret (venue API
+  management), numeric accountId, and the trading private key bound to
+  the API credential (EIP-712 signer — not necessarily the deposit
+  wallet).
 
 - **REST API:** `https://edgex-prod-v2.edgex.exchange` — this is the docs'
   production api-domain (mainnet, live-verified 2026-09-15).
@@ -411,25 +438,25 @@ named issue resolves.
 
 | Venue | Venue id | Custody | Can they take funds? | Historical adapter status |
 |---|---|---|---|---|
-| dYdX Chain | `dydx` | LOW (L1, self-custody) | No — onchain positions, user keys | Historical research (curl-verified: markets + book) |
-| Paradex | `paradex` | LOW (Starknet, self-custody) | No — Starknet settlement, user keys | Historical research (curl-verified: markets + book) |
+| dYdX Chain | `dydx` | LOW (L1, self-custody) | No — onchain positions, user keys | LIVE — `MsgPlaceOrder`/`MsgCancelOrder` signed + broadcast by the official `dydx` gRPC client (`dydx-grpc.publicnode.com`); credential is the 24-word BIP-39 mnemonic (m/44'/118'/0'/0/0), `accountId` selects the subaccount; indexer `indexer.dydx.trade/v4/orders` is order truth; trading implemented |
+| Paradex | `paradex` | LOW (Starknet, self-custody) | No — Starknet settlement, user keys | LIVE — `api.prod.paradex.trade` (SNIP-12 Stark-curve order sigs via paradex-rs; L2 key derived from the EVM wallet; `GET /v1/orders/{id}` + orders-history truth polling); trading implemented |
 | GMX V2 | `gmx` | LOW (GLV vaults, self-custody) | No — vault shares, user keys; prices-only feed (no orderbook by design) | Historical research (curl-verified tickers; excluded from spread pairs) |
 | Aevo | `aevo` | LOW–MED (offchain book, onchain settlement) | Cannot move collateral without user signatures | Historical research (curl-verified: markets + book) |
 | ApeX Omni | `apex` | LOW (self-custody modules) | No — user keeps keys | Historical research (LIVE 2026-09-19: 88 markets, 25-level books, hourly funding) |
 | Extended | `extended` | LOW (StarkEx, self-custody) | No — user keeps keys | Historical research (LIVE 2026-09-19: 326 markets, full-depth books, funding in marketStats; client sends UA+Accept — edge 403s fingerprint-less clients) |
 | Derive | `derive` | LOW (L2, self-custody) | No — user keeps keys | Historical research (LIVE 2026-09-19: per-currency instruments via `api.lyra.finance`, top-of-book + funding from `get_ticker`; no depth endpoint exists) |
 | StandX | `standx` | MEDIUM (hybrid matching) | Operator runs book, cannot sign collateral | Historical research (LIVE 2026-09-19: 13 markets, 130-level books, hourly funding; per-entry 4.0 bps taker fee) |
-| Helix (Injective) | `helix` | LOW (Cosmos L1, self-custody) | No — onchain, user keys | Historical research (LIVE 2026-09-19: 286 LCD derivative markets, scaled onchain books; funding NOT on LCD — fails closed) |
-| Vest | `vest` | MEDIUM (hybrid) | Operator cannot sign collateral | Historical research (UNVERIFIED 2026-09-19: `api.vest.exchange` Cloudflare-530s — origin DNS dead; fails closed) |
+| Helix (Injective) | `helix` | LOW (Cosmos L1, self-custody) | No — onchain, user keys | LIVE — Injective v2 derivative orders as Cosmos txs: keccak256(`SignDoc`) → compact secp256k1 sig, `ethsecp256k1` pubkey, broadcast on `sentry.lcd.injective.network`; credential = account EVM key (inj1… derived), `accountId` = subaccount nonce; indexer gRPC (`sentry.exchange.grpc.injective.network`) for order/position/balance truth; trading implemented; funding NOT on LCD — fails closed |
+| Vest | `vest` | MEDIUM (hybrid) | Operator cannot sign collateral | LIVE — rebranded Vest Markets, `server-prod.hz.vestmarkets.com/v2` (544 symbols incl. equity/index/forex perps on zkSync Era); delegate-signer registration via `POST /v2/register` (EIP-712 SignerProof, ~7d expiry) + `X-API-KEY`/`xrestservermm` headers; trading implemented |
 | Antarctic | `antarctic` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Historical research (UNVERIFIED 2026-09-19: site is a CloudFront shell, no public API found; fails closed) |
-| EVEDEX | `evedex` | MEDIUM (hybrid) | Operator cannot sign collateral (docs claim) | Historical research (UNVERIFIED 2026-09-19: `api.evedex.com` DNS-fails, `exchange.evedex.com` 404s; fails closed) |
+| EVEDEX | `evedex` | MEDIUM (hybrid) | Operator cannot sign collateral (docs claim) | LIVE — `exchange-api.evedex.com` (68 instruments, books, fees taker 4.5bp/maker 1.5bp); SIWE→JWT via `auth-api.evedex.com`, EIP-712 order sigs (domain `EVEDEX`/`2`/chainId 42161), `GET /api/order/{id}` truth polling; trading implemented |
 | BULK | `bulk` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Historical research (UNVERIFIED 2026-09-19: `api.bulk.exchange` serves an unrelated landing page; real app at `app.bulk.trade` has no public API found; fails closed) |
-| QFEX | `qfex` | CAUTION (6-person team, thin docs) | Small-team risk — paper only | Historical research (LIVE 2026-09-19: 216 markets via `/refdata`; books/tickers auth-gated — fail closed) |
+| QFEX | `qfex` | CAUTION (6-person team, thin docs) | Small-team risk — paper only | LIVE — API-key HMAC REST (`/refdata`, account reads) + authenticated `/user/trade` WS order entry; trading implemented |
 | Ostium | `ostium` | CAUTION (oracle exploit ~$18M, paused) | Exploit history — paper only until audited relaunch | Historical research (UNVERIFIED 2026-09-19: onchain Arbitrum reads only — no public REST; Python SDK needs key+RPC; fails closed) |
 | SoDEX | `sodex` | MEDIUM (hybrid) | Operator cannot sign collateral (docs claim) | Historical research (UNVERIFIED 2026-09-19: `sodex.xyz` is a parked `/lander` domain; fails closed) |
 | AlphaX | `alphax` | CAUTION (no proof-of-reserves) | No PoR — paper only until published | Historical research (UNVERIFIED 2026-09-19: `alphax.exchange` is a parked `/lander` domain; fails closed) |
 | Pacifica | `pacifica` | CAUTION (ex-FTX team, invite beta) | Team history + beta — paper only | Historical research (LIVE 2026-09-19: 77 markets via `/v1/info`, books via `/v1/book`, funding+predicted via `/v1/info/prices`; crossed books rejected) |
-| Nado | `nado` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Historical research (UNVERIFIED 2026-09-19: `api.nado.xyz` is a dead Vercel deployment; app live but no public API found; fails closed) |
+| Nado | `nado` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | LIVE — Vertex-style sequencer on Ink L2 (`api.prod.nado.xyz`, chain 57073, 82 perps); EIP-712 `Order`/`Cancellation` signed by main or linked signer; gateway+archive truth reconciliation; trading implemented |
 | IO Trader | `iotrader` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Historical research (UNVERIFIED 2026-09-19: `io-trader.com` is a parked page — no such venue found; fails closed) |
 | Niza.fun | `niza` | MEDIUM (thin docs) | Unverified — treat as custodial until docs confirm | Historical research (UNVERIFIED 2026-09-19: `niza.fun` is a memecoin site, no futures product found; fails closed) |
 | Astros | `astros` | LOW (Sui, onchain via DeepBook) | No — user keeps keys (docs claim) | Historical research (UNVERIFIED 2026-09-19: perp frontend live at `perp.astros.ag`, no public REST found; fails closed) |
@@ -591,6 +618,87 @@ the whole flow, so no sidecar was needed.
 - **Still fail-closed by design:** orderbook depth (REST removed upstream —
   WebSocket-only, tried once then refused, never synthesized), ticker (no
   REST bid/ask); matching is async on-venue.
+
+---
+
+## 13. Pendle Boros (`boros`) — YU fixed-rate hedge venue
+
+Pendle Boros is an Arbitrum-settled venue trading **Yield Units (YU)** —
+term-dated fixed-rate swaps over a named platform's realized funding rate
+(e.g. `BINANCE-BTCUSDT-30OCT2026` swaps Binance's BTC perpetual funding to
+a fixed APR until maturity). Boros is **not a perp venue**: it has no
+ticker, orderbook-in-price-terms, or funding source of its own — YU rates
+ARE the instrument. It enters the product only as the hedge layer of the
+funding strategy's 4-leg `fixed_yield` variant (see below).
+
+**API** (`https://api-boros.pendle.finance/apis`, path prefix `/v1/`):
+
+- `GET /v1/markets?isMatured=false` — all active YU markets: `marketId`,
+  `imData.symbol`/`maturity`/`tickStep`, `metadata.platformName`/
+  `assetSymbol`/`maxLeverage`, `data.midApr`/`bestBid`/`bestAsk`/
+  `floatingApr`/`notionalOI`, `config.takerFee` (1e18-scaled). **The
+  `isMatured=false` filter is required** — the unfiltered list includes
+  expired markets; every parsed row is also maturity-checked against
+  current time.
+- `GET /v1/assets` — collateral token table (`tokenId` → symbol/USD
+  price). YU order `size` is denominated in the market's collateral token
+  (WBTC for most BTC markets, WETH for ETH, USDT for some Hyperliquid
+  books) — callers convert USD notional via the token's USD price.
+- `GET /v1/markets/order-book` — rate ladder (`ia[i]` tick index ×
+  `tickSize` → APR; `sz[i]` 1e18-scaled YU depth).
+- `GET /v1/gas-price/current` — `estimatedOrderGasCostUsd` per tx.
+- `GET /v1/accounts/orders`, `/v1/accounts/active-positions`,
+  `POST /v1/accounts/market-acc-infos` — account truth.
+- `GET /v1/agents/expiry-time` — agent approval check (required before
+  any signed call).
+- `GET /v1/orders/by-tx-hash` — resolves a placement tx to its venue
+  order id.
+
+**Auth / signing.** Two-key model: the **root account** (EOA holding
+funds) approves an **agent key** once via the Boros UI; the agent then
+signs every order but can never withdraw. Trading calls go through
+calldata-builder (`POST /v1/calldata-builder/agent/place-order` /
+`cancel-orders` / `enter-markets` / `exit-markets`) → the returned
+`calls[].calldata` is signed as EIP-712 `PendleSignTx(bytes21 account,
+bytes32 connectionId, uint64 nonce)` where `account` = `AccountLib.pack
+(root, accountId)` (20-byte root ‖ 1-byte id), `connectionId` =
+`keccak256(calldata)`, domain = `Pendle Boros Router`/`1.0`/chainId
+42161/router `0x8080…DEf6` — then submitted via `POST
+/v1/send-txs/bulk-calls` and polled via `/v1/send-txs/tx-status` and the
+account order endpoints. Order `side`: 0 long YU (pay fixed / receive
+floating), 1 short YU (receive fixed / pay floating). TIF: 0 GTC, 1 IOC,
+2 FOK, 3 ALO, 4 SOFT_ALO. Order `rate` is the fixed-APR bound as a
+decimal fraction.
+
+**Fixed-yield construction.** A floating carry pair (long perp on venue
+L, short perp on venue S) is converted to a locked rate by adding LONG YU
+on L's Boros market (pays fixed `F_L`, receives the floating `f_L` the
+perp pays) and SHORT YU on S's market (receives fixed `F_S`, pays the
+floating `f_S` the perp earns). Net carry becomes `F_S − F_L` — fixed for
+the shared YU maturity. The scanner emits it as a **separate row**
+(`kind: "fixed_yield"`) alongside the ordinary 2-leg carry, only when
+both venues have a Boros YU market on the same asset sharing one
+maturity, the executable spread (`bid_S − ask_L`) is positive after all
+four legs' costs, and the lock is ≥24h. Eligible Boros platforms are
+mapped fail-closed (`Binance`/`Hyperliquid`/`OKX`/`Lighter` → our venue
+ids; Gate/KuCoin/Bybit markets exist but pair with no admitted adapter).
+
+**Execution** is live-only (Boros has no testnet) and manual-only (the
+autonomous funding path stays testnet-scoped). The two perp legs dispatch
+through the existing atomic coordinator first; the YU legs then submit as
+bounded IOCs (long ≤ ask×1.02, short ≥ bid×0.98), each persisted on a
+sibling signal row `{cycle}-yu` and settled to terminal via venue truth.
+A YU leg that fills nothing triggers an emergency market unwind of the
+perp pair and an exit of any filled YU side — the operator asked for a
+lock, not floating exposure. Partial YU fills keep the pair open with the
+residual floating share marked `Imbalanced`.
+
+**Custody/ops notes.** Funds sit in the root account's Boros vault on
+Arbitrum; the agent key cannot withdraw. Gas is sponsored by Boros but
+debited from the account's gas treasury — `fetch_account` reports it.
+Boros max leverage is low (~1.5–3×), so YU legs consume real collateral
+(`boros_margin_usd` on the DTO). Credential card: root address +
+agent private key + sub-account id (0–255).
 
 ---
 

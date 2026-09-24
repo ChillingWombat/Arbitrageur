@@ -588,7 +588,13 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
               />
               <DetailField
                 label="Type"
-                value={opp.kind === "basis" ? "Basis (SPOT/PERP)" : "Carry (perp/perp)"}
+                value={
+                  opp.kind === "basis"
+                    ? "Basis (SPOT/PERP)"
+                    : opp.kind === "fixed_yield"
+                    ? "Fixed Yield (perp/perp + 2× Boros YU)"
+                    : "Carry (perp/perp)"
+                }
                 tip="Basis = same-exchange long-spot / short-perp cash-and-carry; Carry = cross-exchange perp/perp funding."
               />
               {opp.kind === "basis" && (
@@ -965,8 +971,23 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
     const now = Date.now();
     if (now - lastAutoCarryExecRef.current < 8000) return; // 8s cooldown
 
-    // Select top funding carry opportunity with positive net yield meeting hurdle
-    const topOpp = opportunities.find((o) => o.net_apr_pct >= minAprPct);
+    // Select the best candidate across 2-leg and 4-leg variants of the
+    // same pair. Comparable economics = expected net USD per hour of the
+    // row's own committed hold (fixed rows lock to maturity; carry rows
+    // carry a modelled hold). Rows without an expectation fall back to
+    // their daily-accrual rate.
+    const hourlyUsd = (o: FundingOpportunityDto) => {
+      const h = o.expected_hold_hours;
+      if (o.expected_return_usd != null && h != null && h > 0)
+        return o.expected_return_usd / h;
+      return (o.estimated_daily_income_usd ?? 0) / 24;
+    };
+    // fixed_yield rows are live-only (Boros has no testnet) and the auto
+    // loop is testnet-only — exclude them here so the bot never picks a
+    // row the backend must refuse.
+    const topOpp = opportunities
+      .filter((o) => o.net_apr_pct >= minAprPct && o.kind !== "fixed_yield")
+      .sort((a, b) => hourlyUsd(b) - hourlyUsd(a))[0];
     if (topOpp) {
       lastAutoCarryExecRef.current = now;
       void handleExecute(topOpp, { silent: true, auto: true });
@@ -1191,6 +1212,11 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
                         <span className="px-1.5 py-0.5 rounded-md text-[10px] font-sans font-bold bg-slate-100 text-slate-800 border border-slate-200 truncate">
                           {opp.symbol}
                         </span>
+                        {opp.kind === "fixed_yield" && (
+                          <span className="px-1.5 py-0.5 rounded-md text-[10px] font-sans font-bold bg-profit-dim text-profit border border-profit/30 shrink-0" title="4-leg variant: perp pair + two Pendle Boros YU legs lock the funding rate to maturity">
+                            Fixed Yield
+                          </span>
+                        )}
                       </div>
                       <span
                         className="text-[10px] font-sans font-bold text-accent-strong tabular-nums shrink-0"
@@ -1224,6 +1250,34 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
                           <span className="text-slate-500">Basis:</span>
                           <span className="font-semibold text-slate-900 tabular-nums">{opp.basis_bps >= 0 ? "+" : ""}{opp.basis_bps.toFixed(1)} bps</span>
                         </div>
+                      )}
+                      {opp.kind === "fixed_yield" && (
+                        <>
+                          {opp.lock_until_ms != null && (
+                            <div className="flex items-center justify-between gap-1">
+                              <span className="text-slate-500">Lock until:</span>
+                              <span className="font-semibold text-profit tabular-nums">
+                                {new Date(opp.lock_until_ms).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" })}
+                              </span>
+                            </div>
+                          )}
+                          {opp.yu_hedge_cost_bps != null && (
+                            <div className="flex items-center justify-between gap-1">
+                              <span className="text-slate-500">YU hedge:</span>
+                              <span className="font-semibold text-slate-900 tabular-nums" title="Two Boros YU taker fees + amortized Arbitrum gas">
+                                +{opp.yu_hedge_cost_bps.toFixed(1)} bps
+                              </span>
+                            </div>
+                          )}
+                          {opp.boros_margin_usd != null && (
+                            <div className="flex items-center justify-between gap-1">
+                              <span className="text-slate-500">Boros margin:</span>
+                              <span className="font-semibold text-slate-900 tabular-nums" title="Estimated collateral lock on Boros for the two YU legs">
+                                ${opp.boros_margin_usd >= 1000 ? `${(opp.boros_margin_usd / 1000).toFixed(1)}k` : opp.boros_margin_usd.toFixed(0)}
+                              </span>
+                            </div>
+                          )}
+                        </>
                       )}
                       <div className="flex items-center justify-between gap-1">
                         <span className="text-slate-500">Breakeven:</span>

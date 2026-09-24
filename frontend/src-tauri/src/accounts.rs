@@ -8,7 +8,9 @@ use crate::commands::{
 use crate::state::{AppEngineState, VenueBalanceInfo};
 use crate::state_store::{AccountProfile, StrategyAccountRoute};
 use crate::vault::{CredentialPresence, ExchangeCredentials, VaultStatus};
-use arbitrageur_exchanges::evm_amm::{ADMITTED_EVM_AMM_VENUE_IDS, LIVE_EVM_AMM_VENUE_IDS};
+use arbitrageur_exchanges::evm_amm::{
+    ADMITTED_EVM_AMM_VENUE_IDS, EVM_EXTERNAL_SIGNER_PREFIX, LIVE_EVM_AMM_VENUE_IDS,
+};
 use arbitrageur_risk::margin_monitor::MarginHealthStatus;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -30,6 +32,8 @@ pub fn initialize_vault_impl(
         vault.get_status()
     };
     ensure_credential_migration(state)?;
+    state.open_evm_stronghold();
+    migrate_evm_keys_to_stronghold(state);
     state.sync_vault_credentials_to_adapters();
     Ok(status)
 }
@@ -41,6 +45,8 @@ pub fn unlock_vault_impl(password: &str, state: &AppEngineState) -> Result<Vault
         vault.get_status()
     };
     ensure_credential_migration(state)?;
+    state.open_evm_stronghold();
+    migrate_evm_keys_to_stronghold(state);
     state.sync_vault_credentials_to_adapters();
     if crate::state::TradingEnvironment::from_mode(&state.settings.read().trading_mode)
         == crate::state::TradingEnvironment::Live
@@ -84,6 +90,9 @@ pub fn lock_vault_impl(state: &AppEngineState) -> Result<VaultStatus, String> {
             }
         }
     }
+    // Drop the stronghold before the vault forgets its session key —
+    // adapter signers are wiped by the sync below either way.
+    state.close_evm_stronghold();
     let status = {
         let mut vault = state.vault.write();
         vault.lock();
@@ -652,6 +661,10 @@ pub fn upsert_account_impl(
             let _ = vault.update_profile_enabled(&[(profile.id.clone(), profile.enabled)]);
         }
     }
+    // If this write landed a raw hex key on an AMM venue profile, move it
+    // into the stronghold before the sync provisions adapters — no-op when
+    // no stronghold is loaded (the record keeps working as a local key).
+    migrate_evm_keys_to_stronghold(state);
     state.sync_vault_credentials_to_adapters();
 
     let dto = accounts_with_presence(state, vec![profile])?
@@ -684,6 +697,23 @@ pub struct EvmWalletSaveDto {
     /// `{venue}-default` account ids created by this save. New rows are
     /// disabled — a wallet save never admits a venue by itself.
     pub created_accounts: Vec<String>,
+    /// Where the key bytes ended up: `"stronghold"` (vault record carries
+    /// only the sentinel; signing happens inside guarded memory) or
+    /// `"vault"` (fallback — encrypted credential record, legacy behavior).
+    pub key_storage: String,
+}
+
+/// Decode a validated hex private key into bytes for the stronghold
+/// write. The caller (`save_evm_wallet_impl`) has already run full
+/// secp256k1 validation via `derive_evm_signer_address_impl` — this only
+/// re-encodes the bytes; it is not the validation path.
+fn evm_key_bytes(private_key: &str) -> Result<zeroize::Zeroizing<[u8; 32]>, String> {
+    let raw = hex::decode(private_key.trim().trim_start_matches("0x"))
+        .map_err(|e| format!("invalid EVM private key: {e}"))?;
+    let bytes: [u8; 32] = raw
+        .try_into()
+        .map_err(|_| "invalid EVM private key: expected 32 bytes".to_string())?;
+    Ok(zeroize::Zeroizing::new(bytes))
 }
 
 /// The account a shared-wallet write targets for one AMM venue: the
@@ -769,6 +799,27 @@ pub fn save_evm_wallet_impl(
         return Err("Vault is locked. Please unlock before saving credentials.".into());
     }
 
+    // Preferred custody: write the key into the Stronghold snapshot and
+    // store only the sentinel in vault records — the raw bytes never
+    // persist. Falls back to vault storage (legacy behavior) when no
+    // stronghold is loaded or the write fails; `key_storage` reports
+    // which path ran so the UI can show honest custody status.
+    let key_storage = match state.evm_stronghold.read().as_ref() {
+        Some(sh) => match sh.store_key(evm_key_bytes(private_key)?) {
+            Ok(()) => "stronghold",
+            Err(e) => {
+                tracing::warn!("stronghold key store failed ({e}) — falling back to vault record");
+                "vault"
+            }
+        },
+        None => "vault",
+    };
+    let stored_key = if key_storage == "stronghold" {
+        crate::stronghold::EVM_STRONGHOLD_KEY_REF.to_string()
+    } else {
+        private_key.trim().to_string()
+    };
+
     let mut keyed = Vec::new();
     let mut address_only = Vec::new();
     let mut created = Vec::new();
@@ -804,7 +855,7 @@ pub fn save_evm_wallet_impl(
                 account_index: None,
                 subaccount_index: None,
                 api_key_index: None,
-                private_key: has_key.then(|| private_key.trim().to_string()),
+                private_key: has_key.then(|| stored_key.clone()),
                 base_url: None, // preserve any stored RPC override
                 enabled: p.enabled,
             };
@@ -825,6 +876,7 @@ pub fn save_evm_wallet_impl(
         keyed_venues: keyed,
         address_only_venues: address_only,
         created_accounts: created,
+        key_storage: key_storage.to_string(),
     })
 }
 
@@ -854,8 +906,88 @@ pub fn clear_evm_wallet_impl(state: &AppEngineState) -> Result<u32, String> {
         }
     }
     drop(vault);
+    // Revoke the key inside the stronghold so the record is unreadable
+    // even to the in-memory vault — a revoked key cannot sign again until
+    // a new one is stored. The sync below clears adapter signers
+    // regardless, so a revoke failure still leaves adapters signerless.
+    if let Some(sh) = state.evm_stronghold.read().as_ref() {
+        if let Err(e) = sh.revoke_key() {
+            tracing::warn!("stronghold key revoke failed: {e}");
+        }
+    }
     state.sync_vault_credentials_to_adapters();
     Ok(cleared)
+}
+
+/// Move vault-held EVM AMM private keys into the loaded stronghold — the
+/// upgrade path for records written before key custody moved out of the
+/// encrypted file. Only runs when every raw AMM key derives to the SAME
+/// signer: the shared wallet is a single key and divergent keys can't
+/// share one stronghold record, so they stay vault-held (still working
+/// via the local-signer path). On success each record's `private_key` is
+/// rewritten to the sentinel so the key bytes stop persisting in the
+/// vault file. Best-effort: any parse/store failure leaves the record
+/// untouched.
+fn migrate_evm_keys_to_stronghold(state: &AppEngineState) {
+    if state.evm_stronghold.read().is_none() {
+        return;
+    }
+    let mut vault = state.vault.write();
+    if !vault.is_unlocked() {
+        return;
+    }
+    let evm_records: Vec<ExchangeCredentials> = vault
+        .get_data()
+        .map(|d| {
+            d.credentials
+                .iter()
+                .filter(|c| ADMITTED_EVM_AMM_VENUE_IDS.contains(&c.venue.to_lowercase().as_str()))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    // Distinct raw keys across all AMM records — sentinel and empty
+    // records are already fine.
+    let mut keys = std::collections::BTreeSet::new();
+    for c in &evm_records {
+        let k = c.private_key.as_deref().unwrap_or("").trim();
+        if !k.is_empty() && !k.starts_with(EVM_EXTERNAL_SIGNER_PREFIX) {
+            keys.insert(k.to_string());
+        }
+    }
+    if keys.len() != 1 {
+        return; // nothing to migrate, or divergent keys — keep vault custody
+    }
+    let key_hex = keys.iter().next().expect("one key");
+    if derive_evm_signer_address_impl(key_hex).is_err() {
+        return; // malformed — let update_credentials refuse it as before
+    }
+    let Ok(key_bytes) = evm_key_bytes(key_hex) else {
+        return;
+    };
+    if let Some(sh) = state.evm_stronghold.read().as_ref() {
+        if let Err(e) = sh.store_key(key_bytes) {
+            tracing::warn!("EVM key migration to stronghold failed: {e}");
+            return;
+        }
+    } else {
+        return;
+    }
+    for c in evm_records {
+        let k = c.private_key.as_deref().unwrap_or("").trim();
+        if k.is_empty() || k.starts_with(EVM_EXTERNAL_SIGNER_PREFIX) {
+            continue;
+        }
+        let mut record = c.clone();
+        record.private_key = Some(crate::stronghold::EVM_STRONGHOLD_KEY_REF.to_string());
+        let res = match record.profile_id.clone() {
+            Some(pid) => vault.upsert_profile_credentials(&pid, record),
+            None => vault.upsert_credentials(vec![record]),
+        };
+        if let Err(e) = res {
+            tracing::warn!("EVM key migration failed for {}: {e}", c.venue);
+        }
+    }
 }
 
 #[tauri::command]
@@ -870,6 +1002,62 @@ pub async fn save_evm_wallet(
 #[tauri::command]
 pub async fn clear_evm_wallet(state: State<'_, Arc<AppEngineState>>) -> Result<u32, String> {
     clear_evm_wallet_impl(&state)
+}
+
+/// Where the shared EVM key currently lives, for the wallet card's custody
+/// chip: `"stronghold"` when a record carries the sentinel (key bytes are
+/// inside the stronghold snapshot), `"vault"` when a record still holds a
+/// raw key (legacy / stronghold-unavailable fallback), `"none"` when no
+/// AMM record holds any key material. `strongholdLoaded` distinguishes
+/// "sentinel + live signer" from "sentinel but no snapshot loaded" (which
+/// cannot sign — shown as a warning state in the UI).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EvmKeyCustodyDto {
+    pub custody: String,
+    pub stronghold_loaded: bool,
+}
+
+pub fn get_evm_key_custody_impl(state: &AppEngineState) -> Result<EvmKeyCustodyDto, String> {
+    let mut vault = state.vault.write();
+    if !vault.is_unlocked() {
+        return Err("Vault is locked.".into());
+    }
+    let mut custody = "none";
+    let data = vault.get_data().map_err(|e| e.to_string())?;
+    for c in &data.credentials {
+        if !ADMITTED_EVM_AMM_VENUE_IDS.contains(&c.venue.to_lowercase().as_str()) {
+            continue;
+        }
+        let k = c.private_key.as_deref().unwrap_or("").trim();
+        if k.is_empty() {
+            continue;
+        }
+        if k.starts_with(EVM_EXTERNAL_SIGNER_PREFIX) {
+            custody = "stronghold";
+        } else if custody != "stronghold" {
+            custody = "vault";
+        }
+    }
+    // "loaded" means a snapshot is open AND holds the key record — an
+    // open-but-empty stronghold cannot sign, same as absent.
+    let stronghold_loaded = state
+        .evm_stronghold
+        .read()
+        .as_ref()
+        .map(|s| s.has_key())
+        .unwrap_or(false);
+    Ok(EvmKeyCustodyDto {
+        custody: custody.to_string(),
+        stronghold_loaded,
+    })
+}
+
+#[tauri::command]
+pub async fn get_evm_key_custody(
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<EvmKeyCustodyDto, String> {
+    get_evm_key_custody_impl(&state)
 }
 
 /// Delete an account profile and its bound credential record. Route
@@ -1011,7 +1199,18 @@ pub fn get_account_credential_field_impl(
             "passphrase" => c.passphrase.clone().unwrap_or_default(),
             "accountId" => c.account_id.clone().unwrap_or_default(),
             "walletAddress" => c.wallet_address.clone().unwrap_or_default(),
-            "privateKey" => c.private_key.clone().unwrap_or_default(),
+            "privateKey" => {
+                let k = c.private_key.clone().unwrap_or_default();
+                if k.trim()
+                    .starts_with(arbitrageur_exchanges::evm_amm::EVM_EXTERNAL_SIGNER_PREFIX)
+                {
+                    // The sentinel is not a key — revealing it would hand
+                    // the UI a fake credential. External-custody keys are
+                    // intentionally non-exportable.
+                    return Err("Key is held in Stronghold custody and cannot be revealed".into());
+                }
+                k
+            }
             "baseUrl" => c.base_url.clone().unwrap_or_default(),
             _ => return Err(format!("Unknown credential field '{field}'")),
         }),
@@ -1203,6 +1402,12 @@ pub async fn get_venue_balances_impl(
 
         match live_account_or_cached(state, vid, &adapter).await {
             Ok((account, stale_age)) => {
+                // USD-quote policy: convert venue-settlement figures to the
+                // USD basis so the balance card, equity attribution, and
+                // margin evaluation all read USD — a depegged settlement
+                // coin shows as a real equity drop, not hidden basis.
+                let mut account = account;
+                state.normalize_account_usd(vid, &mut account);
                 let free_margin_usd = account
                     .free_margin
                     .to_string()
@@ -1415,9 +1620,50 @@ pub fn get_account_signer_address_impl(
     account_id: &str,
     state: &AppEngineState,
 ) -> Result<String, String> {
-    let key = get_account_credential_field_impl(account_id, "privateKey", state)?;
+    // Read the stored value directly — the IPC reveal path refuses sentinel
+    // records, but this function only ever returns a public address and the
+    // sentinel is the routing input that selects stronghold derivation.
+    let exists = state
+        .state_store
+        .get_account(account_id)
+        .map_err(|e| e.to_string())?
+        .is_some();
+    if !exists {
+        return Err(format!("Unknown account '{account_id}'"));
+    }
+    let key = {
+        let mut vault = state.vault.write();
+        if !vault.is_unlocked() {
+            return Err("Vault is locked. Please unlock before viewing credentials.".into());
+        }
+        let data = vault.get_data().map_err(|e| e.to_string())?;
+        data.credentials
+            .iter()
+            .find(|c| c.profile_id.as_deref() == Some(account_id))
+            .and_then(|c| c.private_key.clone())
+            .unwrap_or_default()
+    };
     if key.is_empty() {
         return Err("no private key stored for this account".into());
+    }
+    if key
+        .trim()
+        .starts_with(arbitrageur_exchanges::evm_amm::EVM_EXTERNAL_SIGNER_PREFIX)
+    {
+        // External custody: the record carries the sentinel, not key
+        // bytes. Prefer the live derivation from the stronghold itself;
+        // fall back to the stored wallet address (which was validated to
+        // equal the signer when the wallet was saved).
+        if let Some(sh) = state.evm_stronghold.read().as_ref() {
+            if let Ok(addr) = sh.evm_address() {
+                return Ok(addr.to_string());
+            }
+        }
+        let wa = get_account_credential_field_impl(account_id, "walletAddress", state)?;
+        if wa.trim().is_empty() {
+            return Err("external-custody key has no wallet address on record".into());
+        }
+        return Ok(wa.trim().to_string());
     }
     derive_evm_signer_address_impl(&key)
 }
@@ -1463,11 +1709,7 @@ pub fn get_active_signer_address_impl(
         {
             return Ok(a.active_signer_address());
         }
-        if let Some(a) = state
-            .live_evm_amms
-            .iter()
-            .find(|a| a.spec_id() == vid)
-        {
+        if let Some(a) = state.live_evm_amms.iter().find(|a| a.spec_id() == vid) {
             return Ok(a.wallet_address_hex());
         }
     }

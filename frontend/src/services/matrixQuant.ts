@@ -213,38 +213,49 @@ export const globalSpreadTracker = new RollingSpreadTracker();
  */
 export function getVenueFeeBps(venueIdOrName: string): number {
   const v = venueIdOrName.toLowerCase();
-  // Long-tail perp venues — exact-id matches mirror the DexPerpAdapter
-  // spec table (docs/VENUE_COVERAGE.md).
-  if (v === "aevo") return 3.0;
-  if (v === "alphax") return 3.0;
-  if (v === "antarctic") return 3.0;
-  if (v === "apex") return 2.0;
-  if (v === "astros") return 3.0;
-  if (v === "bulk") return 3.0;
-  if (v === "derive") return 3.0;
+  // Values mirror the audited backend table `venue_fee_bps`
+  // (frontend/src-tauri/src/commands.rs) — the same standard-tier taker
+  // the executor prices routes with. Drift here shows phantom net edge.
+  if (v === "aevo") return 2.0;
+  if (v === "alphax") return 4.0;
+  if (v === "antarctic") return 4.0;
+  if (v === "apex") return 4.0;
+  if (v === "astros") return 4.0;
+  if (v === "bulk") return 4.0;
+  if (v === "derive") return 2.0;
   if (v === "dydx") return 2.0;
-  if (v === "edgex") return 3.8;
-  if (v === "evedex") return 3.0;
+  if (v === "edgex") return 4.5;
+  if (v === "evedex") return 4.5;
   if (v === "extended") return 2.0;
-  if (v === "gatedex") return 3.0;
-  if (v === "gmx") return 5.0;
+  if (v === "gatedex") return 4.0;
+  if (v === "gmx") return 4.0;
   if (v === "grvt") return 5.0;
   if (v === "helix") return 0.01;
-  if (v === "iotrader") return 3.0;
-  if (v === "nado") return 3.0;
-  if (v === "niza") return 3.0;
-  if (v === "ondoperps") return 2.5;
-  if (v === "ostium") return 3.0;
+  if (v === "iotrader") return 4.0;
+  if (v === "nado") return 3.5;
+  if (v === "niza") return 4.0;
+  if (v === "ondoperps") return 3.0;
+  if (v === "ostium") return 4.0;
   if (v === "pacifica") return 2.0;
   if (v === "paradex") return 2.0;
   if (v === "qfex") return 4.0;
-  if (v === "sodex") return 3.0;
-  if (v === "standx") return 4.0;
-  if (v === "vest") return 3.0;
+  if (v === "sodex") return 4.0;
+  if (v === "standx") return 2.0;
+  if (v === "vest") return 1.0;
+  // CEX / primary venues.
+  if (v === "aster") return 4.0;
+  if (v === "binance") return 5.0;
+  if (v === "boros") return 5.0;
+  if (v === "coinbase") return 5.0;
+  if (v === "decibel") return 5.0;
+  if (v === "kalshi") return 10.0;
+  if (v === "kraken") return 5.0;
+  if (v === "okx") return 5.0;
+  if (v === "polymarket") return 0.0;
   // EVM spot AMMs — pool fees are per-pair onchain; these are the venue
-  // defaults (Uniswap V3 WETH/USDC sits in the 5bp tier; PancakeSwap V2
-  // charges 25bp; Solidly volatile pools ~30bp).
-  if (v === "uniswap") return 5.0;
+  // defaults (PancakeSwap V2 charges 25bp; Solidly volatile pools ~30bp;
+  // UniV3 pairs span 5–100bp so the conservative tier is the default).
+  if (v === "uniswap") return 30.0;
   if (v === "uniswap_v2") return 30.0;
   if (v === "pancakeswap") return 25.0;
   if (v === "pancakeswap_v3") return 25.0;
@@ -256,12 +267,12 @@ export function getVenueFeeBps(venueIdOrName: string): number {
   if (v === "ramses") return 30.0;
   if (v === "pharaoh") return 30.0;
   if (v.includes("lighter") || v.includes("lgt")) return 1.5;
-  if (v.includes("hyperliquid") || v.includes("hl")) return 2.0;
-  if (v.includes("vanta") || v.includes("vnt")) return 3.0;
-  if (v.includes("robinhood") || v.includes("rh")) return 2.5;
-  if (v.includes("arcus") || v.includes("arc")) return 1.5;
+  if (v.includes("hyperliquid") || v.includes("hl")) return 4.5;
+  if (v.includes("vanta") || v.includes("vnt")) return 4.0;
+  if (v.includes("robinhood") || v.includes("rh")) return 4.0;
+  if (v.includes("arcus") || v.includes("arc")) return 4.0;
   if (v.includes("popdex") || v.includes("pop")) return 10.0;
-  return 2.0;
+  return 4.0;
 }
 
 /**

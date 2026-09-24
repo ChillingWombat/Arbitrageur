@@ -7,7 +7,7 @@ use chrono::{DateTime, Utc};
 use hmac::Hmac;
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -199,6 +199,13 @@ impl SecureVault {
         self.storage_path.exists()
     }
 
+    /// Path of the Stronghold snapshot holding the shared EVM wallet key —
+    /// a sibling of the vault file so both live in the same per-user dir
+    /// (`vault.enc` → `vault.hold`).
+    pub fn stronghold_snapshot_path(&self) -> PathBuf {
+        self.storage_path.with_extension("hold")
+    }
+
     pub fn is_unlocked(&mut self) -> bool {
         if !self.is_unlocked {
             return false;
@@ -248,6 +255,27 @@ impl SecureVault {
             auto_locked: self.is_auto_locked(),
             unlocked_until: self.unlocked_until,
         }
+    }
+
+    /// Derive the Stronghold snapshot key from the live session key via a
+    /// domain-separated SHA-256. Returns `None` while locked — the key
+    /// exists only while the vault is unlocked, which is exactly the
+    /// custody boundary we want: the EVM stronghold can only be opened
+    /// when the operator has unlocked the vault with the master password.
+    ///
+    /// SHA-256 of the session key (rather than reusing the key bytes
+    /// directly) keeps the snapshot key cryptographically independent of
+    /// the vault encryption key, so a leaked snapshot can't be used to
+    /// recover the vault key.
+    pub fn stronghold_session_key(&self) -> Option<Zeroizing<[u8; 32]>> {
+        let key = self.encryption_key.as_ref()?;
+        let mut hasher = Sha256::new();
+        hasher.update(b"arbitrageur/stronghold-snapshot/v1");
+        hasher.update(key.as_slice());
+        let digest = hasher.finalize();
+        let mut out = Zeroizing::new([0u8; 32]);
+        out.copy_from_slice(&digest);
+        Some(out)
     }
 
     /// Derive the v2 32-byte encryption key using Argon2id

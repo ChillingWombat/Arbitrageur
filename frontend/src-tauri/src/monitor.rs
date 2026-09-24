@@ -496,11 +496,14 @@ fn funding_leg_rate_hourly(
     venue: &str,
     symbol: &str,
     now: Instant,
+    merge_usd: bool,
 ) -> Option<f64> {
     if symbol.to_uppercase().ends_with("-SPOT") {
         return Some(0.0);
     }
-    let base = canonical_base(symbol);
+    // Funding is per-instrument — under `separate`, BTC-USDT and BTC-USDC
+    // carry different rates, so the lookup key keeps the quote.
+    let base = arbitrageur_core::symbol::pair_key(symbol, merge_usd);
     match ema.get(&(venue.to_string(), base)) {
         Some((rate, ts)) if now.duration_since(*ts) < Duration::from_secs(300) => Some(*rate),
         _ => None,
@@ -555,7 +558,10 @@ fn session_context(
         session_rv: None,
         win_rate: None,
     };
-    let profiles = match state.state_store.session_profiles(symbol) {
+    let profiles = match state
+        .state_store
+        .session_profiles_mode(symbol, state.usd_merge_quotes())
+    {
         Ok(p) => p,
         Err(_) => return neutral,
     };
@@ -1101,6 +1107,13 @@ fn lighter_tier_budget_per_min(tier: &str) -> f64 {
     }
 }
 
+/// Quote-frequency lookup used when several same-base markets share one
+/// watchlist key — the venue's dominant quote wins because that is the
+/// market a bare base resolves to.
+fn freq_of(freq: &HashMap<String, usize>, quote: &str) -> usize {
+    freq.get(quote).copied().unwrap_or(0)
+}
+
 /// Total per-venue read budget (requests/min) before the transaction
 /// reserve is subtracted. Hyperliquid's documented 1200 weight/min with
 /// weight-2 `l2Book` calls yields a 600/min book budget; we keep margin.
@@ -1123,8 +1136,18 @@ fn venue_budget_per_min(venue: &str, tiers: &[String], _flag_enabled: bool) -> (
 struct VenueLane {
     venue: String,
     adapter: Arc<dyn ExchangeAdapter>,
-    /// Canonical base symbols listed on this venue.
+    /// Watchlist keys listed on this venue — canonical bases under the
+    /// merged quote modes, "BASE-QUOTE" pair keys under `separate`.
     symbols: Vec<String>,
+    /// Watchlist key → venue-native symbol to fetch ("BTC-USDT" →
+    /// "BTCUSDT"). In merged modes the key is a bare base and the map
+    /// carries the venue's dominant-quote market, matching what the
+    /// adapter resolves a bare base to.
+    fetch_symbol: HashMap<String, String>,
+    /// Watchlist key → this venue's quote currency for that book
+    /// ("BTC-USDT" → "USDT"; bare "BTC" → the venue's settlement quote).
+    /// Drives FX normalization and the depeg gate.
+    quote_by_key: HashMap<String, String>,
     /// Rolling 60s request timestamps (budget accounting).
     requests: VecDeque<Instant>,
     /// Total read budget/min and usable share after the tx reserve.
@@ -1301,6 +1324,14 @@ pub struct SpreadMonitorEngine {
     /// The timestamp keeps the exit supervisor honest: a stale lane can
     /// never decide a position's fate.
     funding_ema: Mutex<HashMap<(String, String), (f64, Instant)>>,
+    /// The USD-quote mode the current watchlist/lanes were built under —
+    /// a settings flip forces an immediate rebuild so pair keys, fetch
+    /// symbols, and quote maps never straddle two policies.
+    watchlist_mode: Mutex<String>,
+    /// Venue → settlement currency (the modal quote across its listed
+    /// markets), learned at watchlist refresh. Drives account-equity
+    /// normalization: a venue settling in USDT reports USDT equity.
+    settlement_quotes: Mutex<HashMap<String, String>>,
     /// Canonical-base watchlist (exempted symbols removed).
     watchlist: Mutex<Vec<String>>,
     /// All canonical bases per venue from the last market refresh.
@@ -1343,6 +1374,8 @@ impl SpreadMonitorEngine {
             lanes: Mutex::new(Vec::new()),
             pairs: Mutex::new(HashMap::new()),
             funding_ema: Mutex::new(HashMap::new()),
+            watchlist_mode: Mutex::new(String::new()),
+            settlement_quotes: Mutex::new(HashMap::new()),
             watchlist: Mutex::new(Vec::new()),
             venue_symbols: Mutex::new(HashMap::new()),
             last_watchlist_at: Mutex::new(None),
@@ -1483,8 +1516,12 @@ impl SpreadMonitorEngine {
 
     /// Venues currently listing `base` in the derived >= 2-venue
     /// intersection — the in-scope set for per-strategy auto-filters.
+    /// Matches against the lane's stored watchlist keys, so `separate`
+    /// mode scopes by pair key ("BTC-USDT") and merged modes by base.
     pub fn in_scope_venues(&self, base: &str) -> Vec<String> {
-        let wanted = canonical_base(base);
+        let merge =
+            self.watchlist_mode.lock().as_str() != crate::stablecoin_fx::USD_QUOTE_MODE_SEPARATE;
+        let wanted = arbitrageur_core::symbol::pair_key(base, merge);
         let map = self.venue_symbols.lock();
         let mut out: Vec<String> = map
             .iter()
@@ -1493,6 +1530,42 @@ impl SpreadMonitorEngine {
             .collect();
         out.sort();
         out
+    }
+
+    /// Quote currency a (venue, watchlist-key) book is priced in, learned
+    /// at watchlist refresh from market metadata. `None` when the venue
+    /// isn't in the current universe — callers then fall back to the
+    /// symbol's written quote or the USD baseline.
+    pub fn book_quote(&self, venue: &str, key: &str, merge_usd: bool) -> Option<String> {
+        let lanes = self.lanes.lock();
+        let lane = lanes.iter().find(|l| l.venue == venue)?;
+        // Bare-base keys resolve through the venue's dominant quote. Under
+        // `separate`, a key that already carries a USD-family quote is
+        // exact-match only — the dominant-quote entry belongs to a sibling
+        // instrument, not this one.
+        lane.quote_by_key.get(key).cloned().or_else(|| {
+            let quoted = arbitrageur_core::symbol::symbol_quote(key)
+                .map(|q| arbitrageur_core::symbol::is_usd_family(&q))
+                .unwrap_or(false);
+            (!quoted || merge_usd)
+                .then(|| lane.quote_by_key.get(&canonical_base(key)).cloned())
+                .flatten()
+        })
+    }
+
+    /// The venue's settlement currency — modal quote across its listed
+    /// markets, learned at watchlist refresh. `None` before the first
+    /// successful refresh.
+    pub fn settlement_quote(&self, venue: &str) -> Option<String> {
+        self.settlement_quotes.lock().get(venue).cloned()
+    }
+
+    /// Test seam: pretend a watchlist refresh learned this settlement quote.
+    #[cfg(test)]
+    pub fn set_settlement_quote(&self, venue: &str, quote: &str) {
+        self.settlement_quotes
+            .lock()
+            .insert(venue.to_string(), quote.to_string());
     }
 
     /// Test seam: install a fabricated snapshot without running the loop.
@@ -1561,6 +1634,13 @@ impl SpreadMonitorEngine {
             .lock()
             .map(|t| t.elapsed() >= Duration::from_secs(refresh_secs))
             .unwrap_or(true);
+        // A USD-quote-mode flip rebuilds everything: watchlist keys, fetch
+        // symbols, and per-key quote maps all derive from it.
+        let mode =
+            crate::stablecoin_fx::normalize_usd_quote_mode(&state.settings.read().usd_quote_mode);
+        let merge_usd = mode != crate::stablecoin_fx::USD_QUOTE_MODE_SEPARATE;
+        let mode_changed = *self.watchlist_mode.lock() != mode;
+        let due = due || mode_changed;
         if !due {
             // Cheap path: still pick up newly-admitted venues between full
             // refreshes without re-calling fetch_markets.
@@ -1576,13 +1656,29 @@ impl SpreadMonitorEngine {
             }
         }
 
-        let exempt: HashSet<String> = state
+        // Exemption rows are stored under the write-time policy's key.
+        // Matching honors both shapes: a bare base ("BTC") exempts every
+        // quote variant in any mode; a pair row ("BTC-USDC", written under
+        // `separate`) is exact-match under `separate` and still exempts the
+        // merged base under merged modes (fail-safe — an exemption must
+        // never silently stop applying because the mode flipped).
+        let exempt_raw: HashSet<String> = state
             .state_store
             .exempt_tickers()
             .unwrap_or_default()
             .into_iter()
-            .map(|s| canonical_base(&s))
             .collect();
+        let is_exempt = |key: &str| -> bool {
+            let up = key.to_uppercase();
+            if exempt_raw.contains(&up) {
+                return true;
+            }
+            let base = canonical_base(&up);
+            if exempt_raw.contains(&base) {
+                return true; // bare-base row covers all quote variants
+            }
+            merge_usd && exempt_raw.iter().any(|s| canonical_base(s) == base)
+        };
 
         let venues = state.get_venues();
         let mut venue_bases: HashMap<String, Vec<String>> = HashMap::new();
@@ -1605,15 +1701,102 @@ impl SpreadMonitorEngine {
 
             match adapter.fetch_markets().await {
                 Ok(markets) => {
-                    let mut bases: Vec<String> = markets
+                    // Pair keys under the active quote mode. For merged
+                    // modes several markets share one key (BTC-USDT +
+                    // BTC-USDC → "BTC"); the representative fetch symbol is
+                    // the market in the venue's modal quote — the same one
+                    // the adapter resolves a bare base to.
+                    let mut quote_freq: HashMap<String, usize> = HashMap::new();
+                    for m in markets.iter().filter(|m| m.is_active) {
+                        *quote_freq.entry(m.symbol.quote.clone()).or_default() += 1;
+                    }
+                    let mut by_key: HashMap<String, &arbitrageur_core::market::MarketMetadata> =
+                        HashMap::new();
+                    for m in markets.iter().filter(|m| m.is_active) {
+                        // Bare spellings ("BTC", Hyperliquid-style) carry no
+                        // quote — under `separate` the market's declared quote
+                        // supplies it, so a USDC-implied bare book joins the
+                        // BTC-USDC lane rather than a quote-blind "BTC" lane
+                        // that would pair venues on different quotes.
+                        let key = if !merge_usd
+                            && arbitrageur_core::symbol::symbol_quote(&m.symbol.raw).is_none()
+                            && arbitrageur_core::symbol::is_usd_family(&m.symbol.quote)
+                        {
+                            format!(
+                                "{}-{}",
+                                canonical_base(&m.symbol.raw),
+                                m.symbol.quote.to_uppercase()
+                            )
+                        } else {
+                            arbitrageur_core::symbol::pair_key(&m.symbol.raw, merge_usd)
+                        };
+                        let better = match by_key.get(&key) {
+                            Some(prev) => {
+                                freq_of(&quote_freq, &m.symbol.quote)
+                                    > freq_of(&quote_freq, &prev.symbol.quote)
+                            }
+                            None => true,
+                        };
+                        if better {
+                            by_key.insert(key, m);
+                        }
+                    }
+                    // Venue settlement currency: the quote most markets
+                    // list against. Equity/margin the venue reports are
+                    // denominated in it.
+                    let default_quote = quote_freq
                         .iter()
-                        .filter(|m| m.is_active)
-                        .map(|m| canonical_base(&m.symbol.base))
-                        .collect::<HashSet<_>>()
-                        .into_iter()
-                        .collect();
+                        .max_by_key(|(_, n)| *n)
+                        .map(|(q, _)| q.clone())
+                        .unwrap_or_else(|| "USD".to_string());
+                    self.settlement_quotes
+                        .lock()
+                        .insert(vid.to_string(), default_quote);
+                    let mut bases: Vec<String> = by_key.keys().cloned().collect();
                     bases.sort();
+                    let mut fetch_symbol = HashMap::with_capacity(bases.len());
+                    let mut quote_by_key = HashMap::with_capacity(bases.len());
+                    for (k, m) in &by_key {
+                        fetch_symbol.insert(k.clone(), m.venue_symbol.clone());
+                        quote_by_key.insert(k.clone(), m.symbol.quote.clone());
+                    }
                     venue_bases.insert(vid.to_string(), bases.clone());
+
+                    // Venue-local stablecoin rates for single-venue paths:
+                    // the venue's own stable/stable markets are the honest
+                    // conversion for intra-venue cycles and venue equity.
+                    if merge_usd {
+                        if let Ok(marks) = adapter.fetch_market_prices().await {
+                            let mut pairs: Vec<(String, String, f64)> = Vec::new();
+                            for (vsym, price) in &marks {
+                                let Some(q) = arbitrageur_core::symbol::symbol_quote(vsym) else {
+                                    continue;
+                                };
+                                let b = canonical_base(vsym);
+                                let Ok(p) = price.to_string().parse::<f64>() else {
+                                    continue;
+                                };
+                                if arbitrageur_core::symbol::is_usd_family(&b)
+                                    && arbitrageur_core::symbol::is_usd_family(&q)
+                                {
+                                    pairs.push((b, q, p));
+                                }
+                            }
+                            if !pairs.is_empty() {
+                                let n = state.stablecoin_fx.refresh_venue_rates(
+                                    vid,
+                                    &pairs,
+                                    Utc::now().timestamp_millis(),
+                                );
+                                if n > 0 {
+                                    tracing::debug!(
+                                        "monitor: {vid} local stablecoin rates refreshed ({n} quotes)"
+                                    );
+                                }
+                            }
+                        }
+                    }
+
                     // Preserve round-robin progress + backoff across refresh.
                     let (cursor, last_fetch, requests, fail_streak, backoff_until) = {
                         let lanes = self.lanes.lock();
@@ -1635,6 +1818,8 @@ impl SpreadMonitorEngine {
                         venue: vid.to_string(),
                         adapter,
                         symbols: bases,
+                        fetch_symbol,
+                        quote_by_key,
                         requests,
                         budget_per_min: budget,
                         usable_per_min: usable,
@@ -1650,6 +1835,12 @@ impl SpreadMonitorEngine {
                     tracing::warn!("monitor: fetch_markets failed for {vid}: {e}");
                     // Keep the previous lane (and its backoff) if the venue
                     // was already known — dropping it would hide staleness.
+                    // A quote-mode flip is the exception: the old lane's
+                    // keys/fetch-symbols describe the other policy, so the
+                    // venue drops out until it can refetch.
+                    if mode_changed {
+                        continue;
+                    }
                     let lanes = self.lanes.lock();
                     if let Some(old) = lanes.iter().find(|l| l.venue == vid) {
                         venue_bases.insert(vid.to_string(), old.symbols.clone());
@@ -1670,6 +1861,8 @@ impl SpreadMonitorEngine {
                         venue: l.venue.clone(),
                         adapter: l.adapter.clone(),
                         symbols: l.symbols.clone(),
+                        fetch_symbol: l.fetch_symbol.clone(),
+                        quote_by_key: l.quote_by_key.clone(),
                         requests: l.requests.clone(),
                         budget_per_min: l.budget_per_min,
                         usable_per_min: l.usable_per_min,
@@ -1695,13 +1888,14 @@ impl SpreadMonitorEngine {
             .into_iter()
             .filter(|(_, n)| *n >= 2)
             .map(|(b, _)| b)
-            .filter(|b| !exempt.contains(b))
+            .filter(|b| !is_exempt(b))
             .collect();
         watch.sort();
 
         *self.venue_symbols.lock() = venue_bases;
         *self.watchlist.lock() = watch;
         *self.lanes.lock() = new_lanes;
+        *self.watchlist_mode.lock() = mode.to_string();
         *self.last_watchlist_at.lock() = Some(Instant::now());
 
         // Drop persisted signals for pairs that left the universe.
@@ -1724,7 +1918,8 @@ impl SpreadMonitorEngine {
         *self.last_rollup_at.lock() = Some(Instant::now());
         let now_ms = Utc::now().timestamp_millis();
         let from_ms = now_ms - 7 * 86_400_000;
-        let symbols = match state.state_store.distinct_sample_symbols() {
+        let merge_usd = state.usd_merge_quotes();
+        let symbols = match state.state_store.distinct_sample_symbols_mode(merge_usd) {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("session rollup: symbol scan failed: {e}");
@@ -1734,7 +1929,7 @@ impl SpreadMonitorEngine {
         for symbol in symbols.iter().take(500) {
             if let Err(e) = state
                 .state_store
-                .rollup_session_profiles(symbol, from_ms, now_ms, now_ms)
+                .rollup_session_profiles_mode(symbol, merge_usd, from_ms, now_ms, now_ms)
             {
                 tracing::warn!("session rollup failed for {symbol}: {e}");
             }
@@ -1771,14 +1966,44 @@ impl SpreadMonitorEngine {
     /// (no budget spent) but are still validated and sampled. Books go to
     /// the hub; top-of-book is persisted to `spread_samples` for the
     /// historical baseline. Funding cadence is unchanged (no WS channel).
+    /// Quote currency a lane book is priced in: the refresh-learned map
+    /// first, then the symbol's own written quote, else USD (per the
+    /// parity baseline, never a fabricated divergence).
+    fn lane_quote(&self, venue: &str, key: &str, book_symbol: &str, merge_usd: bool) -> String {
+        self.book_quote(venue, key, merge_usd)
+            .or_else(|| arbitrageur_core::symbol::symbol_quote(book_symbol))
+            .unwrap_or_else(|| "USD".into())
+    }
+
+    /// Build the USD-normalized sample for one book under the active quote
+    /// mode. `separate`/`parity` record raw venue prices; `fx_adjusted`
+    /// converts quote-denominated prices to USD via the rate table.
+    fn fx_sample(
+        &self,
+        state: &AppEngineState,
+        venue: &str,
+        key: &str,
+        book: &OrderBook,
+    ) -> Option<VenueSampleEntry> {
+        let quote = self.lane_quote(venue, key, &book.symbol, state.usd_merge_quotes());
+        let scale = state.fx_price_factor(Some(venue), &quote);
+        book_sample(book, venue, scale)
+    }
+
     async fn poll_due_books(&self, state: &AppEngineState) {
         struct Job {
             venue: String,
+            /// Watchlist key the sample persists under.
             symbol: String,
+            /// Venue-native symbol the adapter actually fetches — differs
+            /// from `symbol` under `separate` mode (pair keys like
+            /// "BTC-USDT" fetch as the venue's own spelling).
+            fetch: String,
             adapter: Arc<dyn ExchangeAdapter>,
         }
         let mut jobs: Vec<Job> = Vec::new();
         let mut ws_hits: Vec<(String, String, OrderBook)> = Vec::new();
+        let merge_usd = state.usd_merge_quotes();
         {
             let cfg = self.cfg.lock().clone();
             let mut lanes = self.lanes.lock();
@@ -1805,7 +2030,20 @@ impl SpreadMonitorEngine {
                         .market_data_hub
                         .get_valid_ws_book(&venue_id, &sym, None)
                     {
-                        if validate_monitor_book(&book, &venue_id, &sym).is_ok() {
+                        // Quote-strictness on the WS path: hub keys merge
+                        // USD-family spellings, so a book's written quote
+                        // must match the lane's expected quote when it
+                        // carries one — a BTC-USDC hub book must not feed
+                        // the BTC-USDT lane under `separate` mode.
+                        let quote_ok = merge_usd
+                            || match (
+                                lane.quote_by_key.get(&sym),
+                                arbitrageur_core::symbol::symbol_quote(&book.symbol),
+                            ) {
+                                (Some(w), Some(g)) => w == &g,
+                                _ => true, // unlabeled books can't be disproven
+                            };
+                        if quote_ok && validate_monitor_book(&book, &venue_id, &sym).is_ok() {
                             // Mark the symbol fetched: without this stamp
                             // `due_symbols()` keeps returning it and this
                             // loop never terminates on a WS-fresh lane.
@@ -1822,6 +2060,11 @@ impl SpreadMonitorEngine {
                     lane.last_fetch.insert(sym.clone(), Instant::now());
                     jobs.push(Job {
                         venue: lane.venue.clone(),
+                        fetch: lane
+                            .fetch_symbol
+                            .get(&sym)
+                            .cloned()
+                            .unwrap_or_else(|| sym.clone()),
                         symbol: sym,
                         adapter: lane.adapter.clone(),
                     });
@@ -1830,10 +2073,13 @@ impl SpreadMonitorEngine {
         }
         let now_ms = Utc::now().timestamp_millis();
         for (venue, symbol, book) in ws_hits {
-            if let Some(entry) = book_sample(&book, &venue) {
-                let _ = state
-                    .state_store
-                    .record_spread_samples(&symbol, now_ms, &[entry]);
+            if let Some(entry) = self.fx_sample(state, &venue, &symbol, &book) {
+                let _ = state.state_store.record_spread_samples_mode(
+                    &symbol,
+                    merge_usd,
+                    now_ms,
+                    &[entry],
+                );
             }
         }
         if jobs.is_empty() {
@@ -1860,7 +2106,7 @@ impl SpreadMonitorEngine {
                 .clone();
             set.spawn(async move {
                 let _permit = sem.acquire_owned().await.ok();
-                let res = flights.fetch(&job.adapter, &job.symbol).await;
+                let res = flights.fetch(&job.adapter, &job.fetch).await;
                 (job.venue, job.symbol, res)
             });
         }
@@ -1874,12 +2120,15 @@ impl SpreadMonitorEngine {
                     if let Some(lane) = self.lanes.lock().iter_mut().find(|l| l.venue == venue) {
                         lane.note_success();
                     }
-                    let entry = book_sample(&book, &venue);
+                    let entry = self.fx_sample(state, &venue, &symbol, &book);
                     state.market_data_hub.update_orderbook(book);
                     if let Some(e) = entry {
-                        let _ = state
-                            .state_store
-                            .record_spread_samples(&symbol, now_ms, &[e]);
+                        let _ = state.state_store.record_spread_samples_mode(
+                            &symbol,
+                            merge_usd,
+                            now_ms,
+                            &[e],
+                        );
                     }
                 }
                 Err(e) => {
@@ -1896,6 +2145,7 @@ impl SpreadMonitorEngine {
     /// by the carry estimator. One request per venue per ~60s.
     async fn poll_funding(&self, state: &AppEngineState) {
         let now = Instant::now();
+        let merge_usd = state.usd_merge_quotes();
         let mut work: Vec<(String, Arc<dyn ExchangeAdapter>)> = Vec::new();
         {
             let mut lanes = self.lanes.lock();
@@ -1915,7 +2165,9 @@ impl SpreadMonitorEngine {
                     }
                     let mut ema = self.funding_ema.lock();
                     for fr in rates {
-                        let base = canonical_base(&fr.symbol);
+                        // Funding is per-instrument: under `separate` the
+                        // pair key keeps BTC-USDT and BTC-USDC rates apart.
+                        let base = arbitrageur_core::symbol::pair_key(&fr.symbol, merge_usd);
                         let Some(per_hour) =
                             funding_per_hour(&fr.rate.to_string(), fr.interval_hours)
                         else {
@@ -1986,9 +2238,10 @@ impl SpreadMonitorEngine {
             };
             // net carry = short_leg rate − long_leg rate (same convention
             // as the entry scanner).
+            let merge_usd = state.usd_merge_quotes();
             let (Some(lr), Some(sr)) = (
-                funding_leg_rate_hourly(&ema, &long_leg.venue, &long_leg.symbol, now),
-                funding_leg_rate_hourly(&ema, &short_leg.venue, &short_leg.symbol, now),
+                funding_leg_rate_hourly(&ema, &long_leg.venue, &long_leg.symbol, now, merge_usd),
+                funding_leg_rate_hourly(&ema, &short_leg.venue, &short_leg.symbol, now, merge_usd),
             ) else {
                 continue;
             };
@@ -2094,17 +2347,23 @@ impl SpreadMonitorEngine {
         )> = Vec::new();
         let mut event_batch: Vec<SignalEventDraft> = Vec::new();
 
+        // Quote policy for this pass — drives the quote-strict sample read.
+        let merge_usd = state.usd_merge_quotes();
+
         for symbol in &watchlist {
             // Alias-aware read merges the monitor/feed base key ("BTC")
             // with UI full-symbol keys ("BTC-USDC") so the whole history
             // feeds the baseline regardless of which path produced it.
-            let samples = match state
-                .state_store
-                .spread_samples(symbol, history_from, now_ms)
-            {
-                Ok(s) => s,
-                Err(_) => continue,
-            };
+            // Under `separate` mode the read is quote-strict instead:
+            // "BTC-USDT" must never see "BTC-USDC" rows.
+            let samples =
+                match state
+                    .state_store
+                    .spread_samples_mode(symbol, merge_usd, history_from, now_ms)
+                {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
             let mut mids_by_venue: HashMap<String, Vec<(i64, f64)>> = HashMap::new();
             for s in &samples {
                 if s.mid.is_finite() && s.mid > 0.0 {
@@ -2124,11 +2383,13 @@ impl SpreadMonitorEngine {
             }
             let mut depth_snapshot: HashMap<String, (f64, f64)> = HashMap::new();
             for venue in &venues_here {
-                if let Ok(series) =
-                    state
-                        .state_store
-                        .venue_volume_series(symbol, venue, depth_from_ms, now_ms)
-                {
+                if let Ok(series) = state.state_store.venue_volume_series_mode(
+                    symbol,
+                    venue,
+                    depth_from_ms,
+                    now_ms,
+                    merge_usd,
+                ) {
                     let vols: Vec<f64> = series.iter().map(|(_, v)| *v).collect();
                     if let (Some((_, cur)), Some(med)) = (series.last(), winsorized_median(&vols)) {
                         if cur.is_finite() && *cur > 0.0 && med.is_finite() && med > 0.0 {
@@ -2860,7 +3121,7 @@ impl SpreadMonitorEngine {
         // reversion only when the directional value is uncomputable).
         let gate_p = win_probability.or(p_win);
         let gate_p_lower = win_probability_lower.or(p_win_lower);
-        let (executable, mut block_reason) = execution_gate(
+        let (mut executable, mut block_reason) = execution_gate(
             status,
             books_ok,
             session_block,
@@ -2882,6 +3143,23 @@ impl SpreadMonitorEngine {
             && signal_active
         {
             block_reason = Some(gate_reasons.join("; "));
+        }
+        // Stablecoin depeg gate: a book priced in a halted quote is not
+        // tradeable, whatever the spread math says. Books whose base is
+        // itself a USD-family coin stay live — that spread IS the depeg
+        // arbitrage, and a halted quote must not blind it.
+        if !arbitrageur_core::symbol::is_usd_family(&canonical_base(symbol)) {
+            let halt_bps = state.settings.read().stablecoin_halt_bps;
+            for v in [buy_v, sell_v] {
+                let q = self
+                    .book_quote(v, symbol, state.usd_merge_quotes())
+                    .unwrap_or_else(|| "USD".into());
+                if state.stablecoin_fx.is_halted(&q, now_ms, halt_bps) {
+                    executable = false;
+                    block_reason = Some(format!("quote {q} depegged on {v}"));
+                    break;
+                }
+            }
         }
 
         let row = MonitorRowDto {
@@ -2973,9 +3251,11 @@ fn validate_monitor_book(
 }
 
 /// Whether the book snapshot yields a persistable top-of-book sample.
-fn book_sample(book: &OrderBook, venue: &str) -> Option<VenueSampleEntry> {
-    let bid = book.bids.first()?.price.to_string().parse::<f64>().ok()?;
-    let ask = book.asks.first()?.price.to_string().parse::<f64>().ok()?;
+/// `fx_scale` multiplies quote-denominated prices into the stored USD
+/// basis (1.0 outside fx_adjusted mode); depth stays in base units.
+fn book_sample(book: &OrderBook, venue: &str, fx_scale: f64) -> Option<VenueSampleEntry> {
+    let bid = book.bids.first()?.price.to_string().parse::<f64>().ok()? * fx_scale;
+    let ask = book.asks.first()?.price.to_string().parse::<f64>().ok()? * fx_scale;
     let mid = (bid + ask) / 2.0;
     let bid_depth: f64 = book
         .bids
@@ -3234,6 +3514,239 @@ mod tests {
         }
     }
 
+    /// Scripted-markets adapter: returns a fixed market list so watchlist
+    /// refresh tests control base/quote composition per venue.
+    struct QuoteMarketsAdapter {
+        venue: &'static str,
+        markets: Vec<arbitrageur_core::market::MarketMetadata>,
+    }
+
+    fn scripted_market(
+        venue: &str,
+        venue_symbol: &str,
+        base: &str,
+        quote: &str,
+    ) -> arbitrageur_core::market::MarketMetadata {
+        arbitrageur_core::market::MarketMetadata {
+            symbol: arbitrageur_core::market::Symbol::perp(base, quote),
+            venue: VenueId::new(venue),
+            venue_symbol: venue_symbol.to_string(),
+            price_decimals: 2,
+            size_decimals: 4,
+            min_order_size: dec!(0.001),
+            min_notional: dec!(1.0),
+            maker_fee_bps: dec!(0.1),
+            taker_fee_bps: dec!(0.5),
+            contract_size: dec!(1.0),
+            is_active: true,
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ExchangeAdapter for QuoteMarketsAdapter {
+        fn venue_id(&self) -> VenueId {
+            VenueId::new(self.venue)
+        }
+        fn name(&self) -> &str {
+            "scripted"
+        }
+        async fn fetch_markets(
+            &self,
+        ) -> anyhow::Result<Vec<arbitrageur_core::market::MarketMetadata>> {
+            Ok(self.markets.clone())
+        }
+        async fn fetch_orderbook(&self, _s: &str) -> anyhow::Result<OrderBook> {
+            anyhow::bail!("unused in tests")
+        }
+        async fn fetch_ticker(&self, _s: &str) -> anyhow::Result<arbitrageur_core::quote::Ticker> {
+            anyhow::bail!("unused in tests")
+        }
+        async fn fetch_funding_rate(
+            &self,
+            _s: &str,
+        ) -> anyhow::Result<arbitrageur_core::quote::FundingRate> {
+            anyhow::bail!("unused in tests")
+        }
+        async fn fetch_account(
+            &self,
+        ) -> anyhow::Result<arbitrageur_core::position::AccountSnapshot> {
+            anyhow::bail!("unused in tests")
+        }
+        async fn place_order(
+            &self,
+            _o: arbitrageur_core::order::OrderRequest,
+        ) -> anyhow::Result<arbitrageur_core::order::OrderResponse> {
+            anyhow::bail!("unused in tests")
+        }
+        async fn cancel_order(
+            &self,
+            _r: arbitrageur_core::order::CancelRequest,
+        ) -> anyhow::Result<()> {
+            anyhow::bail!("unused in tests")
+        }
+    }
+
+    #[tokio::test]
+    async fn watchlist_rebuilds_on_usd_quote_mode_flip() {
+        let state = AppEngineState::new();
+        {
+            let mut s = state.settings.write();
+            s.binance_enabled = true;
+            s.okx_enabled = true;
+        }
+        // Same underlying asset, different USD-family quotes per venue.
+        state.test_adapters.write().unwrap().insert(
+            "binance".to_string(),
+            Arc::new(QuoteMarketsAdapter {
+                venue: "binance",
+                markets: vec![scripted_market("binance", "BTCUSDT", "BTC", "USDT")],
+            }),
+        );
+        state.test_adapters.write().unwrap().insert(
+            "okx".to_string(),
+            Arc::new(QuoteMarketsAdapter {
+                venue: "okx",
+                markets: vec![scripted_market("okx", "BTC-USDC", "BTC", "USDC")],
+            }),
+        );
+        let engine = SpreadMonitorEngine::new(&state);
+        engine.maybe_refresh_watchlist(&state).await;
+        // Default fx_adjusted merges USD-family quotes into the base key.
+        assert_eq!(
+            *engine.watchlist.lock(),
+            vec!["BTC".to_string()],
+            "merged modes collapse BTC-USDT + BTC-USDC into BTC"
+        );
+        // Settlement quotes learned per venue.
+        assert_eq!(
+            engine.settlement_quotes.lock().get("binance").cloned(),
+            Some("USDT".to_string())
+        );
+        assert_eq!(
+            engine.settlement_quotes.lock().get("okx").cloned(),
+            Some("USDC".to_string())
+        );
+        // Fetch-symbol + quote maps resolve the venue-native market.
+        {
+            let lanes = engine.lanes.lock();
+            let b = lanes.iter().find(|l| l.venue == "binance").unwrap();
+            assert_eq!(
+                b.fetch_symbol.get("BTC").map(String::as_str),
+                Some("BTCUSDT")
+            );
+            assert_eq!(b.quote_by_key.get("BTC").map(String::as_str), Some("USDT"));
+        }
+
+        // Flip to separate: the pair keys become quote-qualified, so the
+        // two venues no longer intersect and BTC drops off the watchlist
+        // while the lanes carry the exact-quote keys.
+        state.settings.write().usd_quote_mode =
+            crate::stablecoin_fx::USD_QUOTE_MODE_SEPARATE.to_string();
+        engine.maybe_refresh_watchlist(&state).await;
+        assert!(
+            engine.watchlist.lock().is_empty(),
+            "separate mode: BTC-USDT vs BTC-USDC are different instruments"
+        );
+        {
+            let lanes = engine.lanes.lock();
+            let b = lanes.iter().find(|l| l.venue == "binance").unwrap();
+            assert_eq!(b.symbols, vec!["BTC-USDT".to_string()]);
+            assert_eq!(
+                b.fetch_symbol.get("BTC-USDT").map(String::as_str),
+                Some("BTCUSDT")
+            );
+            let o = lanes.iter().find(|l| l.venue == "okx").unwrap();
+            assert_eq!(o.symbols, vec!["BTC-USDC".to_string()]);
+        }
+
+        // Matching quotes on both venues re-appear in separate mode.
+        state.test_adapters.write().unwrap().insert(
+            "okx".to_string(),
+            Arc::new(QuoteMarketsAdapter {
+                venue: "okx",
+                markets: vec![scripted_market("okx", "BTC-USDT", "BTC", "USDT")],
+            }),
+        );
+        // The venue set is unchanged, so force the refresh past the
+        // newly-admitted-venues short-circuit.
+        engine.request_watchlist_refresh();
+        engine.maybe_refresh_watchlist(&state).await;
+        assert_eq!(
+            *engine.watchlist.lock(),
+            vec!["BTC-USDT".to_string()],
+            "separate mode: same BASE-QUOTE on two venues intersects"
+        );
+
+        // Flip back: merged key returns.
+        state.settings.write().usd_quote_mode =
+            crate::stablecoin_fx::USD_QUOTE_MODE_FX_ADJUSTED.to_string();
+        engine.maybe_refresh_watchlist(&state).await;
+        assert_eq!(*engine.watchlist.lock(), vec!["BTC".to_string()]);
+    }
+
+    /// A venue whose markets carry a bare raw spelling (Hyperliquid-style
+    /// "BTC", quote known only from metadata) must still join the exact
+    /// quote's lane under `separate` — otherwise it pairs blind under a
+    /// quote-less "BTC" key and never intersects quoted listings.
+    #[tokio::test]
+    async fn separate_mode_keys_bare_symbols_by_declared_quote() {
+        let state = AppEngineState::new();
+        {
+            let mut s = state.settings.write();
+            s.binance_enabled = true;
+            s.okx_enabled = true;
+            s.usd_quote_mode = crate::stablecoin_fx::USD_QUOTE_MODE_SEPARATE.to_string();
+        }
+        let bare_usdc = arbitrageur_core::market::MarketMetadata {
+            symbol: arbitrageur_core::market::Symbol {
+                base: "BTC".into(),
+                quote: "USDC".into(),
+                raw: "BTC".into(),
+                market_type: arbitrageur_core::market::MarketType::Perpetual,
+            },
+            venue: VenueId::new("binance"),
+            venue_symbol: "BTC".to_string(),
+            price_decimals: 2,
+            size_decimals: 4,
+            min_order_size: dec!(0.001),
+            min_notional: dec!(1.0),
+            maker_fee_bps: dec!(0.1),
+            taker_fee_bps: dec!(0.5),
+            contract_size: dec!(1.0),
+            is_active: true,
+        };
+        state.test_adapters.write().unwrap().insert(
+            "binance".to_string(),
+            Arc::new(QuoteMarketsAdapter {
+                venue: "binance",
+                markets: vec![bare_usdc],
+            }),
+        );
+        state.test_adapters.write().unwrap().insert(
+            "okx".to_string(),
+            Arc::new(QuoteMarketsAdapter {
+                venue: "okx",
+                markets: vec![scripted_market("okx", "BTC-USDC", "BTC", "USDC")],
+            }),
+        );
+        let engine = SpreadMonitorEngine::new(&state);
+        engine.maybe_refresh_watchlist(&state).await;
+        assert_eq!(
+            *engine.watchlist.lock(),
+            vec!["BTC-USDC".to_string()],
+            "bare-symbol venue must join the declared quote's lane"
+        );
+        {
+            let lanes = engine.lanes.lock();
+            let b = lanes.iter().find(|l| l.venue == "binance").unwrap();
+            assert_eq!(b.symbols, vec!["BTC-USDC".to_string()]);
+            assert_eq!(
+                b.quote_by_key.get("BTC-USDC").map(String::as_str),
+                Some("USDC")
+            );
+        }
+    }
+
     #[test]
     fn lane_budget_and_round_robin() {
         let cfg = MonitorConfigDto::default();
@@ -3241,6 +3754,8 @@ mod tests {
             venue: "lighter".into(),
             adapter: Arc::new(DummyAdapter),
             symbols: vec!["A".into(), "B".into(), "C".into()],
+            fetch_symbol: HashMap::new(),
+            quote_by_key: HashMap::new(),
             requests: VecDeque::new(),
             budget_per_min: 60.0,
             usable_per_min: 45.0, // 60 * (1 - 0.25)
@@ -3281,6 +3796,8 @@ mod tests {
                 venue: "test".into(),
                 adapter: Arc::new(DummyAdapter),
                 symbols: vec!["A".into(), "B".into()],
+                fetch_symbol: HashMap::new(),
+                quote_by_key: HashMap::new(),
                 requests: VecDeque::new(),
                 budget_per_min: 60.0,
                 usable_per_min: 45.0,
@@ -3335,10 +3852,14 @@ mod tests {
     #[test]
     fn book_sample_rejects_malformed() {
         let empty = OrderBook::new(VenueId::new("x"), "T".into());
-        assert!(book_sample(&empty, "x").is_none());
+        assert!(book_sample(&empty, "x", 1.0).is_none());
         let ok = book("x", "T", 99.0, 101.0, 1);
-        let s = book_sample(&ok, "x").unwrap();
+        let s = book_sample(&ok, "x", 1.0).unwrap();
         assert!((s.mid - 100.0).abs() < 1e-9);
+        // fx_adjusted scale converts the stored basis, depth stays raw.
+        let scaled = book_sample(&ok, "x", 0.99).unwrap();
+        assert!((scaled.mid - 99.0).abs() < 1e-9);
+        assert!((scaled.best_bid - 98.01).abs() < 1e-9);
     }
 
     #[test]
@@ -3357,17 +3878,17 @@ mod tests {
         ema.insert(("lighter".into(), "BTC".into()), (0.0001, now));
         // Fresh perp rate resolves by (venue, canonical base).
         assert_eq!(
-            funding_leg_rate_hourly(&ema, "lighter", "BTC-USDC", now),
+            funding_leg_rate_hourly(&ema, "lighter", "BTC-USDC", now, true),
             Some(0.0001)
         );
         // Spot legs contribute 0 by design — never blocked, never lying.
         assert_eq!(
-            funding_leg_rate_hourly(&ema, "lighter", "BTC-SPOT", now),
+            funding_leg_rate_hourly(&ema, "lighter", "BTC-SPOT", now, true),
             Some(0.0)
         );
         // A perp leg on a venue with no sample → None (no decision).
         assert_eq!(
-            funding_leg_rate_hourly(&ema, "hyperliquid", "BTC-USDC", now),
+            funding_leg_rate_hourly(&ema, "hyperliquid", "BTC-USDC", now, true),
             None
         );
         // Stale samples (>5min) → None.
@@ -3376,8 +3897,25 @@ mod tests {
             (0.0002, now - Duration::from_secs(600)),
         );
         assert_eq!(
-            funding_leg_rate_hourly(&ema, "kraken", "BTC-USDC", now),
+            funding_leg_rate_hourly(&ema, "kraken", "BTC-USDC", now, true),
             None
+        );
+        // `separate` mode keys on the pair: a USDT-keyed rate does not
+        // answer a USDC-quoted leg.
+        ema.insert(("binance".into(), "BTC-USDT".into()), (0.0003, now));
+        assert_eq!(
+            funding_leg_rate_hourly(&ema, "binance", "BTC-USDT", now, false),
+            Some(0.0003)
+        );
+        assert_eq!(
+            funding_leg_rate_hourly(&ema, "binance", "BTC-USDC", now, false),
+            None
+        );
+        // ...while merged mode collapses the quotes onto the base.
+        ema.insert(("coinbase".into(), "BTC".into()), (0.0004, now));
+        assert_eq!(
+            funding_leg_rate_hourly(&ema, "coinbase", "BTC-USDC", now, true),
+            Some(0.0004)
         );
     }
 
