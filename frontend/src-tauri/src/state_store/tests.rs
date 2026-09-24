@@ -51,7 +51,7 @@ fn test_file_store_config_and_permissions() {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 30);
+        assert_eq!(version, 35);
         let mode: String = conn
             .query_row("PRAGMA journal_mode", [], |r| r.get(0))
             .unwrap();
@@ -732,34 +732,37 @@ fn test_leg_symbol_none_resolves_to_root_and_some_is_exact() {
         .lock()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 30);
+    assert_eq!(version, 35);
     store
-        .record_signal_execution(&NewSignalExecution {
-            id: "fund-1".to_string(),
-            strategy_id: "funding".into(),
-            symbol: "BTC-USDC".to_string(),
-            route_id: None,
-            expected_net_usd: None,
-            note: None,
-            legs: vec![
-                NewSignalLeg {
-                    account_id: None,
-                    venue: "lighter".into(),
-                    side: LegSide::Long,
-                    symbol: Some("BTC-SPOT".to_string()),
-                    intended_qty: 0.5,
-                    intended_price: None,
-                },
-                NewSignalLeg {
-                    account_id: None,
-                    venue: "lighter".into(),
-                    side: LegSide::Short,
-                    symbol: None,
-                    intended_qty: 0.5,
-                    intended_price: None,
-                },
-            ],
-        })
+        .record_signal_execution(
+            &NewSignalExecution {
+                id: "fund-1".to_string(),
+                strategy_id: "funding".into(),
+                symbol: "BTC-USDC".to_string(),
+                route_id: None,
+                expected_net_usd: None,
+                note: None,
+                legs: vec![
+                    NewSignalLeg {
+                        account_id: None,
+                        venue: "lighter".into(),
+                        side: LegSide::Long,
+                        symbol: Some("BTC-SPOT".to_string()),
+                        intended_qty: 0.5,
+                        intended_price: None,
+                    },
+                    NewSignalLeg {
+                        account_id: None,
+                        venue: "lighter".into(),
+                        side: LegSide::Short,
+                        symbol: None,
+                        intended_qty: 0.5,
+                        intended_price: None,
+                    },
+                ],
+            },
+            "testnet",
+        )
         .unwrap();
     let sig = store.get_signal("fund-1").unwrap().expect("signal");
     let long = sig
@@ -780,15 +783,15 @@ fn test_leg_symbol_none_resolves_to_root_and_some_is_exact() {
     store
         .apply_leg_fill("fund-1", LegSide::Short, 0.5, 65000.0, 0.1, None)
         .unwrap();
-    assert!((store.venue_symbol_net("lighter", "BTC-SPOT").unwrap() - 0.5).abs() < 1e-9);
-    assert!((store.venue_symbol_net("lighter", "BTC-USDC").unwrap() + 0.5).abs() < 1e-9);
+    assert!((store.venue_symbol_net("lighter", "BTC-SPOT", None).unwrap() - 0.5).abs() < 1e-9);
+    assert!((store.venue_symbol_net("lighter", "BTC-USDC", None).unwrap() + 0.5).abs() < 1e-9);
 }
 
 #[test]
 fn test_v22_backfill_copies_parent_root_symbol() {
     let store = StateStore::open_in_memory().unwrap();
     store
-        .record_signal_execution(&two_leg_signal("s-v21", "ETH-USDC", None, None))
+        .record_signal_execution(&two_leg_signal("s-v21", "ETH-USDC", None, None), "testnet")
         .unwrap();
     // Simulate a pre-v22 row, then replay the v22 backfill verbatim.
     store
@@ -809,7 +812,64 @@ fn test_v22_backfill_copies_parent_root_symbol() {
             .unwrap();
     let sig = store.get_signal("s-v21").unwrap().expect("signal");
     assert!(sig.legs.iter().all(|l| l.symbol == "ETH-USDC"));
-    assert_eq!(store.ticker_net_position("ETH-USDC").unwrap(), 0.0);
+    assert_eq!(store.ticker_net_position("ETH-USDC", None).unwrap(), 0.0);
+}
+
+#[test]
+fn test_symbol_guards_are_case_insensitive() {
+    // Regression (#42): a signal persisted under any case spelling must
+    // still block and net against the same instrument — a lowercase write
+    // must never let `BTC-USDC` slip past an unresolved `btc-usdc`.
+    let store = StateStore::open_in_memory().unwrap();
+    store
+        .record_signal_execution(&two_leg_signal("s-case", "btc-usdc", None, None), "testnet")
+        .unwrap();
+    for spelling in ["BTC-USDC", "btc-usdc", "Btc-Usdc"] {
+        assert!(
+            store.ticker_blocked(spelling, None).unwrap(),
+            "{spelling} must be blocked by the stored lowercase signal"
+        );
+        assert_eq!(store.blocking_signals(spelling, None).unwrap().len(), 1);
+        assert_eq!(store.list_signals(Some(spelling), None).unwrap().len(), 1);
+    }
+    // Unrelated instrument is not blocked.
+    assert!(!store.ticker_blocked("ETH-USDC", None).unwrap());
+
+    // Filled legs net case-insensitively at both the ticker and venue level.
+    store
+        .apply_leg_fill("s-case", LegSide::Long, 0.5, 60000.0, 0.0, None)
+        .unwrap();
+    store
+        .apply_leg_fill("s-case", LegSide::Short, 0.5, 60100.0, 0.0, None)
+        .unwrap();
+    store
+        .update_signal_status("s-case", SignalStatus::Balanced, None)
+        .unwrap();
+    assert_eq!(
+        store.open_balanced_signal_count("BTC-USDC", None).unwrap(),
+        1
+    );
+    assert_eq!(
+        store.ticker_net_position("BTC-USDC", None).unwrap().abs(),
+        0.0
+    );
+    // Leg symbols keep venue-native case at rest but net case-insensitively.
+    assert!(
+        (store
+            .venue_symbol_net("hyperliquid", "BTC-USDC", None)
+            .unwrap()
+            - 0.5)
+            .abs()
+            < 1e-9
+    );
+    assert!(
+        (store
+            .venue_symbol_net("hyperliquid", "btc-usdc", None)
+            .unwrap()
+            - 0.5)
+            .abs()
+            < 1e-9
+    );
 }
 
 #[test]
@@ -834,18 +894,16 @@ fn test_signal_lifecycle_blocks_then_frees_ticker() {
         .unwrap();
 
     let sig = store
-        .record_signal_execution(&two_leg_signal(
-            "s1",
-            "BTC-USDC",
-            Some("hl_a"),
-            Some("lt_a"),
-        ))
+        .record_signal_execution(
+            &two_leg_signal("s1", "BTC-USDC", Some("hl_a"), Some("lt_a")),
+            "testnet",
+        )
         .unwrap();
     assert_eq!(sig.status, SignalStatus::InFlight);
     assert_eq!(sig.account_long_id.as_deref(), Some("hl_a"));
     assert_eq!(sig.account_short_id.as_deref(), Some("lt_a"));
     assert_eq!(sig.legs.len(), 2);
-    assert!(store.ticker_blocked("btc-usdc").unwrap());
+    assert!(store.ticker_blocked("btc-usdc", None).unwrap());
 
     // Full fills on both legs → per-signal delta reconciles to zero.
     store
@@ -858,14 +916,21 @@ fn test_signal_lifecycle_blocks_then_frees_ticker() {
     store
         .update_signal_status("s1", SignalStatus::Balanced, None)
         .unwrap();
-    assert!(!store.ticker_blocked("BTC-USDC").unwrap());
+    assert!(!store.ticker_blocked("BTC-USDC", None).unwrap());
     // The open position still contributes legs to per-venue/account nets.
-    assert!((store.venue_symbol_net("hyperliquid", "BTC-USDC").unwrap() - 1.0).abs() < 1e-9);
-    assert!((store.venue_symbol_net("lighter", "BTC-USDC").unwrap() + 1.0).abs() < 1e-9);
+    assert!(
+        (store
+            .venue_symbol_net("hyperliquid", "BTC-USDC", None)
+            .unwrap()
+            - 1.0)
+            .abs()
+            < 1e-9
+    );
+    assert!((store.venue_symbol_net("lighter", "BTC-USDC", None).unwrap() + 1.0).abs() < 1e-9);
     assert!((store.account_symbol_net("hl_a", "BTC-USDC").unwrap() - 1.0).abs() < 1e-9);
     assert!((store.account_symbol_net("lt_a", "BTC-USDC").unwrap() + 1.0).abs() < 1e-9);
     // Ticker net is zero only because the signal hedged itself.
-    assert!((store.ticker_net_position("BTC-USDC").unwrap()).abs() < 1e-9);
+    assert!((store.ticker_net_position("BTC-USDC", None).unwrap()).abs() < 1e-9);
 
     let recorded = store.get_signal("s1").unwrap().unwrap();
     assert_eq!(recorded.status, SignalStatus::Balanced);
@@ -876,7 +941,7 @@ fn test_signal_lifecycle_blocks_then_frees_ticker() {
 fn test_signal_predictions_record_resolve_list() {
     let store = StateStore::open_in_memory().unwrap();
     store
-        .record_signal_execution(&two_leg_signal("s-pred", "BTC-USDC", None, None))
+        .record_signal_execution(&two_leg_signal("s-pred", "BTC-USDC", None, None), "testnet")
         .unwrap();
 
     // Two kinds can attach to one signal (composite PK).
@@ -971,7 +1036,7 @@ fn test_signal_predictions_record_resolve_list() {
 fn record_leg_order_id_before_fill() {
     let store = StateStore::open_in_memory().unwrap();
     store
-        .record_signal_execution(&two_leg_signal("s-ack", "BTC-USDC", None, None))
+        .record_signal_execution(&two_leg_signal("s-ack", "BTC-USDC", None, None), "testnet")
         .unwrap();
     store
         .record_leg_order_id("s-ack", LegSide::Short, "venue-order-42", Some("cid-ack-1"))
@@ -997,7 +1062,7 @@ fn test_v27_intended_price_roundtrip() {
     let mut sig = two_leg_signal("s-intended", "BTC-USDC", None, None);
     sig.legs[0].intended_price = Some(100.0);
     sig.legs[1].intended_price = Some(100.5);
-    store.record_signal_execution(&sig).unwrap();
+    store.record_signal_execution(&sig, "testnet").unwrap();
     let got = store.get_signal("s-intended").unwrap().unwrap();
     let long = got.legs.iter().find(|l| l.side == LegSide::Long).unwrap();
     let short = got.legs.iter().find(|l| l.side == LegSide::Short).unwrap();
@@ -1014,7 +1079,7 @@ fn test_v27_slippage_direction_aware_and_missing_data() {
     let mut sig = two_leg_signal("s-slip", "BTC-USDC", None, None);
     sig.legs[0].intended_price = Some(100.0);
     sig.legs[1].intended_price = Some(100.5);
-    store.record_signal_execution(&sig).unwrap();
+    store.record_signal_execution(&sig, "testnet").unwrap();
     store
         .apply_leg_fill("s-slip", LegSide::Long, 1.0, 100.1, 0.0, None)
         .unwrap();
@@ -1031,7 +1096,7 @@ fn test_v27_slippage_direction_aware_and_missing_data() {
 
     // No dispatch quote → excluded even after a fill lands.
     store
-        .record_signal_execution(&two_leg_signal("s-none", "BTC-USDC", None, None))
+        .record_signal_execution(&two_leg_signal("s-none", "BTC-USDC", None, None), "testnet")
         .unwrap();
     store
         .apply_leg_fill("s-none", LegSide::Long, 1.0, 100.0, 0.0, None)
@@ -1039,7 +1104,7 @@ fn test_v27_slippage_direction_aware_and_missing_data() {
     // Intended price without any fill → excluded.
     let mut pending = two_leg_signal("s-pending", "BTC-USDC", None, None);
     pending.legs[0].intended_price = Some(100.0);
-    store.record_signal_execution(&pending).unwrap();
+    store.record_signal_execution(&pending, "testnet").unwrap();
 
     let hl = store.leg_slippage_samples_bps("hyperliquid", 10).unwrap();
     assert_eq!(hl.len(), 1, "only the fully-priced fill may sample");
@@ -1107,7 +1172,7 @@ fn test_migration_v27_intended_price_defaults_null() {
     let v: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 30);
+    assert_eq!(v, 35);
     let ip: Option<f64> = conn
         .query_row(
             "SELECT intended_price FROM signal_legs WHERE id = 'leg-pre'",
@@ -1122,14 +1187,17 @@ fn test_migration_v27_intended_price_defaults_null() {
 fn pending_order_legs_and_monotonic_fill_state() {
     let store = StateStore::open_in_memory().unwrap();
     store
-        .record_signal_execution(&two_leg_signal("s-recon", "BTC-USDC", None, None))
+        .record_signal_execution(
+            &two_leg_signal("s-recon", "BTC-USDC", None, None),
+            "testnet",
+        )
         .unwrap();
     // No order ids yet — nothing to reconcile.
-    assert!(store.list_pending_order_legs().unwrap().is_empty());
+    assert!(store.list_pending_order_legs(None).unwrap().is_empty());
     store
         .record_leg_order_id("s-recon", LegSide::Short, "ord-77", Some("cid-recon-1"))
         .unwrap();
-    let pending = store.list_pending_order_legs().unwrap();
+    let pending = store.list_pending_order_legs(None).unwrap();
     assert_eq!(pending.len(), 1);
     let (exec, leg) = &pending[0];
     assert_eq!(exec.id, "s-recon");
@@ -1158,14 +1226,14 @@ fn pending_order_legs_and_monotonic_fill_state() {
     store
         .update_signal_status("s-recon", SignalStatus::Closed, None)
         .unwrap();
-    assert!(store.list_pending_order_legs().unwrap().is_empty());
+    assert!(store.list_pending_order_legs(None).unwrap().is_empty());
 }
 
 #[test]
 fn fee_unaccounted_legs_covers_filled_at_submit() {
     let store = StateStore::open_in_memory().unwrap();
     store
-        .record_signal_execution(&two_leg_signal("s-fee", "BTC-USDC", None, None))
+        .record_signal_execution(&two_leg_signal("s-fee", "BTC-USDC", None, None), "testnet")
         .unwrap();
     // An order id without any fill — nothing to price the fee on yet.
     store
@@ -1187,7 +1255,10 @@ fn fee_unaccounted_legs_covers_filled_at_submit() {
     assert!(store.list_fee_unaccounted_legs(86_400).unwrap().is_empty());
     // A leg without a venue order id can never be enriched.
     store
-        .record_signal_execution(&two_leg_signal("s-nooid", "BTC-USDC", None, None))
+        .record_signal_execution(
+            &two_leg_signal("s-nooid", "BTC-USDC", None, None),
+            "testnet",
+        )
         .unwrap();
     store
         .apply_leg_fill("s-nooid", LegSide::Short, 0.5, 100.0, 0.0, None)
@@ -1202,7 +1273,7 @@ fn test_imbalanced_signal_blocks_ticker_despite_net_zero() {
     // flat, but only because signal A carries −1 while signal B carries
     // +1. Neither signal hedged itself, so both must block.
     store
-        .record_signal_execution(&two_leg_signal("sa", "BTC-USDC", None, None))
+        .record_signal_execution(&two_leg_signal("sa", "BTC-USDC", None, None), "testnet")
         .unwrap();
     store
         .apply_leg_fill("sa", LegSide::Short, 1.0, 60120.0, 0.0, Some("o-a"))
@@ -1214,7 +1285,7 @@ fn test_imbalanced_signal_blocks_ticker_despite_net_zero() {
     let mut b = two_leg_signal("sb", "BTC-USDC", None, None);
     b.legs[0].venue = "lighter".into();
     b.legs[1].venue = "hyperliquid".into();
-    store.record_signal_execution(&b).unwrap();
+    store.record_signal_execution(&b, "testnet").unwrap();
     store
         .apply_leg_fill("sb", LegSide::Long, 1.0, 60050.0, 0.0, Some("o-b"))
         .unwrap();
@@ -1223,21 +1294,21 @@ fn test_imbalanced_signal_blocks_ticker_despite_net_zero() {
         .unwrap();
 
     // Aggregate ticker position is flat (−1 + 1 = 0)...
-    assert!((store.ticker_net_position("BTC-USDC").unwrap()).abs() < 1e-9);
+    assert!((store.ticker_net_position("BTC-USDC", None).unwrap()).abs() < 1e-9);
     // ...yet each signal individually holds residual exposure.
     assert!((store.signal_delta("sa").unwrap() + 1.0).abs() < 1e-9);
     assert!((store.signal_delta("sb").unwrap() - 1.0).abs() < 1e-9);
     // The ticker stays blocked until BOTH imbalanced signals reconcile.
-    assert!(store.ticker_blocked("BTC-USDC").unwrap());
-    let blockers = store.blocking_signals("BTC-USDC").unwrap();
+    assert!(store.ticker_blocked("BTC-USDC", None).unwrap());
+    let blockers = store.blocking_signals("BTC-USDC", None).unwrap();
     assert_eq!(blockers.len(), 2);
 
     // Closing B's exposure alone is not enough — A still blocks.
     store
         .update_signal_status("sb", SignalStatus::Closed, None)
         .unwrap();
-    assert!(store.ticker_blocked("BTC-USDC").unwrap());
-    let blockers = store.blocking_signals("BTC-USDC").unwrap();
+    assert!(store.ticker_blocked("BTC-USDC", None).unwrap());
+    let blockers = store.blocking_signals("BTC-USDC", None).unwrap();
     assert_eq!(blockers.len(), 1);
     assert_eq!(blockers[0].id, "sa");
 }
@@ -1248,14 +1319,14 @@ fn test_in_flight_signal_survives_reopen() {
     {
         let store = StateStore::open(&file).unwrap();
         store
-            .record_signal_execution(&two_leg_signal("s-live", "ETH-USDC", None, None))
+            .record_signal_execution(&two_leg_signal("s-live", "ETH-USDC", None, None), "testnet")
             .unwrap();
-        assert!(store.ticker_blocked("ETH-USDC").unwrap());
+        assert!(store.ticker_blocked("ETH-USDC", None).unwrap());
     }
     // Restart: the interrupted in-flight signal still blocks the ticker.
     let store = StateStore::open(&file).unwrap();
-    assert!(store.ticker_blocked("eth-usdc").unwrap());
-    let blockers = store.blocking_signals("ETH-USDC").unwrap();
+    assert!(store.ticker_blocked("eth-usdc", None).unwrap());
+    let blockers = store.blocking_signals("ETH-USDC", None).unwrap();
     assert_eq!(blockers.len(), 1);
     assert_eq!(blockers[0].status, SignalStatus::InFlight);
     let _ = fs::remove_dir_all(dir);
@@ -1267,18 +1338,21 @@ fn test_signal_validation_and_account_fk() {
     // Unknown strategy IDs and empty symbols are rejected.
     let mut bad = two_leg_signal("bad", "BTC-USDC", None, None);
     bad.strategy_id = "nonsense".into();
-    assert!(store.record_signal_execution(&bad).is_err());
+    assert!(store.record_signal_execution(&bad, "testnet",).is_err());
     let mut bad2 = two_leg_signal("bad2", "  ", None, None);
     bad2.symbol = " ".into();
-    assert!(store.record_signal_execution(&bad2).is_err());
+    assert!(store.record_signal_execution(&bad2, "testnet",).is_err());
     // Legs referencing a nonexistent account violate the FK.
     assert!(store
-        .record_signal_execution(&two_leg_signal("bad3", "BTC-USDC", Some("ghost"), None))
+        .record_signal_execution(
+            &two_leg_signal("bad3", "BTC-USDC", Some("ghost"), None),
+            "testnet",
+        )
         .is_err());
     // Zero/negative intended quantities are rejected.
     let mut bad4 = two_leg_signal("bad4", "BTC-USDC", None, None);
     bad4.legs[0].intended_qty = 0.0;
-    assert!(store.record_signal_execution(&bad4).is_err());
+    assert!(store.record_signal_execution(&bad4, "testnet",).is_err());
 
     // account_has_signal_legs gates deletion.
     store
@@ -1295,7 +1369,10 @@ fn test_signal_validation_and_account_fk() {
         .unwrap();
     assert!(!store.account_has_signal_legs("hl_a").unwrap());
     store
-        .record_signal_execution(&two_leg_signal("s9", "BTC-USDC", Some("hl_a"), None))
+        .record_signal_execution(
+            &two_leg_signal("s9", "BTC-USDC", Some("hl_a"), None),
+            "testnet",
+        )
         .unwrap();
     assert!(store.account_has_signal_legs("hl_a").unwrap());
     assert!(store.delete_account("hl_a").is_err());
@@ -1306,7 +1383,10 @@ fn test_spatial_baseline_roundtrip_and_validation() {
     let store = StateStore::open_in_memory().unwrap();
     assert_eq!(normalize_strategy_id("triangle").unwrap(), "triangle");
     store
-        .record_signal_execution(&two_leg_signal("sig-base-1", "BTC-USDC", None, None))
+        .record_signal_execution(
+            &two_leg_signal("sig-base-1", "BTC-USDC", None, None),
+            "testnet",
+        )
         .unwrap();
     let row = SpatialEntryBaseline {
         signal_id: "sig-base-1".into(),
@@ -1775,7 +1855,7 @@ fn test_kv_survives_reopen() {
             .lock()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 30);
+        assert_eq!(version, 35);
     }
     let _ = fs::remove_dir_all(dir);
 }
@@ -1791,6 +1871,7 @@ fn test_cycle_lots_persist_across_reopen() {
                 id: "spatial-9".into(),
                 strategy_id: "spatial_spread".into(),
                 symbol: "BTC-USDC".into(),
+                environment: "testnet".into(),
                 venue_long: "hyperliquid".into(),
                 venue_short: "lighter".into(),
                 entry_time: chrono::Utc::now(),
@@ -2358,7 +2439,7 @@ fn test_migration_v20_rescales_lighter_funding_history() {
     let v: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 30);
+    assert_eq!(v, 35);
 
     let mut stmt = conn
             .prepare("SELECT venue_id, rate_8h, interval_hours FROM funding_rate_samples ORDER BY venue_id, ts_ms")
@@ -2478,7 +2559,7 @@ fn test_migration_v7_to_v8_preserves_data() {
     let v10: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v10, 30);
+    assert_eq!(v10, 35);
     // v19 remaps the renamed lifecycle statuses on the way through.
     let remapped: String = conn
         .query_row(
@@ -2728,7 +2809,7 @@ fn filled_two_leg(
     sig.legs[1].venue = short_venue.to_string();
     sig.legs[0].intended_qty = qty;
     sig.legs[1].intended_qty = qty;
-    store.record_signal_execution(&sig).unwrap();
+    store.record_signal_execution(&sig, "testnet").unwrap();
     store
         .apply_leg_fill(id, LegSide::Long, qty, long_px, 0.5, None)
         .unwrap();
@@ -2744,7 +2825,7 @@ fn filled_two_leg(
 fn test_unknown_leg_side_fails_closed_instead_of_defaulting_long() {
     let store = StateStore::open_in_memory().unwrap();
     let sig = two_leg_signal("sig_bad_side", "BTC-USDC", None, None);
-    store.record_signal_execution(&sig).unwrap();
+    store.record_signal_execution(&sig, "testnet").unwrap();
     {
         let conn = store.conn.lock();
         conn.execute_batch("PRAGMA ignore_check_constraints = ON;")
@@ -2899,7 +2980,7 @@ fn test_aggregate_open_positions_partial_flatten_nets_residual() {
     child.legs[1].side = LegSide::Long;
     child.legs[0].intended_qty = 0.6;
     child.legs[1].intended_qty = 0.6;
-    store.record_signal_execution(&child).unwrap();
+    store.record_signal_execution(&child, "testnet").unwrap();
     store
         .apply_leg_fill("flat-s1-0001", LegSide::Short, 0.6, 100.0, 0.0, None)
         .unwrap();
@@ -2940,7 +3021,7 @@ fn test_aggregate_open_positions_single_leg_flatten_child_merges() {
     child.legs[0].venue = "lighter".into(); // …retargeted to the residual venue
     child.legs[0].side = LegSide::Long; // close the parent's short
     child.legs[0].intended_qty = 0.005;
-    store.record_signal_execution(&child).unwrap();
+    store.record_signal_execution(&child, "testnet").unwrap();
     store
         .apply_leg_fill("flat-s1-a1b2", LegSide::Long, 0.005, 2700.0, 0.0, None)
         .unwrap();
@@ -3328,19 +3409,22 @@ fn test_margin_snapshots_table_exists_after_migration() {
 fn pending_order_legs_exclude_simulated_ids() {
     let store = StateStore::open_in_memory().unwrap();
     store
-        .record_signal_execution(&two_leg_signal("s-paper", "BTC-USDC", None, None))
+        .record_signal_execution(
+            &two_leg_signal("s-paper", "BTC-USDC", None, None),
+            "testnet",
+        )
         .unwrap();
     // Paper fills write synthetic sim-* order ids — they must never be
     // polled against a real venue.
     store
         .record_leg_order_id("s-paper", LegSide::Short, "sim-deadbeef", None)
         .unwrap();
-    assert!(store.list_pending_order_legs().unwrap().is_empty());
+    assert!(store.list_pending_order_legs(None).unwrap().is_empty());
     // A real venue id on the other leg still enters the poll set.
     store
         .record_leg_order_id("s-paper", LegSide::Long, "real-ord-9", None)
         .unwrap();
-    let pending = store.list_pending_order_legs().unwrap();
+    let pending = store.list_pending_order_legs(None).unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].1.side, LegSide::Long);
 }
@@ -3378,7 +3462,7 @@ fn test_migration_v24_admits_external_and_preserves_rows() {
     let v: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 30);
+    assert_eq!(v, 35);
     let kept: String = conn
         .query_row(
             "SELECT strategy_id FROM signal_executions WHERE id = 'sig-keep'",
@@ -3435,7 +3519,7 @@ fn external_strategy_signal_persists() {
             intended_price: None,
         }],
     };
-    store.record_signal_execution(&sig).unwrap();
+    store.record_signal_execution(&sig, "testnet").unwrap();
 }
 
 #[test]
@@ -3446,22 +3530,25 @@ fn every_allowed_strategy_id_persists() {
     let store = StateStore::open_in_memory().unwrap();
     for (i, sid) in ALLOWED_STRATEGY_IDS.iter().enumerate() {
         store
-            .record_signal_execution(&NewSignalExecution {
-                id: format!("allowed-{i}"),
-                strategy_id: (*sid).into(),
-                symbol: "BTC-USD".into(),
-                route_id: None,
-                expected_net_usd: None,
-                note: None,
-                legs: vec![NewSignalLeg {
-                    account_id: None,
-                    venue: "kraken".into(),
-                    side: LegSide::Long,
-                    symbol: Some("BTC-USD".into()),
-                    intended_qty: 1.0,
-                    intended_price: None,
-                }],
-            })
+            .record_signal_execution(
+                &NewSignalExecution {
+                    id: format!("allowed-{i}"),
+                    strategy_id: (*sid).into(),
+                    symbol: "BTC-USD".into(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: vec![NewSignalLeg {
+                        account_id: None,
+                        venue: "kraken".into(),
+                        side: LegSide::Long,
+                        symbol: Some("BTC-USD".into()),
+                        intended_qty: 1.0,
+                        intended_price: None,
+                    }],
+                },
+                "testnet",
+            )
             .unwrap_or_else(|e| panic!("strategy id {sid} failed CHECK: {e}"));
     }
 }
@@ -3480,6 +3567,7 @@ fn test_scheduled_exits_crud_and_claim() {
         limit_price: None,
         execute_at_ms: 1_800_000_000_000,
         status: "pending".into(),
+        attempts: 0,
         note: None,
         created_at: now.clone(),
         updated_at: now,
@@ -3530,6 +3618,7 @@ fn test_scheduled_exits_reject_bad_rows() {
         limit_price: None,
         execute_at_ms: 1,
         status: "pending".into(),
+        attempts: 0,
         note: None,
         created_at: now.clone(),
         updated_at: now,
@@ -3552,4 +3641,391 @@ fn test_scheduled_exits_reject_bad_rows() {
             "row {i} must fail CHECK"
         );
     }
+}
+
+#[test]
+fn test_signal_environment_isolation() {
+    // Regression (#45): a live signal must be invisible to testnet gating
+    // reads and vice versa — environments never share blocking exposure.
+    let store = StateStore::open_in_memory().unwrap();
+    store
+        .record_signal_execution(&two_leg_signal("s-test", "BTC-USDC", None, None), "testnet")
+        .unwrap();
+    store
+        .record_signal_execution(&two_leg_signal("s-live", "ETH-USDC", None, None), "live")
+        .unwrap();
+
+    // In-flight signals block their own environment only.
+    assert!(store.ticker_blocked("BTC-USDC", Some("testnet")).unwrap());
+    assert!(!store.ticker_blocked("BTC-USDC", Some("live")).unwrap());
+    assert!(store.ticker_blocked("ETH-USDC", Some("live")).unwrap());
+    assert!(!store.ticker_blocked("ETH-USDC", Some("testnet")).unwrap());
+    // Unscoped reads (env-switch guards) still see everything.
+    assert!(store.ticker_blocked("BTC-USDC", None).unwrap());
+    assert!(store.ticker_blocked("ETH-USDC", None).unwrap());
+
+    // Environment attribution is durable.
+    assert_eq!(
+        store.get_signal("s-test").unwrap().unwrap().environment,
+        "testnet"
+    );
+    assert_eq!(
+        store.get_signal("s-live").unwrap().unwrap().environment,
+        "live"
+    );
+}
+
+#[test]
+fn test_unknown_environment_signal_blocks_both_envs() {
+    // Regression (#45): a legacy row whose environment cannot be
+    // attributed stays fail-closed visible to BOTH environments — an
+    // un-attributable exposure must block entries everywhere.
+    let store = StateStore::open_in_memory().unwrap();
+    store
+        .record_signal_execution(
+            &two_leg_signal("s-legacy", "BTC-USDC", None, None),
+            "testnet",
+        )
+        .unwrap();
+    store
+        .conn
+        .lock()
+        .execute(
+            "UPDATE signal_executions SET environment = 'unknown' WHERE id = 's-legacy'",
+            [],
+        )
+        .unwrap();
+    for env in [Some("testnet"), Some("live"), None] {
+        assert!(
+            store.ticker_blocked("BTC-USDC", env).unwrap(),
+            "unknown-env signal must block env {env:?}"
+        );
+    }
+}
+
+#[test]
+fn test_environment_scoped_open_and_pending_reads() {
+    let store = StateStore::open_in_memory().unwrap();
+    store
+        .record_signal_execution(&two_leg_signal("s-t", "BTC-USDC", None, None), "testnet")
+        .unwrap();
+    store
+        .record_signal_execution(&two_leg_signal("s-l", "ETH-USDC", None, None), "live")
+        .unwrap();
+
+    let testnet_open = store.list_open_signals(Some("testnet")).unwrap();
+    assert_eq!(testnet_open.len(), 1);
+    assert_eq!(testnet_open[0].id, "s-t");
+    let live_open = store.list_open_signals(Some("live")).unwrap();
+    assert_eq!(live_open.len(), 1);
+    assert_eq!(live_open[0].id, "s-l");
+    assert_eq!(store.list_open_signals(None).unwrap().len(), 2);
+
+    // Pending-order polling must be env-scoped too — a testnet leg must
+    // never be polled through a live adapter. Legs enter the poll set via
+    // a recorded venue order id.
+    store
+        .record_leg_order_id("s-t", LegSide::Long, "tn-oid-1", None)
+        .unwrap();
+    store
+        .record_leg_order_id("s-l", LegSide::Short, "lv-oid-1", None)
+        .unwrap();
+    let tn_pending = store.list_pending_order_legs(Some("testnet")).unwrap();
+    assert_eq!(tn_pending.len(), 1);
+    assert_eq!(tn_pending[0].0.id, "s-t");
+    let lv_pending = store.list_pending_order_legs(Some("live")).unwrap();
+    assert_eq!(lv_pending.len(), 1);
+    assert_eq!(lv_pending[0].0.id, "s-l");
+
+    // Balanced counts and net positions respect env.
+    store
+        .update_signal_status("s-t", SignalStatus::Balanced, None)
+        .unwrap();
+    assert_eq!(
+        store
+            .open_balanced_signal_count("BTC-USDC", Some("testnet"))
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        store
+            .open_balanced_signal_count("BTC-USDC", Some("live"))
+            .unwrap(),
+        0
+    );
+    store
+        .apply_leg_fill("s-t", LegSide::Long, 1.0, 64000.0, 0.0, None)
+        .unwrap();
+    assert_eq!(
+        store
+            .ticker_net_position("BTC-USDC", Some("testnet"))
+            .unwrap(),
+        1.0
+    );
+    assert_eq!(
+        store.ticker_net_position("BTC-USDC", Some("live")).unwrap(),
+        0.0
+    );
+}
+
+#[test]
+fn test_terminal_signal_never_reopens() {
+    // Regression (#45): closed/failed are terminal — a stale
+    // reconciliation pass must not resurrect them, repeated terminal
+    // writes are idempotent, and closed_at keeps the first stamp.
+    let store = StateStore::open_in_memory().unwrap();
+    store
+        .record_signal_execution(&two_leg_signal("s-term", "BTC-USDC", None, None), "testnet")
+        .unwrap();
+    store
+        .update_signal_status("s-term", SignalStatus::Closed, Some("first close"))
+        .unwrap();
+    let first = store.get_signal("s-term").unwrap().unwrap();
+    assert_eq!(first.status, SignalStatus::Closed);
+    let first_closed_at = first.closed_at.clone().expect("closed_at stamped");
+
+    // Reopen attempts are rejected and change nothing.
+    for status in [
+        SignalStatus::InFlight,
+        SignalStatus::Balanced,
+        SignalStatus::Imbalanced,
+        SignalStatus::Unresolved,
+    ] {
+        assert!(
+            store
+                .update_signal_status("s-term", status, Some("stale"))
+                .is_err(),
+            "{status:?} must not reopen a closed signal"
+        );
+        let sig = store.get_signal("s-term").unwrap().unwrap();
+        assert_eq!(sig.status, SignalStatus::Closed);
+        assert_eq!(sig.closed_at.as_deref(), Some(first_closed_at.as_str()));
+    }
+
+    // Idempotent terminal write: same status is allowed, closed_at keeps
+    // the original stamp (not re-dated).
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    store
+        .update_signal_status("s-term", SignalStatus::Closed, Some("repeat"))
+        .unwrap();
+    let sig = store.get_signal("s-term").unwrap().unwrap();
+    assert_eq!(sig.closed_at.as_deref(), Some(first_closed_at.as_str()));
+    assert_eq!(sig.note.as_deref(), Some("repeat"));
+
+    // Cross-terminal moves are rejected — a closed signal cannot become
+    // failed, a failed signal cannot become closed.
+    assert!(store
+        .update_signal_status("s-term", SignalStatus::Failed, None)
+        .is_err());
+    store
+        .record_signal_execution(&two_leg_signal("s-fail", "ETH-USDC", None, None), "testnet")
+        .unwrap();
+    store
+        .update_signal_status("s-fail", SignalStatus::Failed, None)
+        .unwrap();
+    assert!(store
+        .update_signal_status("s-fail", SignalStatus::Closed, None)
+        .is_err());
+    assert!(store
+        .update_signal_status("s-fail", SignalStatus::InFlight, None)
+        .is_err());
+    assert_eq!(
+        store.get_signal("s-fail").unwrap().unwrap().status,
+        SignalStatus::Failed
+    );
+}
+
+#[test]
+fn test_v34_enables_incremental_auto_vacuum_and_retention_shrinks_db() {
+    // Regression (#43): deleted pages must return to the allocator —
+    // auto_vacuum is enabled by the v34 migration (pragma + one-time
+    // VACUUM), and a prune + incremental_vacuum pass measurably shrinks
+    // the database instead of parking freed rows on the freelist.
+    let store = StateStore::open_in_memory().unwrap();
+    let auto_vacuum: i64 = store
+        .conn
+        .lock()
+        .query_row("PRAGMA auto_vacuum", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(auto_vacuum, 2, "auto_vacuum must be INCREMENTAL (2)");
+
+    // Grow enough rows to allocate real pages (~100B/row).
+    for i in 0..4_000i64 {
+        store
+            .record_spread_samples(
+                "BTC-USDC",
+                1_000 + i,
+                &[sample("hyperliquid", 100.0 + (i % 50) as f64)],
+            )
+            .unwrap();
+    }
+    let grown = store.db_size_bytes().unwrap();
+    assert!(grown > 0);
+
+    // Keep the newest 10 rows, then return freed pages — the file must
+    // converge toward used size, not stay at the high-water mark.
+    store.prune_spread_samples(0, 10).unwrap();
+    store.incremental_vacuum(1_000_000).unwrap();
+    let shrunk = store.db_size_bytes().unwrap();
+    assert!(
+        shrunk < grown,
+        "DB must shrink after prune+vacuum: grown={grown} shrunk={shrunk}"
+    );
+    let freelist: i64 = store
+        .conn
+        .lock()
+        .query_row("PRAGMA freelist_count", [], |r| r.get(0))
+        .unwrap();
+    // WAL pins a small tail — the pass must drain the bulk of the freelist
+    // (~thousands of pages freed), not necessarily reach zero.
+    assert!(
+        freelist < 500,
+        "freelist must be nearly drained, got {freelist}"
+    );
+}
+
+#[test]
+fn telemetry_samples_offload_to_dedicated_db() {
+    let (dir, file) = temp_store_path("telemetry");
+    // Seed a pre-split row straight into the main db; reopening must drain
+    // it onto the dedicated telemetry connection.
+    {
+        let store = StateStore::open(&file).unwrap();
+        store
+            .conn
+            .lock()
+            .execute(
+                "INSERT INTO spread_samples
+                    (symbol, venue_id, ts_ms, mid, best_bid, best_ask)
+                 VALUES ('BTC', 'binance', 1000, 50000.0, 49990.0, 50010.0)",
+                [],
+            )
+            .unwrap();
+    }
+    let store = StateStore::open(&file).unwrap();
+    let legacy: i64 = store
+        .conn
+        .lock()
+        .query_row("SELECT COUNT(*) FROM spread_samples", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(legacy, 0, "legacy rows must drain out of the main db");
+    assert!(
+        file.with_extension("telemetry.db").exists(),
+        "telemetry db file must exist"
+    );
+    let rows = store.spread_samples("BTC", 0, 2000).unwrap();
+    assert_eq!(rows.len(), 1, "drained rows remain readable");
+    assert_eq!(rows[0].ts_ms, 1000);
+
+    // Frame flood collapses to one row per (symbol, venue) interval.
+    let entry = |mid: f64| VenueSampleEntry {
+        venue_id: "lighter".into(),
+        mid,
+        best_bid: mid - 1.0,
+        best_ask: mid + 1.0,
+        bid_depth: None,
+        ask_depth: None,
+    };
+    for i in 0..50 {
+        store
+            .record_spread_samples_throttled("BTC", true, 10_000 + i * 10, &[entry(50000.0)])
+            .unwrap();
+    }
+    store
+        .record_spread_samples_throttled(
+            "BTC",
+            true,
+            10_000 + StateStore::SAMPLE_MIN_INTERVAL_MS + 1,
+            &[entry(50100.0)],
+        )
+        .unwrap();
+    let rows = store.spread_samples("BTC", 10_000, 11_000).unwrap();
+    assert_eq!(
+        rows.len(),
+        2,
+        "throttled flood must persist first frame + first past the interval"
+    );
+
+    // Ledger writes never queue behind the frame flood: a signal execution
+    // record lands and roundtrips while telemetry writes interleave.
+    for i in 0..200 {
+        let _ = store.record_spread_samples_throttled("BTC", true, 20_000 + i, &[entry(50000.0)]);
+    }
+    let sig = two_leg_signal("flood-ledger-1", "BTC", None, None);
+    store.record_signal_execution(&sig, "testnet").unwrap();
+    let stored = store.list_signals(None, None).unwrap();
+    assert!(stored.iter().any(|s| s.id == "flood-ledger-1"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn ticker_reduce_only_is_scoped_by_environment_and_strategy() {
+    let store = StateStore::open_in_memory().unwrap();
+
+    // Unknown (env, strategy, symbol) → not reduce-only.
+    assert!(!store
+        .ticker_reduce_only("BTC-USDC", "futures", "testnet")
+        .unwrap());
+
+    store
+        .set_ticker_reduce_only("BTC-USDC", "futures", "testnet", true, 1_000)
+        .unwrap();
+    assert!(store
+        .ticker_reduce_only("BTC-USDC", "futures", "testnet")
+        .unwrap());
+
+    // Symbol matching is case-insensitive (venue-native casing differs).
+    assert!(store
+        .ticker_reduce_only("btc-usdc", "futures", "testnet")
+        .unwrap());
+
+    // Other environment and other strategy stay clear — the flag must
+    // never leak across scopes the way the old client-side set did.
+    assert!(!store
+        .ticker_reduce_only("BTC-USDC", "futures", "live")
+        .unwrap());
+    assert!(!store
+        .ticker_reduce_only("BTC-USDC", "funding", "testnet")
+        .unwrap());
+    assert!(!store
+        .ticker_reduce_only("ETH-USDC", "futures", "testnet")
+        .unwrap());
+
+    // The same symbol in a different strategy scopes independently.
+    store
+        .set_ticker_reduce_only("BTC-USDC", "funding", "live", true, 1_100)
+        .unwrap();
+    assert!(store
+        .ticker_reduce_only("BTC-USDC", "funding", "live")
+        .unwrap());
+    assert!(!store
+        .ticker_reduce_only("BTC-USDC", "funding", "testnet")
+        .unwrap());
+
+    // List is env-filtered.
+    let testnet_rows = store.list_reduce_only_tickers("testnet").unwrap();
+    assert_eq!(
+        testnet_rows,
+        vec![("futures".to_string(), "BTC-USDC".to_string())]
+    );
+    let live_rows = store.list_reduce_only_tickers("live").unwrap();
+    assert_eq!(
+        live_rows,
+        vec![("funding".to_string(), "BTC-USDC".to_string())]
+    );
+
+    // Clearing only removes its own scope.
+    store
+        .set_ticker_reduce_only("BTC-USDC", "futures", "testnet", false, 1_200)
+        .unwrap();
+    assert!(!store
+        .ticker_reduce_only("BTC-USDC", "futures", "testnet")
+        .unwrap());
+    assert!(store
+        .ticker_reduce_only("BTC-USDC", "funding", "live")
+        .unwrap());
+    assert!(store
+        .list_reduce_only_tickers("testnet")
+        .unwrap()
+        .is_empty());
 }

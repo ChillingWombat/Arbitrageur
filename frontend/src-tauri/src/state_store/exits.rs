@@ -38,7 +38,7 @@ impl StateStore {
     pub fn list_scheduled_exits(&self, status: Option<&str>) -> anyhow::Result<Vec<ScheduledExit>> {
         let conn = self.conn.lock();
         let sql = "SELECT id, venue, symbol, side, close_pct, mode, limit_price,
-                          execute_at_ms, status, note, created_at, updated_at
+                          execute_at_ms, status, note, created_at, updated_at, attempts
                    FROM scheduled_exits";
         let rows = match status {
             Some(s) => {
@@ -68,7 +68,7 @@ impl StateStore {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
             "SELECT id, venue, symbol, side, close_pct, mode, limit_price,
-                    execute_at_ms, status, note, created_at, updated_at
+                    execute_at_ms, status, note, created_at, updated_at, attempts
              FROM scheduled_exits
              WHERE status = 'pending' AND execute_at_ms <= ?1
              ORDER BY execute_at_ms ASC",
@@ -88,6 +88,27 @@ impl StateStore {
             "UPDATE scheduled_exits SET status = 'firing', updated_at = ?2
              WHERE id = ?1 AND status = 'pending'",
             rusqlite::params![id, chrono::Utc::now().to_rfc3339()],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// Reschedule a claimed ('firing') exit back to pending at a later
+    /// due time, bumping its attempt counter — transient-dispatch-failure
+    /// backoff. Terminal rows are untouched; `false` when the row is not
+    /// in a claimable state.
+    pub fn reschedule_scheduled_exit(
+        &self,
+        id: &str,
+        execute_at_ms: i64,
+        note: Option<&str>,
+    ) -> anyhow::Result<bool> {
+        let conn = self.conn.lock();
+        let n = conn.execute(
+            "UPDATE scheduled_exits SET status = 'pending', execute_at_ms = ?2,
+                    attempts = attempts + 1, note = COALESCE(?3, note),
+                    updated_at = ?4
+             WHERE id = ?1 AND status IN ('pending', 'firing')",
+            rusqlite::params![id, execute_at_ms, note, chrono::Utc::now().to_rfc3339()],
         )?;
         Ok(n == 1)
     }

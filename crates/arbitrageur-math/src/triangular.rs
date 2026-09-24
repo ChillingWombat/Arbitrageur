@@ -144,9 +144,13 @@ pub fn evaluate_triangular_cycle(
     }
 
     let end_notional = amount;
+    // `gross_bps` is already VWAP-inclusive: each leg converted through its
+    // realized execution price, so depth slippage is inside the ratio.
+    // `total_slippage_bps` stays reported for display/telemetry but must
+    // NOT be subtracted again — doing so double-charges every leg's walk.
     let gross_bps = (end_notional / start_notional - dec!(1)) * BPS_DIVISOR;
     let total_fee_bps = fee_bps[0] + fee_bps[1] + fee_bps[2];
-    let net_bps = gross_bps - total_fee_bps - total_slippage_bps;
+    let net_bps = gross_bps - total_fee_bps;
     let estimated_profit = net_bps / BPS_DIVISOR * start_notional;
 
     Some(TriangularCycleResult {

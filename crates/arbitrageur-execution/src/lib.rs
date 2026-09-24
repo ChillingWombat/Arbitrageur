@@ -184,7 +184,7 @@ mod tests {
                 } else {
                     None
                 },
-                fee: dec!(0.1),
+                fee: Some(dec!(0.1)),
                 fee_currency: "USDC".to_string(),
                 raw_response: None,
                 timestamp: chrono::Utc::now(),
@@ -258,7 +258,10 @@ mod tests {
                 leg_b,
             } => {
                 // Generic coordinator reports immediate realized cash P&L: negative reported fees only
-                assert_eq!(realized_profit, -(leg_a.fee + leg_b.fee));
+                assert_eq!(
+                    realized_profit,
+                    -(leg_a.fee.unwrap_or_default() + leg_b.fee.unwrap_or_default())
+                );
                 assert_eq!(realized_profit, dec!(-0.2));
             }
             other => panic!("Expected Success, got {:?}", other),
@@ -572,7 +575,7 @@ mod tests {
             filled_qty: qty,
             remaining_qty: Decimal::ZERO,
             avg_fill_price: Some(dec!(100)),
-            fee: dec!(0.1),
+            fee: Some(dec!(0.1)),
             fee_currency: "USDC".into(),
             raw_response: None,
             timestamp: chrono::Utc::now(),
@@ -590,7 +593,7 @@ mod tests {
             filled_qty: qty,
             remaining_qty: Decimal::ZERO,
             avg_fill_price: Some(dec!(100)),
-            fee: dec!(0.1),
+            fee: Some(dec!(0.1)),
             fee_currency: "USDC".into(),
             raw_response: None,
             timestamp: chrono::Utc::now(),
@@ -757,7 +760,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_fill_negative_fee_is_unwound() {
-        assert_malformed_fill_unwound(|r| r.fee = dec!(-0.5)).await;
+        assert_malformed_fill_unwound(|r| r.fee = Some(dec!(-0.5))).await;
     }
 
     async fn assert_bad_unwind_unresolved(bad_unwind: OrderResponse) {
@@ -1008,7 +1011,7 @@ mod tests {
                 requested - filled
             },
             avg_fill_price: (filled > Decimal::ZERO).then_some(dec!(100)),
-            fee: dec!(0.1),
+            fee: Some(dec!(0.1)),
             fee_currency: "USDC".to_string(),
             raw_response: None,
             timestamp: chrono::Utc::now(),

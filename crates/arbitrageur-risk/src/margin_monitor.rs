@@ -13,6 +13,10 @@ pub enum MarginHealthStatus {
     /// Unfunded account: zero equity, no open positions, no margin locked.
     /// Nothing is at risk, so this is informational — never critical.
     Empty,
+    /// Liquidation/margin data missing — safety cannot be verified.
+    /// Never reported as Healthy: an unverifiable position is a risk the
+    /// monitor cannot rule out.
+    Unknown,
 }
 
 /// Margin monitor configuration.
@@ -94,7 +98,10 @@ impl MarginMonitor {
                 MarginHealthStatus::Healthy
             }
         } else {
-            MarginHealthStatus::Healthy
+            // No liquidation price from the venue — the distance to a
+            // liquidation cannot be computed, so the position's safety is
+            // unverified. Fail closed: never claim Healthy.
+            MarginHealthStatus::Unknown
         }
     }
 }
@@ -148,5 +155,35 @@ mod tests {
             updated_at: chrono::Utc::now(),
         });
         assert_eq!(m.evaluate_account(&acc), MarginHealthStatus::Breached);
+    }
+
+    /// Regression (#46): a position with no liquidation price cannot be
+    /// verified safe — it must never report Healthy.
+    #[test]
+    fn position_without_liquidation_price_is_unknown_not_healthy() {
+        use arbitrageur_core::position::Position;
+        use arbitrageur_core::types::Side;
+        let m = MarginMonitor::new(MarginMonitorConfig::default());
+        let pos = Position {
+            venue: VenueId("hyperliquid".into()),
+            symbol: "BTC-USDC".into(),
+            side: Side::Buy,
+            quantity: dec!(1),
+            entry_price: dec!(60000),
+            mark_price: dec!(60000),
+            unrealized_pnl: dec!(0),
+            realized_pnl: dec!(0),
+            liquidation_price: None,
+            leverage: dec!(5),
+            initial_margin: dec!(12000),
+            maintenance_margin: dec!(6000),
+            updated_at: chrono::Utc::now(),
+        };
+        assert_eq!(m.evaluate_position(&pos), MarginHealthStatus::Unknown);
+
+        // With a liquidation price far away, the same position is Healthy.
+        let mut pos = pos;
+        pos.liquidation_price = Some(dec!(30000));
+        assert_eq!(m.evaluate_position(&pos), MarginHealthStatus::Healthy);
     }
 }

@@ -598,11 +598,17 @@ pub fn evaluate_exit(
             ),
         };
     }
+    // Adverse = the deviation keeps growing on the ENTRY'S side of zero.
+    // A deviation that crossed zero is favorable overshoot: the position
+    // rode the reversion through the band and beyond — profitable, never a
+    // stop. `|dev| >= stop_at` alone would punish exactly that win.
     let stop_at = (cfg.stop_mult * entry_dev_bps.abs()).max(friction_band_bps);
-    if dev.abs() >= stop_at {
+    if entry_dev_bps != 0.0 && dev.signum() == entry_dev_bps.signum() && dev.abs() >= stop_at {
         return ExitEval::Exit {
             trigger: ExitTrigger::Stopped,
-            reason: format!("deviation crossed stop band (|dev| {dev:.1} >= {stop_at:.1} bps)"),
+            reason: format!(
+                "deviation widened past stop band (dev {dev:.1} on entry side, |dev| >= {stop_at:.1} bps)"
+            ),
         };
     }
     if now_ms >= deadline_ms {
@@ -1004,12 +1010,28 @@ mod tests {
             ),
             "got {e:?}"
         );
+        // Sign flip through zero is favorable overshoot — the position rode
+        // the reversion past the band, which is profit, never a stop.
+        assert_eq!(
+            evaluate_exit(
+                10.0,
+                4.0,
+                999_999,
+                None,
+                Some(&live("ready", Some(-20.0))),
+                0,
+                &cfg
+            ),
+            ExitEval::Hold
+        );
+        // The stop is direction-symmetric: a negative-side entry stops on
+        // further downside, and its overshoot through zero holds too.
         let e = evaluate_exit(
-            10.0,
+            -10.0,
             4.0,
             999_999,
             None,
-            Some(&live("ready", Some(-20.0))),
+            Some(&live("ready", Some(-15.0))),
             0,
             &cfg,
         );
@@ -1020,6 +1042,18 @@ mod tests {
                 ..
             }
         ));
+        assert_eq!(
+            evaluate_exit(
+                -10.0,
+                4.0,
+                999_999,
+                None,
+                Some(&live("ready", Some(20.0))),
+                0,
+                &cfg
+            ),
+            ExitEval::Hold
+        );
         // 14.9 holds (deadline far away).
         assert_eq!(
             evaluate_exit(

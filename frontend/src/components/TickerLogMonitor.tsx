@@ -6,7 +6,6 @@ import {
 } from "lucide-react";
 import type { ExecutionLogEntry, TickerStrategyConfigDto, VenueOrderBookDto } from "../types";
 import { formatCurrencyPnl, formatCurrencyPrice } from "../types/tickers";
-import { EXCHANGES_ALPHABETICAL } from "./EngineSettings";
 import { EmptyState } from "./EmptyState";
 
 export interface LogItem {
@@ -126,10 +125,8 @@ export const TickerLogMonitor: React.FC<TickerLogMonitorProps> = React.memo(Tick
 function TickerLogMonitorInner({
   symbol,
   strategyName = "Simple Spread",
-  config,
   executionLogs = [],
   orderbooks = [],
-  autoBotEnabled = false,
   isPaused = false,
   matchAllSymbols = false,
   namespace,
@@ -140,33 +137,13 @@ function TickerLogMonitorInner({
   const [autoScroll, setAutoScroll] = useState<boolean>(true);
   const [runtimeLogs, setRuntimeLogs] = useState<LogItem[]>([]);
   const scrollBottomRef = useRef<HTMLDivElement>(null);
-  const storageKey = `ticker-log-monitor:${namespace ?? symbol}`;
   // Heartbeat entries buffer here and flush to state at most once per
   // second — the 3s orderbook poll must not setState per tick.
   const pendingRef = useRef<LogItem[]>([]);
 
-  // Load persisted telemetry stream for this ticker (survives remounts/restarts)
-  useEffect(() => {
-    pendingRef.current = [];
-    try {
-      const raw = localStorage.getItem(storageKey);
-      const parsed = raw ? (JSON.parse(raw) as LogItem[]) : [];
-      parsed.sort((a, b) => a.epochMs - b.epochMs);
-      setRuntimeLogs(parsed.slice(-500));
-    } catch {
-      setRuntimeLogs([]);
-    }
-  }, [storageKey]);
-
-  // Persist the telemetry stream automatically (capped) — the engine creates
-  // and stores logs continuously; there is no manual scanning mode.
-  useEffect(() => {
-    try {
-      localStorage.setItem(storageKey, JSON.stringify(runtimeLogs.slice(-500)));
-    } catch {
-      // Storage quota exceeded — telemetry remains visible but unpersisted
-    }
-  }, [runtimeLogs, storageKey]);
+  // Heartbeats are session-scoped display telemetry — never persisted. Only
+  // backend-sourced `executionLogs` rows may survive remounts; a fabricated
+  // localStorage stream would masquerade as engine telemetry on restart.
 
   // Convert backend execution logs into structured log items for this ticker
   const executionItems = useMemo<LogItem[]>(() => {
@@ -233,23 +210,11 @@ function TickerLogMonitorInner({
     }
 
     const grossSpreadBps = bestAsk > 0 && bestBid > 0 ? ((bestBid - bestAsk) / bestAsk) * 10000 : 0;
-    // Round-trip fees come from venue metadata; unresolved routes report gross only.
-    const feeBpsFor = (venueName: string): number | null => {
-      const key = venueName.toLowerCase();
-      const meta = EXCHANGES_ALPHABETICAL.find(
-        (e) => key.includes(e.name.toLowerCase()) || e.name.toLowerCase().includes(key),
-      );
-      return meta ? meta.feeBps : null;
-    };
-    const askFee = feeBpsFor(bestAskVenue);
-    const bidFee = feeBpsFor(bestBidVenue);
-    const estFees = askFee !== null && bidFee !== null ? askFee + bidFee : null;
-    const netSpreadBps = estFees !== null ? grossSpreadBps - estFees : grossSpreadBps;
-    const hurdleBps = (config?.targetProfitBps ?? 1.0) + (estFees ?? 0);
-    const spreadNote =
-      estFees !== null
-        ? `Net spread: ${netSpreadBps.toFixed(1)} BPS (hurdle: ${hurdleBps.toFixed(1)} BPS)`
-        : `Gross spread: ${grossSpreadBps.toFixed(1)} BPS (route fees unresolved)`;
+    // Observation only: net-of-fee evaluation belongs to the backend
+    // execution gate (which walks depth and applies real venue fee tiers).
+    // This panel must never claim a hurdle breach or execution evaluation —
+    // those rows arrive via `executionLogs` from the engine itself.
+    const spreadNote = `Gross spread: ${grossSpreadBps.toFixed(1)} BPS (net evaluated by execution gate)`;
 
     if (isPaused) {
       newEntries.push({
@@ -261,20 +226,6 @@ function TickerLogMonitorInner({
         message: `Trading currently PAUSED. Strategy executions suspended. All positions and margin preserved safely.`,
         status: "WARNING",
       });
-    } else if (estFees !== null && netSpreadBps >= (config?.targetProfitBps ?? 1.0)) {
-      newEntries.push({
-        id: `eval-${epochMs}`,
-        timestamp,
-        epochMs,
-        level: autoBotEnabled ? "TRIGGER" : "EVAL",
-        source: autoBotEnabled ? "AutoBot" : "Signal Evaluator",
-        message: `Hurdle breached! Net spread +${netSpreadBps.toFixed(1)} BPS exceeded target +${(config?.targetProfitBps ?? 1.0).toFixed(1)} BPS (Hurdle: ${hurdleBps.toFixed(1)} BPS). ${
-          autoBotEnabled ? "Evaluating order execution." : "Entries disabled — monitoring only."
-        }`,
-        route: `${bestAskVenue} ➔ ${bestBidVenue}`,
-        spreadBps: netSpreadBps,
-        status: "INFO",
-      });
     } else {
       newEntries.push({
         id: `scan-${epochMs}`,
@@ -284,7 +235,7 @@ function TickerLogMonitorInner({
         source: "MarketDataHub",
         message: `Polled ${orderbooks.length} venues. Best: Buy ${bestAskVenue} @ ${formatCurrencyPrice(bestAsk)} / Sell ${bestBidVenue} @ ${formatCurrencyPrice(bestBid)}. ${spreadNote}.`,
         route: `${bestAskVenue} ➔ ${bestBidVenue}`,
-        spreadBps: netSpreadBps,
+        spreadBps: grossSpreadBps,
         status: "INFO",
       });
     }
@@ -292,7 +243,7 @@ function TickerLogMonitorInner({
     if (newEntries.length > 0) {
       pendingRef.current.push(...newEntries);
     }
-  }, [orderbooks, symbol, autoBotEnabled, isPaused, config]);
+  }, [orderbooks, symbol, isPaused]);
 
   // Flush buffered heartbeats at most once per second; no pending entries
   // means no state update and no downstream re-sort/reconciliation.
@@ -396,12 +347,7 @@ function TickerLogMonitorInner({
   const handleClearLogs = useCallback(() => {
     pendingRef.current = [];
     setRuntimeLogs([]);
-    try {
-      localStorage.removeItem(storageKey);
-    } catch {
-      // ignore
-    }
-  }, [storageKey]);
+  }, []);
 
   return (
     <div className="space-y-3 font-mono text-xs select-none">

@@ -9,13 +9,21 @@ impl StateStore {
     /// Persist a selected candidate as `in_flight` before any order is
     /// dispatched. Because the row exists before execution, an interrupted
     /// run still blocks the symbol on restart until the legs reconcile.
+    /// `environment` is the active trading environment (`testnet`|`live`)
+    /// — durable on the row so testnet and live exposure/performance can
+    /// never blend in aggregation or be polled through the wrong adapter.
     pub fn record_signal_execution(
         &self,
         signal: &NewSignalExecution,
+        environment: &str,
     ) -> anyhow::Result<SignalExecution> {
         let id = normalize_id(&signal.id)?;
         let strategy_id = normalize_strategy_id(&signal.strategy_id)?;
         let symbol = normalize_symbol(&signal.symbol)?;
+        let environment = match environment.trim().to_ascii_lowercase().as_str() {
+            "testnet" | "live" => environment.trim().to_ascii_lowercase(),
+            other => anyhow::bail!("invalid signal environment '{other}'"),
+        };
         if signal.legs.is_empty() || signal.legs.len() > 2 {
             anyhow::bail!("signal executions require 1 or 2 legs");
         }
@@ -47,8 +55,9 @@ impl StateStore {
         tx.execute(
             "INSERT INTO signal_executions
                 (id, strategy_id, symbol, status, route_id, account_long_id,
-                 account_short_id, expected_net_usd, fees_usd, note, created_at, updated_at)
-             VALUES (?1, ?2, ?3, 'in_flight', ?4, ?5, ?6, ?7, 0, ?8, ?9, ?9)",
+                 account_short_id, expected_net_usd, fees_usd, note, created_at,
+                 updated_at, environment)
+             VALUES (?1, ?2, ?3, 'in_flight', ?4, ?5, ?6, ?7, 0, ?8, ?9, ?9, ?10)",
             params![
                 id,
                 strategy_id,
@@ -58,7 +67,8 @@ impl StateStore {
                 account_short,
                 signal.expected_net_usd,
                 signal.note,
-                now
+                now,
+                environment
             ],
         )?;
         for leg in &signal.legs {
@@ -94,6 +104,10 @@ impl StateStore {
     }
 
     /// Transition a signal's status; terminal states stamp `closed_at`.
+    /// Terminal is enforced in the UPDATE itself, not just by callers: a
+    /// `closed`/`failed` row accepts only an idempotent rewrite of its own
+    /// status (note may still be annotated), so a late reconciliation poll
+    /// or a racing flatten can never reopen a resolved signal.
     pub fn update_signal_status(
         &self,
         signal_id: &str,
@@ -104,23 +118,42 @@ impl StateStore {
         let now = Utc::now().to_rfc3339();
         let terminal = matches!(status, SignalStatus::Closed | SignalStatus::Failed);
         let conn = self.conn.lock();
+        // `status NOT IN ('closed','failed') OR status = ?2` — a terminal row
+        // only matches when the new status equals the stored one.
         let changed = if terminal {
             conn.execute(
                 "UPDATE signal_executions
-                 SET status = ?2, note = COALESCE(?3, note), updated_at = ?4, closed_at = ?4
-                 WHERE id = ?1",
+                 SET status = ?2, note = COALESCE(?3, note), updated_at = ?4,
+                     closed_at = COALESCE(closed_at, ?4)
+                 WHERE id = ?1
+                   AND (status NOT IN ('closed','failed') OR status = ?2)",
                 params![signal_id, status.as_str(), note, now],
             )?
         } else {
             conn.execute(
                 "UPDATE signal_executions
                  SET status = ?2, note = COALESCE(?3, note), updated_at = ?4
-                 WHERE id = ?1",
+                 WHERE id = ?1
+                   AND (status NOT IN ('closed','failed') OR status = ?2)",
                 params![signal_id, status.as_str(), note, now],
             )?
         };
         if changed == 0 {
-            anyhow::bail!("signal execution {signal_id} does not exist");
+            // Distinguish a missing row from a terminal-guard refusal so the
+            // caller sees why the transition was rejected.
+            let current: Option<String> = conn
+                .query_row(
+                    "SELECT status FROM signal_executions WHERE id = ?1",
+                    [&signal_id],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            match current.as_deref() {
+                None => anyhow::bail!("signal execution {signal_id} does not exist"),
+                Some(cur) => anyhow::bail!(
+                    "signal execution {signal_id} is already {cur}; terminal signals cannot reopen"
+                ),
+            }
         }
         Ok(())
     }
@@ -292,12 +325,15 @@ impl StateStore {
             anyhow::bail!("fee must be finite and nonnegative");
         }
         let now = Utc::now().to_rfc3339();
-        let conn = self.conn.lock();
+        let mut conn = self.conn.lock();
+        // Leg write + parent fee aggregate must commit atomically — a crash
+        // between them would pair a new fill with a stale fee total.
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         // Monotonic write: a stale dispatch-time ack must never regress a
         // fill the reconciler already recorded from an authoritative poll.
         // Price/fee follow only when this write advances the cumulative
         // quantity, so a lagging ack cannot pair new qty with old price.
-        let changed = conn.execute(
+        let changed = tx.execute(
             "UPDATE signal_legs
              SET fill_price = CASE WHEN ?3 >= filled_qty THEN ?4 ELSE fill_price END,
                  fee_usd = CASE WHEN ?3 >= filled_qty THEN MAX(fee_usd, ?5) ELSE fee_usd END,
@@ -317,13 +353,14 @@ impl StateStore {
         if changed == 0 {
             anyhow::bail!("signal {signal_id} has no {side:?} leg");
         }
-        conn.execute(
+        tx.execute(
             "UPDATE signal_executions
              SET fees_usd = (SELECT COALESCE(SUM(fee_usd), 0) FROM signal_legs WHERE signal_id = ?1),
                  updated_at = ?2
              WHERE id = ?1",
             params![signal_id, now],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -349,8 +386,9 @@ impl StateStore {
             }
         }
         let now = Utc::now().to_rfc3339();
-        let conn = self.conn.lock();
-        let changed = conn.execute(
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
             "UPDATE signal_legs
              SET venue_order_id = ?3,
                  client_order_id = COALESCE(?5, client_order_id),
@@ -361,10 +399,11 @@ impl StateStore {
         if changed == 0 {
             anyhow::bail!("signal {signal_id} has no {side:?} leg");
         }
-        conn.execute(
+        tx.execute(
             "UPDATE signal_executions SET updated_at = ?2 WHERE id = ?1",
             params![signal_id, now],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -372,9 +411,18 @@ impl StateStore {
     /// not reached `closed`/`failed` — the reconciliation poll set.
     /// `sim-%` order ids are SimulatedExchange synthetic ids — paper fills
     /// must never be polled against a real venue.
-    pub fn list_pending_order_legs(&self) -> anyhow::Result<Vec<(SignalExecution, SignalLeg)>> {
+    /// `environment` scopes the set to one trading environment: legs are
+    /// polled through the active environment's adapters, so a testnet order
+    /// id must never reach a live venue endpoint (and vice versa). `None`
+    /// returns every environment's pending legs; `Some(env)` additionally
+    /// includes `unknown`-environment rows — legacy rows that cannot be
+    /// attributed stay fail-closed-visible to both environments.
+    pub fn list_pending_order_legs(
+        &self,
+        environment: Option<&str>,
+    ) -> anyhow::Result<Vec<(SignalExecution, SignalLeg)>> {
         let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
+        let mut sql = String::from(
             "SELECT l.id FROM signal_legs l
              JOIN signal_executions e ON e.id = l.signal_id
              WHERE (
@@ -383,9 +431,16 @@ impl StateStore {
                  OR e.status IN ('imbalanced', 'unresolved')
                )
                AND e.status IN ('in_flight', 'imbalanced', 'unresolved')",
-        )?;
+        );
+        let mut binds: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        if let Some(env) = environment {
+            sql.push_str(" AND e.environment IN ('unknown', ?)");
+            binds.push(Box::new(env.trim().to_ascii_lowercase()));
+        }
+        let mut stmt = conn.prepare(&sql)?;
+        let refs: Vec<&dyn rusqlite::types::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
         let leg_ids: Vec<String> = stmt
-            .query_map([], |r| r.get::<_, String>(0))?
+            .query_map(refs.as_slice(), |r| r.get::<_, String>(0))?
             .collect::<Result<_, _>>()?;
         drop(stmt);
         drop(conn);
@@ -479,8 +534,11 @@ impl StateStore {
             anyhow::bail!("fee must be finite and nonnegative");
         }
         let now = Utc::now().to_rfc3339();
-        let conn = self.conn.lock();
-        let changed = conn.execute(
+        let mut conn = self.conn.lock();
+        // Same atomicity rule as apply_leg_fill: leg snapshot and the
+        // parent's fee aggregate commit together or not at all.
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
             "UPDATE signal_legs
              SET filled_qty = MAX(filled_qty, ?3),
                  fill_price = COALESCE(?4, fill_price),
@@ -499,13 +557,14 @@ impl StateStore {
         if changed == 0 {
             anyhow::bail!("signal {signal_id} has no {side:?} leg");
         }
-        conn.execute(
+        tx.execute(
             "UPDATE signal_executions
              SET fees_usd = (SELECT COALESCE(SUM(fee_usd), 0) FROM signal_legs WHERE signal_id = ?1),
                  updated_at = ?2
              WHERE id = ?1",
             params![signal_id, now],
         )?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -533,12 +592,12 @@ impl StateStore {
         let mut sql = String::from(
             "SELECT id, strategy_id, symbol, status, route_id, account_long_id,
                     account_short_id, expected_net_usd, fees_usd, note,
-                    created_at, updated_at, closed_at
+                    created_at, updated_at, closed_at, environment
              FROM signal_executions WHERE 1=1",
         );
         let mut binds: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         if let Some(s) = symbol {
-            sql.push_str(" AND symbol = ?");
+            sql.push_str(" AND symbol = ? COLLATE NOCASE");
             binds.push(Box::new(normalize_symbol(s)?));
         }
         if let Some(st) = status {
@@ -563,19 +622,31 @@ impl StateStore {
     /// Signals whose fills still count as open exposure (`counts_as_open`):
     /// in-flight, balanced, imbalanced, unresolved — everything not closed
     /// or failed. Boot reconciliation and lifecycle gates use this to avoid
-    /// hydrating closed history.
-    pub fn list_open_signals(&self) -> anyhow::Result<Vec<SignalExecution>> {
+    /// hydrating closed history. `environment` scopes to one environment —
+    /// `Some(env)` also includes `unknown` rows (unattributable exposure
+    /// stays fail-closed-visible); `None` returns every environment.
+    pub fn list_open_signals(
+        &self,
+        environment: Option<&str>,
+    ) -> anyhow::Result<Vec<SignalExecution>> {
         let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
+        let mut sql = String::from(
             "SELECT id, strategy_id, symbol, status, route_id, account_long_id,
                     account_short_id, expected_net_usd, fees_usd, note,
-                    created_at, updated_at, closed_at
+                    created_at, updated_at, closed_at, environment
              FROM signal_executions
-             WHERE status IN ('in_flight','balanced','imbalanced','unresolved')
-             ORDER BY created_at DESC, id",
-        )?;
+             WHERE status IN ('in_flight','balanced','imbalanced','unresolved')",
+        );
+        let mut binds: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        if let Some(env) = environment {
+            sql.push_str(" AND environment IN ('unknown', ?)");
+            binds.push(Box::new(env.trim().to_ascii_lowercase()));
+        }
+        sql.push_str(" ORDER BY created_at DESC, id");
+        let mut stmt = conn.prepare(&sql)?;
+        let refs: Vec<&dyn rusqlite::types::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
         let rows = stmt
-            .query_map([], signal_exec_from_row)?
+            .query_map(refs.as_slice(), signal_exec_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(stmt);
         let mut out = Vec::with_capacity(rows.len());
@@ -588,20 +659,34 @@ impl StateStore {
 
     /// Signals that block new orders on a symbol: in-flight, imbalanced, or
     /// unresolved legs must reconcile before another candidate may dispatch.
-    pub fn blocking_signals(&self, symbol: &str) -> anyhow::Result<Vec<SignalExecution>> {
+    /// `environment` scopes blocking to one environment's exposure —
+    /// `Some(env)` also includes `unknown` rows so unattributable legacy
+    /// exposure still blocks (fail-closed); `None` blocks on any env.
+    pub fn blocking_signals(
+        &self,
+        symbol: &str,
+        environment: Option<&str>,
+    ) -> anyhow::Result<Vec<SignalExecution>> {
         let symbol = normalize_symbol(symbol)?;
         let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
+        let mut sql = String::from(
             "SELECT id, strategy_id, symbol, status, route_id, account_long_id,
                     account_short_id, expected_net_usd, fees_usd, note,
-                    created_at, updated_at, closed_at
+                    created_at, updated_at, closed_at, environment
              FROM signal_executions
-             WHERE symbol = ?1
-               AND status IN ('in_flight', 'imbalanced', 'unresolved')
-             ORDER BY created_at, id",
-        )?;
+             WHERE symbol = ?1 COLLATE NOCASE
+               AND status IN ('in_flight', 'imbalanced', 'unresolved')",
+        );
+        let mut binds: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(symbol)];
+        if let Some(env) = environment {
+            sql.push_str(" AND environment IN ('unknown', ?)");
+            binds.push(Box::new(env.trim().to_ascii_lowercase()));
+        }
+        sql.push_str(" ORDER BY created_at, id");
+        let mut stmt = conn.prepare(&sql)?;
+        let refs: Vec<&dyn rusqlite::types::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
         let rows = stmt
-            .query_map([&symbol], signal_exec_from_row)?
+            .query_map(refs.as_slice(), signal_exec_from_row)?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         drop(stmt);
         let mut out = Vec::with_capacity(rows.len());
@@ -612,8 +697,81 @@ impl StateStore {
         Ok(out)
     }
 
-    pub fn ticker_blocked(&self, symbol: &str) -> anyhow::Result<bool> {
-        Ok(!self.blocking_signals(symbol)?.is_empty())
+    pub fn ticker_blocked(&self, symbol: &str, environment: Option<&str>) -> anyhow::Result<bool> {
+        Ok(!self.blocking_signals(symbol, environment)?.is_empty())
+    }
+
+    /// Set or clear the durable exits-only flag for (environment, strategy,
+    /// symbol). Entry gates consult [`Self::ticker_reduce_only`]; exits are
+    /// never gated by it — that is the entire point of the flag.
+    pub fn set_ticker_reduce_only(
+        &self,
+        symbol: &str,
+        strategy_id: &str,
+        environment: &str,
+        enabled: bool,
+        ts_ms: i64,
+    ) -> anyhow::Result<()> {
+        let symbol = normalize_symbol(symbol)?;
+        let strategy_id = normalize_id(strategy_id)?;
+        let environment = environment.trim().to_ascii_lowercase();
+        let conn = self.conn.lock();
+        if enabled {
+            conn.execute(
+                "INSERT OR REPLACE INTO ticker_reduce_only
+                    (environment, strategy_id, symbol, set_ts_ms)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![environment, strategy_id, symbol, ts_ms],
+            )?;
+        } else {
+            conn.execute(
+                "DELETE FROM ticker_reduce_only
+                 WHERE environment = ?1 AND strategy_id = ?2 AND symbol = ?3 COLLATE NOCASE",
+                params![environment, strategy_id, symbol],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Whether (environment, strategy, symbol) is exits-only. Read errors
+    /// propagate — entry callers must fail closed, never treat an unreadable
+    /// flag as "not reduce-only".
+    pub fn ticker_reduce_only(
+        &self,
+        symbol: &str,
+        strategy_id: &str,
+        environment: &str,
+    ) -> anyhow::Result<bool> {
+        let symbol = normalize_symbol(symbol)?;
+        let conn = self.conn.lock();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM ticker_reduce_only
+             WHERE environment = ?1 AND strategy_id = ?2 AND symbol = ?3 COLLATE NOCASE",
+            params![
+                environment.trim().to_ascii_lowercase(),
+                strategy_id.trim().to_ascii_lowercase(),
+                symbol
+            ],
+            |r| r.get(0),
+        )?;
+        Ok(n > 0)
+    }
+
+    /// All exits-only rows for one environment — powers the positions panel
+    /// badge and the frontend's auto-execution skip list.
+    pub fn list_reduce_only_tickers(
+        &self,
+        environment: &str,
+    ) -> anyhow::Result<Vec<(String, String)>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT strategy_id, symbol FROM ticker_reduce_only WHERE environment = ?1
+             ORDER BY strategy_id, symbol",
+        )?;
+        let rows = stmt.query_map([environment.trim().to_ascii_lowercase()], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Count of matched open pairs on a symbol — signals whose legs both
@@ -622,14 +780,23 @@ impl StateStore {
     /// exact after restarts and can never drift from venue truth the way a
     /// cached counter can. in_flight/imbalanced/unresolved signals are not
     /// units — they hard-block via `blocking_signals` instead.
-    pub fn open_balanced_signal_count(&self, symbol: &str) -> anyhow::Result<i64> {
+    pub fn open_balanced_signal_count(
+        &self,
+        symbol: &str,
+        environment: Option<&str>,
+    ) -> anyhow::Result<i64> {
         let symbol = normalize_symbol(symbol)?;
         let conn = self.conn.lock();
-        Ok(conn.query_row(
-            "SELECT COUNT(*) FROM signal_executions WHERE symbol = ?1 AND status = 'balanced'",
-            [&symbol],
-            |r| r.get(0),
-        )?)
+        let mut sql = String::from(
+            "SELECT COUNT(*) FROM signal_executions WHERE symbol = ?1 COLLATE NOCASE AND status = 'balanced'",
+        );
+        let mut binds: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(symbol)];
+        if let Some(env) = environment {
+            sql.push_str(" AND environment IN ('unknown', ?)");
+            binds.push(Box::new(env.trim().to_ascii_lowercase()));
+        }
+        let refs: Vec<&dyn rusqlite::types::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
+        Ok(conn.query_row(&sql, refs.as_slice(), |r| r.get(0))?)
     }
 
     /// Signed net delta of one signal's filled legs (long +, short −).
@@ -648,17 +815,28 @@ impl StateStore {
 
     /// Signed net position for a symbol across every signal whose filled legs
     /// still count as open (excludes closed and failed signals).
-    pub fn ticker_net_position(&self, symbol: &str) -> anyhow::Result<f64> {
+    /// `environment` scopes to one environment's exposure — `Some(env)`
+    /// includes `unknown` rows; `None` nets across every environment.
+    pub fn ticker_net_position(
+        &self,
+        symbol: &str,
+        environment: Option<&str>,
+    ) -> anyhow::Result<f64> {
         let symbol = normalize_symbol(symbol)?;
         let conn = self.conn.lock();
-        Ok(conn.query_row(
+        let mut sql = String::from(
             "SELECT COALESCE(SUM(CASE l.side WHEN 'long' THEN l.filled_qty ELSE -l.filled_qty END), 0)
              FROM signal_legs l
              JOIN signal_executions s ON s.id = l.signal_id
-             WHERE s.symbol = ?1 AND s.status NOT IN ('closed', 'failed')",
-            [&symbol],
-            |r| r.get(0),
-        )?)
+             WHERE s.symbol = ?1 COLLATE NOCASE AND s.status NOT IN ('closed', 'failed')",
+        );
+        let mut binds: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(symbol)];
+        if let Some(env) = environment {
+            sql.push_str(" AND s.environment IN ('unknown', ?)");
+            binds.push(Box::new(env.trim().to_ascii_lowercase()));
+        }
+        let refs: Vec<&dyn rusqlite::types::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
+        Ok(conn.query_row(&sql, refs.as_slice(), |r| r.get(0))?)
     }
 
     /// Per-account net position on an exact execution symbol — the
@@ -673,7 +851,7 @@ impl StateStore {
             "SELECT COALESCE(SUM(CASE l.side WHEN 'long' THEN l.filled_qty ELSE -l.filled_qty END), 0)
              FROM signal_legs l
              JOIN signal_executions s ON s.id = l.signal_id
-             WHERE l.account_id = ?1 AND l.symbol = ?2
+             WHERE l.account_id = ?1 AND l.symbol = ?2 COLLATE NOCASE
                AND s.status NOT IN ('closed', 'failed')",
             params![account_id, symbol],
             |r| r.get(0),
@@ -681,20 +859,33 @@ impl StateStore {
     }
 
     /// Per-venue net position on an exact execution symbol across all
-    /// accounts/signals (see [`Self::account_symbol_net`]).
-    pub fn venue_symbol_net(&self, venue: &str, symbol: &str) -> anyhow::Result<f64> {
+    /// accounts/signals (see [`Self::account_symbol_net`]). `environment`
+    /// scopes to one environment — `Some(env)` includes `unknown` rows;
+    /// `None` nets across every environment.
+    pub fn venue_symbol_net(
+        &self,
+        venue: &str,
+        symbol: &str,
+        environment: Option<&str>,
+    ) -> anyhow::Result<f64> {
         let venue = normalize_venue(venue)?;
         let symbol = normalize_symbol(symbol)?;
         let conn = self.conn.lock();
-        Ok(conn.query_row(
+        let mut sql = String::from(
             "SELECT COALESCE(SUM(CASE l.side WHEN 'long' THEN l.filled_qty ELSE -l.filled_qty END), 0)
              FROM signal_legs l
              JOIN signal_executions s ON s.id = l.signal_id
-             WHERE l.venue = ?1 AND l.symbol = ?2
+             WHERE l.venue = ?1 COLLATE NOCASE AND l.symbol = ?2 COLLATE NOCASE
                AND s.status NOT IN ('closed', 'failed')",
-            params![venue, symbol],
-            |r| r.get(0),
-        )?)
+        );
+        let mut binds: Vec<Box<dyn rusqlite::types::ToSql>> =
+            vec![Box::new(venue), Box::new(symbol)];
+        if let Some(env) = environment {
+            sql.push_str(" AND s.environment IN ('unknown', ?)");
+            binds.push(Box::new(env.trim().to_ascii_lowercase()));
+        }
+        let refs: Vec<&dyn rusqlite::types::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
+        Ok(conn.query_row(&sql, refs.as_slice(), |r| r.get(0))?)
     }
 
     /// Realized per-leg slippage samples for a venue, direction-aware bps:

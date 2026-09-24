@@ -1,7 +1,9 @@
 # Capability Matrix
 
-**Status date:** 2026-09-23
+**Status date:** 2026-09-25
 **Authority:** This file and `README.md` define current runtime capability. Historical handoffs describe what was attempted at the time and are not capability guarantees.
+
+**Since 2026-09-23:** USD-quote policy (`usd_quote_mode` merge/separate + `stablecoin_fx` global rate feed with depeg gates), Stronghold custody for the shared EVM wallet key (`vault.hold` snapshot next to `vault.enc`), durable circuit-breaker/ pause state across restarts, bounded-IOC dispatch on OKX/PopDEX, and fail-closed prediction-market order books (real CLOB reads — fabricated book levels removed).
 
 ## Capability vocabulary
 

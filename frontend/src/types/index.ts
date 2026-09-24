@@ -460,7 +460,9 @@ export interface FundingOpportunityDto {
   short_market_type: string;
   net_rate_8h_pct: number;
   net_apr_pct: number;
-  net_apy_pct: number;
+  /** Compounded-if-reinvested APY; `null` when the backend cannot express a
+   * finite compounded figure — render as unavailable, never as 0. */
+  net_apy_pct: number | null;
   round_trip_fee_bps: number;
   break_even_hours: number;
   estimated_daily_income_usd: number;
@@ -644,7 +646,9 @@ export interface OuFitDto {
   sigma: number;
   half_life: number;
   stationary_std: number;
-  r_squared: number;
+  /** Real regression R² when a fit produced enough variance; `null` when
+   * the fit quality is unavailable — never display as a number. */
+  r_squared: number | null;
 }
 
 export interface RiskOverviewDto {
@@ -1210,6 +1214,18 @@ export interface OpenPositionDto {
   feesUsd: number;
   notionalUsd: number | null;
   openedAt: string;
+  /** Durable server-side exits-only flag for (env, strategy, symbol). */
+  reduceOnly: boolean;
+}
+
+/** Per-strategy capability descriptor — Execute controls and auto-loops
+ *  must gate on this; a permanently-stubbed path never gets an armed
+ *  Execute button. */
+export interface StrategyCapabilityDto {
+  strategyId: string;
+  scanReady: boolean;
+  executeReady: boolean;
+  reason: string | null;
 }
 
 /** One candidate in a synchronized batch — per symbol only the highest

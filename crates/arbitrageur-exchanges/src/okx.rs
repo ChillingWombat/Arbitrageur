@@ -28,6 +28,10 @@ pub struct OkxAdapter {
     api_key: RwLock<Option<Zeroizing<String>>>,
     api_secret: RwLock<Option<Zeroizing<String>>>,
     passphrase: RwLock<Option<Zeroizing<String>>>,
+    /// OKX `tdMode` for order placement: "isolated" (default — bounded
+    /// per-position margin), "cross", or "cash". Constructor-set via
+    /// [`OkxAdapter::with_td_mode`]; never silently assumed.
+    td_mode: &'static str,
     rate_limiter: AccountRequestCoordinator,
 }
 
@@ -91,8 +95,25 @@ impl OkxAdapter {
             api_key: RwLock::new(api_key.map(Zeroizing::new)),
             api_secret: RwLock::new(api_secret.map(Zeroizing::new)),
             passphrase: RwLock::new(passphrase.map(Zeroizing::new)),
+            td_mode: "isolated",
             rate_limiter: AccountRequestCoordinator::new("okx", 200, 3000, 500, 15000),
         }
+    }
+
+    /// Override the margin trade mode used on order placement.
+    /// Only OKX's documented `tdMode` values are accepted — anything else
+    /// fails closed rather than silently sending a margin mode the venue
+    /// would interpret differently.
+    pub fn with_td_mode(mut self, mode: &str) -> anyhow::Result<Self> {
+        self.td_mode = match mode.trim().to_ascii_lowercase().as_str() {
+            "isolated" => "isolated",
+            "cross" => "cross",
+            "cash" => "cash",
+            other => {
+                anyhow::bail!("OKX unsupported tdMode '{other}' — expected isolated|cross|cash")
+            }
+        };
+        Ok(self)
     }
 
     /// Demo-trading adapter: same host as production but every signed request
@@ -244,6 +265,7 @@ impl OkxAdapter {
         path: &str,
         body: Option<&str>,
     ) -> anyhow::Result<serde_json::Value> {
+        self.rate_limiter.acquire_signed().await?;
         let (api_key, api_secret, passphrase) = self.credentials()?;
         let ts = Self::okx_timestamp();
         let body_str = body.unwrap_or("");
@@ -371,7 +393,7 @@ impl OkxAdapter {
             filled_qty: dec!(0),
             remaining_qty: order.quantity,
             avg_fill_price: None,
-            fee: dec!(0),
+            fee: None,
             fee_currency: fee_currency.to_string(),
             raw_response: Some(v.to_string()),
             timestamp: Utc::now(),
@@ -427,7 +449,7 @@ impl OkxAdapter {
         Decimal,
         Decimal,
         Option<Decimal>,
-        Decimal,
+        Option<Decimal>,
     )> {
         use arbitrageur_core::types::OrderStatus;
         let path = format!("/api/v5/trade/order?instId={inst_id}&ordId={ord_id}");
@@ -502,7 +524,7 @@ impl OkxAdapter {
         } else {
             None
         };
-        let fee = dec_from_json(data.get("fee")).unwrap_or(dec!(0)).abs();
+        let fee = dec_from_json(data.get("fee")).map(|f| f.abs());
         let status = match state {
             "filled" if filled_base == orig_base => OrderStatus::Filled,
             "filled" => anyhow::bail!(
@@ -548,7 +570,7 @@ impl OkxAdapter {
         arbitrageur_core::types::OrderStatus,
         Decimal,
         Option<Decimal>,
-        Decimal,
+        Option<Decimal>,
     )> {
         for _ in 0..6 {
             let (status, _orig, filled_base, avg_px, fee) = self
@@ -992,20 +1014,43 @@ impl ExchangeAdapter for OkxAdapter {
             arbitrageur_core::types::Side::Sell => "sell",
         };
         let (ord_type, px) = match order.order_type {
-            arbitrageur_core::types::OrderType::Market
-            | arbitrageur_core::types::OrderType::ImmediateOrCancel => ("market", None),
+            arbitrageur_core::types::OrderType::Market => ("market", None),
+            arbitrageur_core::types::OrderType::ImmediateOrCancel => {
+                // Bounded IOC: OKX `ordType=ioc` is a limit order filled
+                // immediately-or-cancelled at `px` or better. Sending it as
+                // an unbounded `market` would strip the caller's worst-price
+                // bound (triangle sweeps and smart-routing caps encode it in
+                // `price`).
+                let p = order.price.filter(|p| *p > dec!(0)).ok_or_else(|| {
+                    anyhow::anyhow!("OKX IOC order requires a positive price bound")
+                })?;
+                ("ioc", Some(p.to_string()))
+            }
             arbitrageur_core::types::OrderType::Limit
             | arbitrageur_core::types::OrderType::PostOnly => {
                 let p = order
                     .price
                     .filter(|p| *p > dec!(0))
                     .ok_or_else(|| anyhow::anyhow!("OKX limit order requires a positive price"))?;
-                ("limit", Some(p.to_string()))
+                // Every order semantic must reach the wire — a request for
+                // post-only/FOK/IOC must never silently become a resting
+                // GTC limit.
+                let ot = match order.order_type {
+                    arbitrageur_core::types::OrderType::PostOnly => "post_only",
+                    _ => match order.time_in_force {
+                        arbitrageur_core::types::TimeInForce::PostOnly => "post_only",
+                        arbitrageur_core::types::TimeInForce::FillOrKill => "fok",
+                        arbitrageur_core::types::TimeInForce::ImmediateOrCancel => "ioc",
+                        arbitrageur_core::types::TimeInForce::GoodTilCancelled => "limit",
+                    },
+                };
+                let ot = if order.post_only { "post_only" } else { ot };
+                (ot, Some(p.to_string()))
             }
         };
         let mut body = serde_json::json!({
             "instId": inst_id,
-            "tdMode": "isolated",
+            "tdMode": self.td_mode,
             "side": side_str,
             "ordType": ord_type,
             "sz": contracts.to_string(),
@@ -1351,5 +1396,15 @@ mod tests {
             .account_position_for(&account, "BTC-USDC")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn td_mode_accepts_only_documented_values() {
+        let a = OkxAdapter::new(None, None, None, None);
+        let a = a.with_td_mode("cross").unwrap();
+        assert_eq!(a.td_mode, "cross");
+        assert!(OkxAdapter::new(None, None, None, None)
+            .with_td_mode("bogus")
+            .is_err());
     }
 }

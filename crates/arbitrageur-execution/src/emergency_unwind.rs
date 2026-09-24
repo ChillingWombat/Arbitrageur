@@ -4,6 +4,15 @@ use arbitrageur_core::types::{Decimal, OrderStatus, Side};
 use std::sync::Arc;
 use tracing::{error, info};
 
+/// Emergency unwind must be fast, but async-ack venues need a bounded
+/// window to reach terminal state: ~3s of `fetch_order` polling covers
+/// normal fill propagation without stalling the unwind path.
+const UNWIND_POLL_ATTEMPTS: u32 = 10;
+const UNWIND_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
+/// Consecutive poll failures tolerated before giving up — a venue that
+/// cannot report order state at all fails closed rather than guessing.
+const UNWIND_POLL_MISS_LIMIT: u32 = 3;
+
 /// Handles auto-rollback and market unwinding when an atomic multi-leg arbitrage leg fails.
 pub struct EmergencyUnwindHandler;
 
@@ -34,56 +43,89 @@ impl EmergencyUnwindHandler {
 
         match exchange.place_order(unwind_order).await {
             Ok(resp) => {
-                let valid = resp.status == OrderStatus::Filled
-                    && resp.filled_qty == unhedged_qty
-                    && resp.remaining_qty == Decimal::ZERO
-                    && resp.venue == exchange.venue_id()
-                    && resp.symbol.as_str() == symbol
-                    && resp.original_qty == unhedged_qty
-                    && resp.client_order_id == unwind_client_id
-                    && !resp.order_id.is_empty()
-                    && resp
+                // Async-ack venues (Lighter, Decibel, PopDEX…) return `New`
+                // for an accepted market order that fills milliseconds later.
+                // The submit acknowledgement is never a fill — poll
+                // `fetch_order` for the venue's authoritative terminal state.
+                let mut cur = resp;
+                let mut poll_misses = 0u32;
+                for _ in 0..UNWIND_POLL_ATTEMPTS {
+                    if cur.status.is_final() || cur.order_id.is_empty() {
+                        break;
+                    }
+                    tokio::time::sleep(UNWIND_POLL_INTERVAL).await;
+                    match exchange
+                        .fetch_order(symbol, &cur.order_id, Some(&unwind_client_id))
+                        .await
+                    {
+                        Ok(polled) => {
+                            cur = polled;
+                            poll_misses = 0;
+                        }
+                        Err(e) => {
+                            poll_misses += 1;
+                            error!(
+                                "Emergency unwind order {} poll failed on {} {}: {e:#} (miss {poll_misses}/{UNWIND_POLL_MISS_LIMIT})",
+                                cur.order_id,
+                                exchange.name(),
+                                symbol,
+                            );
+                            if poll_misses >= UNWIND_POLL_MISS_LIMIT {
+                                break;
+                            }
+                        }
+                    }
+                }
+                let valid = cur.status == OrderStatus::Filled
+                    && cur.filled_qty == unhedged_qty
+                    && cur.remaining_qty == Decimal::ZERO
+                    && cur.venue == exchange.venue_id()
+                    && cur.symbol.as_str() == symbol
+                    && cur.original_qty == unhedged_qty
+                    && cur.client_order_id == unwind_client_id
+                    && !cur.order_id.is_empty()
+                    && cur
                         .avg_fill_price
                         .map(|p| p > Decimal::ZERO)
                         .unwrap_or(false)
-                    && resp.fee >= Decimal::ZERO;
+                    && cur.fee.map(|f| f >= Decimal::ZERO).unwrap_or(true);
                 if valid {
                     info!(
                         "Emergency unwind order filled successfully on {}: order_id={}",
                         exchange.name(),
-                        resp.order_id
+                        cur.order_id
                     );
-                    Ok(resp)
+                    Ok(cur)
                 } else {
                     error!(
-                        "FATAL: EMERGENCY UNWIND INCOMPLETE ON {} {}: status={:?} filled={}/{} remaining={} venue={} symbol={} client_order_id={} order_id={} avg_px={:?} fee={}. MANUAL OPERATOR INTERVENTION REQUIRED!",
+                        "FATAL: EMERGENCY UNWIND INCOMPLETE ON {} {}: status={:?} filled={}/{} remaining={} venue={} symbol={} client_order_id={} order_id={} avg_px={:?} fee={:?}. MANUAL OPERATOR INTERVENTION REQUIRED!",
                         exchange.name(),
                         symbol,
-                        resp.status,
-                        resp.filled_qty,
+                        cur.status,
+                        cur.filled_qty,
                         unhedged_qty,
-                        resp.remaining_qty,
-                        resp.venue,
-                        resp.symbol,
-                        resp.client_order_id,
-                        resp.order_id,
-                        resp.avg_fill_price,
-                        resp.fee
+                        cur.remaining_qty,
+                        cur.venue,
+                        cur.symbol,
+                        cur.client_order_id,
+                        cur.order_id,
+                        cur.avg_fill_price,
+                        cur.fee
                     );
                     anyhow::bail!(
-                        "Emergency unwind incomplete on {} {}: status={:?} filled={}/{} remaining={} venue={} symbol={} client_order_id={} order_id={} avg_px={:?} fee={}",
+                        "Emergency unwind incomplete on {} {}: status={:?} filled={}/{} remaining={} venue={} symbol={} client_order_id={} order_id={} avg_px={:?} fee={:?}",
                         exchange.name(),
                         symbol,
-                        resp.status,
-                        resp.filled_qty,
+                        cur.status,
+                        cur.filled_qty,
                         unhedged_qty,
-                        resp.remaining_qty,
-                        resp.venue,
-                        resp.symbol,
-                        resp.client_order_id,
-                        resp.order_id,
-                        resp.avg_fill_price,
-                        resp.fee
+                        cur.remaining_qty,
+                        cur.venue,
+                        cur.symbol,
+                        cur.client_order_id,
+                        cur.order_id,
+                        cur.avg_fill_price,
+                        cur.fee
                     )
                 }
             }
@@ -163,7 +205,7 @@ mod tests {
                 filled_qty: order.quantity,
                 remaining_qty: Decimal::ZERO,
                 avg_fill_price: Some(arbitrageur_core::types::dec!(100)),
-                fee: Decimal::ZERO,
+                fee: Some(Decimal::ZERO),
                 fee_currency: "USDC".to_string(),
                 raw_response: None,
                 timestamp: chrono::Utc::now(),

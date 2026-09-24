@@ -13,7 +13,7 @@ import {
   Sigma,
 } from "lucide-react";
 import { SpreadGapIcon } from "./icons";
-import { formatStrategyName } from "../types/tickers";
+import { formatCurrencyPnl, formatStrategyName } from "../types/tickers";
 import { api } from "../services/api";
 import type { CalibrationReportDto, StrategyMetrics, WfoOptimizationResult } from "../types";
 
@@ -121,8 +121,8 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
         <div className="p-4 bg-surface border border-surface-border rounded-xl shadow-card">
           <span className="text-xs font-mono text-slate-500 font-semibold block">Total Realized PnL</span>
           <div className="mt-1 flex items-baseline space-x-1.5">
-            <span className={`text-base font-bold font-mono tabular-nums ${totalPnlUsd >= 0 ? "text-profit" : "text-loss"}`}>
-              {totalPnlUsd >= 0 ? `+$${totalPnlUsd.toFixed(2)}` : `-$${Math.abs(totalPnlUsd).toFixed(2)}`}
+            <span className={`text-base font-bold font-mono tabular-nums ${Number.isFinite(totalPnlUsd) ? (totalPnlUsd >= 0 ? "text-profit" : "text-loss") : "text-slate-500"}`}>
+              {formatCurrencyPnl(totalPnlUsd)}
             </span>
           </div>
           <span className="text-xs text-muted font-mono">Net of taker fees & slippage</span>
@@ -219,12 +219,14 @@ export const StrategyPerformance: React.FC<StrategyPerformanceProps> = ({ active
                 <div className="p-1.5 rounded-lg bg-surface-raised/60">
                   <span className="text-xs text-muted block">Net PnL</span>
                   <span className={`text-xs font-bold ${s.total_pnl_usd >= 0 ? "text-profit" : "text-loss"}`}>
-                    +${s.total_pnl_usd.toFixed(1)}
+                    {formatCurrencyPnl(s.total_pnl_usd)}
                   </span>
                 </div>
                 <div className="p-1.5 rounded-lg bg-surface-raised/60">
                   <span className="text-xs text-muted block">Avg / Trade</span>
-                  <span className="text-xs font-bold text-accent-strong">+{s.avg_pnl_bps.toFixed(1)} BPS</span>
+                  <span className="text-xs font-bold text-accent-strong">
+                    {Number.isFinite(s.avg_pnl_bps) ? `${s.avg_pnl_bps > 0 ? "+" : ""}${s.avg_pnl_bps.toFixed(1)} BPS` : "—"}
+                  </span>
                 </div>
                 <div className="p-1.5 rounded-lg bg-surface-raised/60">
                   <span className="text-xs text-muted block">Sharpe</span>

@@ -1218,6 +1218,7 @@ impl DexPerpAdapter {
         body: &serde_json::Value,
         headers: &[(String, String)],
     ) -> anyhow::Result<serde_json::Value> {
+        self.rate_limiter.acquire_signed().await?;
         let mut req = self.client.post(url).json(body);
         for (k, v) in headers {
             req = req.header(k.as_str(), v.as_str());
@@ -1250,6 +1251,7 @@ impl DexPerpAdapter {
         url: &str,
         headers: &[(String, String)],
     ) -> anyhow::Result<serde_json::Value> {
+        self.rate_limiter.acquire_signed().await?;
         let mut req = self.client.get(url);
         for (k, v) in headers {
             req = req.header(k.as_str(), v.as_str());
@@ -1279,6 +1281,7 @@ impl DexPerpAdapter {
         url: &str,
         headers: &[(String, String)],
     ) -> anyhow::Result<serde_json::Value> {
+        self.rate_limiter.acquire_signed().await?;
         let mut req = self.client.delete(url);
         for (k, v) in headers {
             req = req.header(k.as_str(), v.as_str());
@@ -2795,7 +2798,11 @@ fn dec_to_i256(v: Decimal, scale: u32) -> Option<I256> {
 }
 
 fn dec_to_u256(v: Decimal, scale: u32) -> Option<U256> {
-    let scaled = (v * Decimal::from(10u64.pow(scale.min(28)))).round();
+    // Checked math: `10u64.pow` overflows for scale ≥ 20 and `Decimal` mul
+    // panics past MAX — a venue-extreme input must fail, never panic or
+    // silently wrap into a wrong order size.
+    let multiplier = Decimal::from(10u128.checked_pow(scale)?);
+    let scaled = v.checked_mul(multiplier)?.round();
     if scaled < dec!(0) {
         return None;
     }
@@ -2845,7 +2852,18 @@ fn map_order_status(
         "partially_filled" | "partiallyfilled" | "partial" | "partial_fill" => {
             Some(PartiallyFilled)
         }
-        "filled" | "closed" | "done" | "fully_filled" => Some(Filled),
+        "filled" | "fully_filled" => Some(Filled),
+        // "closed"/"done" mean terminal, not necessarily filled — a
+        // zero-fill close must never masquerade as Filled. Verify against
+        // quantities; anything short is terminal-with-partial (Cancelled —
+        // the reconciler reads filled_qty and classifies PartialTerminal).
+        "closed" | "done" => {
+            if original > dec!(0) && filled >= original {
+                Some(Filled)
+            } else {
+                Some(Cancelled)
+            }
+        }
         "cancelled" | "canceled" | "cancel" => Some(Cancelled),
         "rejected" | "failed" | "error" => Some(Rejected),
         "expired" => Some(Expired),
@@ -3037,7 +3055,22 @@ impl DexPerpAdapter {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("StandX login returned no token"))?
             .to_string();
-        let expires_at = Utc::now() + chrono::Duration::days(6);
+        // Decode the JWT's `exp` claim rather than assuming a lifetime —
+        // riding an expired token would fail every signed call. No `exp`
+        // → conservative 1h refresh window, never a blind multi-day pin.
+        let expires_at = token
+            .split('.')
+            .nth(1)
+            .and_then(|p| base64_decode_url(p).ok())
+            .and_then(|j| serde_json::from_slice::<serde_json::Value>(&j).ok())
+            .and_then(|p| p.get("exp").and_then(|v| v.as_i64()))
+            .map(|exp| {
+                Utc::now()
+                    + chrono::Duration::seconds(
+                        (exp - Utc::now().timestamp() - 60).clamp(60, 7 * 86_400),
+                    )
+            })
+            .unwrap_or_else(|| Utc::now() + chrono::Duration::hours(1));
         *self.session.write() = Some(DexPerpSession {
             token: token.clone(),
             account_id: None,
@@ -3553,7 +3586,7 @@ impl DexPerpAdapter {
             filled_qty: filled,
             remaining_qty: (original - filled).max(dec!(0)),
             avg_fill_price: avg_price,
-            fee: dec!(0),
+            fee: None,
             fee_currency: "USD".to_string(),
             raw_response: Some(raw.to_string()),
             timestamp: Utc::now(),
@@ -3661,12 +3694,7 @@ impl DexPerpAdapter {
                 .price
                 .ok_or_else(|| anyhow::anyhow!("Pacifica limit orders require a price"))?;
             data["price"] = serde_json::json!(price.to_string());
-            let tif = match order.order_type {
-                arbitrageur_core::types::OrderType::ImmediateOrCancel => "IOC",
-                arbitrageur_core::types::OrderType::PostOnly => "ALO",
-                _ => "GTC",
-            };
-            data["tif"] = serde_json::json!(tif);
+            data["tif"] = serde_json::json!(pacifica_limit_tif(order)?);
         }
         let op = if is_market {
             "create_market_order"
@@ -3684,8 +3712,9 @@ impl DexPerpAdapter {
             .get("order_id")
             .or_else(|| d.get("orderId"))
             .and_then(|v| {
-                v.as_i64()
+                v.as_u64()
                     .map(|i| i.to_string())
+                    .or_else(|| v.as_i64().map(|i| i.to_string()))
                     .or_else(|| v.as_str().map(|s| s.to_string()))
             })
             .ok_or_else(|| anyhow::anyhow!("Pacifica create_order returned no order_id: {resp}"))?;
@@ -3742,8 +3771,9 @@ impl DexPerpAdapter {
                 let id_match = e
                     .get("order_id")
                     .and_then(|v| {
-                        v.as_i64()
+                        v.as_u64()
                             .map(|i| i.to_string())
+                            .or_else(|| v.as_i64().map(|i| i.to_string()))
                             .or_else(|| v.as_str().map(|s| s.to_string()))
                     })
                     .map(|s| s == order_id)
@@ -3848,11 +3878,7 @@ impl DexPerpAdapter {
     async fn standx_place(&self, order: &OrderRequest) -> anyhow::Result<OrderResponse> {
         let vsym = self.venue_symbol(&order.symbol);
         let is_market = order.order_type == arbitrageur_core::types::OrderType::Market;
-        let tif = match order.order_type {
-            arbitrageur_core::types::OrderType::ImmediateOrCancel => "ioc",
-            arbitrageur_core::types::OrderType::PostOnly => "alo",
-            _ => "gtc",
-        };
+        let tif = standx_tif(order)?;
         let mut body = serde_json::json!({
             "symbol": vsym,
             "side": if order.side.is_buy() { "buy" } else { "sell" },
@@ -4054,17 +4080,14 @@ impl DexPerpAdapter {
             "size": order.quantity.to_string(),
             "clientOrderId": order.client_order_id,
             "reduceOnly": order.reduce_only,
-            "postOnly": order.order_type == arbitrageur_core::types::OrderType::PostOnly || order.post_only,
+            "postOnly": matches!(effective_exec_policy(order), ExecPolicy::PostOnly),
         });
         if !is_market {
             let price = order
                 .price
                 .ok_or_else(|| anyhow::anyhow!("Ondo limit orders require a price"))?;
             body["price"] = serde_json::json!(price.to_string());
-            body["timeInForce"] = serde_json::json!(match order.order_type {
-                arbitrageur_core::types::OrderType::ImmediateOrCancel => "IOC",
-                _ => "GTC",
-            });
+            body["timeInForce"] = serde_json::json!(ondo_limit_policy(order)?.0);
         }
         let headers = self.ondo_auth_headers().await?;
         let url = format!("{}/v1/perps/orders", self.base_url);
@@ -4249,11 +4272,9 @@ impl DexPerpAdapter {
             .parse()
             .map_err(|_| anyhow::anyhow!("GRVT sub-account id {account_id} is not numeric"))?;
         let is_market = order.order_type == arbitrageur_core::types::OrderType::Market;
-        let (tif_code, post_only) = match order.order_type {
-            arbitrageur_core::types::OrderType::ImmediateOrCancel => (3u8, false),
-            arbitrageur_core::types::OrderType::PostOnly => (2u8, true),
-            _ => (1u8, false),
-        };
+        // GRVT time_in_force codes + postOnly flag come from the shared
+        // venue policy table — every requested policy maps explicitly.
+        let (tif_code, post_only) = grvt_policy(order);
         let price_bound = match order.price {
             Some(p) if !is_market => p,
             _ => self.market_bound_price(order).await?,
@@ -4546,11 +4567,7 @@ impl DexPerpAdapter {
             "nonce": nonce.to_string().parse::<u64>().unwrap_or(0),
             "signer": signer_addr,
             "order_type": if is_market { "market" } else { "limit" },
-            "time_in_force": match order.order_type {
-                arbitrageur_core::types::OrderType::ImmediateOrCancel => "ioc",
-                arbitrageur_core::types::OrderType::PostOnly => "post_only",
-                _ => "gtc",
-            },
+            "time_in_force": derive_tif(order)?,
             "mmp": false,
             "reduce_only": order.reduce_only,
             "signature": sig,
@@ -4767,6 +4784,10 @@ impl DexPerpAdapter {
             dec_to_u256(price, 6).ok_or_else(|| anyhow::anyhow!("Aevo price out of range"))?;
         let salt = U256::from(Utc::now().timestamp_millis() as u64 % u64::MAX);
         let ts = U256::from(Utc::now().timestamp() as u64);
+        // Aevo's signed-order wire carries no time-in-force — only a
+        // post_only flag. IOC/FOK requests cannot be expressed; refuse
+        // rather than rest a GTC order the caller never asked for.
+        let aevo_post_only = aevo_policy(order)?;
         let (sig, maker) = self.aevo_order_sig(
             order.side.is_buy(),
             price_6,
@@ -4783,7 +4804,7 @@ impl DexPerpAdapter {
             "limit_price": price_6.to_string(),
             "salt": salt.to_string(),
             "signature": sig,
-            "post_only": order.order_type == arbitrageur_core::types::OrderType::PostOnly || order.post_only,
+            "post_only": aevo_post_only,
             "timestamp": ts.to_string().parse::<u64>().unwrap_or(0),
         });
         let headers = self.aevo_headers()?;
@@ -6131,11 +6152,10 @@ impl DexPerpAdapter {
         }
         let vsym = self.venue_symbol(&order.symbol);
         let is_buy = order.side.is_buy();
-        let (order_type, tif) = match order.order_type {
-            OrderType::Market => ("MARKET", None),
-            OrderType::ImmediateOrCancel => ("LIMIT", Some("FOK")),
-            _ => ("LIMIT", Some("GTC")),
-        };
+        // Vest exposes MARKET plus LIMIT with GTC/FOK tifs — the shared
+        // policy table maps IOC to FOK (strictly stronger, never weaker)
+        // and refuses post-only outright.
+        let (order_type, tif) = vest_wire_type(order)?;
         // Resolve auth first (self-registering when the primary key is
         // held) — a credential failure must not even read the book.
         let headers = self.vest_headers().await?;
@@ -6283,7 +6303,7 @@ impl DexPerpAdapter {
             entry.clone(),
         );
         if let Some(f) = dec_from_json(entry.get("fees")) {
-            resp.fee = f;
+            resp.fee = Some(f);
             resp.fee_currency = "USDC".to_string();
         }
         Ok(resp)
@@ -6631,6 +6651,7 @@ impl DexPerpAdapter {
         wait_key: &str,
         frame: serde_json::Value,
     ) -> anyhow::Result<serde_json::Value> {
+        self.rate_limiter.acquire_signed().await?;
         let state = self.qfex_session().await?;
         let (tx, rx) = tokio::sync::oneshot::channel();
         state
@@ -6657,26 +6678,8 @@ impl DexPerpAdapter {
     }
 
     async fn qfex_place(&self, order: &OrderRequest) -> anyhow::Result<OrderResponse> {
-        use arbitrageur_core::types::{OrderType, TimeInForce};
         let vsym = self.venue_symbol(&order.symbol);
-        let order_type = if order.order_type == OrderType::PostOnly || order.post_only {
-            "ALO"
-        } else {
-            match order.order_type {
-                OrderType::Market => "MARKET",
-                _ => "LIMIT",
-            }
-        };
-        let tif = match order.time_in_force {
-            TimeInForce::ImmediateOrCancel => "IOC",
-            TimeInForce::FillOrKill => "FOK",
-            _ => "GTC",
-        };
-        let tif = if order.order_type == OrderType::ImmediateOrCancel {
-            "IOC"
-        } else {
-            tif
-        };
+        let (order_type, tif) = qfex_policy(order);
         let qty_f = order
             .quantity
             .to_string()
@@ -6774,7 +6777,22 @@ impl DexPerpAdapter {
     ) -> anyhow::Result<OrderResponse> {
         // Live state: the WS cache holds every pushed order_response —
         // this is the authoritative open-order source (no REST exists).
-        if let Some(s) = self.qfex_ws.read().as_ref() {
+        // A dead socket leaves stale rows that would report the last
+        // pre-disconnect status forever — drop it and re-establish the
+        // session so a fresh subscribe can repopulate open orders before
+        // consulting the cache (fail closed: never trust a dead feed).
+        let existing = {
+            self.qfex_ws
+                .read()
+                .as_ref()
+                .filter(|s| s.alive.load(std::sync::atomic::Ordering::Relaxed))
+                .cloned()
+        };
+        let session = match existing {
+            Some(s) => Some(s),
+            None => self.qfex_session().await.ok(),
+        };
+        if let Some(s) = session {
             let cached = {
                 let m = s.orders.lock().unwrap();
                 m.get(order_id)
@@ -6972,6 +6990,40 @@ fn nado_nonce() -> u64 {
     (recv << 20) | u64::from(rand::random::<u32>() & 0xF_FFFF)
 }
 
+/// An order's effective execution policy, resolved once from the three
+/// places a caller can express it. `order_type` is the semantic;
+/// `time_in_force` refines a plain Limit; the legacy `post_only` flag
+/// forces maker-only. Venues must map every variant they accept and
+/// refuse the rest — nothing may silently downgrade a requested policy.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ExecPolicy {
+    Market,
+    Ioc,
+    Fok,
+    PostOnly,
+    Rest,
+}
+
+fn effective_exec_policy(order: &OrderRequest) -> ExecPolicy {
+    use arbitrageur_core::types::{OrderType, TimeInForce};
+    if order.order_type == OrderType::Market {
+        ExecPolicy::Market
+    } else if order.post_only
+        || order.order_type == OrderType::PostOnly
+        || order.time_in_force == TimeInForce::PostOnly
+    {
+        ExecPolicy::PostOnly
+    } else if order.order_type == OrderType::ImmediateOrCancel
+        || order.time_in_force == TimeInForce::ImmediateOrCancel
+    {
+        ExecPolicy::Ioc
+    } else if order.time_in_force == TimeInForce::FillOrKill {
+        ExecPolicy::Fok
+    } else {
+        ExecPolicy::Rest
+    }
+}
+
 /// Appendix bit-layout (docs.nado.xyz order-appendix): version 1, order
 /// type at bits 9-10 (0 default, 1 IOC, 2 FOK, 3 post-only), reduce-only
 /// at bit 11. Market orders are IOC with a book-bounded limit price —
@@ -6998,6 +7050,118 @@ fn nado_appendix(order: &OrderRequest) -> u128 {
         appendix |= 1 << 11;
     }
     appendix
+}
+
+/* ------------------------------------------------------------------ */
+/* Per-venue wire policies — extracted as pure fns so the test matrix    */
+/* can enumerate the full ExecPolicy space per venue and assert every   */
+/* request either maps to a documented constant or refuses.             */
+/* ------------------------------------------------------------------ */
+
+/// Pacifica limit tif: IOC/ALO/GTC only — FOK and the market path are
+/// refused (market orders use `create_market_order`, not this body).
+fn pacifica_limit_tif(order: &OrderRequest) -> anyhow::Result<&'static str> {
+    Ok(match effective_exec_policy(order) {
+        ExecPolicy::Ioc => "IOC",
+        ExecPolicy::PostOnly => "ALO",
+        ExecPolicy::Rest => "GTC",
+        ExecPolicy::Fok => {
+            anyhow::bail!("Pacifica has no fill-or-kill — refusing instead of downgrading to GTC")
+        }
+        ExecPolicy::Market => {
+            anyhow::bail!("Pacifica market orders use create_market_order")
+        }
+    })
+}
+
+/// StandX tif: ioc/alo/gtc — market orders submit as ioc (immediate by
+/// construction), FOK is refused rather than downgraded to GTC.
+fn standx_tif(order: &OrderRequest) -> anyhow::Result<&'static str> {
+    Ok(match effective_exec_policy(order) {
+        ExecPolicy::Ioc => "ioc",
+        ExecPolicy::PostOnly => "alo",
+        ExecPolicy::Rest => "gtc",
+        ExecPolicy::Fok => {
+            anyhow::bail!("StandX has no fill-or-kill — refusing instead of downgrading to GTC")
+        }
+        ExecPolicy::Market => "ioc",
+    })
+}
+
+/// Ondo limit fields: (timeInForce, postOnly) — post-only rides its own
+/// flag on a GTC row, IOC has a native tif, FOK refuses.
+fn ondo_limit_policy(order: &OrderRequest) -> anyhow::Result<(&'static str, bool)> {
+    Ok(match effective_exec_policy(order) {
+        ExecPolicy::Ioc => ("IOC", false),
+        ExecPolicy::PostOnly => ("GTC", true),
+        ExecPolicy::Rest => ("GTC", false),
+        ExecPolicy::Fok => {
+            anyhow::bail!("Ondo has no fill-or-kill — refusing instead of downgrading to GTC")
+        }
+        ExecPolicy::Market => anyhow::bail!("unreachable: is_market checked"),
+    })
+}
+
+/// GRVT time_in_force codes: 1 GOOD_TILL_TIME, 2 ALL_OR_NOTHING,
+/// 3 IMMEDIATE_OR_CANCEL, 4 FILL_OR_KILL — plus a signed postOnly flag.
+/// Every requested policy maps explicitly; nothing degrades.
+fn grvt_policy(order: &OrderRequest) -> (u8, bool) {
+    match effective_exec_policy(order) {
+        ExecPolicy::Ioc => (3, false),
+        ExecPolicy::Fok => (4, false),
+        ExecPolicy::PostOnly => (2, true),
+        ExecPolicy::Rest | ExecPolicy::Market => (1, false),
+    }
+}
+
+/// Derive time_in_force: ioc/post_only/gtc — market rides a bounded
+/// limit price under gtc; FOK has no wire form and refuses.
+fn derive_tif(order: &OrderRequest) -> anyhow::Result<&'static str> {
+    Ok(match effective_exec_policy(order) {
+        ExecPolicy::Ioc => "ioc",
+        ExecPolicy::PostOnly => "post_only",
+        ExecPolicy::Rest | ExecPolicy::Market => "gtc",
+        ExecPolicy::Fok => {
+            anyhow::bail!("Derive has no fill-or-kill — refusing instead of downgrading to GTC")
+        }
+    })
+}
+
+/// Aevo signed orders carry only a post_only flag — no tif field at all.
+/// IOC/FOK cannot be expressed and refuse; market submits as a bounded
+/// limit (not post-only). Returns the post_only wire value.
+fn aevo_policy(order: &OrderRequest) -> anyhow::Result<bool> {
+    match effective_exec_policy(order) {
+        ExecPolicy::Ioc | ExecPolicy::Fok => anyhow::bail!(
+            "Aevo signed orders cannot express IOC/FOK — refusing instead of resting GTC"
+        ),
+        ExecPolicy::PostOnly => Ok(true),
+        ExecPolicy::Rest | ExecPolicy::Market => Ok(false),
+    }
+}
+
+/// Vest (order_type, tif): MARKET plus LIMIT with GTC/FOK. IOC maps to
+/// FOK — strictly stronger than requested (all-or-nothing vs partial-ok),
+/// never weaker, so the mapping cannot over-fill. Post-only refuses.
+fn vest_wire_type(order: &OrderRequest) -> anyhow::Result<(&'static str, Option<&'static str>)> {
+    Ok(match effective_exec_policy(order) {
+        ExecPolicy::Market => ("MARKET", None),
+        ExecPolicy::Ioc | ExecPolicy::Fok => ("LIMIT", Some("FOK")),
+        ExecPolicy::Rest => ("LIMIT", Some("GTC")),
+        ExecPolicy::PostOnly => anyhow::bail!("Vest post-only refused above"),
+    })
+}
+
+/// QFEX (order_type, order_time_in_force): every requested policy has a
+/// native pair — nothing refuses, nothing downgrades.
+fn qfex_policy(order: &OrderRequest) -> (&'static str, &'static str) {
+    match effective_exec_policy(order) {
+        ExecPolicy::PostOnly => ("ALO", "GTC"),
+        ExecPolicy::Market => ("MARKET", "GTC"),
+        ExecPolicy::Ioc => ("LIMIT", "IOC"),
+        ExecPolicy::Fok => ("LIMIT", "FOK"),
+        ExecPolicy::Rest => ("LIMIT", "GTC"),
+    }
 }
 
 /// The EIP-712 `Order` struct hash and its full typed-data digest under
@@ -7428,10 +7592,12 @@ impl DexPerpAdapter {
         if let Some(arr) = d.get("perp_products").and_then(|v| v.as_array()) {
             for p in arr {
                 if let (Some(pid), Some(px)) = (
-                    p.get("product_id").and_then(|v| v.as_u64()),
+                    p.get("product_id")
+                        .and_then(|v| v.as_u64())
+                        .and_then(|v| u32::try_from(v).ok()),
                     nado_x18(p.get("oracle_price_x18")),
                 ) {
-                    marks.insert(pid as u32, px);
+                    marks.insert(pid, px);
                 }
             }
         }
@@ -7442,7 +7608,15 @@ impl DexPerpAdapter {
                 if amt == dec!(0) {
                     continue;
                 }
-                let pid = b.get("product_id").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                // A missing/oversized product_id is not product 0 (USDT0) —
+                // skip the row rather than mislabel the currency.
+                let Some(pid) = b
+                    .get("product_id")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| u32::try_from(v).ok())
+                else {
+                    continue;
+                };
                 // Product 0 is the USDT0 quote asset itself.
                 let currency = if pid == 0 {
                     "USDT0".to_string()
@@ -7469,7 +7643,13 @@ impl DexPerpAdapter {
                 if amt == dec!(0) {
                     continue;
                 }
-                let pid = b.get("product_id").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+                let Some(pid) = b
+                    .get("product_id")
+                    .and_then(|v| v.as_u64())
+                    .and_then(|v| u32::try_from(v).ok())
+                else {
+                    continue;
+                };
                 let vsym = pid_to_sym.get(&pid).cloned().unwrap_or_default();
                 let sym = vsym.strip_suffix("-PERP").unwrap_or(&vsym).to_uppercase();
                 let side = if amt < dec!(0) {
@@ -7570,9 +7750,21 @@ fn evedex_domain_sep() -> [u8; 32] {
 }
 
 /// Client order id `{days:05d}:{26 hex}` per SDK `generateOrderIdV2`.
-fn evedex_order_id() -> String {
+/// When the caller supplies a `client_order_id` the suffix is derived
+/// deterministically from it: a retry after a lost ack regenerates the
+/// SAME venue id, so the matcher dedupes the resubmission instead of
+/// silently opening a second real order. Callers without an id get the
+/// historical random suffix.
+fn evedex_order_id(client_order_id: Option<&str>) -> String {
     let days = ((Utc::now().timestamp_millis() - EVEDEX_ORDER_ID_EPOCH_MS) / 86_400_000).max(0);
-    format!("{days:05}:{}", hex::encode(rand::random::<[u8; 13]>()))
+    let suffix = match client_order_id.map(str::trim).filter(|c| !c.is_empty()) {
+        Some(cid) => {
+            let h = keccak256(cid.as_bytes());
+            hex::encode(&h[..13])
+        }
+        None => hex::encode(rand::random::<[u8; 13]>()),
+    };
+    format!("{days:05}:{suffix}")
 }
 
 /// SDK `toMatcherNumber`: round half-away-from-zero at 8dp, plain
@@ -7796,6 +7988,7 @@ impl DexPerpAdapter {
         path: &str,
         body: Option<&serde_json::Value>,
     ) -> anyhow::Result<serde_json::Value> {
+        self.rate_limiter.acquire_signed().await?;
         for attempt in 0..2u8 {
             if self.evedex_tokens.read().is_none() {
                 self.evedex_login().await?;
@@ -7904,7 +8097,7 @@ impl DexPerpAdapter {
                 fee.get("coin").and_then(|v| v.as_str()),
                 dec_from_json(fee.get("quantity")),
             ) {
-                out.fee = q;
+                out.fee = Some(q);
                 out.fee_currency = coin.to_string();
             }
         }
@@ -7929,7 +8122,7 @@ impl DexPerpAdapter {
         let _ = self.evedex_identity()?;
         let instrument = self.venue_symbol(&order.symbol);
         let side = if order.side.is_buy() { "BUY" } else { "SELL" };
-        let id = evedex_order_id();
+        let id = evedex_order_id(Some(order.client_order_id.as_str()));
         // EVEDEX orders carry leverage (1–300); the engine has no
         // leverage concept — 1x keeps orders fully margined.
         let leverage: u8 = 1;
@@ -8104,14 +8297,22 @@ impl DexPerpAdapter {
                 if total == dec!(0) {
                     continue;
                 }
-                equity += dec_from_json(b.get("balanceUSD")).unwrap_or(total);
+                let currency = b
+                    .get("currency")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("USD")
+                    .to_string();
+                // Equity is USD — never add a non-USD balance at face value
+                // when the venue omitted its USD conversion (fail closed:
+                // undercount rather than fabricate a price).
+                match dec_from_json(b.get("balanceUSD")) {
+                    Some(usd) => equity += usd,
+                    None if arbitrageur_core::symbol::is_usd_family(&currency) => equity += total,
+                    None => {}
+                }
                 balances.push(arbitrageur_core::position::Balance {
                     venue: self.venue_id.clone(),
-                    currency: b
-                        .get("currency")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("USD")
-                        .to_string(),
+                    currency,
                     total,
                     free: total,
                     locked: dec!(0),
@@ -9026,7 +9227,7 @@ impl DexPerpAdapter {
             filled_qty: dec!(0),
             remaining_qty: qty,
             avg_fill_price: None,
-            fee: dec!(0),
+            fee: None,
             fee_currency: "USDC".to_string(),
             raw_response: Some(resp.to_string()),
             timestamp: Utc::now(),
@@ -9085,10 +9286,12 @@ impl DexPerpAdapter {
             let resp = self
                 .edgex_get_private(
                     "/api/v2/private/order/getOrderById",
-                    &serde_json::json!({"accountId": account_id, "orderIdList": order_id}),
+                    &serde_json::json!({"accountId": account_id, "orderIdList": [order_id]}),
                 )
                 .await?;
             entry = resp.get("data").and_then(|v| v.as_array()).and_then(|a| {
+                // Exact id match only — falling back to an arbitrary array
+                // element would report another order's state as this one's.
                 a.iter()
                     .find(|e| {
                         e.get("id").and_then(|v| {
@@ -9099,7 +9302,6 @@ impl DexPerpAdapter {
                         }) == Some(true)
                     })
                     .cloned()
-                    .or_else(|| a.first().cloned())
             });
         }
         if entry.is_none() {
@@ -9107,14 +9309,13 @@ impl DexPerpAdapter {
                 let resp = self
                     .edgex_get_private(
                         "/api/v2/private/order/getOrderByClientOrderId",
-                        &serde_json::json!({"accountId": account_id, "clientOrderIdList": cid}),
+                        &serde_json::json!({"accountId": account_id, "clientOrderIdList": [cid]}),
                     )
                     .await?;
                 entry = resp.get("data").and_then(|v| v.as_array()).and_then(|a| {
                     a.iter()
                         .find(|e| e.get("clientOrderId").and_then(|v| v.as_str()) == Some(cid))
                         .cloned()
-                        .or_else(|| a.first().cloned())
                 });
             }
         }
@@ -9166,7 +9367,7 @@ impl DexPerpAdapter {
             filled_qty: filled,
             remaining_qty: (original - filled).max(dec!(0)),
             avg_fill_price: avg_fill,
-            fee: dec_from_json(e.get("cumFillFee")).unwrap_or_default(),
+            fee: dec_from_json(e.get("cumFillFee")),
             fee_currency: "USDC".to_string(),
             raw_response: Some(e.to_string()),
             timestamp: Utc::now(),
@@ -9735,7 +9936,7 @@ impl DexPerpAdapter {
             filled_qty: dec!(0),
             remaining_qty: qty,
             avg_fill_price: None,
-            fee: dec!(0),
+            fee: None,
             fee_currency: "USD".to_string(),
             raw_response: Some(resp.to_string()),
             timestamp: Utc::now(),
@@ -9781,10 +9982,11 @@ impl DexPerpAdapter {
                     .ok()
                     .and_then(|v| v.as_array().cloned())
                     .and_then(|a| {
+                        // Exact externalId match only — an arbitrary array
+                        // element is another order's state, not this one's.
                         a.iter()
                             .find(|e| e.get("externalId").and_then(|v| v.as_str()) == Some(cid))
                             .cloned()
-                            .or_else(|| a.first().cloned())
                     });
             }
         }
@@ -9824,7 +10026,7 @@ impl DexPerpAdapter {
             filled_qty: filled,
             remaining_qty: (original - filled).max(dec!(0)),
             avg_fill_price: dec_from_json(e.get("averagePrice")),
-            fee: dec_from_json(e.get("payedFee")).unwrap_or_default(),
+            fee: dec_from_json(e.get("payedFee")),
             fee_currency: "USD".to_string(),
             raw_response: Some(e.to_string()),
             timestamp: Utc::now(),
@@ -9919,6 +10121,7 @@ impl DexPerpAdapter {
         let vsym = self.venue_symbol(symbol);
         let url = format!("{}/api/v1/user/leverage", self.base_url);
         let body = serde_json::json!({"market": vsym, "leverage": leverage.to_string()});
+        self.rate_limiter.acquire_signed().await?;
         let mut req = self.client.patch(&url).json(&body);
         for (k, v) in &headers {
             req = req.header(k.as_str(), v.as_str());
@@ -10271,7 +10474,7 @@ impl DexPerpAdapter {
             filled_qty: dec!(0),
             remaining_qty: qty,
             avg_fill_price: None,
-            fee: dec!(0),
+            fee: None,
             fee_currency: "USD".to_string(),
             raw_response: Some(format!("{tx:?}")),
             timestamp: Utc::now(),
@@ -10373,7 +10576,7 @@ impl DexPerpAdapter {
             filled_qty: filled,
             remaining_qty: (original - filled).max(dec!(0)),
             avg_fill_price: dec_from_json(e.get("averageFillPrice")),
-            fee: dec!(0),
+            fee: None,
             fee_currency: "USD".to_string(),
             raw_response: Some(e.to_string()),
             timestamp: Utc::now(),
@@ -11002,10 +11205,13 @@ impl DexPerpAdapter {
                         info.price_tick
                     );
                 }
-                let atomic = matches!(
-                    order.time_in_force,
-                    TimeInForce::ImmediateOrCancel | TimeInForce::FillOrKill
-                );
+                // order_type is the semantic — an IOC request with a stale
+                // GTC tif must stay atomic, never rest on the book.
+                let atomic = order.order_type == OrderType::ImmediateOrCancel
+                    || matches!(
+                        order.time_in_force,
+                        TimeInForce::ImmediateOrCancel | TimeInForce::FillOrKill
+                    );
                 if matches!(order.time_in_force, TimeInForce::FillOrKill) {
                     // Injective's atomic type is IOC-style (partial fills
                     // cancel the rest); FOK all-or-nothing is not
@@ -11044,7 +11250,7 @@ impl DexPerpAdapter {
             filled_qty: dec!(0),
             remaining_qty: qty_tick,
             avg_fill_price: None,
-            fee: dec!(0),
+            fee: None,
             fee_currency: info.quote.clone(),
             raw_response: Some(txhash),
             timestamp: Utc::now(),
@@ -11142,7 +11348,7 @@ impl DexPerpAdapter {
             filled_qty: filled,
             remaining_qty: (original - filled).max(dec!(0)),
             avg_fill_price: Decimal::from_str(&entry.price).ok().map(|p| p / info.scale),
-            fee: dec!(0),
+            fee: None,
             fee_currency: info.quote.clone(),
             raw_response: None,
             timestamp: Utc::now(),
@@ -12216,7 +12422,7 @@ mod tests {
 
     #[test]
     fn evedex_order_id_matches_v2_shape() {
-        let id = evedex_order_id();
+        let id = evedex_order_id(None);
         let (days, suffix) = id.split_once(':').expect("day:suffix");
         assert_eq!(days.len(), 5);
         assert_eq!(suffix.len(), 26);
@@ -12224,6 +12430,21 @@ mod tests {
         // Day counter is days since 2025-07-24 (≈426 on 2026-09-23).
         let d: i64 = days.parse().unwrap();
         assert!(d >= 426, "day counter behind the SDK epoch: {d}");
+    }
+
+    #[test]
+    fn evedex_order_id_is_deterministic_per_client_id() {
+        // Retry after a lost ack must regenerate the same venue id so the
+        // matcher dedupes instead of doubling the order.
+        let a = evedex_order_id(Some("sig-abc-leg0"));
+        let b = evedex_order_id(Some("sig-abc-leg0"));
+        assert_eq!(a, b);
+        assert_ne!(
+            evedex_order_id(Some("sig-abc-leg0")),
+            evedex_order_id(Some("sig-abc-leg1"))
+        );
+        assert_ne!(evedex_order_id(None), evedex_order_id(None));
+        assert_ne!(evedex_order_id(Some("x")), evedex_order_id(Some(" ")));
     }
 
     #[test]
@@ -13297,5 +13518,238 @@ mod wallet_direct_tests {
             )
             .is_ok());
         assert!(a.has_live_credentials());
+    }
+
+    #[test]
+    fn exec_policy_resolution_never_downgrades() {
+        use arbitrageur_core::types::{OrderType, Side, TimeInForce};
+        let venue = VenueId::new("vest");
+        let mk = |t: OrderType, tif: TimeInForce, po: bool| {
+            let mut o = OrderRequest::new_limit(
+                venue.clone(),
+                "BTC-USDC",
+                Side::Buy,
+                dec!(50000),
+                dec!(0.01),
+            );
+            o.order_type = t;
+            o.time_in_force = tif;
+            o.post_only = po;
+            o
+        };
+        // Every request maps to exactly one policy — the semantic field
+        // wins over a contradictory tif.
+        assert_eq!(
+            effective_exec_policy(&mk(OrderType::Market, TimeInForce::GoodTilCancelled, false)),
+            ExecPolicy::Market
+        );
+        assert_eq!(
+            effective_exec_policy(&mk(OrderType::Limit, TimeInForce::ImmediateOrCancel, false)),
+            ExecPolicy::Ioc
+        );
+        assert_eq!(
+            effective_exec_policy(&mk(OrderType::Limit, TimeInForce::FillOrKill, false)),
+            ExecPolicy::Fok
+        );
+        assert_eq!(
+            effective_exec_policy(&mk(
+                OrderType::PostOnly,
+                TimeInForce::GoodTilCancelled,
+                false
+            )),
+            ExecPolicy::PostOnly
+        );
+        assert_eq!(
+            effective_exec_policy(&mk(OrderType::Limit, TimeInForce::PostOnly, false)),
+            ExecPolicy::PostOnly
+        );
+        assert_eq!(
+            effective_exec_policy(&mk(OrderType::Limit, TimeInForce::GoodTilCancelled, true)),
+            ExecPolicy::PostOnly
+        );
+        assert_eq!(
+            effective_exec_policy(&mk(
+                OrderType::ImmediateOrCancel,
+                TimeInForce::GoodTilCancelled,
+                false
+            )),
+            ExecPolicy::Ioc
+        );
+        assert_eq!(
+            effective_exec_policy(&mk(OrderType::Limit, TimeInForce::GoodTilCancelled, false)),
+            ExecPolicy::Rest
+        );
+    }
+
+    /// One request per effective policy, plus the alternative spellings
+    /// (`OrderType::PostOnly`/`ImmediateOrCancel`, tif `PostOnly`) that must
+    /// resolve identically — the matrix proves request→policy→wire is
+    /// total: every accepted policy lands on a documented constant, every
+    /// unaccepted one refuses.
+    fn policy_orders() -> Vec<(&'static str, OrderRequest)> {
+        use arbitrageur_core::types::{OrderType, Side, TimeInForce};
+        let venue = VenueId::new("vest");
+        let mk = |t: OrderType, tif: TimeInForce, po: bool| {
+            let mut o = OrderRequest::new_limit(
+                venue.clone(),
+                "BTC-USDC",
+                Side::Buy,
+                dec!(50000),
+                dec!(0.01),
+            );
+            o.order_type = t;
+            o.time_in_force = tif;
+            o.post_only = po;
+            o
+        };
+        let mut market = OrderRequest::new_market(venue.clone(), "BTC-USDC", Side::Buy, dec!(0.01));
+        market.order_type = OrderType::Market;
+        vec![
+            ("market", market),
+            (
+                "ioc-tif",
+                mk(OrderType::Limit, TimeInForce::ImmediateOrCancel, false),
+            ),
+            (
+                "ioc-type",
+                mk(
+                    OrderType::ImmediateOrCancel,
+                    TimeInForce::GoodTilCancelled,
+                    false,
+                ),
+            ),
+            ("fok", mk(OrderType::Limit, TimeInForce::FillOrKill, false)),
+            (
+                "postonly-flag",
+                mk(OrderType::Limit, TimeInForce::GoodTilCancelled, true),
+            ),
+            (
+                "postonly-type",
+                mk(OrderType::PostOnly, TimeInForce::GoodTilCancelled, false),
+            ),
+            (
+                "postonly-tif",
+                mk(OrderType::Limit, TimeInForce::PostOnly, false),
+            ),
+            (
+                "rest",
+                mk(OrderType::Limit, TimeInForce::GoodTilCancelled, false),
+            ),
+        ]
+    }
+
+    #[test]
+    fn venue_wire_policy_matrix_maps_or_refuses_every_policy() {
+        // Grouped by expected ExecPolicy for readable expectations.
+        let groups: &[(&[&str], ExecPolicy)] = &[
+            (&["market"], ExecPolicy::Market),
+            (&["ioc-tif", "ioc-type"], ExecPolicy::Ioc),
+            (&["fok"], ExecPolicy::Fok),
+            (
+                &["postonly-flag", "postonly-type", "postonly-tif"],
+                ExecPolicy::PostOnly,
+            ),
+            (&["rest"], ExecPolicy::Rest),
+        ];
+        let orders = policy_orders();
+        for (names, want) in groups {
+            for name in *names {
+                let order = &orders.iter().find(|(n, _)| n == name).unwrap().1;
+                assert_eq!(
+                    effective_exec_policy(order),
+                    *want,
+                    "{name} must resolve to {want:?}"
+                );
+            }
+        }
+        let get = |name: &str| orders.iter().find(|(n, _)| *n == name).unwrap().1.clone();
+
+        // Pacifica: limit path accepts IOC/ALO/GTC; FOK and market refuse.
+        assert_eq!(pacifica_limit_tif(&get("ioc-tif")).unwrap(), "IOC");
+        assert_eq!(pacifica_limit_tif(&get("postonly-flag")).unwrap(), "ALO");
+        assert_eq!(pacifica_limit_tif(&get("rest")).unwrap(), "GTC");
+        assert!(pacifica_limit_tif(&get("fok")).is_err());
+        assert!(pacifica_limit_tif(&get("market")).is_err());
+
+        // StandX: market submits as ioc; FOK refuses.
+        assert_eq!(standx_tif(&get("ioc-tif")).unwrap(), "ioc");
+        assert_eq!(standx_tif(&get("postonly-type")).unwrap(), "alo");
+        assert_eq!(standx_tif(&get("rest")).unwrap(), "gtc");
+        assert_eq!(standx_tif(&get("market")).unwrap(), "ioc");
+        assert!(standx_tif(&get("fok")).is_err());
+
+        // Ondo: (timeInForce, postOnly) — post-only rides the flag on GTC.
+        assert_eq!(ondo_limit_policy(&get("ioc-tif")).unwrap(), ("IOC", false));
+        assert_eq!(
+            ondo_limit_policy(&get("postonly-tif")).unwrap(),
+            ("GTC", true)
+        );
+        assert_eq!(ondo_limit_policy(&get("rest")).unwrap(), ("GTC", false));
+        assert!(ondo_limit_policy(&get("fok")).is_err());
+        assert!(ondo_limit_policy(&get("market")).is_err());
+
+        // GRVT: explicit codes for every policy — nothing refuses.
+        assert_eq!(grvt_policy(&get("ioc-tif")), (3, false));
+        assert_eq!(grvt_policy(&get("fok")), (4, false));
+        assert_eq!(grvt_policy(&get("postonly-flag")), (2, true));
+        assert_eq!(grvt_policy(&get("rest")), (1, false));
+        assert_eq!(grvt_policy(&get("market")), (1, false));
+
+        // Derive: ioc/post_only/gtc strings; FOK refuses; market→gtc.
+        assert_eq!(derive_tif(&get("ioc-tif")).unwrap(), "ioc");
+        assert_eq!(derive_tif(&get("postonly-type")).unwrap(), "post_only");
+        assert_eq!(derive_tif(&get("rest")).unwrap(), "gtc");
+        assert_eq!(derive_tif(&get("market")).unwrap(), "gtc");
+        assert!(derive_tif(&get("fok")).is_err());
+
+        // Aevo: no tif field — IOC/FOK refuse; post_only flag only.
+        assert!(aevo_policy(&get("ioc-tif")).is_err());
+        assert!(aevo_policy(&get("fok")).is_err());
+        assert!(aevo_policy(&get("postonly-flag")).unwrap());
+        assert!(!aevo_policy(&get("rest")).unwrap());
+        assert!(!aevo_policy(&get("market")).unwrap());
+
+        // Vest: MARKET native; IOC and FOK both ride FOK (strictly
+        // stronger); post-only refuses.
+        assert_eq!(vest_wire_type(&get("market")).unwrap(), ("MARKET", None));
+        assert_eq!(
+            vest_wire_type(&get("ioc-tif")).unwrap(),
+            ("LIMIT", Some("FOK"))
+        );
+        assert_eq!(vest_wire_type(&get("fok")).unwrap(), ("LIMIT", Some("FOK")));
+        assert_eq!(
+            vest_wire_type(&get("rest")).unwrap(),
+            ("LIMIT", Some("GTC"))
+        );
+        assert!(vest_wire_type(&get("postonly-flag")).is_err());
+
+        // QFEX: every policy has a native (order_type, tif) pair.
+        assert_eq!(qfex_policy(&get("postonly-tif")), ("ALO", "GTC"));
+        assert_eq!(qfex_policy(&get("market")), ("MARKET", "GTC"));
+        assert_eq!(qfex_policy(&get("ioc-tif")), ("LIMIT", "IOC"));
+        assert_eq!(qfex_policy(&get("fok")), ("LIMIT", "FOK"));
+        assert_eq!(qfex_policy(&get("rest")), ("LIMIT", "GTC"));
+
+        // The alternative spellings resolve identically on every venue —
+        // no request form may bypass the policy gate.
+        for (a, b) in [
+            ("ioc-tif", "ioc-type"),
+            ("postonly-flag", "postonly-type"),
+            ("postonly-flag", "postonly-tif"),
+        ] {
+            let (oa, ob) = (get(a), get(b));
+            assert_eq!(
+                effective_exec_policy(&oa),
+                effective_exec_policy(&ob),
+                "{a} vs {b}"
+            );
+            assert_eq!(pacifica_limit_tif(&oa).ok(), pacifica_limit_tif(&ob).ok());
+            assert_eq!(standx_tif(&oa).ok(), standx_tif(&ob).ok());
+            assert_eq!(grvt_policy(&oa), grvt_policy(&ob));
+            assert_eq!(derive_tif(&oa).ok(), derive_tif(&ob).ok());
+            assert_eq!(aevo_policy(&oa).ok(), aevo_policy(&ob).ok());
+            assert_eq!(vest_wire_type(&oa).ok(), vest_wire_type(&ob).ok());
+            assert_eq!(qfex_policy(&oa), qfex_policy(&ob));
+        }
     }
 }

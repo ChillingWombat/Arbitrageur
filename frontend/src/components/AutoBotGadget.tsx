@@ -1,6 +1,7 @@
 import React from "react";
 import { Play, Pause, OctagonX } from "lucide-react";
 import type { RadarBotConfigDto, RadarBotStatusDto } from "../types";
+import { ConfirmActionModal } from "./ConfirmActionModal";
 import {
   botArmed,
   botBadgeTone,
@@ -29,6 +30,7 @@ export const AutoBotGadget: React.FC<AutoBotGadgetProps> = ({
   const controlsOff = botControlsDisabled(cfg);
   const open = status?.openPositions ?? [];
   const flattenArmed = !flattening && botFlattenAvailable(open.length, cfg?.mode);
+  const [showStopConfirm, setShowStopConfirm] = React.useState(false);
 
   const handleStop = () => {
     onMode("off");
@@ -97,7 +99,7 @@ export const AutoBotGadget: React.FC<AutoBotGadgetProps> = ({
           type="button"
           title="Emergency exit — stop bot and immediately flatten this strategy's positions to delta-neutral"
           disabled={!flattenArmed}
-          onClick={handleStop}
+          onClick={() => setShowStopConfirm(true)}
           className="flex items-center space-x-1 px-2 py-2 rounded-lg text-xs font-sans font-semibold transition cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed text-loss hover:bg-loss-dim border border-transparent hover:border-loss-border bg-loss-dim/40 shadow-xs active:scale-[0.98]"
         >
           <OctagonX className="w-3 h-3" />
@@ -127,6 +129,20 @@ export const AutoBotGadget: React.FC<AutoBotGadgetProps> = ({
           {status.lastError}
         </span>
       )}
+      <ConfirmActionModal
+        spec={
+          showStopConfirm
+            ? {
+                title: "Stop Auto-Bot",
+                subtitle: "Disable and flatten to delta-neutral",
+                body: "This switches the bot off and dispatches close orders for every open position it manages. Unfilled residuals stay open and escalate for operator review.",
+                confirmLabel: "Stop & Flatten",
+              }
+            : null
+        }
+        onConfirm={handleStop}
+        onCancel={() => setShowStopConfirm(false)}
+      />
     </div>
   );
 };

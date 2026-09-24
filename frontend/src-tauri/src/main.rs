@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod accounts;
+mod alerting;
 mod attribution;
 mod auto_exec;
 mod autotune;
@@ -127,6 +128,30 @@ fn main() {
     // same audited path as the manual apply.
     commands::spawn_autotune_scheduler(engine_state.clone());
 
+    // Spawn the dedicated drawdown-breaker feed. The daily-loss halt must
+    // not depend on anyone watching the Risk Overview: every 15s each
+    // admitted venue's account is read (singleflight-coalesced with the
+    // other lanes) and the env-scoped equity total feeds the breaker.
+    // Reads that fail keep their last-known equity in the total — a
+    // connectivity blip is not a drawdown.
+    {
+        let bg_state = engine_state.clone();
+        tauri::async_runtime::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+            loop {
+                interval.tick().await;
+                for (vid, _name, adapter) in bg_state.get_venues() {
+                    if let Ok((mut acc, _stale)) =
+                        execution::live_account_or_cached(&bg_state, vid, &adapter).await
+                    {
+                        bg_state.normalize_account_usd(vid, &mut acc);
+                        execution::feed_breaker_equity_usd(&bg_state, vid, acc.equity);
+                    }
+                }
+            }
+        });
+    }
+
     tauri::Builder::default()
         .manage(engine_state)
         .setup(|app| {
@@ -199,6 +224,8 @@ fn main() {
             commands::delete_account_credentials,
             commands::get_account_credential_field,
             commands::derive_evm_signer_address,
+            accounts::get_evm_amm_allowance,
+            accounts::prepare_evm_amm_allowance,
             commands::get_account_signer_address,
             commands::get_active_signer_address,
             commands::save_evm_wallet,
@@ -213,6 +240,9 @@ fn main() {
             commands::list_signal_executions,
             commands::get_ticker_position_state,
             commands::get_open_positions,
+            commands::set_ticker_reduce_only,
+            commands::list_reduce_only_tickers,
+            commands::get_strategy_capabilities,
             external_positions::get_external_positions,
             external_positions::recommend_external_close,
             external_positions::close_external_position,

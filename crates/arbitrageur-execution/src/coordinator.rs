@@ -168,15 +168,26 @@ fn is_complete_fill(
             .avg_fill_price
             .map(|p| p > Decimal::ZERO)
             .unwrap_or(false)
-        && resp.fee >= Decimal::ZERO
+        && resp.fee.map(|f| f >= Decimal::ZERO).unwrap_or(true)
+}
+
+/// The venue-reported fee on a response, 0 when the venue did not report
+/// one (unknown — never fabricated). PnL that nets fees through this is a
+/// known-cost floor, not an estimate.
+fn known_fee(resp: &OrderResponse) -> Decimal {
+    resp.fee.unwrap_or(Decimal::ZERO)
 }
 
 /// A partial fill is trimmable only when it is attributable to the
-/// dispatched order, echoes the requested quantity, reports PartiallyFilled
-/// with the exact shortfall remaining, and carries a positive fill price with
-/// a nonnegative fee. Malformed fills (wrong echoed qty, missing price,
-/// negative fee) are never kept open — they fall through to the full-unwind
-/// path.
+/// dispatched order, echoes the requested quantity, carries a positive fill
+/// price with a nonnegative fee, and reports a coherent remainder:
+/// `PartiallyFilled` (still working — reconciler tracks it) or a TERMINAL
+/// status (`Cancelled`/`Rejected`/`Expired`) where the remainder is either
+/// the exact shortfall or already consumed by the cancel. A terminal IOC
+/// leg that ended partially filled is exactly this case — refusing it
+/// would force the full-unwind path on a sound, finished fill. Malformed
+/// fills (wrong echoed qty, missing price, negative fee, incoherent
+/// remainder) are never kept open — they fall through to full unwind.
 fn is_trimmable_partial(
     resp: &OrderResponse,
     exchange: &Arc<dyn ExchangeAdapter>,
@@ -184,17 +195,27 @@ fn is_trimmable_partial(
     client_order_id: &str,
     requested_qty: Decimal,
 ) -> bool {
+    let status_ok = resp.status == OrderStatus::PartiallyFilled
+        || matches!(
+            resp.status,
+            OrderStatus::Cancelled | OrderStatus::Rejected | OrderStatus::Expired
+        );
+    // `remaining` is coherent when it equals the shortfall, or when the
+    // order is terminal and reports nothing open (the cancel consumed the
+    // rest — no further fill can arrive).
+    let remainder_ok = resp.remaining_qty == requested_qty - resp.filled_qty
+        || (resp.status.is_final() && resp.remaining_qty == Decimal::ZERO);
     response_identity_matches(resp, exchange, symbol, client_order_id)
         && resp.original_qty == requested_qty
-        && resp.status == OrderStatus::PartiallyFilled
+        && status_ok
         && resp.filled_qty > Decimal::ZERO
         && resp.filled_qty < requested_qty
-        && resp.remaining_qty == requested_qty - resp.filled_qty
+        && remainder_ok
         && resp
             .avg_fill_price
             .map(|p| p > Decimal::ZERO)
             .unwrap_or(false)
-        && resp.fee >= Decimal::ZERO
+        && resp.fee.map(|f| f >= Decimal::ZERO).unwrap_or(true)
 }
 
 /// Realized price PnL of closing `closed_qty` of a leg opened at
@@ -313,7 +334,7 @@ impl AtomicArbitrageCoordinator {
 
                     // Immediate realized cash P&L on opening fills is fee outflow only
                     ArbitrageExecutionResult::Success {
-                        realized_profit: -(fill_a.fee + fill_b.fee),
+                        realized_profit: -(known_fee(&fill_a) + known_fee(&fill_b)),
                         leg_a: fill_a,
                         leg_b: fill_b,
                     }
@@ -441,12 +462,12 @@ impl AtomicArbitrageCoordinator {
                         let trim_fee = trim_a
                             .as_ref()
                             .and_then(|r| r.as_ref().ok())
-                            .map(|resp| resp.fee)
+                            .and_then(|resp| resp.fee)
                             .unwrap_or(Decimal::ZERO)
                             + trim_b
                                 .as_ref()
                                 .and_then(|r| r.as_ref().ok())
-                                .map(|resp| resp.fee)
+                                .and_then(|resp| resp.fee)
                                 .unwrap_or(Decimal::ZERO);
                         // Closed trim-leg price PnL: each trimmed excess was
                         // opened at the leg fill price and closed at the trim
@@ -481,7 +502,8 @@ impl AtomicArbitrageCoordinator {
                             matched_qty, excess_a, excess_b
                         );
                         return ArbitrageExecutionResult::PartialPairKept {
-                            realized_profit: trim_pnl - (fill_a.fee + fill_b.fee + trim_fee),
+                            realized_profit: trim_pnl
+                                - (known_fee(&fill_a) + known_fee(&fill_b) + trim_fee),
                             leg_a_fill: fill_a,
                             leg_b_fill: fill_b,
                             matched_qty,

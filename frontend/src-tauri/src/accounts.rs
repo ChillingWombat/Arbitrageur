@@ -38,13 +38,51 @@ pub fn initialize_vault_impl(
     Ok(status)
 }
 
+/// Exponential backoff for failed unlock attempts (online password-guess
+/// throttle). Failure `n` waits `min(2^n, 30)` seconds before the next try.
+fn unlock_backoff_secs(failures: u32) -> u64 {
+    (1u64 << failures.min(5)).min(30)
+}
+
 pub fn unlock_vault_impl(password: &str, state: &AppEngineState) -> Result<VaultStatus, String> {
+    {
+        let backoff = state.vault_unlock_backoff.lock();
+        let retry_in = backoff
+            .1
+            .saturating_duration_since(std::time::Instant::now());
+        if backoff.0 > 0 && !retry_in.is_zero() {
+            return Err(format!(
+                "Too many failed unlock attempts — retry in {}s",
+                retry_in.as_secs() + 1
+            ));
+        }
+    }
     let status = {
         let mut vault = state.vault.write();
-        vault.unlock(password).map_err(|e| e.to_string())?;
-        vault.get_status()
+        match vault.unlock(password) {
+            Ok(()) => {
+                *state.vault_unlock_backoff.lock() = (0, std::time::Instant::now());
+                vault.get_status()
+            }
+            Err(e) => {
+                let mut backoff = state.vault_unlock_backoff.lock();
+                backoff.0 = backoff.0.saturating_add(1);
+                backoff.1 = std::time::Instant::now()
+                    + std::time::Duration::from_secs(unlock_backoff_secs(
+                        backoff.0.saturating_sub(1),
+                    ));
+                return Err(e.to_string());
+            }
+        }
     };
-    ensure_credential_migration(state)?;
+    // Post-unlock setup must never report failure for an unlock that
+    // already succeeded — the vault IS open; a setup failure degrades
+    // credential provisioning (adapters stay unauthenticated and fail
+    // closed) rather than making the unlock look atomic-rolled-back.
+    // Each step logs its own failure and the next still runs.
+    if let Err(e) = ensure_credential_migration(state) {
+        tracing::warn!("post-unlock credential migration failed: {e}");
+    }
     state.open_evm_stronghold();
     migrate_evm_keys_to_stronghold(state);
     state.sync_vault_credentials_to_adapters();
@@ -75,7 +113,10 @@ pub fn lock_vault_impl(state: &AppEngineState) -> Result<VaultStatus, String> {
     // while live positions are open rather than silently disabling exit
     // supervision; testnet sims need no credentials and lock freely.
     if state.is_live() {
-        if let Ok(signals) = state.state_store.list_open_signals() {
+        if let Ok(signals) = state
+            .state_store
+            .list_open_signals(Some(state.env().as_str()))
+        {
             let open: Vec<String> = signals
                 .iter()
                 .filter(|s| s.status.counts_as_open())
@@ -119,17 +160,20 @@ const DELETABLE_CREDENTIAL_VENUES: &[&str] = &[
 /// Open signals that would lose venue authentication if `venue`'s
 /// credentials were deleted — live mode only (testnet strands are
 /// recoverable by re-adding the key; a live position cannot wait).
-fn open_signals_on_venue(venue: &str, state: &AppEngineState) -> Vec<String> {
-    let Ok(signals) = state.state_store.list_open_signals() else {
-        return Vec::new();
-    };
-    signals
+/// `Err` when exposure cannot be verified — a read failure is not "no
+/// exposure", so callers must refuse the destructive operation.
+fn open_signals_on_venue(venue: &str, state: &AppEngineState) -> Result<Vec<String>, String> {
+    let signals = state
+        .state_store
+        .list_open_signals(Some(state.env().as_str()))
+        .map_err(|e| format!("Cannot verify open positions on {venue}: {e}"))?;
+    Ok(signals
         .iter()
         .filter(|s| {
             s.status.counts_as_open() && s.legs.iter().any(|l| l.venue.eq_ignore_ascii_case(venue))
         })
         .map(|s| format!("{}:{}", s.symbol, s.status.as_str()))
-        .collect()
+        .collect())
 }
 
 pub fn delete_exchange_credentials_impl(
@@ -144,7 +188,7 @@ pub fn delete_exchange_credentials_impl(
         ));
     }
     if state.is_live() {
-        let open = open_signals_on_venue(&normalized, state);
+        let open = open_signals_on_venue(&normalized, state)?;
         if !open.is_empty() {
             return Err(format!(
                 "Cannot delete {normalized} credentials while {} live position(s) use that venue ({}). Flatten them first.",
@@ -560,24 +604,28 @@ pub fn upsert_account_impl(
             // supervision — its adapter drops out of `get_venues`, so
             // closes can no longer authenticate or even resolve.
             if !input.enabled && state.is_live() {
-                if let Ok(signals) = state.state_store.list_open_signals() {
-                    let open: Vec<String> = signals
-                        .iter()
-                        .filter(|s| {
-                            s.status.counts_as_open()
-                                && s.legs
-                                    .iter()
-                                    .any(|l| l.account_id.as_deref() == Some(id.as_str()))
-                        })
-                        .map(|s| format!("{}:{}", s.symbol, s.status.as_str()))
-                        .collect();
-                    if !open.is_empty() {
-                        return Err(format!(
-                            "Cannot disable account {id} while {} live position(s) route through it ({}). Flatten them first.",
-                            open.len(),
-                            open.join(", ")
-                        ));
-                    }
+                // Fail closed: a read error is not "no exposure" — refuse
+                // the disable when open positions cannot be verified.
+                let signals = state
+                    .state_store
+                    .list_open_signals(Some(state.env().as_str()))
+                    .map_err(|e| format!("Cannot verify open positions for account {id}: {e}"))?;
+                let open: Vec<String> = signals
+                    .iter()
+                    .filter(|s| {
+                        s.status.counts_as_open()
+                            && s.legs
+                                .iter()
+                                .any(|l| l.account_id.as_deref() == Some(id.as_str()))
+                    })
+                    .map(|s| format!("{}:{}", s.symbol, s.status.as_str()))
+                    .collect();
+                if !open.is_empty() {
+                    return Err(format!(
+                        "Cannot disable account {id} while {} live position(s) route through it ({}). Flatten them first.",
+                        open.len(),
+                        open.join(", ")
+                    ));
                 }
             }
             state
@@ -1133,24 +1181,27 @@ pub fn delete_account_credentials_impl(
     // open strands live exit supervision — the account's orders can no
     // longer authenticate. Same gate as the venue-wide delete above.
     if state.is_live() {
-        if let Ok(signals) = state.state_store.list_open_signals() {
-            let open: Vec<String> = signals
-                .iter()
-                .filter(|s| {
-                    s.status.counts_as_open()
-                        && s.legs
-                            .iter()
-                            .any(|l| l.account_id.as_deref() == Some(account_id))
-                })
-                .map(|s| format!("{}:{}", s.symbol, s.status.as_str()))
-                .collect();
-            if !open.is_empty() {
-                return Err(format!(
-                    "Cannot remove account {account_id} credentials while {} live position(s) route through it ({}). Flatten them first.",
-                    open.len(),
-                    open.join(", ")
-                ));
-            }
+        // Fail closed on read errors — "cannot verify" is not "no exposure".
+        let signals = state
+            .state_store
+            .list_open_signals(Some(state.env().as_str()))
+            .map_err(|e| format!("Cannot verify open positions for account {account_id}: {e}"))?;
+        let open: Vec<String> = signals
+            .iter()
+            .filter(|s| {
+                s.status.counts_as_open()
+                    && s.legs
+                        .iter()
+                        .any(|l| l.account_id.as_deref() == Some(account_id))
+            })
+            .map(|s| format!("{}:{}", s.symbol, s.status.as_str()))
+            .collect();
+        if !open.is_empty() {
+            return Err(format!(
+                "Cannot remove account {account_id} credentials while {} live position(s) route through it ({}). Flatten them first.",
+                open.len(),
+                open.join(", ")
+            ));
         }
     }
     let res = {
@@ -1469,6 +1520,15 @@ pub async fn get_venue_balances_impl(
                                 name
                             )),
                         ),
+                        // Account-level eval cannot produce this today, but the
+                        // shared enum must never silently map Unknown → safe.
+                        MarginHealthStatus::Unknown => (
+                            "UNVERIFIED".to_string(),
+                            Some(format!(
+                                "{} margin data incomplete — safety cannot be verified.",
+                                name
+                            )),
+                        ),
                     };
 
                 // Stale override: figures above are last-known-good. Inside the
@@ -1722,6 +1782,59 @@ pub async fn get_active_signer_address(
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<Option<String>, String> {
     get_active_signer_address_impl(&venue, &state)
+}
+
+/// Read the wallet's current ERC-20 allowance to an EVM AMM venue's router
+/// (human units). Live-only — EVM AMMs have no testnet adapters.
+#[tauri::command]
+pub async fn get_evm_amm_allowance(
+    venue: String,
+    token: String,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<f64, String> {
+    let vid = venue.trim().to_lowercase();
+    let adapter = state
+        .live_evm_amms
+        .iter()
+        .find(|a| a.spec_id() == vid)
+        .ok_or_else(|| format!("no EVM AMM adapter for venue '{venue}'"))?;
+    adapter
+        .router_allowance(token.trim())
+        .await
+        .map(|d| d.to_string().parse::<f64>().unwrap_or(0.0))
+        .map_err(|e| e.to_string())
+}
+
+/// Operator setup action: submit an exact-amount ERC-20 approval so the
+/// venue router may spend up to `amount` of `token` (the new total cap —
+/// swaps draw it down). Deliberately off the dispatch path: an onchain
+/// approval waits ~30s for mining, which would leave a sibling CEX leg
+/// naked (issue #59). Returns the mined tx hash, or null when the existing
+/// allowance already covers `amount`.
+#[tauri::command]
+pub async fn prepare_evm_amm_allowance(
+    venue: String,
+    token: String,
+    amount: f64,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<Option<String>, String> {
+    if !(amount.is_finite() && amount > 0.0) {
+        return Err("amount must be a positive finite number".to_string());
+    }
+    let vid = venue.trim().to_lowercase();
+    let adapter = state
+        .live_evm_amms
+        .iter()
+        .find(|a| a.spec_id() == vid)
+        .ok_or_else(|| format!("no EVM AMM adapter for venue '{venue}'"))?;
+    let amount_dec: arbitrageur_core::types::Decimal = amount
+        .to_string()
+        .parse()
+        .map_err(|e| format!("invalid amount: {e}"))?;
+    adapter
+        .approve_router_token(token.trim(), amount_dec)
+        .await
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]

@@ -52,7 +52,10 @@ pub struct FundingOpportunityDto {
     pub short_market_type: String,
     pub net_rate_8h_pct: f64,
     pub net_apr_pct: f64,
-    pub net_apy_pct: f64,
+    /// Compounded-if-reinvested APY; `None` when the backend cannot express
+    /// a finite compounded figure (extreme rates) — render as unavailable,
+    /// never as zero.
+    pub net_apy_pct: Option<f64>,
     pub round_trip_fee_bps: f64,
     pub break_even_hours: f64,
     pub estimated_daily_income_usd: f64,
@@ -445,7 +448,9 @@ fn boros_fixed_yield_variant(
         short_market_type: "perpetual".to_string(),
         net_rate_8h_pct: ev.fixed_apr * 8.0 / 8760.0 * 100.0,
         net_apr_pct: ev.fixed_apr_pct,
-        net_apy_pct: ev.fixed_apr_pct,
+        // Fixed yield locks a flat rate — the annual figure is the locked
+        // APR itself, which is a real (not compounded) annual yield.
+        net_apy_pct: Some(ev.fixed_apr_pct),
         round_trip_fee_bps: perp_rt_fee_bps + ev.yu_hedge_cost_bps,
         break_even_hours: ev.break_even_hours,
         estimated_daily_income_usd: ev.daily_income_usd,
@@ -1017,10 +1022,8 @@ async fn scan_funding_opportunities_for_symbol(
                         .unwrap_or(0.0),
                     net_apy_pct: opp
                         .net_apy
-                        .to_string()
-                        .parse::<f64>()
-                        .map(|v| v * 100.0)
-                        .unwrap_or(0.0),
+                        .and_then(|a| a.to_string().parse::<f64>().ok())
+                        .map(|v| v * 100.0),
                     round_trip_fee_bps: opp
                         .round_trip_fee_bps
                         .to_string()
@@ -1367,10 +1370,8 @@ async fn scan_funding_opportunities_for_symbol(
                         net_apy_pct: eval
                             .carry
                             .net_apy
-                            .to_string()
-                            .parse::<f64>()
-                            .map(|v| v * 100.0)
-                            .unwrap_or(0.0),
+                            .and_then(|a| a.to_string().parse::<f64>().ok())
+                            .map(|v| v * 100.0),
                         round_trip_fee_bps: eval
                             .carry
                             .round_trip_fee_bps
@@ -1853,6 +1854,17 @@ pub async fn execute_funding_carry_impl(
         .ok_or_else(|| format!("Venue '{short_canon}' is not admitted for execution"))?;
 
     let _execution_guard = state.execution_lock.lock().await;
+    // Re-run the live gate under the lock after the rescan — environment,
+    // credentials, or adapter admission may have changed between the
+    // pre-flight gate above and dispatch (TOCTOU). The early gate stays as
+    // a fast-fail; this one is authoritative.
+    if state.is_live() {
+        if is_fixed {
+            live_entry_gate(state, &[long_venue, short_venue, "boros"])?;
+        } else {
+            live_entry_gate(state, &[long_venue, short_venue])?;
+        }
+    }
     if let Err(reason) = state.circuit_breaker.is_trading_allowed() {
         return Err(format!(
             "Execution halted by Risk Circuit Breaker: {reason}"
@@ -1985,7 +1997,7 @@ pub async fn execute_funding_carry_impl(
     // is scoped to the root perp; residual checks read each exact leg symbol.
     if let Some(blocker) = state
         .state_store
-        .blocking_signals(&root_symbol)
+        .blocking_signals(&root_symbol, Some(state.env().as_str()))
         .map_err(|e| e.to_string())?
         .into_iter()
         .next()
@@ -1994,6 +2006,15 @@ pub async fn execute_funding_carry_impl(
             "Symbol {root_symbol} is blocked by signal {} (status {}): awaiting leg reconciliation/delta-neutral confirmation",
             blocker.id,
             blocker.status.as_str()
+        ));
+    }
+    if state
+        .state_store
+        .ticker_reduce_only(&root_symbol, "funding", state.env().as_str())
+        .map_err(|e| e.to_string())?
+    {
+        return Err(format!(
+            "Symbol {root_symbol} is reduce-only for funding — exits only, entry refused"
         ));
     }
     let dust = triangle_dust_qty();
@@ -2139,34 +2160,37 @@ pub async fn execute_funding_carry_impl(
     let signal_id = format!("{cycle_tag}-carry");
     state
         .state_store
-        .record_signal_execution(&NewSignalExecution {
-            id: signal_id.clone(),
-            strategy_id: FUNDING_STRATEGY_ID.to_string(),
-            symbol: root_symbol.clone(),
-            route_id: None,
-            // The scan's cost-adjusted projection (carry − fees − spread
-            // over the hold estimate) is the honest entry expectation.
-            expected_net_usd: opp.expected_return_usd.filter(|v| v.is_finite()),
-            note: Some(format!("{carry_note}; {path}")),
-            legs: vec![
-                NewSignalLeg {
-                    account_id: account_for(long_canon),
-                    venue: long_canon.to_string(),
-                    side: LegSide::Long,
-                    symbol: Some(long_sym.clone()),
-                    intended_qty: qty_f64,
-                    intended_price: Some(long_ask_f),
-                },
-                NewSignalLeg {
-                    account_id: account_for(short_canon),
-                    venue: short_canon.to_string(),
-                    side: LegSide::Short,
-                    symbol: Some(short_sym.clone()),
-                    intended_qty: qty_f64,
-                    intended_price: Some(short_bid_f),
-                },
-            ],
-        })
+        .record_signal_execution(
+            &NewSignalExecution {
+                id: signal_id.clone(),
+                strategy_id: FUNDING_STRATEGY_ID.to_string(),
+                symbol: root_symbol.clone(),
+                route_id: None,
+                // The scan's cost-adjusted projection (carry − fees − spread
+                // over the hold estimate) is the honest entry expectation.
+                expected_net_usd: opp.expected_return_usd.filter(|v| v.is_finite()),
+                note: Some(format!("{carry_note}; {path}")),
+                legs: vec![
+                    NewSignalLeg {
+                        account_id: account_for(long_canon),
+                        venue: long_canon.to_string(),
+                        side: LegSide::Long,
+                        symbol: Some(long_sym.clone()),
+                        intended_qty: qty_f64,
+                        intended_price: Some(long_ask_f),
+                    },
+                    NewSignalLeg {
+                        account_id: account_for(short_canon),
+                        venue: short_canon.to_string(),
+                        side: LegSide::Short,
+                        symbol: Some(short_sym.clone()),
+                        intended_qty: qty_f64,
+                        intended_price: Some(short_bid_f),
+                    },
+                ],
+            },
+            state.env().as_str(),
+        )
         .map_err(|e| format!("Failed to persist funding signal record: {e}"))?;
 
     // Calibration log: the funding card carries three forecast numbers,
@@ -2309,7 +2333,7 @@ pub async fn execute_funding_carry_impl(
             b.remaining_qty = dec!(0);
             b.original_qty = matched_qty;
             ArbitrageExecutionResult::Success {
-                realized_profit: -(a.fee + b.fee),
+                realized_profit: -(a.fee.unwrap_or_default() + b.fee.unwrap_or_default()),
                 leg_a: a,
                 leg_b: b,
             }
@@ -2323,7 +2347,7 @@ pub async fn execute_funding_carry_impl(
             leg_b,
             realized_profit: _,
         } => {
-            let fees_dec = leg_a.fee + leg_b.fee;
+            let fees_dec = leg_a.fee.unwrap_or_default() + leg_b.fee.unwrap_or_default();
             let fee_f = fees_dec.to_string().parse::<f64>().unwrap_or(0.0);
             let long_px_f = leg_a
                 .avg_fill_price
@@ -2406,33 +2430,36 @@ pub async fn execute_funding_carry_impl(
                 // signal under the shared cycle tag (triangle precedent).
                 state
                     .state_store
-                    .record_signal_execution(&NewSignalExecution {
-                        id: yu_signal_id.clone(),
-                        strategy_id: FUNDING_STRATEGY_ID.to_string(),
-                        symbol: root_symbol.clone(),
-                        route_id: None,
-                        expected_net_usd: opp.expected_return_usd.filter(|v| v.is_finite()),
-                        note: Some(format!(
-                            "boros YU hedge for {signal_id} (fixed yield to maturity)"
-                        )),
-                        legs: yu_plan
-                            .iter()
-                            .map(|(l, qty, bound)| NewSignalLeg {
-                                account_id: account_for("boros"),
-                                venue: "boros".to_string(),
-                                side: if l.yu_side == "long" {
-                                    LegSide::Long
-                                } else {
-                                    LegSide::Short
-                                },
-                                symbol: Some(l.yu_symbol.clone()),
-                                intended_qty: qty.to_string().parse::<f64>().unwrap_or(0.0),
-                                intended_price: Some(
-                                    bound.to_string().parse::<f64>().unwrap_or(0.0),
-                                ),
-                            })
-                            .collect(),
-                    })
+                    .record_signal_execution(
+                        &NewSignalExecution {
+                            id: yu_signal_id.clone(),
+                            strategy_id: FUNDING_STRATEGY_ID.to_string(),
+                            symbol: root_symbol.clone(),
+                            route_id: None,
+                            expected_net_usd: opp.expected_return_usd.filter(|v| v.is_finite()),
+                            note: Some(format!(
+                                "boros YU hedge for {signal_id} (fixed yield to maturity)"
+                            )),
+                            legs: yu_plan
+                                .iter()
+                                .map(|(l, qty, bound)| NewSignalLeg {
+                                    account_id: account_for("boros"),
+                                    venue: "boros".to_string(),
+                                    side: if l.yu_side == "long" {
+                                        LegSide::Long
+                                    } else {
+                                        LegSide::Short
+                                    },
+                                    symbol: Some(l.yu_symbol.clone()),
+                                    intended_qty: qty.to_string().parse::<f64>().unwrap_or(0.0),
+                                    intended_price: Some(
+                                        bound.to_string().parse::<f64>().unwrap_or(0.0),
+                                    ),
+                                })
+                                .collect(),
+                        },
+                        state.env().as_str(),
+                    )
                     .map_err(|e| format!("Failed to persist YU hedge signal record: {e}"))?;
 
                 let mut yu_fills: Vec<(crate::state_store::LegSide, OrderResponse)> = Vec::new();
@@ -2532,7 +2559,10 @@ pub async fn execute_funding_carry_impl(
                         .and_then(|p| p.to_string().parse::<f64>().ok())
                         .unwrap_or(0.0);
                     if filled > 0.0 && px > 0.0 {
-                        let fee = fill.fee.to_string().parse::<f64>().unwrap_or(0.0);
+                        let fee = fill
+                            .fee
+                            .map(|v| v.to_string().parse::<f64>().unwrap_or(0.0))
+                            .unwrap_or(0.0);
                         let _ = state.state_store.apply_leg_fill(
                             &yu_signal_id,
                             *side,
@@ -2678,6 +2708,7 @@ pub async fn execute_funding_carry_impl(
                     open_qty,
                     short_px_f,
                     fee_f,
+                    state.env().as_str().to_string(),
                 );
                 if let Some(lot) = ledger.lots.get(&funding_cycle_id) {
                     state
@@ -2748,7 +2779,10 @@ pub async fn execute_funding_carry_impl(
                         .avg_fill_price
                         .and_then(|p| p.to_string().parse::<f64>().ok())
                         .unwrap_or(0.0);
-                    let fee = f.fee.to_string().parse::<f64>().unwrap_or(0.0);
+                    let fee = f
+                        .fee
+                        .map(|v| v.to_string().parse::<f64>().unwrap_or(0.0))
+                        .unwrap_or(0.0);
                     // Keep the venue order id reachable even when the leg was
                     // accepted but unfilled — reconciliation polls it to
                     // terminal state instead of losing the exposure.

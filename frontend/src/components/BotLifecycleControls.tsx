@@ -1,7 +1,8 @@
-import React from "react";
+import React, { useState } from "react";
 import { Play, Pause, ArrowDown, OctagonX } from "lucide-react";
 import { getBotControlAvailability } from "../hooks/useBotLifecycle";
 import type { BotPhase } from "../hooks/useBotLifecycle";
+import { ConfirmActionModal } from "./ConfirmActionModal";
 
 interface BotLifecycleControlsProps {
   phase: BotPhase;
@@ -39,6 +40,7 @@ export const BotLifecycleControls: React.FC<BotLifecycleControlsProps> = ({
   onReduceOnly,
   onStop,
 }) => {
+  const [showStopConfirm, setShowStopConfirm] = useState(false);
   const stopping = phase === "stopping";
   const availability = getBotControlAvailability(
     phase,
@@ -95,7 +97,7 @@ export const BotLifecycleControls: React.FC<BotLifecycleControlsProps> = ({
       icon: <OctagonX className="w-3 h-3" />,
       // Emergency exit stays armed while a phase is active or positions remain
       enabled: availability.stop,
-      onClick: onStop,
+      onClick: () => setShowStopConfirm(true),
       activeClass: "text-loss hover:bg-loss-dim border-loss-border",
     },
   ];
@@ -131,6 +133,20 @@ export const BotLifecycleControls: React.FC<BotLifecycleControlsProps> = ({
           {phaseLabel}
         </span>
       )}
+      <ConfirmActionModal
+        spec={
+          showStopConfirm
+            ? {
+                title: "Emergency Stop",
+                subtitle: "Flatten to delta-neutral",
+                body: "This immediately dispatches close orders for every open position this strategy holds — market orders where the venue allows them. Unfilled residuals stay open and escalate for operator review.",
+                confirmLabel: "Flatten Positions",
+              }
+            : null
+        }
+        onConfirm={onStop}
+        onCancel={() => setShowStopConfirm(false)}
+      />
     </div>
   );
 };

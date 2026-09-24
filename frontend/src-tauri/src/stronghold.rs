@@ -27,7 +27,7 @@
 //! Manual lock drops the stronghold and the sync wipes adapter signers.
 
 use std::ops::Deref;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use alloy_consensus::SignableTransaction;
@@ -58,9 +58,10 @@ fn key_location() -> Location {
 }
 
 /// Backend storage for the wallet stronghold: a password-encrypted
-/// snapshot file in production, in-memory only for tests.
+/// snapshot file in production, in-memory only for tests. The snapshot
+/// variant carries its own path because the plugin type does not expose it.
 enum Backend {
-    Snapshot(Stronghold),
+    Snapshot(Stronghold, PathBuf),
     #[cfg(test)]
     InMemory(iota_stronghold::Stronghold),
 }
@@ -69,7 +70,7 @@ impl Deref for Backend {
     type Target = iota_stronghold::Stronghold;
     fn deref(&self) -> &Self::Target {
         match self {
-            Self::Snapshot(s) => s,
+            Self::Snapshot(s, _) => s,
             #[cfg(test)]
             Self::InMemory(s) => s,
         }
@@ -93,8 +94,9 @@ impl EvmStronghold {
         let sh = Stronghold::new(path, password.to_vec())
             .map_err(|e| anyhow::anyhow!("stronghold open failed: {e}"))?;
         let client = load_or_create_client(&sh)?;
+        Self::harden_snapshot_permissions(path);
         Ok(Self {
-            backend: Backend::Snapshot(sh),
+            backend: Backend::Snapshot(sh, path.to_path_buf()),
             client,
         })
     }
@@ -110,12 +112,49 @@ impl EvmStronghold {
         })
     }
 
+    /// The snapshot library writes `.hold` under the process umask — force
+    /// owner-only permissions (0600 file / 0700 parent, matching the vault
+    /// file's own rules) after every write. Never fatal: a chmod failure on
+    /// an exotic filesystem must not wedge the signing path, but it is
+    /// always logged.
+    fn harden_snapshot_permissions(path: &Path) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if let Some(parent) = path.parent() {
+                if parent.exists() {
+                    if let Err(e) =
+                        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+                    {
+                        tracing::warn!(
+                            "stronghold: could not chmod 0700 {}: {e}",
+                            parent.display()
+                        );
+                    }
+                }
+            }
+            if path.exists() {
+                if let Err(e) =
+                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                {
+                    tracing::warn!("stronghold: could not chmod 0600 {}: {e}", path.display());
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = path;
+        }
+    }
+
     /// Persist the snapshot (no-op for the in-memory backend).
     fn save(&self) -> anyhow::Result<()> {
         match &self.backend {
-            Backend::Snapshot(sh) => sh
-                .save()
-                .map_err(|e| anyhow::anyhow!("stronghold snapshot commit failed: {e}"))?,
+            Backend::Snapshot(sh, path) => {
+                sh.save()
+                    .map_err(|e| anyhow::anyhow!("stronghold snapshot commit failed: {e}"))?;
+                Self::harden_snapshot_permissions(path);
+            }
             #[cfg(test)]
             Backend::InMemory(_) => {}
         }
@@ -365,5 +404,33 @@ mod tests {
         sh.revoke_key().expect("revoke");
         assert!(!sh.has_key());
         assert!(sh.evm_address().is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hold_snapshot_permissions_harden_to_owner_only() {
+        // The .hold snapshot carries the wallet key — a lax umask or a
+        // copied file must never leave it group/world-readable. Hardening
+        // enforces 0700 on the parent dir and 0600 on the file itself.
+        use std::os::unix::fs::PermissionsExt;
+        let dir =
+            std::env::temp_dir().join(format!("arbitrageur_hold_test_{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let hold = dir.join("vault.hold");
+        std::fs::write(&hold, b"snapshot-bytes").unwrap();
+        std::fs::set_permissions(&hold, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        EvmStronghold::harden_snapshot_permissions(&hold);
+
+        assert_eq!(
+            std::fs::metadata(&hold).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(&dir).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

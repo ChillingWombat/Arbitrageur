@@ -20,6 +20,10 @@ pub struct AccountRequestCoordinator {
 #[derive(Debug)]
 struct CoordinatorState {
     last_request_time: Option<Instant>,
+    /// Signed/order traffic gets its own throttle bucket so public-read
+    /// pacing never silently delays order submission — while the venue-wide
+    /// backoff applies to both.
+    last_signed_request_time: Option<Instant>,
     backoff_until: Option<Instant>,
     consecutive_failures: u32,
     cached_data: Option<(Instant, String)>,
@@ -42,6 +46,7 @@ impl AccountRequestCoordinator {
             backoff_max: Duration::from_millis(backoff_max_ms),
             state: Arc::new(Mutex::new(CoordinatorState {
                 last_request_time: None,
+                last_signed_request_time: None,
                 backoff_until: None,
                 consecutive_failures: 0,
                 cached_data: None,
@@ -125,6 +130,35 @@ impl AccountRequestCoordinator {
         allow_cache: bool,
     ) -> Result<Option<String>, anyhow::Error> {
         self.acquire_or_cache_path("default", allow_cache).await
+    }
+
+    /// Pre-submit gate for SIGNED paths (orders, cancels, private POSTs).
+    /// A venue-level backoff (including one written by a failed submit)
+    /// blocks order submission — never serves cached data, since a signed
+    /// request must always reach the venue. Throttles signed calls at
+    /// `min_interval` on a bucket separate from public reads.
+    pub async fn acquire_signed(&self) -> Result<(), anyhow::Error> {
+        let wait_dur = {
+            let state = self.state.lock();
+            if let Some(until) = state.backoff_until {
+                let now = Instant::now();
+                if now < until {
+                    anyhow::bail!(
+                        "[{}] Rate limit backoff active for another {:?} — signed request refused",
+                        self.venue_name,
+                        until - now
+                    );
+                }
+            }
+            state
+                .last_signed_request_time
+                .and_then(|last| self.min_interval.checked_sub(last.elapsed()))
+        };
+        if let Some(wait) = wait_dur {
+            sleep(wait).await;
+        }
+        self.state.lock().last_signed_request_time = Some(Instant::now());
+        Ok(())
     }
 
     /// Record a successful HTTP response for a specific path.

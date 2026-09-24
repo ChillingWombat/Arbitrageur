@@ -582,18 +582,6 @@ impl AsterAdapter {
             None
         };
 
-        // Aster taker fee: 3.5 BPS
-        let cum_quote = if executed_qty > dec!(0) {
-            dec_from_json(v.get("cumQuote"))
-                .filter(|q| *q >= dec!(0))
-                .ok_or_else(|| {
-                    anyhow::anyhow!("Aster filled order response missing valid cumQuote: {v}")
-                })?
-        } else {
-            dec!(0)
-        };
-        let fee = cum_quote * Decimal::new(35, 5);
-
         Ok(OrderResponse {
             order_id,
             client_order_id: client_order_id.to_string(),
@@ -604,7 +592,7 @@ impl AsterAdapter {
             filled_qty: executed_qty,
             remaining_qty,
             avg_fill_price: avg_price,
-            fee,
+            fee: None,
             fee_currency: "USDT".to_string(),
             raw_response: raw,
             timestamp: Utc::now(),
@@ -821,6 +809,7 @@ impl ExchangeAdapter for AsterAdapter {
         if !self.has_credentials() {
             anyhow::bail!("Cannot fetch live account on Aster: API credentials are not configured or vault is locked");
         }
+        self.rate_limiter.acquire_signed().await?;
         let mut params = BTreeMap::new();
         params.insert("timestamp", Utc::now().timestamp_millis().to_string());
         params.insert("recvWindow", "5000".to_string());
@@ -833,11 +822,16 @@ impl ExchangeAdapter for AsterAdapter {
             .get(&url)
             .header("X-MBX-APIKEY", api_key)
             .send()
-            .await?;
+            .await
+            .inspect_err(|_| {
+                self.rate_limiter.record_failure(false);
+            })?;
 
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
+            self.rate_limiter
+                .record_failure(status == reqwest::StatusCode::TOO_MANY_REQUESTS);
             anyhow::bail!("Aster fetch_account failed (HTTP {status}): {text}");
         }
 
@@ -953,7 +947,10 @@ impl ExchangeAdapter for AsterAdapter {
         let (type_str, tif_str) = match order.order_type {
             OrderType::Market => ("MARKET", None),
             OrderType::PostOnly => ("LIMIT", Some("GTX")),
-            OrderType::Limit | OrderType::ImmediateOrCancel => {
+            // IOC is the order semantic — a contradictory TIF field must
+            // not silently turn it into a resting GTC order.
+            OrderType::ImmediateOrCancel => ("LIMIT", Some("IOC")),
+            OrderType::Limit => {
                 let tif = match order.time_in_force {
                     TimeInForce::ImmediateOrCancel => "IOC",
                     TimeInForce::FillOrKill => "FOK",
@@ -962,6 +959,13 @@ impl ExchangeAdapter for AsterAdapter {
                 };
                 ("LIMIT", Some(tif))
             }
+        };
+        // A post_only flag carries the same maker-only intent — honor it
+        // as GTX rather than letting it degrade to a taker-capable limit.
+        let (type_str, tif_str) = if order.post_only && type_str == "LIMIT" {
+            ("LIMIT", Some("GTX"))
+        } else {
+            (type_str, tif_str)
         };
         params.insert("type", type_str.to_string());
         if let Some(tif) = tif_str {
@@ -1018,16 +1022,22 @@ impl ExchangeAdapter for AsterAdapter {
         let (api_key, query_string) = self.sign_params(&params)?;
         let url = format!("{}/fapi/v3/order?{}", self.base_url, query_string);
 
+        self.rate_limiter.acquire_signed().await?;
         let resp = self
             .client
             .post(&url)
             .header("X-MBX-APIKEY", api_key)
             .send()
-            .await?;
+            .await
+            .inspect_err(|_| {
+                self.rate_limiter.record_failure(false);
+            })?;
 
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
+            self.rate_limiter
+                .record_failure(status == reqwest::StatusCode::TOO_MANY_REQUESTS);
             anyhow::bail!("Aster place_order failed (HTTP {status}): {text}");
         }
 
@@ -1038,7 +1048,9 @@ impl ExchangeAdapter for AsterAdapter {
             &v,
             &venue_symbol,
             &order.symbol,
-            Some(order.quantity),
+            // Verify against the snapped wire quantity — the venue echoes
+            // what was sent, not the pre-floor request amount.
+            Some(qty_wire),
             Some(order.client_order_id.as_str()),
             Some(text),
         )
@@ -1079,15 +1091,22 @@ impl ExchangeAdapter for AsterAdapter {
         let (api_key, query_string) = self.sign_params(&params)?;
         let url = format!("{}/fapi/v3/order?{}", self.base_url, query_string);
 
+        self.rate_limiter.acquire_signed().await?;
         let resp = self
             .client
             .delete(&url)
             .header("X-MBX-APIKEY", api_key)
             .send()
-            .await?;
+            .await
+            .inspect_err(|_| {
+                self.rate_limiter.record_failure(false);
+            })?;
 
         if !resp.status().is_success() {
+            let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
+            self.rate_limiter
+                .record_failure(status == reqwest::StatusCode::TOO_MANY_REQUESTS);
             anyhow::bail!("Aster cancel_order failed: {text}");
         }
         Ok(())
@@ -1118,15 +1137,21 @@ impl ExchangeAdapter for AsterAdapter {
 
         let (api_key, query_string) = self.sign_params(&params)?;
         let url = format!("{}/fapi/v3/order?{}", self.base_url, query_string);
+        self.rate_limiter.acquire_signed().await?;
         let resp = self
             .client
             .get(&url)
             .header("X-MBX-APIKEY", api_key)
             .send()
-            .await?;
+            .await
+            .inspect_err(|_| {
+                self.rate_limiter.record_failure(false);
+            })?;
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
+            self.rate_limiter
+                .record_failure(status == reqwest::StatusCode::TOO_MANY_REQUESTS);
             anyhow::bail!("Aster fetch_order failed (HTTP {status}): {text}");
         }
         let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
@@ -1156,15 +1181,22 @@ impl ExchangeAdapter for AsterAdapter {
         let (api_key, query_string) = self.sign_params(&params)?;
         let url = format!("{}/fapi/v3/leverage?{}", self.base_url, query_string);
 
+        self.rate_limiter.acquire_signed().await?;
         let resp = self
             .client
             .post(&url)
             .header("X-MBX-APIKEY", api_key)
             .send()
-            .await?;
+            .await
+            .inspect_err(|_| {
+                self.rate_limiter.record_failure(false);
+            })?;
 
         if !resp.status().is_success() {
+            let status = resp.status();
             let text = resp.text().await.unwrap_or_default();
+            self.rate_limiter
+                .record_failure(status == reqwest::StatusCode::TOO_MANY_REQUESTS);
             anyhow::bail!("Aster set_leverage failed: {text}");
         }
         Ok(())

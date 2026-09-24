@@ -268,6 +268,12 @@ pub struct SignalExecution {
     pub strategy_id: String,
     pub symbol: String,
     pub status: SignalStatus,
+    /// Trading environment this signal's legs execute in — `testnet` or
+    /// `live` for v32+ rows; `unknown` for legacy rows whose account
+    /// bindings could not attribute one. Environment-scoped reads treat
+    /// `unknown` as visible to every environment (fail-closed: exposure
+    /// that cannot be attributed still blocks and still gets polled).
+    pub environment: String,
     pub route_id: Option<String>,
     pub account_long_id: Option<String>,
     pub account_short_id: Option<String>,
@@ -373,6 +379,7 @@ pub struct SpreadSample {
 }
 
 /// Batch entry accepted by `record_spread_samples`.
+#[derive(Clone)]
 pub struct VenueSampleEntry {
     pub venue_id: String,
     pub mid: f64,
@@ -506,6 +513,9 @@ pub struct OpenPositionDto {
     pub notional_usd: Option<f64>,
     /// Earliest signal creation time in the group.
     pub opened_at: String,
+    /// Durable exits-only flag for (environment, strategy, symbol) — set by
+    /// the positions command post-aggregation, `false` in the raw group.
+    pub reduce_only: bool,
 }
 
 /// Group open signal executions into per-(strategy, symbol, venue-set)
@@ -664,6 +674,7 @@ pub fn aggregate_open_positions(
             fees_usd: fees,
             notional_usd: notional,
             opened_at,
+            reduce_only: false,
         });
     }
     out.sort_by(|a, b| a.key.cmp(&b.key));
@@ -755,6 +766,9 @@ pub struct ScheduledExit {
     pub limit_price: Option<f64>,
     pub execute_at_ms: i64,
     pub status: String,
+    /// Dispatch attempts so far — reschedules increment it; a row that
+    /// exhausts its retry budget goes `failed` rather than retry forever.
+    pub attempts: i64,
     pub note: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -765,6 +779,14 @@ pub struct ScheduledExit {
 /// independent so a chatty pair can never evict price history — and price
 /// pruning can never wipe the audit trail's newest window either.
 pub const MONITOR_SIGNAL_EVENTS_MAX_ROWS: i64 = 50_000;
+
+/// Hard row caps for the telemetry tables — enforced unconditionally on
+/// every retention pass, independent of `spread_samples_max_days` (an
+/// operator who disables day retention still cannot grow the file without
+/// bound). Sized as backstops above what the 14-day default produces:
+/// ~4M spread rows ≈ 650MB, ~1M volume rows ≈ 250MB.
+pub const SPREAD_SAMPLES_MAX_ROWS: i64 = 4_000_000;
+pub const VENUE_VOLUME_SAMPLES_MAX_ROWS: i64 = 1_000_000;
 
 const ACCOUNT_COLS: &str = "id, venue, label, enabled, is_default, account_tier, max_leverage, environment, created_at, updated_at";
 
@@ -910,6 +932,23 @@ CREATE INDEX ix_signal_legs_signal ON signal_legs(signal_id);
 CREATE INDEX ix_signal_legs_account ON signal_legs(account_id);
 PRAGMA user_version = 2;
 COMMIT;";
+
+/// Telemetry-file schema: `spread_samples` at its post-v28 shape (depth
+/// columns included). Versioned implicitly by DDL — `IF NOT EXISTS` keeps
+/// the file forward-compatible without a migration chain of its own.
+const TELEMETRY_SCHEMA_SQL: &str = "\
+CREATE TABLE IF NOT EXISTS spread_samples (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    symbol TEXT NOT NULL COLLATE NOCASE CHECK(length(symbol) BETWEEN 1 AND 64),
+    venue_id TEXT NOT NULL COLLATE NOCASE CHECK(length(venue_id) BETWEEN 1 AND 64),
+    ts_ms INTEGER NOT NULL CHECK(ts_ms >= 0),
+    mid REAL NOT NULL CHECK(mid > 0),
+    best_bid REAL NOT NULL,
+    best_ask REAL NOT NULL,
+    bid_depth REAL,
+    ask_depth REAL
+);
+CREATE INDEX IF NOT EXISTS ix_spread_samples_symbol_ts ON spread_samples(symbol, ts_ms);";
 
 /// v3 adds the durable venue mid-price sample log feeding the dislocation
 /// signal series. One row per venue per observed poll; timestamps are epoch
@@ -1484,6 +1523,78 @@ CREATE INDEX ix_cycle_lots_strategy_symbol ON cycle_lots(strategy_id, symbol);
 PRAGMA user_version = 30;
 COMMIT;";
 
+/// v31 gives scheduled exits a retry counter. A claimed row that fails on
+/// a transient condition (venue unreachable, locked vault before the
+/// auto-lock-aware close gate) reschedules itself pending with backoff
+/// instead of dying on the first failure — bounded by `attempts`.
+const MIGRATION_V31_SQL: &str = "\
+BEGIN IMMEDIATE;
+ALTER TABLE scheduled_exits ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0;
+PRAGMA user_version = 31;
+COMMIT;";
+
+/// v32 adds a durable environment dimension to signal_executions so live
+/// and testnet exposure/performance never blend. Rows whose legs bind an
+/// account backfill that account's environment; anything that cannot be
+/// attributed stays `unknown` — environment-scoped reads treat `unknown`
+/// as visible to every environment (fail-closed), while P&L aggregation
+/// excludes it from both cuts rather than guessing.
+const MIGRATION_V32_SQL: &str = "\
+BEGIN IMMEDIATE;
+ALTER TABLE signal_executions ADD COLUMN environment TEXT NOT NULL DEFAULT 'unknown'
+    CHECK(environment IN ('unknown', 'testnet', 'live'));
+UPDATE signal_executions SET environment = COALESCE((
+    SELECT a.environment FROM signal_legs l
+    JOIN exchange_accounts a ON a.id = l.account_id
+    WHERE l.signal_id = signal_executions.id
+      AND a.environment IN ('testnet', 'live')
+    ORDER BY l.created_at LIMIT 1
+), 'unknown')
+WHERE environment = 'unknown';
+CREATE INDEX ix_signal_executions_env ON signal_executions(environment);
+PRAGMA user_version = 32;
+COMMIT;";
+
+/// v33 adds `cycle_lots.environment` — the virtual-cycle ledger aggregates
+/// strategy metrics per environment, so each persisted lot carries the
+/// environment that opened it. Lots have no account bindings to backfill
+/// from, so pre-v33 rows stay `unknown` and are excluded from both
+/// environments' metrics rather than guessed into one.
+const MIGRATION_V33_SQL: &str = "\
+BEGIN IMMEDIATE;
+ALTER TABLE cycle_lots ADD COLUMN environment TEXT NOT NULL DEFAULT 'unknown'
+    CHECK(environment IN ('unknown', 'testnet', 'live'));
+PRAGMA user_version = 33;
+COMMIT;";
+
+/// v34 enables incremental auto-vacuum so pages freed by retention deletes
+/// can return to the OS via `PRAGMA incremental_vacuum`. The pragma only
+/// takes effect when set before schema creation or paired with VACUUM, so
+/// this step runs both — deliberately WITHOUT a transaction wrapper
+/// (VACUUM cannot run inside one). It is one-time by construction: the
+/// pragma lands in the DB header and the rebuild writes pointer maps;
+/// failure leaves user_version at 33 and retries on next open.
+const MIGRATION_V34_SQL: &str = "\
+PRAGMA auto_vacuum = INCREMENTAL;
+VACUUM;
+PRAGMA user_version = 34;";
+
+/// v35 adds `ticker_reduce_only`: a server-side per-(environment, strategy,
+/// symbol) exits-only flag. The previous client-side localStorage flag could
+/// be bypassed by any manual entry path and was not environment-scoped —
+/// reduce-only must be durable state that entry gates enforce.
+const MIGRATION_V35_SQL: &str = "\
+BEGIN IMMEDIATE;
+CREATE TABLE ticker_reduce_only (
+    environment TEXT NOT NULL CHECK(environment IN ('testnet','live')),
+    strategy_id TEXT NOT NULL CHECK(length(strategy_id) BETWEEN 1 AND 64),
+    symbol TEXT NOT NULL COLLATE NOCASE CHECK(length(symbol) BETWEEN 1 AND 64),
+    set_ts_ms INTEGER NOT NULL CHECK(set_ts_ms >= 0),
+    PRIMARY KEY (environment, strategy_id, symbol)
+);
+PRAGMA user_version = 35;
+COMMIT;";
+
 const MIGRATION_V17_SQL: &str = "\
 BEGIN IMMEDIATE;
 CREATE TABLE strategy_params_v17 (
@@ -1621,6 +1732,16 @@ COMMIT;";
 /// material; secrets remain exclusively in the encrypted vault.
 pub struct StateStore {
     conn: Mutex<Connection>,
+    /// Telemetry-only connection on a sibling file (`<db>.telemetry.db`).
+    /// `spread_samples` rows arrive per WebSocket frame — hundreds a second —
+    /// and are lossy-at-worst, so they get their own `synchronous = NORMAL`
+    /// writer rather than queueing fsync-bound writes ahead of
+    /// execution-ledger work on `conn`. `None` falls back to `conn`
+    /// (in-memory stores and telemetry-open failures).
+    telemetry: Option<Mutex<Connection>>,
+    /// Last persisted (symbol, venue) timestamp for the telemetry throttle —
+    /// excess frames drop here instead of queueing on the telemetry writer.
+    sample_watermarks: Mutex<HashMap<(String, String), i64>>,
 }
 
 fn normalize_id(raw: &str) -> anyhow::Result<String> {
@@ -1676,6 +1797,9 @@ fn normalize_symbol(raw: &str) -> anyhow::Result<String> {
     if v.is_empty() || v.chars().count() > 64 || v.chars().any(|c| c.is_control()) {
         anyhow::bail!("invalid symbol: expected 1-64 non-control characters");
     }
+    // Stored verbatim (trim only) — leg symbols carry venue-native case
+    // (Hyperliquid `kPEPE` must reach the venue byte-for-byte). Blocking
+    // comparisons canonicalize case at the query layer instead.
     Ok(v.to_string())
 }
 
@@ -1779,7 +1903,7 @@ fn route_from_row(row: &Row<'_>) -> rusqlite::Result<StrategyAccountRoute> {
 const SIGNAL_BY_ID_SQL: &str = "\
 SELECT id, strategy_id, symbol, status, route_id, account_long_id,
        account_short_id, expected_net_usd, fees_usd, note,
-       created_at, updated_at, closed_at
+       created_at, updated_at, closed_at, environment
 FROM signal_executions
 WHERE id = ?1";
 
@@ -1790,6 +1914,7 @@ fn signal_exec_from_row(row: &Row<'_>) -> rusqlite::Result<SignalExecution> {
         strategy_id: row.get(1)?,
         symbol: row.get(2)?,
         status: SignalStatus::from_status(&status_raw).unwrap_or(SignalStatus::Unresolved),
+        environment: row.get(13)?,
         route_id: row.get(4)?,
         account_long_id: row.get(5)?,
         account_short_id: row.get(6)?,
@@ -1841,6 +1966,7 @@ fn scheduled_exit_from_row(row: &Row<'_>) -> rusqlite::Result<ScheduledExit> {
         limit_price: row.get(6)?,
         execute_at_ms: row.get(7)?,
         status: row.get(8)?,
+        attempts: row.get(12).unwrap_or(0),
         note: row.get(9)?,
         created_at: row.get(10)?,
         updated_at: row.get(11)?,
@@ -1919,14 +2045,119 @@ impl StateStore {
             }
             fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
         }
+        let telemetry = file_path.and_then(|p| match Self::open_telemetry(p) {
+            Ok(t) => Some(t),
+            Err(e) => {
+                // Telemetry is lossy-at-worst — fall back to the shared
+                // connection rather than failing store open.
+                tracing::warn!(
+                    "state_store: telemetry db unavailable ({e}); sharing main connection"
+                );
+                None
+            }
+        });
         Ok(Self {
             conn: Mutex::new(conn),
+            telemetry,
+            sample_watermarks: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// Connection hosting `spread_samples` — the dedicated telemetry writer
+    /// when available, else the shared main connection.
+    fn telemetry(&self) -> &Mutex<Connection> {
+        self.telemetry.as_ref().unwrap_or(&self.conn)
+    }
+
+    /// Sibling file path for the telemetry database.
+    fn telemetry_path(main_path: &Path) -> PathBuf {
+        main_path.with_extension("telemetry.db")
+    }
+
+    /// Open (or create) the telemetry database and drain any pre-split
+    /// `spread_samples` rows out of the main database. The drain runs once
+    /// per open; subsequent boots find an empty legacy table and detach
+    /// immediately.
+    fn open_telemetry(main_path: &Path) -> anyhow::Result<Mutex<Connection>> {
+        let tpath = Self::telemetry_path(main_path);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            drop(
+                fs::OpenOptions::new()
+                    .create(true)
+                    .write(true)
+                    .truncate(false)
+                    .mode(0o600)
+                    .open(&tpath)?,
+            );
+        }
+        let tconn = Connection::open(&tpath)?;
+        tconn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA busy_timeout = 5000;
+             PRAGMA trusted_schema = OFF;
+             PRAGMA auto_vacuum = INCREMENTAL;",
+        )?;
+        tconn.execute_batch(TELEMETRY_SCHEMA_SQL)?;
+        if let Err(e) = Self::drain_legacy_samples(&tconn, main_path) {
+            tracing::warn!("state_store: legacy spread_samples drain failed ({e}); leftover rows stay in the main db");
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&tpath, fs::Permissions::from_mode(0o600))?;
+        }
+        Ok(Mutex::new(tconn))
+    }
+
+    /// Copy pre-split `spread_samples` rows from the main database into the
+    /// telemetry file in bounded batches, deleting each copied batch so the
+    /// legacy table converges to empty. Batch deletes hold a short write
+    /// lock on the main db — this runs at open before feeds or execution
+    /// start, so the contention window is bounded and one-time.
+    fn drain_legacy_samples(tconn: &Connection, main_path: &Path) -> anyhow::Result<()> {
+        const DRAIN_BATCH: i64 = 100_000;
+        tconn.execute(
+            "ATTACH DATABASE ?1 AS legacy",
+            [main_path.to_string_lossy().as_ref()],
+        )?;
+        let drain = (|| -> anyhow::Result<i64> {
+            let mut total = 0i64;
+            loop {
+                let copied = tconn.execute(
+                    "INSERT INTO spread_samples
+                        (symbol, venue_id, ts_ms, mid, best_bid, best_ask, bid_depth, ask_depth)
+                     SELECT symbol, venue_id, ts_ms, mid, best_bid, best_ask, bid_depth, ask_depth
+                     FROM (SELECT * FROM legacy.spread_samples ORDER BY id LIMIT ?1)",
+                    [DRAIN_BATCH],
+                )? as i64;
+                if copied == 0 {
+                    break;
+                }
+                total += copied;
+                tconn.execute(
+                    "DELETE FROM legacy.spread_samples WHERE id IN (
+                         SELECT id FROM legacy.spread_samples ORDER BY id LIMIT ?1)",
+                    [copied],
+                )?;
+            }
+            Ok(total)
+        })();
+        let _ = tconn.execute("DETACH DATABASE legacy", []);
+        let total = drain?;
+        if total > 0 {
+            tracing::info!(
+                "state_store: drained {total} legacy spread_samples rows into telemetry db"
+            );
+        }
+        Ok(())
     }
 
     fn migrate(conn: &Connection) -> anyhow::Result<()> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 30 {
+        if version > 35 {
             anyhow::bail!("unsupported state store schema version: {version}");
         }
         if version == 0 {
@@ -2105,6 +2336,36 @@ impl StateStore {
         }
         if version <= 29 {
             if let Err(err) = conn.execute_batch(MIGRATION_V30_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 30 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V31_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 31 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V32_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 32 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V33_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 33 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V34_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 34 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V35_SQL) {
                 let _ = conn.execute_batch("ROLLBACK;");
                 return Err(err.into());
             }

@@ -52,6 +52,7 @@ import type {
   AccountEquityEventDto,
   SpatialCandidateInput,
   CandidateOutcomeDto,
+  StrategyCapabilityDto,
   SignalExecutionDto,
   OpenPositionDto,
   TickerPositionState,
@@ -108,6 +109,20 @@ export async function invokeDesktop<T>(
   const core = await loadCore();
   if (!core) throw new Error(DESKTOP_REQUIRED_ERROR);
   return core.invoke<T>(command, args);
+}
+
+/**
+ * Execution commands return Ok(SimStepResultDto) even when the dispatch
+ * failed or unwound — `execution_success` is the truth field. Without this
+ * assertion every caller that only awaits the promise would report a
+ * failed dispatch as "Executed". Throws the backend's `message` so the
+ * caller surfaces the real failure reason.
+ */
+export function requireExecuted(res: SimStepResultDto): SimStepResultDto {
+  if (!res.execution_success) {
+    throw new Error(res.message || "Execution failed (no backend reason)");
+  }
+  return res;
 }
 
 /** Race an IPC call against a timeout, resolving the fallback instead of
@@ -595,7 +610,7 @@ export const api = {
   },
 
   async executeSpotArbitrage(params: SpotExecutionParams): Promise<SimStepResultDto> {
-    return invokeDesktop("execute_spot_arbitrage", { params });
+    return invokeDesktop<SimStepResultDto>("execute_spot_arbitrage", { params }).then(requireExecuted);
   },
 
   async scanTriangleOpportunities(filterAsset?: string): Promise<TriangleOpportunityDto[]> {
@@ -605,7 +620,7 @@ export const api = {
   },
 
   async executeTriangleArbitrage(params: TriangleExecutionParams): Promise<SimStepResultDto> {
-    return invokeDesktop<SimStepResultDto>("execute_triangle_arbitrage", { params });
+    return invokeDesktop<SimStepResultDto>("execute_triangle_arbitrage", { params }).then(requireExecuted);
   },
 
   async checkSpatialConvergence(
@@ -680,8 +695,7 @@ export const api = {
     baselineMeanSpreadBps?: number,
     positionStep?: number,
     maxUnits?: number,
-    nominalHurdleBps?: number,
-    canaryMaxLossBps?: number
+    nominalHurdleBps?: number
   ): Promise<SimStepResultDto> {
     return invokeDesktop<SimStepResultDto>("execute_spatial_arbitrage", {
       symbol,
@@ -694,8 +708,7 @@ export const api = {
       positionStep,
       maxUnits,
       nominalHurdleBps,
-      canaryMaxLossBps,
-    });
+    }).then(requireExecuted);
   },
 
   async executeCrossTickerArbitrage(
@@ -726,7 +739,7 @@ export const api = {
       shortVenue: p.shortVenue,
       orderQty: p.orderQty,
       netSpreadBps: p.netSpreadBps,
-    });
+    }).then(requireExecuted);
   },
 
   async fetchMultiMarketQuotes(symbols: string[]): Promise<TickerMarketQuoteDto[]> {
@@ -734,11 +747,11 @@ export const api = {
   },
 
   async executeFundingCarry(symbol: string, longVenue: string, shortVenue: string, tradeSizeUsd: number, auto = false, kind?: string): Promise<SimStepResultDto> {
-    return invokeDesktop<SimStepResultDto>("execute_funding_carry", { symbol, longVenue, shortVenue, tradeSizeUsd, auto, kind: kind ?? null });
+    return invokeDesktop<SimStepResultDto>("execute_funding_carry", { symbol, longVenue, shortVenue, tradeSizeUsd, auto, kind: kind ?? null }).then(requireExecuted);
   },
 
   async executePredictionArbitrage(marketTitle: string, buyYesVenue: string, buyNoVenue: string, quantity: number): Promise<SimStepResultDto> {
-    return invokeDesktop<SimStepResultDto>("execute_prediction_arbitrage", { marketTitle, buyYesVenue, buyNoVenue, quantity });
+    return invokeDesktop<SimStepResultDto>("execute_prediction_arbitrage", { marketTitle, buyYesVenue, buyNoVenue, quantity }).then(requireExecuted);
   },
 
   async getEngineSettings(): Promise<EngineSettingsDto> {
@@ -1020,9 +1033,10 @@ export const api = {
   },
 
   async executeSpatialCandidates(
-    candidates: SpatialCandidateInput[]
+    candidates: SpatialCandidateInput[],
+    auto?: boolean
   ): Promise<CandidateOutcomeDto[]> {
-    return invokeDesktop<CandidateOutcomeDto[]>("execute_spatial_candidates", { candidates });
+    return invokeDesktop<CandidateOutcomeDto[]>("execute_spatial_candidates", { candidates, auto });
   },
 
   async listSignalExecutions(
@@ -1055,6 +1069,27 @@ export const api = {
       strategyId,
       executionType: executionType ?? null,
     });
+  },
+
+  /** Persist the exits-only flag for (current env, strategy, symbol) — the
+   * backend entry gates enforce it on every dispatch path. */
+  async setTickerReduceOnly(
+    symbol: string,
+    strategyId: string,
+    enabled: boolean
+  ): Promise<void> {
+    return invokeDesktop<void>("set_ticker_reduce_only", { symbol, strategyId, enabled });
+  },
+
+  /** All exits-only (strategyId, symbol) rows for the current environment. */
+  async listReduceOnlyTickers(): Promise<{ strategyId: string; symbol: string }[]> {
+    return invokeDesktop("list_reduce_only_tickers");
+  },
+
+  /** Per-strategy scan/execute capability descriptors — gate every Execute
+   * control and auto-execution loop on these, never on assumed wiring. */
+  async getStrategyCapabilities(): Promise<StrategyCapabilityDto[]> {
+    return invokeDesktop<StrategyCapabilityDto[]>("get_strategy_capabilities");
   },
 
   async getVenueBalances(): Promise<VenueBalanceInfo[]> {
@@ -1176,7 +1211,7 @@ export const api = {
       buyVenue,
       sellVenue,
       sizeUsd,
-    });
+    }).then(requireExecuted);
   },
 
   // ---- Autonomous convergence bot (opt-in) ----

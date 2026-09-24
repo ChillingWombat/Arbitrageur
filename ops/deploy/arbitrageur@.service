@@ -3,6 +3,12 @@ Description=Arbitrageur headless paper daemon (port %i)
 Documentation=file:///opt/arbitrageur/ops/deploy/README.md
 After=network-online.target
 Wants=network-online.target
+# Crash loop / permanent failure pages the operator: when the unit enters
+# a failed state (exhausted restarts, watchdog, non-zero exit under
+# Restart=on-failure policy), systemd starts the paired notifier unit.
+# arbitrageur-notify@.service runs /etc/arbitrageur/alert.sh — install it
+# (sample in ops/deploy) and wire your channel there. [Unit]-section key.
+OnFailure=arbitrageur-notify@%i.service
 
 [Service]
 Type=simple

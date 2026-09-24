@@ -25,6 +25,10 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+        with:
+          # The whitespace gate diffs the pushed/PR revision range, which
+          # needs the base commit present — depth 1 cannot see it.
+          fetch-depth: 0
 
       - name: Install pinned Rust toolchain
         run: |
@@ -37,7 +41,16 @@ jobs:
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev libdbus-1-dev
 
       - name: Check patch whitespace
-        run: git diff --check
+        # `git diff --check` with no range compares worktree to index —
+        # empty on a clean checkout, gating nothing. Diff the actual
+        # revision range being tested: PR base→head, or push before→head.
+        run: |
+          base="${{ github.event.pull_request.base.sha || github.event.before }}"
+          if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ]; then
+            base="$(git merge-base HEAD origin/main || echo HEAD~1)"
+          fi
+          echo "Whitespace check range: $base...HEAD"
+          git diff --check "$base"...HEAD
 
       - name: Verify vendored Lighter signer digest
         run: |
@@ -131,6 +144,13 @@ jobs:
 
       - name: Build headless binary
         run: cargo build --release --locked --bin arbitrageur
+
+      - name: Assert Lighter signer ships beside the binary
+        run: |
+          # A missing sidecar silently drops Lighter out of deployed
+          # builds — fail packaging rather than discover it on a host.
+          test -f target/release/liblighter_signer.so
+          echo "8cb2fbcadab0b9b3fed4a524998b825818b677fcf9c49bc1f18b4ca02a233753  target/release/liblighter_signer.so" | sha256sum --check --status
 
       - name: Install binary for unit verification
         run: sudo install -m 0755 target/release/arbitrageur /usr/local/bin/arbitrageur

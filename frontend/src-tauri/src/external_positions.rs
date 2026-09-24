@@ -273,7 +273,7 @@ pub async fn get_external_positions_impl(
     }
     let signals = state
         .state_store
-        .list_open_signals()
+        .list_open_signals(Some(&environment))
         .map_err(|e| e.to_string())?;
 
     let mut positions = Vec::new();
@@ -638,9 +638,13 @@ fn validate_close_response(
             resp.filled_qty == dec!(0) && resp.remaining_qty == expected_qty
         }
     };
-    if !(valid_status && attributable && bounded_qty && resp.fee >= dec!(0)) {
+    if !(valid_status
+        && attributable
+        && bounded_qty
+        && resp.fee.map(|f| f >= dec!(0)).unwrap_or(true))
+    {
         return Err(format!(
-            "Close response on {adapter_venue} {expected_symbol} is not attributable/consistent: status={:?} qty={}/{} remaining={} venue={} client_order_id={} order_id={} fee={}",
+            "Close response on {adapter_venue} {expected_symbol} is not attributable/consistent: status={:?} qty={}/{} remaining={} venue={} client_order_id={} order_id={} fee={:?}",
             resp.status,
             resp.filled_qty,
             expected_qty,
@@ -666,8 +670,17 @@ pub async fn close_external_position_impl(
     input: CloseExternalPositionInput,
     state: &AppEngineState,
 ) -> Result<CloseResultDto, String> {
-    if !state.vault.write().is_unlocked() {
-        return Err("Vault is locked. Unlock before closing external positions.".into());
+    {
+        let mut vault = state.vault.write();
+        if !vault.is_unlocked() {
+            // Timer-based auto-lock only forgets vault secrets — adapter
+            // credentials stay provisioned by design, so a scheduled
+            // risk-reducing exit must still fire unattended. A MANUAL lock
+            // clears adapter credentials and stays refused.
+            if !vault.is_auto_locked() {
+                return Err("Vault is locked. Unlock before closing external positions.".into());
+            }
+        }
     }
     state.sync_vault_credentials_to_adapters();
     let venue_lc = input.venue.trim().to_lowercase();
@@ -704,9 +717,13 @@ pub async fn close_external_position_impl(
         .fetch_account()
         .await
         .map_err(|e| format!("Account re-read failed for {venue_lc}: {e}"))?;
+    // Serialize the whole dedup→persist→submit critical section: two
+    // concurrent closes must not both pass the in-flight check (issue #36 —
+    // on venues without reduce-only a second close can flip the position).
+    let _guard = state.execution_lock.lock().await;
     let signals = state
         .state_store
-        .list_open_signals()
+        .list_open_signals(Some(state.env().as_str()))
         .map_err(|e| e.to_string())?;
     let live = adapter
         .account_position_for(&account, &input.symbol)
@@ -808,35 +825,38 @@ pub async fn close_external_position_impl(
     // preserves the exact leg identity for reconciliation.
     state
         .state_store
-        .record_signal_execution(&NewSignalExecution {
-            id: sid.clone(),
-            strategy_id: "external".into(),
-            symbol: live.symbol.clone(),
-            route_id: None,
-            expected_net_usd: None,
-            note: Some(if close_pct < 100.0 {
-                format!("External {base} close via bot ({mode}, {close_pct}% of {ext})")
-            } else {
-                format!("External {base} close via bot ({mode})")
-            }),
-            legs: vec![NewSignalLeg {
-                // Stamp the default account the adapter authenticated with —
-                // otherwise the account-disable/delete guards can't see this
-                // in-flight close and a credential wipe would strand its
-                // order polling.
-                account_id: state
-                    .state_store
-                    .default_account(&venue_lc, state.env().as_str())
-                    .ok()
-                    .flatten()
-                    .map(|a| a.id),
-                venue: venue_lc.clone(),
-                side: leg_side,
-                symbol: Some(live.symbol.clone()),
-                intended_qty: dec_f64(qty_dec),
-                intended_price: None,
-            }],
-        })
+        .record_signal_execution(
+            &NewSignalExecution {
+                id: sid.clone(),
+                strategy_id: "external".into(),
+                symbol: live.symbol.clone(),
+                route_id: None,
+                expected_net_usd: None,
+                note: Some(if close_pct < 100.0 {
+                    format!("External {base} close via bot ({mode}, {close_pct}% of {ext})")
+                } else {
+                    format!("External {base} close via bot ({mode})")
+                }),
+                legs: vec![NewSignalLeg {
+                    // Stamp the default account the adapter authenticated with —
+                    // otherwise the account-disable/delete guards can't see this
+                    // in-flight close and a credential wipe would strand its
+                    // order polling.
+                    account_id: state
+                        .state_store
+                        .default_account(&venue_lc, state.env().as_str())
+                        .ok()
+                        .flatten()
+                        .map(|a| a.id),
+                    venue: venue_lc.clone(),
+                    side: leg_side,
+                    symbol: Some(live.symbol.clone()),
+                    intended_qty: dec_f64(qty_dec),
+                    intended_price: None,
+                }],
+            },
+            state.env().as_str(),
+        )
         .map_err(|e| format!("Failed to persist external close intent: {e}"))?;
 
     let mark_unresolved = |note: &str| {
@@ -845,7 +865,6 @@ pub async fn close_external_position_impl(
             .update_signal_status(&sid, SignalStatus::Unresolved, Some(note));
     };
 
-    let _guard = state.execution_lock.lock().await;
     let resp = if mode == "auto" {
         let cfg = state.settings.read().passive_unwind;
         let refresher = crate::commands::FlattenLiveRefresh {
@@ -938,7 +957,9 @@ pub async fn close_external_position_impl(
             leg_side,
             filled,
             fill_price,
-            resp.fee.to_string().parse::<f64>().unwrap_or(0.0),
+            resp.fee
+                .map(|v| v.to_string().parse::<f64>().unwrap_or(0.0))
+                .unwrap_or(0.0),
             Some(resp.order_id.as_str()),
         ) {
             let note = format!(
@@ -1113,6 +1134,7 @@ pub async fn schedule_external_exit_impl(
         limit_price: input.limit_price.filter(|p| p.is_finite() && *p > 0.0),
         execute_at_ms: input.execute_at_ms,
         status: "pending".into(),
+        attempts: 0,
         note: None,
         created_at: now.clone(),
         updated_at: now,
@@ -1176,13 +1198,46 @@ pub async fn run_due_scheduled_exits(state: &AppEngineState) {
                 );
             }
             Err(e) => {
-                let _ = state
-                    .state_store
-                    .set_scheduled_exit_status(&exit.id, "failed", Some(&e));
-                tracing::warn!("scheduled-exit {} failed: {e}", exit.id);
+                // Retry only pre-dispatch failures — once a close may have
+                // reached the venue, a retry could stack a second close.
+                // Everything else exhausts to `failed` for the operator.
+                let attempts = exit.attempts + 1;
+                if scheduled_exit_retryable(&e) && attempts < MAX_SCHEDULED_EXIT_ATTEMPTS {
+                    let backoff_ms = 60_000i64 * (1i64 << attempts.min(4));
+                    let _ = state.state_store.reschedule_scheduled_exit(
+                        &exit.id,
+                        now_ms + backoff_ms,
+                        Some(&format!("attempt {attempts} failed (retrying): {e}")),
+                    );
+                    tracing::warn!(
+                        "scheduled-exit {} attempt {attempts} failed, retry in {}s: {e}",
+                        exit.id,
+                        backoff_ms / 1000
+                    );
+                } else {
+                    let _ = state.state_store.set_scheduled_exit_status(
+                        &exit.id,
+                        "failed",
+                        Some(&format!("attempt {attempts}: {e}")),
+                    );
+                    tracing::warn!("scheduled-exit {} failed: {e}", exit.id);
+                }
             }
         }
     }
+}
+
+/// Max dispatch attempts for one scheduled exit before it parks `failed`.
+const MAX_SCHEDULED_EXIT_ATTEMPTS: i64 = 6;
+
+/// Only failures that occur BEFORE any order can reach the venue are
+/// retryable — a post-dispatch error may mean the close is already live,
+/// and a blind retry could stack a second close on top of it.
+fn scheduled_exit_retryable(err: &str) -> bool {
+    err.starts_with("Vault is locked")
+        || err.starts_with("No live credentials")
+        || err.contains("already in flight")
+        || err.starts_with("Account re-read failed")
 }
 
 /// Background scheduler: 10s tick, fires due rows. Spawned once at app
@@ -1337,7 +1392,7 @@ mod tests {
             filled_qty: dec!(0),
             remaining_qty: dec!(1.0),
             avg_fill_price: None,
-            fee: dec!(0),
+            fee: Some(dec!(0)),
             fee_currency: "USDC".into(),
             raw_response: None,
             timestamp: Utc::now(),
@@ -1416,5 +1471,331 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    // ---- close dispatch path: dedup lock + scheduled-exit policy ----
+
+    /// Scripted venue for the close path: one seeded position, a placed
+    /// counter, and a status-scripted ack whose identity echoes the
+    /// request so `validate_close_response` attribution passes.
+    struct CloseVenue {
+        venue: &'static str,
+        position: arbitrageur_core::position::Position,
+        placed: std::sync::Mutex<Vec<OrderRequest>>,
+        status: arbitrageur_core::types::OrderStatus,
+        place_error: std::sync::Mutex<Option<String>>,
+    }
+
+    impl CloseVenue {
+        fn new(
+            venue: &'static str,
+            symbol: &str,
+            side: Side,
+            qty: Decimal,
+            status: arbitrageur_core::types::OrderStatus,
+        ) -> Self {
+            Self {
+                venue,
+                position: arbitrageur_core::position::Position {
+                    venue: VenueId::new(venue),
+                    symbol: symbol.to_string(),
+                    side,
+                    quantity: qty,
+                    entry_price: dec!(100),
+                    mark_price: dec!(100),
+                    unrealized_pnl: dec!(0),
+                    realized_pnl: dec!(0),
+                    liquidation_price: None,
+                    leverage: dec!(1),
+                    initial_margin: dec!(0),
+                    maintenance_margin: dec!(0),
+                    updated_at: Utc::now(),
+                },
+                placed: std::sync::Mutex::new(Vec::new()),
+                status,
+                place_error: std::sync::Mutex::new(None),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl arbitrageur_core::exchange::ExchangeAdapter for CloseVenue {
+        fn venue_id(&self) -> VenueId {
+            VenueId::new(self.venue)
+        }
+        fn name(&self) -> &str {
+            self.venue
+        }
+        async fn fetch_markets(
+            &self,
+        ) -> anyhow::Result<Vec<arbitrageur_core::market::MarketMetadata>> {
+            unimplemented!()
+        }
+        async fn fetch_orderbook(
+            &self,
+            _s: &str,
+        ) -> anyhow::Result<arbitrageur_core::quote::OrderBook> {
+            unimplemented!()
+        }
+        async fn fetch_ticker(&self, _s: &str) -> anyhow::Result<arbitrageur_core::quote::Ticker> {
+            unimplemented!()
+        }
+        async fn fetch_funding_rate(
+            &self,
+            _s: &str,
+        ) -> anyhow::Result<arbitrageur_core::quote::FundingRate> {
+            unimplemented!()
+        }
+        async fn fetch_account(
+            &self,
+        ) -> anyhow::Result<arbitrageur_core::position::AccountSnapshot> {
+            Ok(arbitrageur_core::position::AccountSnapshot {
+                venue: VenueId::new(self.venue),
+                equity: dec!(10000),
+                free_margin: dec!(10000),
+                maintenance_margin: dec!(0),
+                margin_usage_pct: dec!(0),
+                balances: Vec::new(),
+                positions: vec![self.position.clone()],
+                timestamp: Utc::now(),
+            })
+        }
+        async fn place_order(&self, o: OrderRequest) -> anyhow::Result<OrderResponse> {
+            if let Some(e) = self.place_error.lock().unwrap().clone() {
+                anyhow::bail!(e);
+            }
+            let n = {
+                let mut p = self.placed.lock().unwrap();
+                p.push(o.clone());
+                p.len()
+            };
+            let (filled, remaining, avg) = match self.status {
+                arbitrageur_core::types::OrderStatus::Filled => {
+                    (o.quantity, dec!(0), Some(dec!(100)))
+                }
+                arbitrageur_core::types::OrderStatus::New => (dec!(0), o.quantity, None),
+                _ => (dec!(0), o.quantity, None),
+            };
+            Ok(OrderResponse {
+                order_id: format!("oid-{n}"),
+                client_order_id: o.client_order_id,
+                venue: VenueId::new(self.venue),
+                symbol: o.symbol,
+                status: self.status,
+                original_qty: o.quantity,
+                filled_qty: filled,
+                remaining_qty: remaining,
+                avg_fill_price: avg,
+                fee: None,
+                fee_currency: "USDC".into(),
+                raw_response: None,
+                timestamp: Utc::now(),
+            })
+        }
+        async fn cancel_order(
+            &self,
+            _r: arbitrageur_core::order::CancelRequest,
+        ) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        fn live_order_submission_implemented(&self) -> bool {
+            true
+        }
+        fn has_live_credentials(&self) -> bool {
+            true
+        }
+    }
+
+    /// Tempdir vault so `SecureVault` state is test-local.
+    fn close_test_state() -> AppEngineState {
+        let dir = std::env::temp_dir().join(format!(
+            "arbitrageur_extclose_vault_{}",
+            rand::random::<u64>()
+        ));
+        let state = AppEngineState::new_with_vault_path(dir.join("vault.enc"));
+        state.vault.write().initialize("test-password-123").unwrap();
+        state
+    }
+
+    fn due_exit(id: &str, venue: &str, symbol: &str) -> crate::state_store::ScheduledExit {
+        let now = Utc::now().to_rfc3339();
+        crate::state_store::ScheduledExit {
+            id: id.into(),
+            venue: venue.into(),
+            symbol: symbol.into(),
+            side: "buy".into(),
+            close_pct: 100.0,
+            mode: "market".into(),
+            limit_price: None,
+            execute_at_ms: Utc::now().timestamp_millis() - 1_000,
+            status: "pending".into(),
+            attempts: 0,
+            note: None,
+            created_at: now.clone(),
+            updated_at: now,
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn close_external_position_dedup_serializes_concurrent_closes() {
+        // Regression (#36): two closes racing the same (venue, symbol) must
+        // NOT both pass the in-flight check — on venues without reduce-only
+        // a second market close flips the position. The execution_lock +
+        // open-signal recheck means exactly one order reaches the venue.
+        let state = Arc::new(close_test_state());
+        let venue = Arc::new(CloseVenue::new(
+            "lighter",
+            "ETH-USDC",
+            Side::Buy,
+            dec!(0.5),
+            // A working ack keeps the close signal in-flight — the second
+            // call must observe it under the lock and refuse.
+            arbitrageur_core::types::OrderStatus::New,
+        ));
+        state
+            .test_adapters
+            .write()
+            .unwrap()
+            .insert("lighter".into(), venue.clone());
+
+        let input = |_: ()| CloseExternalPositionInput {
+            venue: "lighter".into(),
+            symbol: "ETH-USDC".into(),
+            mode: "market".into(),
+            limit_price: None,
+            close_pct: Some(100.0),
+        };
+        let s2 = state.clone();
+        let h = tokio::spawn(async move { close_external_position_impl(input(()), &s2).await });
+        let r1 = close_external_position_impl(input(()), &state).await;
+        let r2 = h.await.expect("join");
+
+        let (oks, errs): (Vec<_>, Vec<_>) = [r1, r2].into_iter().partition(|r| r.is_ok());
+        assert_eq!(oks.len(), 1, "exactly one close may dispatch: {errs:?}");
+        assert_eq!(errs.len(), 1);
+        let err = errs[0].as_ref().unwrap_err();
+        assert!(
+            err.contains("already in flight"),
+            "loser must hit the dedup gate, got: {err}"
+        );
+        assert_eq!(
+            venue.placed.lock().unwrap().len(),
+            1,
+            "exactly one close order may reach the venue"
+        );
+        // And the surviving in-flight signal keeps the symbol deduped for
+        // any later attempt — no second close until it settles.
+        let retry = close_external_position_impl(input(()), &state).await;
+        assert!(retry.unwrap_err().contains("already in flight"));
+        assert_eq!(venue.placed.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn scheduled_exit_auto_lock_fires_manual_lock_reschedules() {
+        // Regression (#36): the timer-based auto-lock forgets vault secrets
+        // but leaves adapter credentials provisioned BY DESIGN — a due
+        // risk-reducing exit must still fire unattended. A MANUAL lock
+        // strips credentials, so the same row reschedules instead of
+        // dispatching blind.
+        let state = close_test_state();
+        let venue = Arc::new(CloseVenue::new(
+            "lighter",
+            "ETH-USDC",
+            Side::Buy,
+            dec!(0.5),
+            arbitrageur_core::types::OrderStatus::New,
+        ));
+        state
+            .test_adapters
+            .write()
+            .unwrap()
+            .insert("lighter".into(), venue.clone());
+
+        // Auto-lock: fire proceeds on provisioned credentials.
+        state.vault.write().force_timer_expiry();
+        state
+            .state_store
+            .insert_scheduled_exit(&due_exit("sched-auto", "lighter", "ETH-USDC"))
+            .unwrap();
+        run_due_scheduled_exits(&state).await;
+        assert_eq!(venue.placed.lock().unwrap().len(), 1);
+        let rows = state.state_store.list_scheduled_exits(None).unwrap();
+        assert_eq!(rows[0].status, "fired", "auto-locked exit must dispatch");
+
+        // Manual lock: the next due row reschedules (bounded attempts),
+        // never fires with stripped credentials.
+        let state = close_test_state();
+        let venue = Arc::new(CloseVenue::new(
+            "lighter",
+            "ETH-USDC",
+            Side::Buy,
+            dec!(0.5),
+            arbitrageur_core::types::OrderStatus::New,
+        ));
+        state
+            .test_adapters
+            .write()
+            .unwrap()
+            .insert("lighter".into(), venue.clone());
+        state.vault.write().lock();
+        state
+            .state_store
+            .insert_scheduled_exit(&due_exit("sched-manual", "lighter", "ETH-USDC"))
+            .unwrap();
+        run_due_scheduled_exits(&state).await;
+        assert_eq!(
+            venue.placed.lock().unwrap().len(),
+            0,
+            "manual lock must not dispatch closes"
+        );
+        let rows = state.state_store.list_scheduled_exits(None).unwrap();
+        assert_eq!(
+            rows[0].status, "pending",
+            "pre-dispatch vault gate failure is retryable"
+        );
+        assert_eq!(rows[0].attempts, 1);
+        assert!(rows[0].execute_at_ms > Utc::now().timestamp_millis());
+    }
+
+    #[tokio::test]
+    async fn scheduled_exit_unknown_venue_and_dispatch_error_fail_closed() {
+        // A venue that cannot dispatch at all is a permanent failure — the
+        // row parks `failed` for the operator instead of retry-looping.
+        let state = close_test_state();
+        state
+            .state_store
+            .insert_scheduled_exit(&due_exit("sched-bad", "nosuchvenue", "ETH-USDC"))
+            .unwrap();
+        run_due_scheduled_exits(&state).await;
+        let rows = state.state_store.list_scheduled_exits(None).unwrap();
+        assert_eq!(rows[0].status, "failed");
+
+        // An error AFTER possible venue submission is never retried — a
+        // blind retry could stack a second close on a live order.
+        let venue = Arc::new(CloseVenue::new(
+            "lighter",
+            "ETH-USDC",
+            Side::Buy,
+            dec!(0.5),
+            arbitrageur_core::types::OrderStatus::New,
+        ));
+        *venue.place_error.lock().unwrap() = Some("venue 500".into());
+        let state = close_test_state();
+        state
+            .test_adapters
+            .write()
+            .unwrap()
+            .insert("lighter".into(), venue.clone());
+        state
+            .state_store
+            .insert_scheduled_exit(&due_exit("sched-err", "lighter", "ETH-USDC"))
+            .unwrap();
+        run_due_scheduled_exits(&state).await;
+        let rows = state.state_store.list_scheduled_exits(None).unwrap();
+        assert_eq!(
+            rows[0].status, "failed",
+            "post-dispatch error must not reschedule: {:?}",
+            rows[0].note
+        );
     }
 }

@@ -434,7 +434,16 @@ impl BorosAdapter {
         let creds = self.creds()?;
         let base_nonce = Utc::now().timestamp_millis().max(0) as u64 * 1000;
         let mut datas = Vec::with_capacity(calls.len());
-        for (i, (calldata, _account_id)) in calls.iter().enumerate() {
+        for (i, (calldata, account_id)) in calls.iter().enumerate() {
+            // The calldata builder returns the accountId the call targets;
+            // `sign_agent_call` always signs the configured account — a
+            // mismatch would act on the wrong sub-account. Fail closed.
+            if u8::try_from(*account_id).ok() != Some(creds.account_id) {
+                anyhow::bail!(
+                    "Boros calldata targets accountId {account_id} but credentials are bound to {} — refusing to sign",
+                    creds.account_id
+                );
+            }
             datas.push(Self::sign_agent_call(
                 &creds,
                 calldata,
@@ -464,13 +473,21 @@ impl BorosAdapter {
             .cloned()
             .ok_or_else(|| anyhow::anyhow!("Boros bulk-calls returned a non-array body"))?;
         for row in &rows {
-            if row.get("status").and_then(|s| s.as_str()) == Some("reverted") {
-                anyhow::bail!(
-                    "Boros transaction reverted on-chain: {}",
+            // Fail closed on anything that is not an explicit success —
+            // the tx may have broadcast anyway, so the error propagates
+            // and order truth is resolved via orders/by-tx-hash.
+            match row.get("status").and_then(|s| s.as_str()) {
+                Some("success" | "mined" | "confirmed" | "succeeded") => {}
+                Some(s) => anyhow::bail!(
+                    "Boros transaction status '{s}': {}",
                     row.get("error")
                         .and_then(|e| e.as_str())
                         .unwrap_or("unknown error")
-                );
+                ),
+                None if row.get("error").is_some() || row.get("txHash").is_none() => {
+                    anyhow::bail!("Boros bulk-calls row carries no status/txHash: {row}")
+                }
+                None => {}
             }
         }
         Ok(rows)
@@ -532,37 +549,55 @@ impl BorosAdapter {
     async fn resolve_market(&self, symbol: &str) -> anyhow::Result<BorosYuMarket> {
         let markets = self.yu_markets().await?;
         let s = symbol.trim();
-        if let Some(id) = s
+        let m = if let Some(id) = s
             .strip_prefix("BOROS-")
             .or_else(|| s.strip_prefix("boros-"))
             .and_then(|d| d.parse::<u64>().ok())
         {
-            return markets
+            markets
                 .iter()
                 .find(|m| m.market_id == id)
                 .cloned()
-                .ok_or_else(|| anyhow::anyhow!("Boros market {id} is not active"));
-        }
-        markets
-            .iter()
-            .find(|m| m.symbol.eq_ignore_ascii_case(s))
-            .cloned()
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Boros symbol '{s}' is not an active YU market — use BOROS-<marketId>"
-                )
-            })
+                .ok_or_else(|| anyhow::anyhow!("Boros market {id} is not active"))?
+        } else {
+            markets
+                .iter()
+                .find(|m| m.symbol.eq_ignore_ascii_case(s))
+                .cloned()
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Boros symbol '{s}' is not an active YU market — use BOROS-<marketId>"
+                    )
+                })?
+        };
+        Self::require_unmatured(m)
     }
 
     /// Resolve a YU market by numeric id — used by the fixed-yield
     /// executor, which carries market ids (not symbols) in its leg DTOs.
     /// Fails closed: only currently-active markets resolve.
     pub async fn market_by_id(&self, market_id: u64) -> anyhow::Result<BorosYuMarket> {
-        self.yu_markets()
+        let m = self
+            .yu_markets()
             .await?
             .into_iter()
             .find(|m| m.market_id == market_id)
-            .ok_or_else(|| anyhow::anyhow!("Boros market {market_id} is not active"))
+            .ok_or_else(|| anyhow::anyhow!("Boros market {market_id} is not active"))?;
+        Self::require_unmatured(m)
+    }
+
+    /// The markets list is cached (TTL window) — a market that matured
+    /// inside the window must still refuse orders. Re-check at resolve
+    /// time, never trust the cache's fetch-time filter.
+    fn require_unmatured(m: BorosYuMarket) -> anyhow::Result<BorosYuMarket> {
+        if m.maturity_unix <= Utc::now().timestamp() {
+            anyhow::bail!(
+                "Boros market {} matured at {} — refusing to trade it",
+                m.symbol,
+                m.maturity_unix
+            );
+        }
+        Ok(m)
     }
 
     /// Cross-margin `marketAcc` for the configured root/accountId with the
@@ -700,28 +735,66 @@ impl ExchangeAdapter for BorosAdapter {
                 &serde_json::json!({ "marketAccs": market_accs }),
             )
             .await?;
+        // Collateral units → USD: every netBalance/margin field is
+        // denominated in the market's collateral token, whose USD price
+        // comes from `/v1/assets` (tokenId lives inside the packed
+        // marketAcc at bits 24..40). A row whose collateral price is
+        // unknown contributes 0 — never face-value a non-USD token.
+        let collateral = parse_collateral_assets(&assets);
+        let px_of_token = |t: u64| -> Option<Decimal> {
+            collateral
+                .get(&t)
+                .map(|(_, px)| *px)
+                .filter(|p| p.is_finite() && *p > 0.0)
+                .and_then(|p| Decimal::from_str(&p.to_string()).ok())
+        };
         let mut equity = dec!(0);
         let mut free = dec!(0);
         let mut maint = dec!(0);
         let mut positions = Vec::new();
         let markets = self.yu_markets().await.unwrap_or_default();
         if let Some(rows) = resp.get("results").and_then(|r| r.as_array()) {
-            for row in rows {
-                equity += dec_fixed_x18(row.get("netBalance")).unwrap_or_default();
-                free += dec_fixed_x18(row.get("availableInitialMargin")).unwrap_or_default();
+            for (i, row) in rows.iter().enumerate() {
+                let token_id = row
+                    .get("marketAcc")
+                    .and_then(|v| v.as_str())
+                    .and_then(|acc| u64::from_str_radix(acc.trim_start_matches("0x"), 16).ok())
+                    .map(|acc| (acc >> 24) & 0xFFFF)
+                    .or_else(|| token_ids.get(i).copied());
+                let usd = |v: Option<&serde_json::Value>| -> Decimal {
+                    match (dec_fixed_x18(v), token_id.and_then(&px_of_token)) {
+                        (Some(d), Some(px)) => d * px,
+                        _ => dec!(0),
+                    }
+                };
+                equity += usd(row.get("netBalance"));
+                free += usd(row.get("availableInitialMargin"));
                 if let Some(ps) = row.get("positions").and_then(|p| p.as_array()) {
                     for p in ps {
                         let signed = dec_fixed_x18(p.get("signedSize")).unwrap_or_default();
                         if signed == dec!(0) {
                             continue;
                         }
-                        maint += dec_fixed_x18(p.get("maintMargin")).unwrap_or_default();
                         let mid = p.get("marketId").and_then(|v| v.as_u64()).unwrap_or(0);
+                        // Position margins are collateral units of the
+                        // position's own market token.
+                        let ppx = markets
+                            .iter()
+                            .find(|m| m.market_id == mid)
+                            .and_then(|m| px_of_token(m.token_id))
+                            .or_else(|| token_id.and_then(&px_of_token))
+                            .unwrap_or(dec!(0));
+                        maint += dec_fixed_x18(p.get("maintMargin")).unwrap_or_default() * ppx;
                         let sym = markets
                             .iter()
                             .find(|m| m.market_id == mid)
                             .map(|m| m.symbol.clone())
                             .unwrap_or_else(|| format!("BOROS-{mid}"));
+                        // positionValue is the position's total value in
+                        // collateral units — per-unit mark in USD.
+                        let mark = dec_fixed_x18(p.get("positionValue"))
+                            .map(|v| (v.abs() / signed.abs()) * ppx)
+                            .unwrap_or_default();
                         positions.push(Position {
                             venue: self.venue_id(),
                             symbol: sym,
@@ -732,17 +805,17 @@ impl ExchangeAdapter for BorosAdapter {
                             },
                             quantity: signed.abs(),
                             entry_price: dec!(0),
-                            mark_price: dec_fixed_x18(p.get("positionValue"))
-                                .unwrap_or_default()
-                                .abs(),
+                            mark_price: mark,
                             unrealized_pnl: dec!(0),
                             realized_pnl: dec!(0),
                             liquidation_price: None,
                             leverage: dec!(1),
                             initial_margin: dec_fixed_x18(p.get("initialMargin"))
-                                .unwrap_or_default(),
+                                .unwrap_or_default()
+                                * ppx,
                             maintenance_margin: dec_fixed_x18(p.get("maintMargin"))
-                                .unwrap_or_default(),
+                                .unwrap_or_default()
+                                * ppx,
                             updated_at: Utc::now(),
                         });
                     }
@@ -798,8 +871,12 @@ impl ExchangeAdapter for BorosAdapter {
             Side::Buy => 0u8,
             Side::Sell => 1u8,
         };
+        // order_type is the semantic — an IOC request with a stale GTC tif
+        // must stay IOC, never rest.
         let tif = if order.post_only || order.order_type == OrderType::PostOnly {
             3u8 // ADD_LIQUIDITY_ONLY
+        } else if order.order_type == OrderType::ImmediateOrCancel {
+            1
         } else {
             match order.time_in_force {
                 TimeInForce::FillOrKill => 2,
@@ -919,7 +996,7 @@ impl ExchangeAdapter for BorosAdapter {
             filled_qty: filled.max(dec!(0)),
             remaining_qty: remaining.max(dec!(0)),
             avg_fill_price: order.price,
-            fee: dec!(0),
+            fee: None,
             fee_currency: "USD".into(),
             raw_response: Some(serde_json::json!({"txHash": tx_hash}).to_string()),
             timestamp: Utc::now(),
@@ -1023,7 +1100,7 @@ impl ExchangeAdapter for BorosAdapter {
             remaining_qty: unfilled.max(dec!(0)),
             avg_fill_price: f64_from_json(row.get("impliedApr"))
                 .and_then(|r| Decimal::from_str(&r.to_string()).ok()),
-            fee: dec!(0),
+            fee: None,
             fee_currency: "USD".into(),
             raw_response: Some(row.to_string()),
             timestamp: Utc::now(),
@@ -1043,6 +1120,13 @@ impl ExchangeAdapter for BorosAdapter {
     }
 
     fn has_live_credentials(&self) -> bool {
+        // Creds presence only — this trait method is sync and cannot hit the
+        // network. The agent-approval gate is enforced where it can be
+        // verified: `fetch_account`/`place_order` call `agent_approved` and
+        // bail when unapproved/expired, so no order path opens on creds
+        // alone. (Gating here on the cached approval would deadlock: the
+        // balance poller consults `has_live_credentials` before ever calling
+        // `fetch_account`, which is the path that refreshes it.)
         self.creds.read().is_some()
     }
 

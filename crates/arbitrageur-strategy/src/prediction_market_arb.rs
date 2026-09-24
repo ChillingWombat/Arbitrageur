@@ -1,5 +1,4 @@
 use arbitrageur_core::exchange::ExchangeAdapter;
-use arbitrageur_core::order::OrderRequest;
 use arbitrageur_core::types::{dec, Decimal, Side};
 use arbitrageur_execution::coordinator::{ArbitrageExecutionResult, AtomicArbitrageCoordinator};
 use arbitrageur_math::prediction_synthetic::{
@@ -156,7 +155,10 @@ impl PredictionMarketArbStrategy {
             )
         };
 
-        let order_poly = OrderRequest::new_limit(
+        // IOC like every other two-leg arb: a resting GTC order would sit
+        // unfilled while the opposite leg may already be done — residual
+        // exposure the coordinator's two-leg semantics are meant to avoid.
+        let order_poly = coordinator.router().build_ioc_order(
             self.poly_exchange.venue_id(),
             poly_sym,
             Side::Buy,
@@ -164,7 +166,7 @@ impl PredictionMarketArbStrategy {
             self.trade_qty,
         );
 
-        let order_kalshi = OrderRequest::new_limit(
+        let order_kalshi = coordinator.router().build_ioc_order(
             self.kalshi_exchange.venue_id(),
             kalshi_sym,
             Side::Buy,

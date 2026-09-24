@@ -549,7 +549,7 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
               </span>
               <span
                 className="text-xs font-sans font-bold text-accent-strong tabular-nums"
-                title={`Compounded: ${opp.net_apy_pct.toFixed(2)}% APY`}
+                title={opp.net_apy_pct != null ? `Compounded: ${opp.net_apy_pct.toFixed(2)}% APY` : "Compounded APY unavailable (rate too extreme to annualize)"}
               >
                 {opp.net_apr_pct.toFixed(2)}% APR
               </span>
@@ -651,8 +651,8 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
               />
               <DetailField
                 label="Compounded APY"
-                value={`${opp.net_apy_pct.toFixed(2)}%`}
-                tip="Net rate compounded over each 8h funding interval for a year."
+                value={opp.net_apy_pct != null ? `${opp.net_apy_pct.toFixed(2)}%` : "n/a"}
+                tip="Net rate compounded over each funding interval for a year, assuming every receipt is reinvested. n/a when the compounded figure is not finite."
               />
               <DetailField
                 label="Daily income"
@@ -1220,7 +1220,7 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
                       </div>
                       <span
                         className="text-[10px] font-sans font-bold text-accent-strong tabular-nums shrink-0"
-                        title={`Net APR — annualized rate after fees & slippage (compounded: ${opp.net_apy_pct.toFixed(1)}% APY)`}
+                        title={opp.net_apy_pct != null ? `Net APR — annualized rate after fees & slippage (compounded: ${opp.net_apy_pct.toFixed(1)}% APY)` : "Net APR — annualized rate after fees & slippage"}
                       >
                         {opp.net_apr_pct.toFixed(1)}%<span className="text-[8px] font-medium text-accent-strong/70 ml-0.5">APR</span>
                       </span>

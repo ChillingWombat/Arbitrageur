@@ -425,7 +425,7 @@ export const StatArbLab: React.FC<StatArbLabProps> = ({
                 <span>Theta: <strong className="tabular-nums">{ouFitResult.theta.toFixed(3)}</strong></span>
                 <span>Mu: <strong className="tabular-nums">{ouFitResult.mu.toFixed(3)}</strong></span>
                 <span>Sigma: <strong className="tabular-nums">{ouFitResult.sigma.toFixed(3)}</strong></span>
-                <span>R2: <strong className="tabular-nums">{(ouFitResult.r_squared * 100).toFixed(1)}%</strong></span>
+                <span>R2: <strong className="tabular-nums">{ouFitResult.r_squared != null ? `${(ouFitResult.r_squared * 100).toFixed(1)}%` : "n/a"}</strong></span>
               </div>
             )}
           </div>

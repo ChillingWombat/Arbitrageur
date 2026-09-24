@@ -38,7 +38,7 @@ import {
   parseDuration,
 } from "../services/matrixQuant";
 import { deriveStepSizing } from "../services/contractSpecs";
-import { isPositionReduceOnly } from "../services/positionsQuant";
+import { describeCommandError } from "../services/api";
 import { formatWinPct as fmtPct } from "../services/winPct";
 import { BotLifecycleControls } from "./BotLifecycleControls";
 import { useBotLifecycle } from "../hooks/useBotLifecycle";
@@ -81,6 +81,11 @@ interface LiveMatrixProps {
   /** Backend-reported venue capability (can_submit / can_enter_strategy)
    *  keyed by venue id — drives the READ-ONLY route badge. */
   venueCaps?: VenueCaps;
+  /** Durable server-side reduce-only symbols (futures strategy) — the auto
+   *  loop skips exactly what the backend entry gate would refuse. */
+  reduceOnlySymbols?: Set<string>;
+  /** Command failures surface as toasts — never swallowed to console. */
+  onCommandError?: (message: string) => void;
 }
 
 interface MatrixCellViewProps {
@@ -477,6 +482,8 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
   futuresParams = null,
   totalEquityUsd = null,
   venueCaps,
+  reduceOnlySymbols,
+  onCommandError,
 }) => {
   // Empty-string alias for internal computations; `symbol` stays nullable so
   // "no selection" is distinguishable from a real ticker.
@@ -798,7 +805,7 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
         });
       }
     } catch (err: unknown) {
-      console.error("Auto-execution trade dispatch error:", err);
+      onCommandError?.(describeCommandError(err, "Auto-execution dispatch failed"));
     } finally {
       setExecuting(false);
     }
@@ -810,6 +817,7 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
       currentStrategyConfig,
       onExecuteTrade,
       handleUpdateTickerConfig,
+      onCommandError,
     ],
   );
 
@@ -823,14 +831,19 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
         ...opp,
         direction: "Divergence Entry",
         trigger_spread_bps: opp.net_spread_bps,
-        baseline_mean_spread_bps: currentStrategyConfig.targetProfitBps,
+        // baseline_mean_spread_bps passes through from the scan DTO — the
+        // config's target-profit threshold is a hurdle, not the pair's
+        // historical mean, and writing it here would poison the
+        // convergence baseline the exit logic measures against.
         position_step: currentStrategyConfig.currentAccumulatedUnits + 1,
         max_units: currentStrategyConfig.maxAccumulatedUnits,
         nominal_hurdle_bps: opp.required_gross_bps,
       };
-      onExecuteTrade(enrichedOpp);
+      onExecuteTrade(enrichedOpp).catch((err) => {
+        onCommandError?.(describeCommandError(err, "Execution failed"));
+      });
     },
-    [currentStrategyConfig, onExecuteTrade],
+    [currentStrategyConfig, onExecuteTrade, onCommandError],
   );
 
   const handleHistoryRefresh = useCallback(() => {
@@ -858,7 +871,7 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
     for (const row of venueMatrix.grid) {
       for (const cell of row) {
         if (cell.isDiagonal) continue;
-        if (bot.entriesAllowed && !isPositionReduceOnly(sym) && cell.isExecutable && cell.netSpreadBps > highestNet) {
+        if (bot.entriesAllowed && !reduceOnlySymbols?.has(sym.toUpperCase()) && cell.isExecutable && cell.netSpreadBps > highestNet) {
           if (currentStrategyConfig.currentAccumulatedUnits < currentStrategyConfig.maxAccumulatedUnits) {
             highestNet = cell.netSpreadBps;
             bestCell = cell;
@@ -875,7 +888,7 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
       lastAutoExecTimeRef.current = now;
       handleExecuteCellTrade(bestCell);
     }
-  }, [bot.entriesAllowed, bot.exitsAllowed, executing, venueMatrix.grid, currentStrategyConfig, isTickerEnabled, isPaused, positionState?.blocked, handleExecuteCellTrade]);
+  }, [bot.entriesAllowed, bot.exitsAllowed, executing, venueMatrix.grid, currentStrategyConfig, isTickerEnabled, isPaused, positionState?.blocked, handleExecuteCellTrade, reduceOnlySymbols]);
 
   // Best Bid & Ask across all venues for Consolidated Level 2 Quote Board
   const overallBestBid = useMemo(() => {

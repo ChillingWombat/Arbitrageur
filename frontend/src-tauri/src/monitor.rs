@@ -399,6 +399,65 @@ pub struct MonitorRowDto {
     pub coverage: Option<f64>,
 }
 
+#[cfg(test)]
+impl MonitorRowDto {
+    /// Minimal executable "ready" row for IPC/dispatch tests — every field
+    /// filled, no fabricated economics: edge/deviation mirror a crossed
+    /// book whose reversion baseline clears the profit floor.
+    pub fn test_row(symbol: &str, buy_venue: &str, sell_venue: &str) -> Self {
+        Self {
+            symbol: symbol.to_string(),
+            buy_venue: buy_venue.to_string(),
+            sell_venue: sell_venue.to_string(),
+            status: "ready".into(),
+            current_edge_bps: Some(-10.0),
+            baseline_bps: Some(-150.0),
+            deviation_bps: Some(140.0),
+            net_capture_bps: Some(120.0),
+            p_win: Some(0.7),
+            reversion_probability: Some(0.7),
+            win_probability: Some(0.7),
+            win_probability_lower: None,
+            win_probability_upper: None,
+            p_win_n_effective: None,
+            p_win_censored: None,
+            p_win_from_model: None,
+            net_win_probability: Some(0.65),
+            net_win_lower: None,
+            net_expected_bps: Some(80.0),
+            net_deciles_bps: None,
+            outcome_trials: None,
+            outcome_censored: None,
+            median_hold_secs: None,
+            median_win_secs: None,
+            expected_profit_bps: Some(80.0),
+            expected_profit_usd: Some(1.0),
+            optimal_size_usd: None,
+            breakeven_size_usd: None,
+            capacity_ladder: Vec::new(),
+            expected_capacity_usd: None,
+            bps_capacity_ladder: Vec::new(),
+            depth_curve: Vec::new(),
+            funding_carry_bps: None,
+            funding_unknown: true,
+            first_seen_ms: None,
+            last_seen_ms: None,
+            signal_age_secs: None,
+            expected_converge_secs: None,
+            qualification_progress: 1.0,
+            observed_episodes: 3,
+            executable: true,
+            block_reason: None,
+            session_id: "asia".into(),
+            session_provisional: false,
+            session_allow: 1.0,
+            session_size_mult: 1.0,
+            threshold_ratio: None,
+            coverage: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VenueLaneStatusDto {
@@ -720,8 +779,8 @@ fn ou_fallback_p_win(
             && p.theta > 0.0
             && p.sigma.is_finite()
             && p.sigma > 0.0
-            && p.r_squared.is_finite()
-            && p.r_squared >= PAIR_OU_MIN_R2
+            && p.r_squared
+                .is_some_and(|r| r.is_finite() && r >= PAIR_OU_MIN_R2)
     })?;
     let horizon = ou.half_life;
     if !horizon.is_finite() || horizon <= 0.0 {
@@ -2210,7 +2269,10 @@ impl SpreadMonitorEngine {
             *last = Some(Instant::now());
         }
         let min_apr = crate::funding::funding_min_apr(state);
-        let signals = match state.state_store.list_open_signals() {
+        let signals = match state
+            .state_store
+            .list_open_signals(Some(state.env().as_str()))
+        {
             Ok(s) => s,
             Err(e) => {
                 tracing::debug!("monitor: funding-exit check skipped (signals unreadable): {e}");
@@ -3390,8 +3452,20 @@ fn execution_gate(
     if optimal.map(|s| s <= 0.0).unwrap_or(true) {
         return (false, Some("no profitable capacity".into()));
     }
-    if let Ok(true) = state.state_store.ticker_blocked(symbol) {
+    if let Ok(true) = state
+        .state_store
+        .ticker_blocked(symbol, Some(state.env().as_str()))
+    {
         return (false, Some("unresolved signal on this symbol".into()));
+    }
+    // Reduce-only is durable exits-only state — an unreadable flag blocks
+    // the entry rather than silently permitting it.
+    if state
+        .state_store
+        .ticker_reduce_only(symbol, "futures", state.env().as_str())
+        .unwrap_or(true)
+    {
+        return (false, Some("ticker is reduce-only — exits only".into()));
     }
     (true, None)
 }
@@ -3943,32 +4017,35 @@ mod tests {
         let sig_id = "sig-funding-supervise-1";
         state
             .state_store
-            .record_signal_execution(&NewSignalExecution {
-                id: sig_id.into(),
-                strategy_id: "funding".into(),
-                symbol: "BTC-USDC".into(),
-                route_id: None,
-                expected_net_usd: Some(1.0),
-                note: None,
-                legs: vec![
-                    NewSignalLeg {
-                        account_id: None,
-                        venue: "lighter".into(),
-                        side: LegSide::Long,
-                        symbol: Some("BTC-USDC".into()),
-                        intended_qty: 0.01,
-                        intended_price: Some(100_000.0),
-                    },
-                    NewSignalLeg {
-                        account_id: None,
-                        venue: "hyperliquid".into(),
-                        side: LegSide::Short,
-                        symbol: Some("BTC-USDC".into()),
-                        intended_qty: 0.01,
-                        intended_price: Some(100_000.0),
-                    },
-                ],
-            })
+            .record_signal_execution(
+                &NewSignalExecution {
+                    id: sig_id.into(),
+                    strategy_id: "funding".into(),
+                    symbol: "BTC-USDC".into(),
+                    route_id: None,
+                    expected_net_usd: Some(1.0),
+                    note: None,
+                    legs: vec![
+                        NewSignalLeg {
+                            account_id: None,
+                            venue: "lighter".into(),
+                            side: LegSide::Long,
+                            symbol: Some("BTC-USDC".into()),
+                            intended_qty: 0.01,
+                            intended_price: Some(100_000.0),
+                        },
+                        NewSignalLeg {
+                            account_id: None,
+                            venue: "hyperliquid".into(),
+                            side: LegSide::Short,
+                            symbol: Some("BTC-USDC".into()),
+                            intended_qty: 0.01,
+                            intended_price: Some(100_000.0),
+                        },
+                    ],
+                },
+                "testnet",
+            )
             .expect("record funding signal");
         for side in [LegSide::Long, LegSide::Short] {
             state
@@ -4014,32 +4091,35 @@ mod tests {
         let sig_id = "sig-funding-supervise-hold";
         state
             .state_store
-            .record_signal_execution(&NewSignalExecution {
-                id: sig_id.into(),
-                strategy_id: "funding".into(),
-                symbol: "BTC-USDC".into(),
-                route_id: None,
-                expected_net_usd: Some(1.0),
-                note: None,
-                legs: vec![
-                    NewSignalLeg {
-                        account_id: None,
-                        venue: "lighter".into(),
-                        side: LegSide::Long,
-                        symbol: Some("BTC-USDC".into()),
-                        intended_qty: 0.01,
-                        intended_price: Some(100_000.0),
-                    },
-                    NewSignalLeg {
-                        account_id: None,
-                        venue: "hyperliquid".into(),
-                        side: LegSide::Short,
-                        symbol: Some("BTC-USDC".into()),
-                        intended_qty: 0.01,
-                        intended_price: Some(100_000.0),
-                    },
-                ],
-            })
+            .record_signal_execution(
+                &NewSignalExecution {
+                    id: sig_id.into(),
+                    strategy_id: "funding".into(),
+                    symbol: "BTC-USDC".into(),
+                    route_id: None,
+                    expected_net_usd: Some(1.0),
+                    note: None,
+                    legs: vec![
+                        NewSignalLeg {
+                            account_id: None,
+                            venue: "lighter".into(),
+                            side: LegSide::Long,
+                            symbol: Some("BTC-USDC".into()),
+                            intended_qty: 0.01,
+                            intended_price: Some(100_000.0),
+                        },
+                        NewSignalLeg {
+                            account_id: None,
+                            venue: "hyperliquid".into(),
+                            side: LegSide::Short,
+                            symbol: Some("BTC-USDC".into()),
+                            intended_qty: 0.01,
+                            intended_price: Some(100_000.0),
+                        },
+                    ],
+                },
+                "testnet",
+            )
             .expect("record funding signal");
         for side in [LegSide::Long, LegSide::Short] {
             state

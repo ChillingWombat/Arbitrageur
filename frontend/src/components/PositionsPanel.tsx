@@ -16,14 +16,13 @@ import type { OpenPositionDto, SystemStatusDto } from "../types";
 
 import {
   scopeAndSortPositions,
-  isPositionReduceOnly,
-  setPositionReduceOnly,
   type PositionScope,
   type PositionSortOption,
 } from "../services/positionsQuant";
-import { api } from "../services/api";
+import { api, describeCommandError } from "../services/api";
 import { EmptyState } from "./EmptyState";
 import { PositionDetailModal } from "./PositionDetailModal";
+import { ConfirmActionModal, type ConfirmActionSpec } from "./ConfirmActionModal";
 
 interface PositionsPanelProps {
   positions: OpenPositionDto[];
@@ -39,6 +38,10 @@ interface PositionsPanelProps {
   onOpenPortfolioMonitor?: () => void;
   isPortfolioActive?: boolean;
   onOpenSettings?: () => void;
+  /** Refetch everything after a backend state change (reduce-only, flatten). */
+  onRefreshAll?: () => Promise<void>;
+  /** Command failures surface as toasts — never swallowed to console. */
+  onCommandError?: (message: string) => void;
 }
 
 const STRATEGY_SHORT: Record<string, string> = {
@@ -75,8 +78,14 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
   onOpenPortfolioMonitor,
   isPortfolioActive,
   onOpenSettings,
+  onRefreshAll,
+  onCommandError,
 }) => {
   const pnl = status?.total_realized_pnl ?? 0;
+  // No status snapshot means the trading state is UNKNOWN — not halted,
+  // not healthy. The badge renders "Unknown" rather than defaulting to a
+  // healthy claim with no data behind it.
+  const statusKnown = status != null;
   const isTripped = status?.circuit_breaker_tripped ?? false;
   const isPaused = propIsPaused ?? status?.is_paused ?? false;
 
@@ -117,16 +126,9 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
     position: OpenPositionDto;
   } | null>(null);
   const [actionInProgress, setActionInProgress] = useState<string | null>(null);
-  const [, setReduceOnlyVersion] = useState(0);
+  const [confirm, setConfirm] = useState<ConfirmActionSpec | null>(null);
+  const pendingFlatten = useRef<{ pos: OpenPositionDto; mode: "emergency_market" | "non_emergency_limit" } | null>(null);
   const contextMenuRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    const handleReduceOnlyChanged = () => {
-      setReduceOnlyVersion((v) => v + 1);
-    };
-    window.addEventListener("arbitrageur:reduce_only_changed", handleReduceOnlyChanged);
-    return () => window.removeEventListener("arbitrageur:reduce_only_changed", handleReduceOnlyChanged);
-  }, []);
 
   useEffect(() => {
     const handleClickOutside = (event: MouseEvent) => {
@@ -156,33 +158,49 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
     setContextMenu({ x, y, position: pos });
   };
 
-  const handleToggleReduceOnly = (pos: OpenPositionDto) => {
-    const current = isPositionReduceOnly(pos.symbol);
-    setPositionReduceOnly(pos.symbol, !current);
-    setContextMenu(null);
-  };
-
-  const handleClearEmergently = async (pos: OpenPositionDto) => {
-    setActionInProgress(`Clearing ${pos.symbol} emergently…`);
+  const handleToggleReduceOnly = async (pos: OpenPositionDto) => {
+    // Durable server-side flag — enforced by every backend entry gate, so a
+    // manual execute can never bypass it the way the localStorage flag could.
     try {
-      await api.flattenTickerPositions(pos.symbol, pos.strategyId, "emergency_market");
+      await api.setTickerReduceOnly(pos.symbol, pos.strategyId, !pos.reduceOnly);
+      await onRefreshAll?.();
     } catch (err) {
-      console.error("Emergency clear failed", err);
+      onCommandError?.(describeCommandError(err, "Reduce-only update failed"));
     } finally {
-      setActionInProgress(null);
       setContextMenu(null);
     }
   };
 
-  const handleClearNonEmergently = async (pos: OpenPositionDto) => {
-    setActionInProgress(`Clearing ${pos.symbol} via limit…`);
+  const requestClear = (pos: OpenPositionDto, mode: "emergency_market" | "non_emergency_limit") => {
+    const emergency = mode === "emergency_market";
+    setConfirm({
+      title: emergency ? "Emergency Clear" : "Clear Position",
+      subtitle: `${pos.symbol} · ${pos.strategyId}`,
+      body: emergency
+        ? `This dispatches market-close orders for every open leg of ${pos.symbol} at the prevailing venue price — immediate fill, whatever the slippage. Continue?`
+        : `This dispatches limit-close orders for every open leg of ${pos.symbol}. Unfilled residuals stay open and re-escalate — verify flatness afterward.`,
+      confirmLabel: emergency ? "Clear at Market" : "Clear via Limit",
+    });
+    pendingFlatten.current = { pos, mode };
+    setContextMenu(null);
+  };
+
+  const runConfirmedFlatten = async () => {
+    const pending = pendingFlatten.current;
+    if (!pending) return;
+    const { pos, mode } = pending;
+    setActionInProgress(
+      mode === "emergency_market"
+        ? `Clearing ${pos.symbol} emergently…`
+        : `Clearing ${pos.symbol} via limit…`
+    );
     try {
-      await api.flattenTickerPositions(pos.symbol, pos.strategyId, "non_emergency_limit");
+      await api.flattenTickerPositions(pos.symbol, pos.strategyId, mode);
+      await onRefreshAll?.();
     } catch (err) {
-      console.error("Non-emergency clear failed", err);
+      onCommandError?.(describeCommandError(err, `Clear ${pos.symbol} failed`));
     } finally {
       setActionInProgress(null);
-      setContextMenu(null);
     }
   };
 
@@ -318,7 +336,7 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
         ) : (
           scoped.map((pos) => {
             const isSelected = selectedPositionKey === pos.key;
-            const isReduce = isPositionReduceOnly(pos.symbol);
+            const isReduce = pos.reduceOnly;
             const longSum = pos.venues.reduce(
               (a, v) => (v.netQty > 0 ? a + v.netQty : a),
               0,
@@ -425,14 +443,18 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
           <div className="flex items-center space-x-1.5">
             <div
               className={`px-2.5 py-1 rounded-full border flex items-center space-x-1.5 text-[11px] font-sans font-semibold ${
-                isTripped
+                !statusKnown
+                  ? "bg-surface-hover border-border text-slate-500"
+                  : isTripped
                   ? "bg-loss-dim border-loss-border text-loss"
                   : isPaused
                   ? "bg-warn-dim border-warn-border text-warn-strong"
                   : "bg-profit-dim border-profit-border text-profit"
               }`}
               title={
-                isTripped
+                !statusKnown
+                  ? "Unknown — no backend status snapshot loaded yet"
+                  : isTripped
                   ? "Halted — circuit breaker tripped: risk limits breached or Emergency Stop triggered. Reset in Portfolio Monitor."
                   : isPaused
                   ? "Paused — executions suspended, positions preserved"
@@ -441,7 +463,9 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
             >
               <span
                 className={`w-1.5 h-1.5 rounded-full ${
-                  isTripped
+                  !statusKnown
+                    ? "bg-slate-400"
+                    : isTripped
                     ? "bg-loss animate-pulse"
                     : isPaused
                     ? "bg-warn animate-pulse"
@@ -449,7 +473,7 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
                 }`}
               />
               <span>
-                {isTripped ? "Halted" : isPaused ? "Paused" : "Healthy"}
+                {!statusKnown ? "Unknown" : isTripped ? "Halted" : isPaused ? "Paused" : "Healthy"}
               </span>
             </div>
           </div>
@@ -504,14 +528,14 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
             {/* Option 1: Reduce Only */}
             <button
               type="button"
-              onClick={() => handleToggleReduceOnly(contextMenu.position)}
+              onClick={() => void handleToggleReduceOnly(contextMenu.position)}
               className="w-full flex items-start space-x-2.5 px-2 py-2 text-left rounded-lg transition hover:bg-warn-dim/40 cursor-pointer group"
             >
               <TrendingDown className="w-4 h-4 text-warn-strong shrink-0 mt-0.5" />
               <div className="flex-1 min-w-0">
                 <div className="font-semibold text-slate-800 group-hover:text-slate-900 flex items-center justify-between">
                   <span>Reduce Only</span>
-                  {isPositionReduceOnly(contextMenu.position.symbol) && (
+                  {contextMenu.position.reduceOnly && (
                     <span className="text-[10px] text-warn-strong font-mono font-bold">Active</span>
                   )}
                 </div>
@@ -525,7 +549,7 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
             <button
               type="button"
               disabled={actionInProgress !== null}
-              onClick={() => void handleClearEmergently(contextMenu.position)}
+              onClick={() => requestClear(contextMenu.position, "emergency_market")}
               className="w-full flex items-start space-x-2.5 px-2 py-2 text-left rounded-lg transition hover:bg-loss-dim cursor-pointer group disabled:opacity-50"
             >
               <Zap className="w-4 h-4 text-loss shrink-0 mt-0.5" />
@@ -544,7 +568,7 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
             <button
               type="button"
               disabled={actionInProgress !== null}
-              onClick={() => void handleClearNonEmergently(contextMenu.position)}
+              onClick={() => requestClear(contextMenu.position, "non_emergency_limit")}
               className="w-full flex items-start space-x-2.5 px-2 py-2 text-left rounded-lg transition hover:bg-blue-50/70 cursor-pointer group disabled:opacity-50"
             >
               <Clock className="w-4 h-4 text-accent-strong shrink-0 mt-0.5" />
@@ -567,6 +591,16 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
           )}
         </div>
       )}
+
+      <ConfirmActionModal
+        spec={confirm}
+        onConfirm={runConfirmedFlatten}
+        onCancel={() => {
+          setConfirm(null);
+          pendingFlatten.current = null;
+        }}
+        onError={(msg) => onCommandError?.(msg)}
+      />
     </aside>
   );
 };

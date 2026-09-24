@@ -69,6 +69,7 @@ use arbitrageur_core::market::{MarketMetadata, MarketType, Symbol};
 use arbitrageur_core::order::{CancelRequest, OrderRequest, OrderResponse};
 use arbitrageur_core::position::{AccountSnapshot, Balance};
 use arbitrageur_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
+use arbitrageur_core::types::TimeInForce;
 use arbitrageur_core::types::{OrderStatus, OrderType, Side, VenueId};
 
 // ---------------------------------------------------------------------------
@@ -1622,17 +1623,19 @@ impl EvmAmmAdapter {
     /// Ensure `spender` may move `needed` of `token`, submitting an approval
     /// tx when short. Exact-amount approvals (no unlimited grants); USDT-style
     /// tokens that reject nonzero→nonzero changes get a reset-then-set.
+    /// Returns the mined approval tx hash when a transaction was submitted.
+    /// Setup/onboarding path only — never called on the dispatch path.
     async fn ensure_allowance(
         &self,
         provider: &impl Provider,
         token: &TokenSpec,
         owner: Address,
         needed: U256,
-    ) -> anyhow::Result<()> {
+    ) -> anyhow::Result<Option<String>> {
         let spender = parse_addr(self.spec.router)?;
         let current = self.erc20_allowance(token, owner, spender).await?;
         if current >= needed {
-            return Ok(());
+            return Ok(None);
         }
         let approve = |amount: U256| IERC20::approveCall { spender, amount }.abi_encode();
         // Reset first when a nonzero allowance exists (USDT policy).
@@ -1645,14 +1648,66 @@ impl EvmAmmAdapter {
             )
             .await?;
         }
-        self.send_signed(
-            provider,
-            parse_addr(token.address)?,
-            approve(needed),
-            "approve",
-        )
-        .await?;
-        Ok(())
+        let receipt = self
+            .send_signed(
+                provider,
+                parse_addr(token.address)?,
+                approve(needed),
+                "approve",
+            )
+            .await?;
+        Ok(Some(format!("{:#x}", receipt.transaction_hash)))
+    }
+
+    /// Read the signer's current ERC-20 allowance to this venue's router, in
+    /// human units. Errors when no signer is provisioned or the token is not
+    /// in this venue's spec.
+    pub async fn router_allowance(&self, token_symbol: &str) -> anyhow::Result<Decimal> {
+        let owner = self
+            .signer
+            .read()
+            .as_ref()
+            .map(|s| s.address())
+            .ok_or_else(|| anyhow::anyhow!("{} has no signing wallet", self.name))?;
+        let token = self.token(token_symbol)?;
+        let spender = parse_addr(self.spec.router)?;
+        let current = self.erc20_allowance(token, owner, spender).await?;
+        Ok(u256_to_dec(current, token.decimals))
+    }
+
+    /// Submit an exact-amount ERC-20 approval for `token_symbol` to this
+    /// venue's router — an operator setup action, deliberately OFF the order
+    /// dispatch path so a swap never blocks ~30s on approval mining while a
+    /// sibling leg is exposed. `amount` is the new total cap in human units
+    /// (each swap draws it down). Returns the mined tx hash, or `None` when
+    /// the existing allowance already covers it.
+    pub async fn approve_router_token(
+        &self,
+        token_symbol: &str,
+        amount: Decimal,
+    ) -> anyhow::Result<Option<String>> {
+        if amount <= Decimal::ZERO {
+            anyhow::bail!("{} approve amount must be positive", self.name);
+        }
+        let token = self.token(token_symbol)?;
+        let needed = dec_to_u256(amount, token.decimals)?;
+        let signer_addr = self
+            .signer
+            .read()
+            .as_ref()
+            .map(|s| s.address())
+            .ok_or_else(|| anyhow::anyhow!("{} has no signing wallet", self.name))?;
+        let signer: Arc<dyn TxSigner<Signature> + Send + Sync> = self
+            .signer
+            .read()
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("{} has no signing wallet", self.name))?;
+        self.check_chain().await?;
+        let provider = ProviderBuilder::new()
+            .wallet(EthereumWallet::new(signer))
+            .connect_http(self.rpc()?);
+        self.ensure_allowance(&provider, token, signer_addr, needed)
+            .await
     }
 
     /// Estimate gas (from the loaded signer address) and build the
@@ -1979,7 +2034,10 @@ impl ExchangeAdapter for EvmAmmAdapter {
                 self.name
             ),
         };
-        if order.post_only || order.order_type == OrderType::PostOnly {
+        if order.post_only
+            || order.order_type == OrderType::PostOnly
+            || order.time_in_force == TimeInForce::PostOnly
+        {
             anyhow::bail!(
                 "{} cannot post resting orders — AMM swaps execute atomically",
                 self.name
@@ -2126,7 +2184,7 @@ impl ExchangeAdapter for EvmAmmAdapter {
                 filled_qty: Decimal::ZERO,
                 remaining_qty: Decimal::ZERO,
                 avg_fill_price: None,
-                fee: gas_fee,
+                fee: Some(gas_fee),
                 fee_currency: self.spec.native_symbol.to_string(),
                 raw_response: Some(format!(
                     "tx {order_id} reverted onchain (gas {gas_fee} {})",
@@ -2171,7 +2229,7 @@ impl ExchangeAdapter for EvmAmmAdapter {
             } else {
                 None
             },
-            fee: gas_fee,
+            fee: Some(gas_fee),
             fee_currency: self.spec.native_symbol.to_string(),
             raw_response: Some(format!(
                 "tx {order_id}: spent {} {} → received {} {} (gas {gas_fee} {})",
@@ -2233,7 +2291,7 @@ impl EvmAmmAdapter {
             filled_qty: Decimal::ZERO,
             remaining_qty: order.quantity,
             avg_fill_price: None,
-            fee: Decimal::ZERO,
+            fee: None,
             fee_currency: self.spec.native_symbol.to_string(),
             raw_response: Some(format!(
                 "tx {tx_hash} submitted; receipt pending venue truth"
@@ -2281,8 +2339,24 @@ impl EvmAmmAdapter {
         let provider = ProviderBuilder::new()
             .wallet(EthereumWallet::new(signer))
             .connect_http(self.rpc()?);
-        self.ensure_allowance(&provider, in_tok, signer_addr, spend_needed)
-            .await?;
+        // Fail fast on allowance — never submit an onchain approval on the
+        // dispatch path (issue #59): the sibling CEX leg fills in ~ms while
+        // an approval waits ~30s for mining, leaving it naked. The operator
+        // pre-approves a router budget via `approve_router_token` (setup
+        // path); swaps draw the cap down and bail here when it runs out.
+        let spender = parse_addr(self.spec.router)?;
+        let allowance = self.erc20_allowance(in_tok, signer_addr, spender).await?;
+        if allowance < spend_needed {
+            anyhow::bail!(
+                "{} router allowance {} {} < {} needed — approve a budget first \
+                 (prepare_evm_amm_allowance); refusing to submit an onchain approval \
+                 on the dispatch path",
+                self.name,
+                u256_to_dec(allowance, in_tok.decimals),
+                in_tok.symbol,
+                u256_to_dec(spend_needed, in_tok.decimals),
+            );
+        }
         let calldata = self.build_swap_calldata(
             pair,
             order.side,
@@ -2784,7 +2858,7 @@ mod tests {
         assert_eq!(resp.filled_qty, Decimal::ZERO);
         assert_eq!(resp.remaining_qty, dec!(0.5));
         assert!(resp.avg_fill_price.is_none());
-        assert_eq!(resp.fee, Decimal::ZERO);
+        assert_eq!(resp.fee, None);
         assert_eq!(resp.fee_currency, "ETH");
         assert!(resp
             .raw_response

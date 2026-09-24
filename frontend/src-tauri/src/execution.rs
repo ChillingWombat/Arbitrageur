@@ -148,9 +148,13 @@ pub(crate) fn reconcile_signal_legs(
             .map_err(|_| "unparseable filled quantity".to_string())?;
         let fee = leg
             .fee
-            .to_string()
-            .parse::<f64>()
-            .map_err(|_| "unparseable fee".to_string())?;
+            .map(|f| {
+                f.to_string()
+                    .parse::<f64>()
+                    .map_err(|_| "unparseable fee".to_string())
+            })
+            .transpose()?
+            .unwrap_or(0.0);
         // Persist accepted order identity even on a zero-fill (working) leg —
         // the reconciliation supervisor needs it to reach terminal state.
         if !leg.order_id.is_empty() {
@@ -195,10 +199,7 @@ pub(crate) fn reconcile_signal_legs(
 }
 
 #[allow(clippy::too_many_arguments)]
-/// Test-facing wrapper over `execute_spatial_arbitrage_inner` — production
-/// callers (command, candidates batch, radar) reach `inner` directly so the
-/// canary-loss parameter stays off every path except the explicit canary
-/// command.
+/// Test-facing wrapper over `execute_spatial_arbitrage_inner`.
 #[cfg(test)]
 pub async fn execute_spatial_arbitrage_impl(
     symbol: &str,
@@ -227,7 +228,6 @@ pub async fn execute_spatial_arbitrage_impl(
         None,
         "futures",
         None,
-        None,
         state,
     )
     .await
@@ -243,7 +243,7 @@ pub(crate) fn unwind_round_trip_pnl(
     unwind: &arbitrageur_core::order::OrderResponse,
     entry_side: Side,
 ) -> Decimal {
-    let fees = entry.fee + unwind.fee;
+    let fees = entry.fee.unwrap_or_default() + unwind.fee.unwrap_or_default();
     let qty = entry.filled_qty;
     let px_pnl = match (entry.avg_fill_price, unwind.avg_fill_price) {
         (Some(e), Some(u)) => match entry_side {
@@ -334,7 +334,6 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
     nominal_hurdle_bps: Option<f64>,
     route_id: Option<&str>,
     strategy_id: &str,
-    canary_max_loss_bps: Option<f64>,
     prediction: Option<EntryPrediction>,
     state: &AppEngineState,
 ) -> Result<SimStepResultDto, String> {
@@ -387,7 +386,7 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
         }
         let open_units = state
             .state_store
-            .open_balanced_signal_count(symbol)
+            .open_balanced_signal_count(symbol, Some(state.env().as_str()))
             .map_err(|e| e.to_string())?;
         if open_units >= i64::from(max) {
             return Err(format!(
@@ -433,7 +432,7 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
     // as delta-neutral. Survives restarts via the SQLite store.
     if let Some(blocker) = state
         .state_store
-        .blocking_signals(symbol)
+        .blocking_signals(symbol, Some(state.env().as_str()))
         .map_err(|e| e.to_string())?
         .into_iter()
         .next()
@@ -443,6 +442,17 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
             symbol,
             blocker.id,
             blocker.status.as_str()
+        ));
+    }
+    // Durable exits-only flag — an unreadable flag blocks rather than
+    // silently permitting an entry the operator marked reduce-only.
+    if state
+        .state_store
+        .ticker_reduce_only(symbol, "futures", state.env().as_str())
+        .map_err(|e| e.to_string())?
+    {
+        return Err(format!(
+            "Symbol {symbol} is reduce-only for futures — exits only, entry refused"
         ));
     }
 
@@ -629,20 +639,10 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
             buy_venue, sell_venue
         )
     })?;
-    // Canary override: an explicit `canary_max_loss_bps` (<=50 bps, live
-    // entries only) lowers the profit floor to accept the spread+fee cost of
-    // a mechanics test. Bounded so a canary can never burn real money on a
-    // genuinely bad route. All other checks (margin, depth, delta-neutrality,
-    // blocking, cap) still apply.
-    let profit_floor_bps = match (is_live, canary_max_loss_bps) {
-        (true, Some(loss)) => {
-            if !loss.is_finite() || !(0.0..=50.0).contains(&loss) {
-                return Err("canary_max_loss_bps must be finite and within 0-50 bps".into());
-            }
-            -loss
-        }
-        _ => target_profit_bps,
-    };
+    // The profit floor is the configured target — no caller-provided
+    // override: a negative floor over IPC would let any client push a live
+    // order through a genuinely bad route.
+    let profit_floor_bps = target_profit_bps;
     // Reversion entries (radar) forecast profit from the spread returning
     // to its band, not from the static top-of-book edge: on a pair whose
     // mean edge is biased, a negative static edge can still be a positive-
@@ -658,14 +658,8 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
     let effective_net_bps = dev_net_bps.unwrap_or(econ.expected_net_bps);
     if effective_net_bps < profit_floor_bps {
         return Err(format!(
-            "Expected net spread {} BPS after route friction is below the {} BPS {}",
-            effective_net_bps,
-            profit_floor_bps.abs(),
-            if profit_floor_bps < 0.0 {
-                "canary loss limit"
-            } else {
-                "target"
-            }
+            "Expected net spread {} BPS after route friction is below the {} BPS target",
+            effective_net_bps, profit_floor_bps
         ));
     }
     // Toxic-fill ceiling: a net edge beyond the configured divergence cap is
@@ -761,11 +755,29 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
             sell_venue, im_sell, acc_sell.free_margin
         ));
     }
-    if acc_buy.get_position(symbol).is_some() || acc_sell.get_position(symbol).is_some() {
-        return Err(format!(
-            "An open position already exists for {}; closing lifecycle is not implemented",
-            symbol
-        ));
+    // Adapter-normalized position check — `get_position` compares raw venue
+    // symbol spellings, which miss scaled/native mappings (e.g. Kraken
+    // `PF_XBTUSD` vs engine `BTC-USD*`). `account_position_for` resolves
+    // through `normalize_account_position`; Err means the mapping is
+    // ambiguous — refuse rather than stack onto unmeasured exposure.
+    for (vname, adapter, acc) in [
+        (buy_venue, &buy_adapter, &acc_buy),
+        (sell_venue, &sell_adapter, &acc_sell),
+    ] {
+        match adapter.account_position_for(acc, symbol) {
+            Ok(Some(_)) => {
+                return Err(format!(
+                    "An open position already exists for {} on {}; closing lifecycle is not implemented",
+                    symbol, vname
+                ));
+            }
+            Ok(None) => {}
+            Err(e) => {
+                return Err(format!(
+                    "Cannot verify {vname} position for {symbol} ({e}); refusing entry"
+                ));
+            }
+        }
     }
 
     if let Err(reason) = state.circuit_breaker.is_trading_allowed() {
@@ -835,39 +847,35 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
     );
     state
         .state_store
-        .record_signal_execution(&crate::state_store::NewSignalExecution {
-            id: signal_id.clone(),
-            strategy_id: strategy_id.to_string(),
-            symbol: symbol.to_string(),
-            route_id: accounts.route_id,
-            expected_net_usd: Some(expected_net_usd),
-            note: if is_live && canary_max_loss_bps.is_some() {
-                Some(format!(
-                    "CANARY entry: profit floor bypassed down to -{:.0} bps to test live mechanics",
-                    canary_max_loss_bps.unwrap_or(0.0)
-                ))
-            } else {
-                None
+        .record_signal_execution(
+            &crate::state_store::NewSignalExecution {
+                id: signal_id.clone(),
+                strategy_id: strategy_id.to_string(),
+                symbol: symbol.to_string(),
+                route_id: accounts.route_id,
+                expected_net_usd: Some(expected_net_usd),
+                note: None,
+                legs: vec![
+                    crate::state_store::NewSignalLeg {
+                        account_id: accounts.long,
+                        venue: buy_vid.to_string(),
+                        side: crate::state_store::LegSide::Long,
+                        symbol: None,
+                        intended_qty: order_qty,
+                        intended_price: buy_ref.to_string().parse::<f64>().ok(),
+                    },
+                    crate::state_store::NewSignalLeg {
+                        account_id: accounts.short,
+                        venue: sell_vid.to_string(),
+                        side: crate::state_store::LegSide::Short,
+                        symbol: None,
+                        intended_qty: order_qty,
+                        intended_price: sell_ref.to_string().parse::<f64>().ok(),
+                    },
+                ],
             },
-            legs: vec![
-                crate::state_store::NewSignalLeg {
-                    account_id: accounts.long,
-                    venue: buy_vid.to_string(),
-                    side: crate::state_store::LegSide::Long,
-                    symbol: None,
-                    intended_qty: order_qty,
-                    intended_price: buy_ref.to_string().parse::<f64>().ok(),
-                },
-                crate::state_store::NewSignalLeg {
-                    account_id: accounts.short,
-                    venue: sell_vid.to_string(),
-                    side: crate::state_store::LegSide::Short,
-                    symbol: None,
-                    intended_qty: order_qty,
-                    intended_price: sell_ref.to_string().parse::<f64>().ok(),
-                },
-            ],
-        })
+            state.env().as_str(),
+        )
         .map_err(|e| format!("Failed to persist in-flight signal record: {e}"))?;
 
     // Calibration log: persist the forecast BEFORE dispatch so the row
@@ -947,6 +955,11 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
     // this arm: the coordinator reports UnresolvedExposure and trips.
     let mut open_qty = order_qty;
     let mut trim_note = String::new();
+    // The trim slice's total contribution to this cycle (excess leg price
+    // delta + trim fees + the excess share of entry fees) — recorded on the
+    // lot via `lot.trim_usd.{id}` so `close_flattened_spatial_lot` folds it
+    // into the durable realized PnL/bps and the prediction resolution.
+    let mut entry_trim_usd: Option<f64> = None;
     let res = match res {
         ArbitrageExecutionResult::PartialPairKept {
             leg_a_fill,
@@ -954,7 +967,7 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
             matched_qty,
             unwind_a,
             unwind_b,
-            realized_profit: _,
+            realized_profit,
         } => {
             let matched_f = dec_to_f64(matched_qty, "trimmed matched quantity")?;
             if matched_f <= 0.0 {
@@ -972,6 +985,13 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
                 describe_trim(&unwind_a),
                 describe_trim(&unwind_b),
             );
+            // Coordinator semantics: realized = trim_pnl − entry_fees −
+            // trim_fee, so realized + entry_fees isolates the trim slice
+            // (price delta − trim fee) that belongs on the lot record.
+            let trim_slice = realized_profit
+                + leg_a_fill.fee.unwrap_or_default()
+                + leg_b_fill.fee.unwrap_or_default();
+            entry_trim_usd = dec_to_f64(trim_slice, "entry trim realized").ok();
             let mut a = leg_a_fill;
             a.filled_qty = matched_qty;
             a.remaining_qty = dec!(0);
@@ -983,7 +1003,7 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
             // Realized cash P&L stays fee outflow only (entry + trim fees are
             // already in paper equity); the matched pair itself is unrealized.
             ArbitrageExecutionResult::Success {
-                realized_profit: -(a.fee + b.fee),
+                realized_profit: -(a.fee.unwrap_or_default() + b.fee.unwrap_or_default()),
                 leg_a: a,
                 leg_b: b,
             }
@@ -997,7 +1017,7 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
             leg_b,
             realized_profit: _,
         } => {
-            let fees_dec = leg_a.fee + leg_b.fee;
+            let fees_dec = leg_a.fee.unwrap_or_default() + leg_b.fee.unwrap_or_default();
             let fee_f = fees_dec.to_string().parse::<f64>().unwrap_or(0.0);
             let buy_px_f = leg_a
                 .avg_fill_price
@@ -1028,6 +1048,7 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
                     open_qty,
                     sell_px_f,
                     fee_f,
+                    state.env().as_str().to_string(),
                 );
                 // Durable lot (schema v30): without persistence a restart
                 // loses close-matching, realized PnL, and prediction
@@ -1039,6 +1060,25 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
                         .state_store
                         .upsert_cycle_lot(lot)
                         .map_err(|e| format!("Failed to persist cycle lot: {e}"))?;
+                }
+                // Entry-time partial-pair trim: its realized slice already
+                // debited the counter via the coordinator's realized_profit;
+                // write the lot's trim mark so `close_flattened_spatial_lot`
+                // folds it into the durable realized PnL (same convention as
+                // `realize_liq_trim` — the close only prices the remaining
+                // matched qty and would otherwise drop the trim outcome).
+                if let Some(usd) = entry_trim_usd.filter(|u| u.is_finite() && *u != 0.0) {
+                    let key = format!("lot.trim_usd.{cycle_id}");
+                    let prior: f64 = state
+                        .state_store
+                        .kv_get(&key)
+                        .ok()
+                        .flatten()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(0.0);
+                    if let Err(e) = state.state_store.kv_set(&key, &(prior + usd).to_string()) {
+                        tracing::warn!("persist entry-trim lot mark {key} failed: {e}");
+                    }
                 }
             }
 
@@ -1154,7 +1194,10 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
                         .avg_fill_price
                         .and_then(|p| p.to_string().parse::<f64>().ok())
                         .unwrap_or(0.0);
-                    let fee = f.fee.to_string().parse::<f64>().unwrap_or(0.0);
+                    let fee = f
+                        .fee
+                        .map(|v| v.to_string().parse::<f64>().unwrap_or(0.0))
+                        .unwrap_or(0.0);
                     // Keep the venue order id reachable even when the leg was
                     // accepted but unfilled — reconciliation polls it to
                     // terminal state instead of losing the exposure.
@@ -1348,8 +1391,16 @@ pub struct CandidateOutcomeDto {
 /// already blocked by an in-flight/unreconciled signal reject all candidates.
 pub async fn execute_spatial_candidates_impl(
     candidates: Vec<SpatialCandidateInput>,
+    auto: bool,
     state: &AppEngineState,
 ) -> Result<Vec<CandidateOutcomeDto>, String> {
+    // Same autonomous-entry refusal as the funding/triangle paths: batch
+    // dispatch must not become the live-autonomy loophole.
+    if auto && state.is_live() {
+        return Err(
+            "autonomous spatial entries are testnet-only — run a manual Execute for live".into(),
+        );
+    }
     if candidates.is_empty() {
         return Ok(Vec::new());
     }
@@ -1378,7 +1429,7 @@ pub async fn execute_spatial_candidates_impl(
 
         if state
             .state_store
-            .ticker_blocked(&symbol_key)
+            .ticker_blocked(&symbol_key, Some(state.env().as_str()))
             .map_err(|e| e.to_string())?
         {
             for c in &cands {
@@ -1386,6 +1437,21 @@ pub async fn execute_spatial_candidates_impl(
                     c,
                     false,
                     Some("ticker blocked by in-flight/unreconciled signal".into()),
+                    None,
+                ));
+            }
+            continue;
+        }
+        if state
+            .state_store
+            .ticker_reduce_only(&symbol_key, "futures", state.env().as_str())
+            .map_err(|e| e.to_string())?
+        {
+            for c in &cands {
+                outcomes.push(outcome_for(
+                    c,
+                    false,
+                    Some("ticker is reduce-only — exits only, entry refused".into()),
                     None,
                 ));
             }
@@ -1443,7 +1509,6 @@ pub async fn execute_spatial_candidates_impl(
             None,
             winner.route_id.as_deref(),
             "futures",
-            None,
             winner.predicted_win_probability.map(|p| EntryPrediction {
                 kind: "reversion",
                 win_probability: p,
@@ -1489,11 +1554,11 @@ pub async fn get_ticker_position_state(
 ) -> Result<serde_json::Value, String> {
     let blocking = state
         .state_store
-        .blocking_signals(&symbol)
+        .blocking_signals(&symbol, Some(state.env().as_str()))
         .map_err(|e| e.to_string())?;
     let net = state
         .state_store
-        .ticker_net_position(&symbol)
+        .ticker_net_position(&symbol, Some(state.env().as_str()))
         .map_err(|e| e.to_string())?;
     Ok(serde_json::json!({
         "symbol": symbol,
@@ -1501,6 +1566,105 @@ pub async fn get_ticker_position_state(
         "blockingSignalIds": blocking.iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
         "netPositionQty": net,
     }))
+}
+
+/// Persist the exits-only flag for (current environment, strategy, symbol).
+/// Entry gates across every dispatch path consult this — a manual click can
+/// never bypass it the way the old client-side localStorage flag could.
+#[tauri::command]
+pub async fn set_ticker_reduce_only(
+    symbol: String,
+    strategy_id: String,
+    enabled: bool,
+    state: tauri::State<'_, Arc<AppEngineState>>,
+) -> Result<(), String> {
+    let sid = crate::state_store::normalize_strategy_id(&strategy_id).map_err(|e| e.to_string())?;
+    state
+        .state_store
+        .set_ticker_reduce_only(
+            &symbol,
+            &sid,
+            state.env().as_str(),
+            enabled,
+            chrono::Utc::now().timestamp_millis(),
+        )
+        .map_err(|e| e.to_string())
+}
+
+/// All exits-only (strategy, symbol) rows for the current environment.
+#[tauri::command]
+pub async fn list_reduce_only_tickers(
+    state: tauri::State<'_, Arc<AppEngineState>>,
+) -> Result<Vec<serde_json::Value>, String> {
+    let rows = state
+        .state_store
+        .list_reduce_only_tickers(state.env().as_str())
+        .map_err(|e| e.to_string())?;
+    Ok(rows
+        .into_iter()
+        .map(|(strategy_id, symbol)| {
+            serde_json::json!({"strategyId": strategy_id, "symbol": symbol})
+        })
+        .collect())
+}
+
+/// Per-strategy capability descriptor: whether scanning and execution are
+/// wired end-to-end. Execute controls and auto-loops must gate on this —
+/// a permanently-stubbed path must never render an armed Execute button.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StrategyCapabilityDto {
+    pub strategy_id: String,
+    pub scan_ready: bool,
+    pub execute_ready: bool,
+    pub reason: Option<String>,
+}
+
+pub fn get_strategy_capabilities_impl() -> Vec<StrategyCapabilityDto> {
+    let cap = |id: &str, scan: bool, exec: bool, reason: Option<&str>| StrategyCapabilityDto {
+        strategy_id: id.into(),
+        scan_ready: scan,
+        execute_ready: exec,
+        reason: reason.map(|r| r.to_string()),
+    };
+    vec![
+        cap("futures", true, true, None),
+        cap("radar", true, true, None),
+        cap("funding", true, true, None),
+        cap("triangle", true, true, None),
+        cap(
+            "spot",
+            false,
+            false,
+            Some("Spot arbitrage is not wired: no venue adapter implements the atomic dual-leg spot path"),
+        ),
+        cap(
+            "prediction",
+            false,
+            false,
+            Some("Prediction venues are scaffolds: no market data or order execution path"),
+        ),
+        cap(
+            "stat_arb",
+            true,
+            false,
+            Some("Research lab — no order dispatch"),
+        ),
+        cap(
+            "external",
+            false,
+            false,
+            Some("External positions are imported, not executed"),
+        ),
+    ]
+}
+
+#[tauri::command]
+pub async fn get_strategy_capabilities(
+    state: tauri::State<'_, Arc<AppEngineState>>,
+) -> Result<Vec<StrategyCapabilityDto>, String> {
+    let _ = state;
+    Ok(get_strategy_capabilities_impl())
 }
 
 /// Aggregated current open positions across signal executions, grouped by
@@ -1526,22 +1690,29 @@ pub async fn get_open_positions(
         signals.retain(|s| s.strategy_id.eq_ignore_ascii_case(&sid));
     }
     let hub = &state.market_data_hub;
-    Ok(crate::state_store::aggregate_open_positions(
-        &signals,
-        &|venue, symbol| {
-            hub.get_valid_orderbook(&VenueId::from(venue), symbol, None)
-                .and_then(|b| b.mid_price())
-                .and_then(|m| dec_to_f64(m, "mark mid").ok())
-        },
-    ))
+    let mut positions = crate::state_store::aggregate_open_positions(&signals, &|venue, symbol| {
+        hub.get_valid_orderbook(&VenueId::from(venue), symbol, None)
+            .and_then(|b| b.mid_price())
+            .and_then(|m| dec_to_f64(m, "mark mid").ok())
+    });
+    // An unreadable flag fails closed: refuse the whole read rather than
+    // badge a reduce-only ticker as freely tradable.
+    for p in &mut positions {
+        p.reduce_only = state
+            .state_store
+            .ticker_reduce_only(&p.symbol, &p.strategy_id, state.env().as_str())
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(positions)
 }
 
 #[tauri::command]
 pub async fn execute_spatial_candidates(
     candidates: Vec<SpatialCandidateInput>,
+    auto: Option<bool>,
     state: tauri::State<'_, Arc<AppEngineState>>,
 ) -> Result<Vec<CandidateOutcomeDto>, String> {
-    execute_spatial_candidates_impl(candidates, &state).await
+    execute_spatial_candidates_impl(candidates, auto.unwrap_or(false), &state).await
 }
 
 pub async fn execute_cross_ticker_arbitrage_impl(
@@ -1673,6 +1844,58 @@ pub(crate) async fn live_account_or_cached(
     }
 }
 
+/// Feed the drawdown breaker from one venue's freshly-observed USD-basis
+/// equity. The breaker watches the portfolio total for the ACTIVE
+/// environment — `breaker_venue_equity` holds each venue's last-seen
+/// value keyed `{env}-{vid}`, so any lane that reads an account (risk
+/// overview, margin poller) keeps the total current even while nobody
+/// polls the UI. A testnet<->live switch is a different account universe,
+/// never a trading loss: the baseline re-anchors instead of tripping.
+/// On a genuine universe switch the map's stale-env entries are dropped
+/// so the old env's equity can't ghost the new env's total.
+pub(crate) fn feed_breaker_equity_usd(state: &AppEngineState, vid: &str, equity_usd: Decimal) {
+    let env_str = state.env().as_str();
+    let prefix = format!("{env_str}-");
+    let key = format!("{prefix}{vid}");
+    let is_live = state.is_live();
+    let total: Decimal = {
+        let mut map = state.breaker_venue_equity.lock();
+        map.insert(key, equity_usd);
+        map.retain(|k, _| k.starts_with(&prefix));
+        map.values().sum()
+    };
+    let mut universe = state.last_risk_live_universe.write();
+    if *universe != Some(is_live) {
+        state.circuit_breaker.reanchor_baseline(total);
+        *universe = Some(is_live);
+    } else {
+        state.circuit_breaker.update_equity(total);
+    }
+}
+
+/// Batch variant for lanes that already hold the full account list —
+/// same per-venue bookkeeping, one total push at the end.
+pub(crate) fn feed_breaker_equity(state: &AppEngineState, accounts: &[AccountSnapshot]) {
+    let env_str = state.env().as_str();
+    let prefix = format!("{env_str}-");
+    let is_live = state.is_live();
+    let total: Decimal = {
+        let mut map = state.breaker_venue_equity.lock();
+        for acc in accounts {
+            map.insert(format!("{prefix}{}", acc.venue), acc.equity);
+        }
+        map.retain(|k, _| k.starts_with(&prefix));
+        map.values().sum()
+    };
+    let mut universe = state.last_risk_live_universe.write();
+    if *universe != Some(is_live) {
+        state.circuit_breaker.reanchor_baseline(total);
+        *universe = Some(is_live);
+    } else {
+        state.circuit_breaker.update_equity(total);
+    }
+}
+
 /// Grace period before a stale venue escalates to ERROR (ms).
 pub(crate) fn stale_grace_ms(state: &AppEngineState) -> i64 {
     (state.settings.read().balance_stale_warn_secs as i64).clamp(30, 3600) * 1000
@@ -1705,7 +1928,6 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
     // keeps contributing its last-known-good figures: a connectivity blip
     // is not a loss of funds and must not move the portfolio total or trip
     // the drawdown breaker.
-    let is_live = state.is_live();
     let mut accounts = Vec::new();
     let manual_locked = {
         let mut vault = state.vault.write();
@@ -1767,21 +1989,13 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
     let total_mm_dec: Decimal = accounts.iter().map(|a| a.maintenance_margin).sum();
     let all_positions: Vec<_> = accounts.iter().flat_map(|a| a.positions.clone()).collect();
 
-    // Feed observed equity into the breaker, then re-read its state so a
-    // drawdown trip is reflected in this same snapshot. A testnet<->live
-    // universe switch is NOT a loss: re-anchor the baseline instead of
-    // tripping (the two envs hold separate credential sets and separate
-    // account equities, so cross-env equity deltas are never real losses).
-    {
-        let mut universe = state.last_risk_live_universe.write();
-        if *universe != Some(is_live) {
-            cb.reanchor_baseline(total_equity_dec);
-            *universe = Some(is_live);
-        } else {
-            cb.update_equity(total_equity_dec);
-        }
-    }
-    let is_halted = cb.is_tripped();
+    // Feed observed equity into the breaker (env-scoped portfolio total),
+    // then re-read its state so a drawdown trip is reflected in this same
+    // snapshot.
+    let is_halted = {
+        feed_breaker_equity(state, &accounts);
+        cb.is_tripped()
+    };
     let cb_str = match cb.trip_reason() {
         Some(reason) => format!("TRIPPED: {}", reason),
         None => {
@@ -1846,8 +2060,11 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
         MarginHealthStatus::Empty => -1,
         MarginHealthStatus::Healthy => 0,
         MarginHealthStatus::Warning => 1,
-        MarginHealthStatus::Critical => 2,
-        MarginHealthStatus::Breached => 3,
+        // Unverifiable liquidation data outranks a verified warning: the
+        // monitor cannot rule the position safe.
+        MarginHealthStatus::Unknown => 2,
+        MarginHealthStatus::Critical => 3,
+        MarginHealthStatus::Breached => 4,
     };
     let mut worst = MarginHealthStatus::Healthy;
     for acc in &accounts {
@@ -1883,6 +2100,7 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
             MarginHealthStatus::Breached => "BREACHED",
             MarginHealthStatus::Critical => "CRITICAL",
             MarginHealthStatus::Warning => "WARNING",
+            MarginHealthStatus::Unknown => "UNKNOWN_LIQUIDATION",
             MarginHealthStatus::Empty | MarginHealthStatus::Healthy => {
                 if min_liq_dist_pct.is_none() {
                     "UNKNOWN_LIQUIDATION"
@@ -2073,7 +2291,7 @@ struct FlattenLegArgs<'a> {
 struct FlattenLegOutcome {
     order_id: Option<String>,
     client_order_id: Option<String>,
-    fill: Option<(Decimal, Decimal, Decimal)>,
+    fill: Option<(Decimal, Decimal, Option<Decimal>)>,
 }
 
 /// Place a reduce-only close order on a venue to flatten one filled leg.
@@ -2132,6 +2350,9 @@ async fn flatten_leg(args: FlattenLegArgs<'_>) -> Result<FlattenLegOutcome, Stri
             )),
             PassiveOutcome::MarketFallback { reason } => notes.push(format!(
                 "{sig_id}: {venue} leg passive skipped, market exit ({reason})"
+            )),
+            PassiveOutcome::Unresolved { reason } => notes.push(format!(
+                "{sig_id}: {venue} leg close UNRESOLVED ({reason}) — order may still be working; reconciliation will settle it"
             )),
         }
         let resp = report.response;
@@ -3074,7 +3295,7 @@ pub async fn flatten_ticker_positions_with_type_impl(
                 .map_err(|e| e.to_string())?;
             for child in state
                 .state_store
-                .list_open_signals()
+                .list_open_signals(Some(state.env().as_str()))
                 .map_err(|e| e.to_string())?
                 .into_iter()
                 .filter(|s| {
@@ -3142,15 +3363,18 @@ pub async fn flatten_ticker_positions_with_type_impl(
             .collect::<Result<Vec<_>, _>>()?;
         state
             .state_store
-            .record_signal_execution(&NewSignalExecution {
-                id: close_id.clone(),
-                strategy_id: sig.strategy_id.clone(),
-                symbol: sig.symbol.clone(),
-                route_id: sig.route_id.clone(),
-                expected_net_usd: None,
-                note: Some(format!("emergency flatten of {}", sig.id)),
-                legs: child_legs,
-            })
+            .record_signal_execution(
+                &NewSignalExecution {
+                    id: close_id.clone(),
+                    strategy_id: sig.strategy_id.clone(),
+                    symbol: sig.symbol.clone(),
+                    route_id: sig.route_id.clone(),
+                    expected_net_usd: None,
+                    note: Some(format!("emergency flatten of {}", sig.id)),
+                    legs: child_legs,
+                },
+                state.env().as_str(),
+            )
             .map_err(|e| format!("Failed to persist flatten signal record: {e}"))?;
         // A child created this pass isn't in the `all_signals` snapshot —
         // join it to the pending set so a later root sharing venue+side sees
@@ -3200,7 +3424,7 @@ pub async fn flatten_ticker_positions_with_type_impl(
                                     t.leg_side,
                                     dec_to_f64(qty, "fill quantity")?,
                                     dec_to_f64(px, "fill price")?,
-                                    dec_to_f64(fee, "fill fee")?,
+                                    dec_to_f64(fee.unwrap_or_default(), "fill fee")?,
                                     outcome.order_id.as_deref(),
                                 )
                                 .map_err(|e| e.to_string())?;
@@ -3391,7 +3615,6 @@ pub async fn execute_spatial_arbitrage(
     position_step: Option<u32>,
     max_units: Option<u32>,
     nominal_hurdle_bps: Option<f64>,
-    canary_max_loss_bps: Option<f64>,
     predicted_win_probability: Option<f64>,
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<SimStepResultDto, String> {
@@ -3408,7 +3631,6 @@ pub async fn execute_spatial_arbitrage(
         nominal_hurdle_bps,
         None,
         "futures",
-        canary_max_loss_bps,
         predicted_win_probability.map(|p| EntryPrediction {
             kind: "reversion",
             win_probability: p,
@@ -3739,7 +3961,7 @@ async fn maybe_liq_trim_pair(
             // deciding on them again would double-reduce the same exposure.
             let trim_in_flight = state
                 .state_store
-                .list_open_signals()
+                .list_open_signals(Some(state.env().as_str()))
                 .map(|sigs| {
                     sigs.iter().any(|s| {
                         s.id.starts_with("trim-")
@@ -3779,19 +4001,18 @@ async fn maybe_liq_trim_pair(
                 intended_price: None,
             })
             .collect();
-            if let Err(e) =
-                state
-                    .state_store
-                    .record_signal_execution(&crate::state_store::NewSignalExecution {
-                        id: close_id.clone(),
-                        strategy_id: sig.strategy_id.clone(),
-                        symbol: sig.symbol.clone(),
-                        route_id: sig.route_id.clone(),
-                        expected_net_usd: None,
-                        note: Some(format!("liq trim of {}", sig.id)),
-                        legs: child_legs,
-                    })
-            {
+            if let Err(e) = state.state_store.record_signal_execution(
+                &crate::state_store::NewSignalExecution {
+                    id: close_id.clone(),
+                    strategy_id: sig.strategy_id.clone(),
+                    symbol: sig.symbol.clone(),
+                    route_id: sig.route_id.clone(),
+                    expected_net_usd: None,
+                    note: Some(format!("liq trim of {}", sig.id)),
+                    legs: child_legs,
+                },
+                state.env().as_str(),
+            ) {
                 return Some((
                     "hold",
                     "liq_trim",
@@ -3838,7 +4059,7 @@ async fn maybe_liq_trim_pair(
                                 match (
                                     dec_to_f64(q, "trim qty"),
                                     dec_to_f64(p, "trim price"),
-                                    dec_to_f64(f, "trim fee"),
+                                    dec_to_f64(f.unwrap_or_default(), "trim fee"),
                                 ) {
                                     (Ok(qf), Ok(pf), Ok(ff)) => {
                                         if let Err(e) = state.state_store.apply_leg_fill(
@@ -3929,7 +4150,10 @@ async fn maybe_liq_trim_pair(
             Some(("trim", "liq_trim", note, false))
         }
         PairTrimDecision::CloseBoth => {
-            let _exec_guard = state.execution_lock.lock().await;
+            // No outer execution_lock here: `flatten_ticker_positions_impl`
+            // acquires it internally, and a second take of the non-reentrant
+            // Tokio mutex would self-deadlock (wedging every execution path
+            // behind it). The dedupe marker write is atomic on its own mutex.
             state
                 .liq_trim_at
                 .lock()
@@ -4307,7 +4531,7 @@ mod account_read_tests {
             filled_qty: filled,
             remaining_qty: dec!(0),
             avg_fill_price: avg_px,
-            fee,
+            fee: Some(fee),
             fee_currency: "USD".into(),
             raw_response: None,
             timestamp: chrono::Utc::now(),
@@ -4428,5 +4652,229 @@ mod account_read_tests {
             .await
             .expect("coarse floor is representable on both");
         assert_eq!(snapped, dec!(0.01));
+    }
+
+    /// Venue fixture for the liq-trim CloseBoth path: one seeded account
+    /// position, market orders that fill at mark.
+    struct TrimVenue {
+        venue: &'static str,
+        position: arbitrageur_core::position::Position,
+        placed: AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl ExchangeAdapter for TrimVenue {
+        fn venue_id(&self) -> VenueId {
+            VenueId::new(self.venue)
+        }
+        fn name(&self) -> &str {
+            self.venue
+        }
+        async fn fetch_markets(
+            &self,
+        ) -> anyhow::Result<Vec<arbitrageur_core::market::MarketMetadata>> {
+            unimplemented!()
+        }
+        async fn fetch_orderbook(&self, _s: &str) -> anyhow::Result<OrderBook> {
+            unimplemented!()
+        }
+        async fn fetch_ticker(&self, _s: &str) -> anyhow::Result<arbitrageur_core::quote::Ticker> {
+            unimplemented!()
+        }
+        async fn fetch_funding_rate(
+            &self,
+            _s: &str,
+        ) -> anyhow::Result<arbitrageur_core::quote::FundingRate> {
+            unimplemented!()
+        }
+        async fn fetch_account(&self) -> anyhow::Result<AccountSnapshot> {
+            Ok(AccountSnapshot {
+                venue: VenueId::new(self.venue),
+                equity: dec!(1000),
+                free_margin: dec!(900),
+                maintenance_margin: dec!(100),
+                margin_usage_pct: dec!(10),
+                balances: vec![],
+                positions: vec![self.position.clone()],
+                timestamp: Utc::now(),
+            })
+        }
+        async fn place_order(
+            &self,
+            o: arbitrageur_core::order::OrderRequest,
+        ) -> anyhow::Result<arbitrageur_core::order::OrderResponse> {
+            let n = self.placed.fetch_add(1, Ordering::SeqCst) + 1;
+            Ok(arbitrageur_core::order::OrderResponse {
+                order_id: format!("{}-oid-{n}", self.venue),
+                client_order_id: o.client_order_id,
+                venue: VenueId::new(self.venue),
+                symbol: o.symbol,
+                status: arbitrageur_core::types::OrderStatus::Filled,
+                original_qty: o.quantity,
+                filled_qty: o.quantity,
+                remaining_qty: dec!(0),
+                avg_fill_price: Some(dec!(100)),
+                fee: Some(dec!(0.01)),
+                fee_currency: "USDC".into(),
+                raw_response: None,
+                timestamp: Utc::now(),
+            })
+        }
+        async fn cancel_order(
+            &self,
+            _r: arbitrageur_core::order::CancelRequest,
+        ) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        fn live_order_submission_implemented(&self) -> bool {
+            true
+        }
+        fn has_live_credentials(&self) -> bool {
+            true
+        }
+    }
+
+    fn trim_position(
+        venue: &'static str,
+        side: Side,
+        liq: Decimal,
+    ) -> arbitrageur_core::position::Position {
+        arbitrageur_core::position::Position {
+            venue: VenueId::new(venue),
+            symbol: "ETH-USDC".into(),
+            side,
+            quantity: dec!(0.5),
+            entry_price: dec!(100),
+            mark_price: dec!(100),
+            unrealized_pnl: dec!(0),
+            realized_pnl: dec!(0),
+            // ~2% from liquidation — inside the 5% trim threshold.
+            liquidation_price: Some(liq),
+            leverage: dec!(10),
+            initial_margin: dec!(50),
+            maintenance_margin: dec!(25),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn closeboth_liq_trim_does_not_self_deadlock_execution_lock() {
+        // Regression: the CloseBoth arm of `maybe_liq_trim_pair` must NOT
+        // take `execution_lock` itself — `flatten_ticker_positions_impl`
+        // acquires the same non-reentrant Tokio mutex internally. Re-adding
+        // an outer take self-deadlocks and wedges every execution path.
+        // A timeout turns that hang into a loud failure.
+        let state = AppEngineState::new();
+        state.settings.write().passive_unwind.enabled = false;
+        // unit_size >= position qty → trimming would strand sub-step dust
+        // → evaluate_liq_trim chooses CloseBoth.
+        state.strategy_configs.write().insert(
+            "ETH-USDC".to_string(),
+            crate::state::TickerStrategyConfigDto {
+                symbol: "ETH-USDC".into(),
+                unit_size: 0.5,
+                ..Default::default()
+            },
+        );
+        let lighter = Arc::new(TrimVenue {
+            venue: "lighter",
+            position: trim_position("lighter", Side::Buy, dec!(98)),
+            placed: AtomicUsize::new(0),
+        });
+        let binance = Arc::new(TrimVenue {
+            venue: "binance",
+            position: trim_position("binance", Side::Sell, dec!(102)),
+            placed: AtomicUsize::new(0),
+        });
+        {
+            let mut m = state.test_adapters.write().unwrap();
+            m.insert("lighter".into(), lighter.clone());
+            m.insert("binance".into(), binance.clone());
+        }
+        // resolve_pos reads only the fresh venue-truth cache.
+        let now_ms = Utc::now().timestamp_millis();
+        for (venue, adapter) in [("lighter", &lighter), ("binance", &binance)] {
+            let acc = adapter.fetch_account().await.unwrap();
+            state
+                .last_good_accounts
+                .lock()
+                .insert(format!("testnet-{venue}"), (acc, now_ms));
+        }
+        // A balanced futures pair: long on lighter, short on binance.
+        state
+            .state_store
+            .record_signal_execution(
+                &crate::state_store::NewSignalExecution {
+                    id: "sig-closeboth".into(),
+                    strategy_id: "futures".into(),
+                    symbol: "ETH-USDC".into(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: vec![
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "lighter".into(),
+                            side: crate::state_store::LegSide::Long,
+                            symbol: Some("ETH-USDC".into()),
+                            intended_qty: 0.5,
+                            intended_price: Some(100.0),
+                        },
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "binance".into(),
+                            side: crate::state_store::LegSide::Short,
+                            symbol: Some("ETH-USDC".into()),
+                            intended_qty: 0.5,
+                            intended_price: Some(100.0),
+                        },
+                    ],
+                },
+                "testnet",
+            )
+            .unwrap();
+        for side in [
+            crate::state_store::LegSide::Long,
+            crate::state_store::LegSide::Short,
+        ] {
+            state
+                .state_store
+                .apply_leg_fill("sig-closeboth", side, 0.5, 100.0, 0.0, Some("entry-oid"))
+                .unwrap();
+        }
+        let sig = state
+            .state_store
+            .list_signals(Some("ETH-USDC"), None)
+            .unwrap()
+            .into_iter()
+            .find(|s| s.id == "sig-closeboth")
+            .unwrap();
+        let buy = sig
+            .legs
+            .iter()
+            .find(|l| l.side == crate::state_store::LegSide::Long)
+            .unwrap();
+        let sell = sig
+            .legs
+            .iter()
+            .find(|l| l.side == crate::state_store::LegSide::Short)
+            .unwrap();
+
+        let out = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            maybe_liq_trim_pair(&state, &sig, buy, sell, 5.0),
+        )
+        .await
+        .expect("CloseBoth arm self-deadlocked on execution_lock")
+        .expect("liq-trim decision expected");
+        assert_eq!((out.0, out.1), ("exit", "liq_trim"), "{}", out.2);
+        assert!(out.3, "CloseBoth is an exit decision");
+        assert!(
+            out.2.contains("closed pair (1 signals)"),
+            "flatten should have closed the pair: {}",
+            out.2
+        );
+        assert_eq!(lighter.placed.load(Ordering::SeqCst), 1);
+        assert_eq!(binance.placed.load(Ordering::SeqCst), 1);
     }
 }

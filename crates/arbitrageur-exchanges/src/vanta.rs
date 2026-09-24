@@ -533,6 +533,7 @@ impl VantaAdapter {
         sign_path: &str,
         body: &str,
     ) -> anyhow::Result<serde_json::Value> {
+        self.rate_limiter.acquire_signed().await?;
         let account_id = self.clean_account_id()?;
         let secret = self.orderly_secret()?;
         let candidates = self.orderly_key_candidates(&secret)?;
@@ -558,6 +559,7 @@ impl VantaAdapter {
                 req = req.body(body.to_string());
             }
             let resp = req.send().await.map_err(|e| {
+                self.rate_limiter.record_failure(false);
                 anyhow::anyhow!("Vanta {method} {sign_path} transport failure: {e}")
             })?;
             if !resp.status().is_success() {
@@ -567,6 +569,8 @@ impl VantaAdapter {
                 if text.contains("-1004") || text.contains("orderly key error") {
                     continue;
                 }
+                self.rate_limiter
+                    .record_failure(status == reqwest::StatusCode::TOO_MANY_REQUESTS);
                 anyhow::bail!("{last_err}");
             }
             let v: serde_json::Value = resp
@@ -624,13 +628,18 @@ impl VantaAdapter {
             Side::Sell => "SELL",
         };
         let is_market = order.order_type == arbitrageur_core::types::OrderType::Market;
+        // Every order semantic must reach the wire — order_type carries the
+        // intent even when the tif field contradicts it.
         let order_type = if is_market {
             "MARKET"
         } else if order.post_only
+            || order.order_type == arbitrageur_core::types::OrderType::PostOnly
             || order.time_in_force == arbitrageur_core::types::TimeInForce::PostOnly
         {
             "POST_ONLY"
-        } else if order.time_in_force == arbitrageur_core::types::TimeInForce::ImmediateOrCancel {
+        } else if order.order_type == arbitrageur_core::types::OrderType::ImmediateOrCancel
+            || order.time_in_force == arbitrageur_core::types::TimeInForce::ImmediateOrCancel
+        {
             "IOC"
         } else if order.time_in_force == arbitrageur_core::types::TimeInForce::FillOrKill {
             "FOK"
@@ -1012,7 +1021,7 @@ impl ExchangeAdapter for VantaAdapter {
             filled_qty: dec!(0),
             remaining_qty: order.quantity,
             avg_fill_price: None,
-            fee: dec!(0),
+            fee: None,
             fee_currency: "USDC".to_string(),
             raw_response: Some(v.to_string()),
             timestamp: Utc::now(),
@@ -1036,10 +1045,20 @@ impl ExchangeAdapter for VantaAdapter {
     }
 
     async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()> {
+        let confirm = |v: &serde_json::Value| -> anyhow::Result<()> {
+            // `success:true` only means the request was well-formed — the
+            // per-order `data.status` carries the truth. Accept only an
+            // explicit CANCELLED; a missing status is unconfirmed.
+            match v.pointer("/data/status").and_then(|s| s.as_str()) {
+                Some("CANCELLED") | Some("CANCELLED_PENDING") => Ok(()),
+                other => anyhow::bail!("Vanta cancel not confirmed — data.status={other:?}: {v}"),
+            }
+        };
         if let Some(id) = req.order_id {
             let venue_symbol = Self::to_vanta_symbol(&req.symbol)?;
             let sign_path = format!("/v1/order?symbol={venue_symbol}&order_id={}", id.trim());
-            self.signed_orderly("DELETE", &sign_path, "").await?;
+            let v = self.signed_orderly("DELETE", &sign_path, "").await?;
+            confirm(&v)?;
             return Ok(());
         }
         if let Some(cid) = req.client_order_id {
@@ -1048,7 +1067,8 @@ impl ExchangeAdapter for VantaAdapter {
                 "/v1/client/order?client_order_id={}&symbol={venue_symbol}",
                 cid.trim()
             );
-            self.signed_orderly("DELETE", &sign_path, "").await?;
+            let v = self.signed_orderly("DELETE", &sign_path, "").await?;
+            confirm(&v)?;
             return Ok(());
         }
         anyhow::bail!("Vanta cancel requires an order_id or client_order_id")
@@ -1145,8 +1165,7 @@ impl ExchangeAdapter for VantaAdapter {
         };
         let fee = dec_from_json(data.get("total_fee"))
             .or_else(|| dec_from_json(data.get("fee")))
-            .unwrap_or_default()
-            .abs();
+            .map(|f| f.abs());
         Ok(OrderResponse {
             order_id: returned_id,
             client_order_id: data

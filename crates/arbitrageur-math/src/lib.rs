@@ -112,6 +112,38 @@ mod tests {
         assert_eq!(carry.long_venue, "lighter");
         assert!(carry.net_apr > dec!(0));
         assert!(carry.daily_income_usd > dec!(0));
+        // Modest rate: a finite compounded APY is expressible.
+        assert!(carry.net_apy.is_some());
+    }
+
+    /// Regression (#46): extreme hourly rates must not produce a clamped
+    /// "100000x" APY — the compounded figure overflows f64 and is reported
+    /// as unavailable (None) while APR stays truthful.
+    #[test]
+    fn test_funding_carry_extreme_rate_apy_is_unavailable() {
+        let now = Utc::now();
+        let rate_a = FundingRate {
+            venue: "hyperliquid".into(),
+            symbol: "ETH-PERP".into(),
+            rate: dec!(0.05), // 5% per hour — pathological
+            predicted_rate: None,
+            interval_hours: 1,
+            next_funding_time: now,
+            timestamp: now,
+        };
+        let rate_b = FundingRate {
+            venue: "lighter".into(),
+            symbol: "ETH-PERP".into(),
+            rate: dec!(0.0001),
+            predicted_rate: None,
+            interval_hours: 8,
+            next_funding_time: now,
+            timestamp: now,
+        };
+        let carry = evaluate_funding_carry(&rate_a, &rate_b, dec!(5), dec!(10000))
+            .expect("carry opportunity");
+        assert!(carry.net_apr > dec!(0));
+        assert_eq!(carry.net_apy, None);
     }
 
     #[test]

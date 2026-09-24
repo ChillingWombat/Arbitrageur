@@ -13,10 +13,16 @@ pub struct FundingCarryOpportunity {
     pub symbol: String,
     /// Effective net funding rate per 8-hour normalized period
     pub net_rate_8h: Decimal,
-    /// Annualized Percentage Rate (APR)
+    /// Annualized Percentage Rate (APR) — linear accrual on notional, which
+    /// is how venue funding actually pays.
     pub net_apr: Decimal,
-    /// Annualized Percentage Yield (APY) with periodic compounding
-    pub net_apy: Decimal,
+    /// Annualized Percentage Yield (APY) *if* every funding receipt were
+    /// reinvested hourly into a larger position. `None` when the compounded
+    /// figure is not finite — extreme rates overflow `f64` long before they
+    /// mean anything, and funding accrues linearly (APR) unless the operator
+    /// actively re-levers, so an unrepresentable compounding claim is
+    /// reported as unavailable rather than clamped to a fabricated number.
+    pub net_apy: Option<Decimal>,
     /// Estimated round-trip transaction fees across both legs in BPS
     pub round_trip_fee_bps: Decimal,
     /// Hours required to break even on fees and start earning positive carry
@@ -72,24 +78,7 @@ pub fn evaluate_funding_carry(
     let net_rate_8h = net_hourly.checked_mul(dec!(8)).unwrap_or(dec!(999999));
     let net_apr = net_hourly.checked_mul(dec!(8760)).unwrap_or(dec!(999999));
 
-    // APY = (1 + net_hourly)^8760 - 1
-    let hourly_f64 = net_hourly.to_string().parse::<f64>().unwrap_or(0.0);
-    let apy_f64 = if hourly_f64 > 0.0 && hourly_f64 < 1.0 {
-        let compounding = (1.0 + hourly_f64).powf(8760.0) - 1.0;
-        if compounding.is_finite() && compounding < 100_000.0 {
-            compounding
-        } else {
-            100_000.0
-        }
-    } else if hourly_f64 >= 1.0 {
-        100_000.0
-    } else {
-        0.0
-    };
-    let net_apy = Decimal::from_str_exact(&format!("{:.6}", apy_f64))
-        .ok()
-        .or_else(|| Decimal::from_f64_retain(apy_f64))
-        .unwrap_or(net_apr);
+    let net_apy = compounded_apy(net_hourly);
 
     let fee_ratio = round_trip_fee_bps / BPS_DIVISOR;
     let break_even_hours = if net_hourly > dec!(0) {
@@ -115,6 +104,24 @@ pub fn evaluate_funding_carry(
         recommended_size_usd: trade_size_usd,
         daily_income_usd,
     })
+}
+
+/// Hourly-compounded APY for a per-hour rate: `(1 + h)^8760 - 1`.
+/// `None` when the result is not finite — hourly rates above ~3.3%
+/// overflow `f64`, and reporting a clamped ceiling as "APY" fabricates a
+/// number no reinvestment plan could realize.
+fn compounded_apy(net_hourly: Decimal) -> Option<Decimal> {
+    let h = net_hourly.to_string().parse::<f64>().ok()?;
+    if h.is_nan() || h <= 0.0 {
+        return None;
+    }
+    let compounding = (1.0 + h).powf(8760.0) - 1.0;
+    if !compounding.is_finite() {
+        return None;
+    }
+    Decimal::from_str_exact(&format!("{:.6}", compounding))
+        .ok()
+        .or_else(|| Decimal::from_f64_retain(compounding))
 }
 
 /// Same-exchange spot-vs-perp/futures (cash-and-carry) basis breakdown.
@@ -189,7 +196,7 @@ pub fn evaluate_spot_perp_basis(
         symbol: perp_funding.symbol.clone(),
         net_rate_8h,
         net_apr,
-        net_apy: net_apr,
+        net_apy: compounded_apy(hourly_funding),
         round_trip_fee_bps,
         break_even_hours,
         recommended_size_usd: trade_size_usd,
