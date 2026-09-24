@@ -36,6 +36,7 @@ import {
   EvmWalletSection,
   EVM_AMM_VENUE_IDS,
 } from "./ExchangeAccounts";
+import { PriceRetriverPanel } from "./PriceRetriverPanel";
 
 
 export type SettingsTab = "execution" | "safety" | "exchanges" | "network" | "about";
@@ -1960,32 +1961,8 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         {/* SECTION 4: NETWORKING & VPS 24/7 DEPLOYMENT                         */}
         {/* =================================================================== */}
         {activeTab === "network" && (
-          <div className="bg-surface border border-surface-border rounded-lg p-3.5 space-y-3 shadow-2xs">
-            <div className="border-b border-surface-border pb-2.5">
-              <h3 className="text-[13px] font-mono font-bold text-slate-900 flex items-center space-x-2">
-                <Globe className="w-4 h-4 text-accent-strong" />
-                <span>24/7 VPS Background Daemon</span>
-              </h3>
-              <p className="text-xs text-slate-500 font-mono mt-0.5">
-                Deploy the standalone binary headlessly on a cloud server
-              </p>
-            </div>
-
-            {/* VPS Daemon Deployment Guide */}
-            <div className="p-4 bg-slate-50 border border-surface-border rounded-lg space-y-2 text-xs font-mono text-slate-700">
-              <h4 className="font-bold text-slate-900 flex items-center space-x-1.5">
-                <span>🖥️ Headless VPS 24/7 Deployment Instructions</span>
-              </h4>
-              <p className="text-xs text-slate-600">
-                To run Arbitrageur continuously 24/7 without keeping your local laptop or desktop open, deploy the standalone Rust binary to an Ubuntu/Debian VPS:
-              </p>
-              <div className="p-2.5 bg-slate-900 text-emerald-400 rounded-lg text-xs overflow-x-auto select-text font-mono">
-                <code>./target/release/arbitrageur serve --bind 0.0.0.0 --port 8787</code>
-              </div>
-              <p className="text-xs text-slate-500">
-                The serve command exposes a read-only health endpoint only — no market data ingestion or order execution runs. You can create a systemd service (e.g. <code className="bg-slate-200 px-1 py-0.5 rounded-md">systemctl start arbitrageur</code>) to auto-restart on server reboot.
-              </p>
-            </div>
+          <div className="space-y-4">
+            <PriceRetriverPanel />
           </div>
         )}
 

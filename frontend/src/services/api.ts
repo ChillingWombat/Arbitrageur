@@ -1218,6 +1218,124 @@ export const api = {
     const res = await invokeDesktop<SessionProfileDto>("get_session_profile", { symbol });
     return normalizeSessionProfile(res, symbol);
   },
+
+  // ---- PriceRetriver VPS Data Node integration ----
+  async priceRetriverStatus(nodeUrl: string, token?: string): Promise<any> {
+    if (api.isTauri) {
+      return invokeDesktop<any>("priceretriver_status", { nodeUrl, token: token || null });
+    }
+    const headers: Record<string, string> = {};
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    const res = await fetch(`${nodeUrl.replace(/\/+$/, "")}/api/v1/status`, { headers });
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+    return res.json();
+  },
+
+  async priceRetriverListPartitions(nodeUrl: string, token?: string): Promise<any> {
+    if (api.isTauri) {
+      return invokeDesktop<any>("priceretriver_list_partitions", { nodeUrl, token: token || null });
+    }
+    const headers: Record<string, string> = {};
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    const res = await fetch(`${nodeUrl.replace(/\/+$/, "")}/api/v1/partitions`, { headers });
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+    return res.json();
+  },
+
+  async priceRetriverDownloadData(
+    nodeUrl: string,
+    token?: string,
+    venue?: string,
+    symbol?: string,
+    destPath?: string,
+  ): Promise<number> {
+    if (api.isTauri) {
+      return invokeDesktop<number>("priceretriver_download_data", {
+        nodeUrl,
+        token: token || null,
+        venue: venue || null,
+        symbol: symbol || null,
+        destPath: destPath || "priceretriver_download.tar.gz",
+      });
+    }
+    const params = new URLSearchParams();
+    if (venue) params.set("venue", venue);
+    if (symbol) params.set("symbol", symbol);
+    if (token) params.set("token", token);
+    const url = `${nodeUrl.replace(/\/+$/, "")}/api/v1/data/download?${params.toString()}`;
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = destPath || "priceretriver_download.tar.gz";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    return 1;
+  },
+
+  async priceRetriverRunPipeline(
+    nodeUrl: string,
+    token: string | undefined,
+    partitionPath: string,
+    pipelineType: string,
+    format: string,
+  ): Promise<any> {
+    if (api.isTauri) {
+      return invokeDesktop<any>("priceretriver_run_pipeline", {
+        nodeUrl,
+        token: token || null,
+        partitionPath,
+        pipelineType,
+        format,
+      });
+    }
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    const res = await fetch(`${nodeUrl.replace(/\/+$/, "")}/api/v1/pipeline/process`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        input_file: partitionPath,
+        output_file: partitionPath.replace(/\.jsonl\.zst$/, `.${format}`),
+        pipeline_type: pipelineType,
+        format,
+      }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+    return res.json();
+  },
+
+  async priceRetriverRunCustomScript(
+    nodeUrl: string,
+    token: string | undefined,
+    scriptCode: string,
+    language: string,
+    partitionPath?: string,
+  ): Promise<any> {
+    if (api.isTauri) {
+      return invokeDesktop<any>("priceretriver_run_custom_script", {
+        nodeUrl,
+        token: token || null,
+        scriptCode,
+        language,
+        partitionPath: partitionPath || null,
+      });
+    }
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (token) headers["Authorization"] = `Bearer ${token}`;
+    const res = await fetch(`${nodeUrl.replace(/\/+$/, "")}/api/v1/pipeline/custom-script`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        input_file: partitionPath || "data/raw/default.jsonl",
+        output_file: "data/processed/custom_output.jsonl",
+        script_code: scriptCode,
+        language,
+        timeout_secs: 120,
+      }),
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+    return res.json();
+  },
 };
 
 
