@@ -2,9 +2,9 @@
 
 ## Project status
 
-Arbitrageur is a research and paper-trading system. Adapter-level signing and order submission exist for several venues, but new live strategy entries are disabled until terminal fill and restart reconciliation are implemented and validated. See `docs/CAPABILITIES.md`.
+Arbitrageur is a research and trading system. Adapter-level signing, order submission, and reconciled live strategy entries exist for many venues — `live_entry_gate` dispatches entries whenever the vault is unlocked and each leg's adapter passes submission/polling/strategy-entry/credential checks. Trading Mode = Live is the operator opt-in. See `docs/CAPABILITIES.md`.
 
-Do not use this repository as a production trading system or assume that an accepted order acknowledgement means a fill.
+Do not assume that an accepted order acknowledgement means a fill, and do not treat the reconciliation machinery as a substitute for venue-side verification.
 
 ## Reporting a vulnerability
 
@@ -21,7 +21,11 @@ Do not include private keys, API secrets, vault files, authentication headers, f
 
 ## Supported code
 
-Security fixes target the current `main` branch. There are no supported release tags yet.
+Security fixes target the current `main` branch. Tagged releases
+(`v*`) are built by `.github/workflows/release.yml` — each publishes the
+trading binary, headless CLI, digest-pinned Lighter signer sidecar,
+SHA-256 checksums, and a CycloneDX SBOM. Verify downloads against
+`SHA256SUMS.txt` before installing.
 
 ## Credential model
 
@@ -35,17 +39,17 @@ Security fixes target the current `main` branch. There are no supported release 
 
 ## Live-order safety boundary
 
-Signing and submission capability do not establish live strategy readiness. Live strategy entry requires:
+Signing and submission capability do not by themselves establish live strategy readiness. `live_entry_gate` admits a live strategy entry only when all of the following hold for every leg's adapter:
 
 - Durable in-flight persistence before submission
-- Terminal fill/partial/cancel/expiry reconciliation
-- Idempotent order identity
-- Reduce-only compensation
-- Correct leverage and margin mode
-- Restart recovery
-- Venue sandbox and owner-approved canary evidence
+- Terminal fill/partial/cancel/expiry reconciliation via `fetch_order` polling
+- Idempotent order identity (persisted client order IDs)
+- Reduce-only compensation on residual legs
+- Restart recovery of durable working orders
+- The adapter's automated strategy-entry transport is implemented
+- Live credentials are loaded for the active environment
 
-Until all requirements are met, the backend must refuse new live strategy entries. Authenticated account monitoring and explicitly risk-reducing submissions are separate capabilities; the operator must confirm their terminal state directly at the venue.
+When any requirement fails, the backend refuses the entry at `live_entry_gate`. Operator approval and canary evidence remain the operator's responsibility — the gate checks capability, not judgment. Authenticated account monitoring and explicitly risk-reducing submissions are separate capabilities; the operator must confirm their terminal state directly at the venue.
 
 ## Vendored signer
 

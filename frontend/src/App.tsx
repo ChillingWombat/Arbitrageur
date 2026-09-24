@@ -14,7 +14,7 @@ import { SpotArbitrageBot } from "./components/SpotArbitrageBot";
 import { TriangularArbitrage } from "./components/TriangularArbitrage";
 import { TickerConfigModal } from "./components/TickerConfigModal";
 import { VaultUnlockModal } from "./components/VaultUnlockModal";
-import { api, withTimeoutFallback } from "./services/api";
+import { api, describeCommandError, withTimeoutFallback } from "./services/api";
 import { scheduleVaultLock } from "./services/vaultLock";
 import { Lock, Unlock, ShieldCheck, AlertTriangle } from "lucide-react";
 import type {
@@ -37,6 +37,7 @@ import type {
   OpenPositionDto,
   VaultStatus,
   SignalExecutionDto,
+  StrategyCapabilityDto,
 } from "./types";
 
 import {
@@ -135,6 +136,23 @@ export const App: React.FC = () => {
   }, [totalEquityUsd]);
   const [tickerPositionState, setTickerPositionState] = useState<TickerPositionState | null>(null);
   const [openPositions, setOpenPositions] = useState<OpenPositionDto[]>([]);
+  // Server-side reduce-only tickers (futures-strategy symbols) — the auto
+  // loop must skip exactly what the backend gate would refuse.
+  const [reduceOnlySymbols, setReduceOnlySymbols] = useState<Set<string>>(new Set());
+  // Per-strategy scan/execute capability descriptors — Execute controls and
+  // auto loops gate on these; a permanently-stubbed path never arms.
+  const [strategyCaps, setStrategyCaps] = useState<Map<string, StrategyCapabilityDto>>(new Map());
+  // Transient command-failure toast — command rejections surface here, the
+  // fatal overlay stays reserved for render crashes.
+  const [commandError, setCommandError] = useState<string | null>(null);
+  const notifyCommandError = useCallback((msg: string) => {
+    setCommandError(msg);
+  }, []);
+  useEffect(() => {
+    if (!commandError) return;
+    const t = setTimeout(() => setCommandError(null), 9000);
+    return () => clearTimeout(t);
+  }, [commandError]);
   // Reconciler-escalated signals — each may hold residual venue exposure and
   // must stay visible on every tab, not only where the acknowledge control
   // lives (Spread Radar).
@@ -394,7 +412,7 @@ export const App: React.FC = () => {
 
       // Every leg races a timeout into its empty fallback, so one stalled
       // venue can never stick the whole refresh (or a configurator save).
-      const [status, settings, books, spatial, funding, prediction, risk, logs, configs, allParams, spot, triangle, tickerPos, positions, balances, signals] = await Promise.all([
+      const [status, settings, books, spatial, funding, prediction, risk, logs, configs, allParams, spot, triangle, tickerPos, positions, balances, signals, reduceOnlyRows, caps] = await Promise.all([
         withTimeoutFallback(api.getSystemStatus(), null),
         withTimeoutFallback(api.getEngineSettings(), null),
         withTimeoutFallback(
@@ -435,6 +453,8 @@ export const App: React.FC = () => {
         withTimeoutFallback(api.getOpenPositions(), []),
         withTimeoutFallback(api.getVenueBalances(), []),
         withTimeoutFallback(api.listSignalExecutions(), [] as SignalExecutionDto[]),
+        withTimeoutFallback(api.listReduceOnlyTickers(), [] as { strategyId: string; symbol: string }[]),
+        withTimeoutFallback(api.getStrategyCapabilities(), [] as StrategyCapabilityDto[]),
       ]);
 
       setSystemStatus(status);
@@ -455,6 +475,14 @@ export const App: React.FC = () => {
       setTriangleOpps(triangle);
       setTickerPositionState(tickerPos);
       setOpenPositions(positions);
+      setReduceOnlySymbols(
+        new Set(
+          reduceOnlyRows
+            .filter((r) => r.strategyId === "futures")
+            .map((r) => r.symbol.toUpperCase())
+        )
+      );
+      setStrategyCaps(new Map(caps.map((c) => [c.strategyId, c])));
       setAttentionSignals(
         signals.filter((s) => s.status === "unresolved" || s.status === "imbalanced")
       );
@@ -587,26 +615,36 @@ export const App: React.FC = () => {
 
   // Risk actions
   const handleResetCircuitBreaker = useCallback(async () => {
-    await api.resetCircuitBreaker();
-    await refreshAllData();
-  }, [refreshAllData]);
+    try {
+      await api.resetCircuitBreaker();
+      await refreshAllData();
+    } catch (err) {
+      notifyCommandError(describeCommandError(err, "Circuit breaker reset failed"));
+    }
+  }, [refreshAllData, notifyCommandError]);
 
   const handleEmergencyKillswitch = useCallback(async () => {
-    await api.triggerKillswitch();
-    await refreshAllData();
-  }, [refreshAllData]);
+    try {
+      await api.triggerKillswitch();
+      await refreshAllData();
+    } catch (err) {
+      notifyCommandError(describeCommandError(err, "Killswitch trigger failed"));
+    }
+  }, [refreshAllData, notifyCommandError]);
 
   const handleTogglePause = useCallback(
     async (paused: boolean) => {
-      setIsPaused(paused);
       try {
-        await api.setEnginePaused(paused);
+        const applied = await api.setEnginePaused(paused);
+        // Apply the backend-confirmed state — never the optimistic intent:
+        // a failed IPC must not show the engine paused when it isn't.
+        setIsPaused(applied);
         await refreshAllData();
       } catch (err) {
-        console.error("Failed to toggle pause status:", err);
+        notifyCommandError(describeCommandError(err, "Failed to toggle pause status"));
       }
     },
-    [refreshAllData],
+    [refreshAllData, notifyCommandError],
   );
 
 
@@ -768,9 +806,13 @@ export const App: React.FC = () => {
     [],
   );
   const handlePredictionSearch = useCallback(async (query: string) => {
-    const res = await api.scanPredictionOpportunities(query);
-    setPredictionOpps(res);
-  }, []);
+    try {
+      const res = await api.scanPredictionOpportunities(query);
+      setPredictionOpps(res);
+    } catch (err) {
+      notifyCommandError(describeCommandError(err, "Prediction scan failed"));
+    }
+  }, [notifyCommandError]);
   const handleStatArbRunStep = useCallback(
     (step: number, py: number, px: number) => api.runStatArbStep(step, py, px),
     [],
@@ -944,6 +986,29 @@ export const App: React.FC = () => {
         </div>
       )}
 
+      {/* Command-failure toast — rejections surface here; the fatal overlay
+          stays reserved for render crashes, never ordinary command errors. */}
+      {commandError && (
+        <div
+          role="alert"
+          className="fixed bottom-4 right-4 z-50 max-w-md bg-loss-dim border border-loss-border rounded-xl px-4 py-3 shadow-2xl flex items-start space-x-2.5 animate-in slide-in-from-bottom-2 duration-150"
+        >
+          <AlertTriangle className="w-4 h-4 text-loss shrink-0 mt-0.5" />
+          <div className="min-w-0 flex-1">
+            <div className="text-xs font-bold text-loss">Command failed</div>
+            <div className="text-xs text-slate-700 break-words">{commandError}</div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setCommandError(null)}
+            className="text-loss hover:text-slate-700 font-bold text-sm px-1 cursor-pointer"
+            aria-label="Dismiss"
+          >
+            ×
+          </button>
+        </div>
+      )}
+
       {/* Main Workspace Body */}
       <div className="relative flex flex-1 overflow-hidden">
         {/* Left Aggregated Positions Panel — symbol selection is
@@ -960,6 +1025,8 @@ export const App: React.FC = () => {
           onOpenPortfolioMonitor={handleTogglePortfolio}
           isPortfolioActive={activeTab === "portfolio_monitor"}
           onOpenSettings={handleOpenSettings}
+          onRefreshAll={refreshAllData}
+          onCommandError={notifyCommandError}
         />
 
         {/* Workspace Content Pane */}
@@ -984,6 +1051,8 @@ export const App: React.FC = () => {
               totalEquityUsd={totalEquityUsd}
               tickerExplorer={tickerExplorerNode}
               venueCaps={venueCaps}
+              reduceOnlySymbols={reduceOnlySymbols}
+              onCommandError={notifyCommandError}
             />
           )}
 
@@ -1013,6 +1082,7 @@ export const App: React.FC = () => {
               isPaused={isPaused}
               hasApiConnectivity={activeVenueCodes.size >= 2}
               params={spotParams}
+              capability={strategyCaps.get("spot")}
             />
           )}
 
@@ -1037,6 +1107,7 @@ export const App: React.FC = () => {
               isPaused={isPaused}
               hasApiConnectivity={activeVenueCodes.size >= 2}
               onOpenConfig={handleOpenTickerConfig}
+              capability={strategyCaps.get("prediction")}
             />
           )}
 
@@ -1058,6 +1129,7 @@ export const App: React.FC = () => {
               openPositions={openPositions}
               onResetCircuitBreaker={handleResetCircuitBreaker}
               onTriggerKillswitch={handleEmergencyKillswitch}
+              onCommandError={notifyCommandError}
             />
           )}
         </main>

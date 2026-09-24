@@ -95,7 +95,10 @@ pub trait ExchangeAdapter: Send + Sync {
             let Some(position) = self.normalize_account_position(raw)? else {
                 continue;
             };
-            if position.quantity <= Decimal::ZERO
+            // Zero is flat; any nonzero magnitude is exposure. Convention is
+            // unsigned `quantity` + `side`, but a negative row must still
+            // block entries rather than read as flat.
+            if position.quantity == Decimal::ZERO
                 || !position.symbol.eq_ignore_ascii_case(requested)
             {
                 continue;

@@ -41,6 +41,17 @@ data/captures/
 .playwright-mcp/
 .omo/
 
+# Vault & durable state — a repo-local HOME must never commit the
+# credential vault or the trading-history sqlite store.
+vault.enc
+*.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+*.db
+*.db-wal
+*.db-shm
+*.hold
+
 # Local desktop launcher shortcuts
 Arbitrageur
 *.desktop

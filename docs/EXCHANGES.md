@@ -59,7 +59,7 @@ The runtime admits only enabled adapters in `get_venues`; capability remains end
   ticker/orderbook/funding feeds — it emits no ordinary opportunity rows.
 - Arcus plus Polymarket/Kalshi remain research/scaffold surfaces outside the admitted strategy path
 
-Submission transport is not terminal fill reconciliation. Every live-submission adapter now exposes `fetch_order` and the desktop reconciliation supervisor polls persisted working orders every 5s and re-scans them at startup; automated residual-leg resolution (opt-in) and bounded cancel retry are implemented, but without venue sandbox/canary evidence no listed venue is live-strategy-entry ready.
+Submission transport is not terminal fill reconciliation. Every live-submission adapter exposes `fetch_order` and the desktop reconciliation supervisor polls persisted working orders every 5s and re-scans them at startup; automated residual-leg resolution and bounded cancel retry are implemented. Strategy live entry dispatches once `live_entry_gate` passes (vault unlocked + per-venue submission/polling/strategy-entry/credentials) — Trading Mode = Live is the opt-in; venue canary evidence remains an operator decision, not a code gate.
 
 Account-position matching is adapter-owned. Live flattening asks the adapter to resolve the venue-native position back to the signal leg's exact symbol before sizing or verifying a reduce-only close. Examples: Binance/Aster/PopDEX `BTCUSDT`, Kraken `PF_XBTUSD`, OKX `BTC-USDT-SWAP`, Vanta `PERP_BTC_USDC`, Decibel `BTC-PERP`, and Lighter `market_id`/spot-vs-perp resolution. Unsupported, unknown, or ambiguous mappings fail closed as unresolved exposure; they are never treated as flat.
 
@@ -235,8 +235,8 @@ Robinhood Web3 connects to the Robinhood EVM chain with multi-DEX router support
 Native adapter (`AsterAdapter`, venue `aster`, admitted to `get_venues`).
 Public market/account reads, authenticated submission transport, and
 order-status polling (`GET /fapi/v3/order`) are implemented; automated
-residual-leg resolution and cancel retry now exist as opt-in mechanisms, but strategy live entry
-remains disabled.
+residual-leg resolution and cancel retry exist, and strategy live entry
+dispatches once `live_entry_gate` passes (vault unlocked + credentials).
 
 - **REST API:** `https://fapi.asterdex.com` (`/fapi/v3/*` recommended,
   `/fapi/v1/*` legacy)

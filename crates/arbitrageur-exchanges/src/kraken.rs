@@ -191,6 +191,7 @@ impl KrakenAdapter {
         params: &std::collections::BTreeMap<&str, String>,
     ) -> anyhow::Result<serde_json::Value> {
         use std::fmt::Write;
+        self.rate_limiter.acquire_signed().await?;
         let (api_key, api_secret) = self.credentials()?;
         let nonce = Utc::now().timestamp_millis().to_string();
         let mut post_data = String::from("nonce=");
@@ -211,10 +212,15 @@ impl KrakenAdapter {
             .body(post_data)
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("Kraken POST {path} transport failure: {e}"))?;
+            .map_err(|e| {
+                self.rate_limiter.record_failure(false);
+                anyhow::anyhow!("Kraken POST {path} transport failure: {e}")
+            })?;
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
+            self.rate_limiter
+                .record_failure(status == reqwest::StatusCode::TOO_MANY_REQUESTS);
             anyhow::bail!("Kraken POST {path} failed (HTTP {status}): {text}");
         }
         let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
@@ -229,6 +235,7 @@ impl KrakenAdapter {
     /// Authenticated GET to a Kraken Futures private endpoint (nonce travels
     /// as a query param and inside the signed payload).
     async fn authed_get(&self, path: &str) -> anyhow::Result<serde_json::Value> {
+        self.rate_limiter.acquire_signed().await?;
         let (api_key, api_secret) = self.credentials()?;
         let nonce = Utc::now().timestamp_millis().to_string();
         let post_data = format!("nonce={nonce}");
@@ -243,10 +250,15 @@ impl KrakenAdapter {
             .header("Authent", authent)
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("Kraken GET {path} transport failure: {e}"))?;
+            .map_err(|e| {
+                self.rate_limiter.record_failure(false);
+                anyhow::anyhow!("Kraken GET {path} transport failure: {e}")
+            })?;
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
+            self.rate_limiter
+                .record_failure(status == reqwest::StatusCode::TOO_MANY_REQUESTS);
             anyhow::bail!("Kraken GET {path} failed (HTTP {status}): {text}");
         }
         let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
@@ -266,6 +278,7 @@ impl KrakenAdapter {
         params: &std::collections::BTreeMap<&str, String>,
     ) -> anyhow::Result<serde_json::Value> {
         use std::fmt::Write;
+        self.rate_limiter.acquire_signed().await?;
         let (api_key, api_secret) = self.credentials()?;
         let nonce = Utc::now().timestamp_millis().to_string();
         let mut post_data = String::from("nonce=");
@@ -284,10 +297,15 @@ impl KrakenAdapter {
             .header("Authent", authent)
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("Kraken GET {path} transport failure: {e}"))?;
+            .map_err(|e| {
+                self.rate_limiter.record_failure(false);
+                anyhow::anyhow!("Kraken GET {path} transport failure: {e}")
+            })?;
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
+            self.rate_limiter
+                .record_failure(status == reqwest::StatusCode::TOO_MANY_REQUESTS);
             anyhow::bail!("Kraken GET {path} failed (HTTP {status}): {text}");
         }
         let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
@@ -418,7 +436,7 @@ impl KrakenAdapter {
                 filled_qty: filled,
                 remaining_qty: orig.saturating_sub(filled),
                 avg_fill_price: avg_px,
-                fee,
+                fee: Some(fee),
                 fee_currency: "USD".to_string(),
                 raw_response: Some(raw.to_string()),
                 timestamp: Utc::now(),
@@ -1117,17 +1135,30 @@ impl ExchangeAdapter for KrakenAdapter {
             arbitrageur_core::types::Side::Buy => "buy",
             arbitrageur_core::types::Side::Sell => "sell",
         };
-        // Engine PostOnly/IOC map onto Kraken order types; plain Limit rests.
-        let order_type = if order.order_type == arbitrageur_core::types::OrderType::Market {
-            "mkt"
-        } else if order.post_only
-            || order.time_in_force == arbitrageur_core::types::TimeInForce::PostOnly
-        {
-            "post"
-        } else if order.time_in_force == arbitrageur_core::types::TimeInForce::ImmediateOrCancel {
-            "ioc"
-        } else {
-            "lmt"
+        // Every order semantic must reach the wire — Kraken Futures has no
+        // FOK order type, so it is refused rather than silently downgraded
+        // to a resting limit.
+        let order_type = match order.order_type {
+            arbitrageur_core::types::OrderType::Market => "mkt",
+            arbitrageur_core::types::OrderType::PostOnly => "post",
+            arbitrageur_core::types::OrderType::ImmediateOrCancel => "ioc",
+            arbitrageur_core::types::OrderType::Limit => {
+                if order.post_only
+                    || order.time_in_force == arbitrageur_core::types::TimeInForce::PostOnly
+                {
+                    "post"
+                } else if order.time_in_force
+                    == arbitrageur_core::types::TimeInForce::ImmediateOrCancel
+                {
+                    "ioc"
+                } else if order.time_in_force == arbitrageur_core::types::TimeInForce::FillOrKill {
+                    anyhow::bail!(
+                        "Kraken Futures does not support FillOrKill — refusing instead of resting a limit order"
+                    );
+                } else {
+                    "lmt"
+                }
+            }
         };
         let mut params = std::collections::BTreeMap::new();
         params.insert("orderType", order_type.to_string());
@@ -1222,7 +1253,7 @@ impl ExchangeAdapter for KrakenAdapter {
             filled_qty: dec!(0),
             remaining_qty: order.quantity,
             avg_fill_price: None,
-            fee: dec!(0),
+            fee: None,
             fee_currency: "USD".to_string(),
             raw_response: Some(v.to_string()),
             timestamp: Utc::now(),
@@ -1254,8 +1285,22 @@ impl ExchangeAdapter for KrakenAdapter {
         if let Ok(vsym) = Self::to_futures_symbol(&req.symbol) {
             params.insert("symbol", vsym);
         }
-        self.authed_post("/derivatives/api/v3/cancelorder", &params)
+        let v = self
+            .authed_post("/derivatives/api/v3/cancelorder", &params)
             .await?;
+        // `result:success` only means the request was accepted — the
+        // per-order `cancelStatus.status` carries the truth ("cancelled",
+        // or "notFound"/"statusNotFound"/"inQueue" when nothing was
+        // actually cancelled).
+        let cancel_status = v
+            .pointer("/cancelStatus/status")
+            .and_then(|s| s.as_str())
+            .unwrap_or("");
+        if cancel_status != "cancelled" {
+            anyhow::bail!(
+                "Kraken cancel not confirmed — cancelStatus.status is '{cancel_status}': {v}"
+            );
+        }
         Ok(())
     }
 

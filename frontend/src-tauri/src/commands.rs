@@ -305,7 +305,8 @@ pub struct OuFitDto {
     pub sigma: f64,
     pub half_life: f64,
     pub stationary_std: f64,
-    pub r_squared: f64,
+    /// `Some` only for fits that produced an R² — never fabricated.
+    pub r_squared: Option<f64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -1319,30 +1320,34 @@ pub(crate) fn enforce_retention_pass(state: &AppEngineState, now_ms: i64) {
         let s = state.settings.read();
         (s.spread_samples_max_days, s.spread_samples_max_gb)
     };
-    if let Some(days) = max_days {
-        if days > 0 {
-            let retain_after = now_ms - (days as i64) * 86_400_000;
-            let _ = state.state_store.delete_spread_samples_before(retain_after);
-            // Same cutoff bounds the raw volume log. Session profiles and
-            // hour bins are derived state and are never pruned here.
-            let _ = state
-                .state_store
-                .prune_venue_volume_samples(retain_after, i64::MAX);
-            // Same day cutoff bounds the signal-event audit log, with its
-            // own row cap so audit history and price history prune
-            // independently.
-            let _ = state.state_store.prune_monitor_signal_events(
-                retain_after,
-                crate::state_store::MONITOR_SIGNAL_EVENTS_MAX_ROWS,
-            );
-            // Same day cutoff bounds the margin-snapshot log behind the
-            // 24h average-utilisation stat.
-            let _ = state.state_store.prune_margin_snapshots(retain_after);
-            // Same day cutoff bounds the funding-rate history log (future
-            // persistence / half-life training substrate).
-            let _ = state.state_store.prune_funding_rate_samples(retain_after);
-        }
-    }
+    // Row caps are unconditional — a disabled day window (`None`/`0`) must
+    // never let a telemetry table grow without bound. `i64::MIN` makes the
+    // day cutoff a no-op while the per-table caps still evict oldest-first.
+    let retain_after = match max_days {
+        Some(days) if days > 0 => now_ms - (days as i64) * 86_400_000,
+        _ => i64::MIN,
+    };
+    let _ = state
+        .state_store
+        .prune_spread_samples(retain_after, crate::state_store::SPREAD_SAMPLES_MAX_ROWS);
+    // Same cutoff bounds the raw volume log. Session profiles and hour
+    // bins are derived state and are never pruned here.
+    let _ = state.state_store.prune_venue_volume_samples(
+        retain_after,
+        crate::state_store::VENUE_VOLUME_SAMPLES_MAX_ROWS,
+    );
+    // Same day cutoff bounds the signal-event audit log, with its own row
+    // cap so audit history and price history prune independently.
+    let _ = state.state_store.prune_monitor_signal_events(
+        retain_after,
+        crate::state_store::MONITOR_SIGNAL_EVENTS_MAX_ROWS,
+    );
+    // Same day cutoff bounds the margin-snapshot log behind the 24h
+    // average-utilisation stat.
+    let _ = state.state_store.prune_margin_snapshots(retain_after);
+    // Same day cutoff bounds the funding-rate history log (future
+    // persistence / half-life training substrate).
+    let _ = state.state_store.prune_funding_rate_samples(retain_after);
     if let Some(gb) = max_gb {
         if gb.is_finite() && gb > 0.0 {
             let budget = (gb * 1024.0 * 1024.0 * 1024.0) as u64;
@@ -1363,11 +1368,12 @@ pub(crate) fn enforce_retention_pass(state: &AppEngineState, now_ms: i64) {
                     Err(_) => break,
                 }
             }
-            // Return freed pages to the OS — bounded per pass, converges
-            // over successive hourly runs toward the used size.
-            let _ = state.state_store.incremental_vacuum(50_000);
         }
     }
+    // Return freed pages to the OS on every pass — bounded per pass,
+    // converges over successive hourly runs toward the used size. No-op on
+    // databases opened before the v34 auto_vacuum migration.
+    let _ = state.state_store.incremental_vacuum(50_000);
 }
 
 pub async fn fetch_orderbooks_impl(
@@ -2052,7 +2058,8 @@ pub fn compute_optimal_thresholds_impl(
         sigma,
         half_life,
         stationary_std,
-        r_squared: 0.89,
+        // No regression ran on this path — r_squared stays unknown.
+        r_squared: None,
     };
 
     let result = compute_bertram_thresholds(&ou, transaction_cost)
@@ -2259,32 +2266,41 @@ fn transition_environment(
     // `get_adapter` under the *new* env — a testnet hedge flattened after a
     // live flip would send real orders to the wrong endpoints.
     if target != state.env() {
-        if let Ok(pending) = state.state_store.list_pending_order_legs() {
-            if !pending.is_empty() {
-                let ids: Vec<String> = pending
-                    .iter()
-                    .map(|(exec, _)| format!("{}:{}", exec.symbol, exec.status.as_str()))
-                    .collect();
-                return Err(format!(
-                    "Cannot switch trading environment while {} signal(s) await reconciliation ({}). Let them settle or resolve the exposure first.",
-                    pending.len(),
-                    ids.join(", ")
-                ));
-            }
-        }
-        if let Ok(signals) = state.state_store.list_open_signals() {
-            let open: Vec<String> = signals
+        // Fail closed: a DB read error is not "no exposure" — the switch is
+        // refused when unresolved state cannot be verified.
+        // Cross-environment view (None): pending legs in EITHER environment
+        // refuse the switch — exposure left in the departing environment
+        // stops being supervised once its adapters unbind.
+        let pending = state
+            .state_store
+            .list_pending_order_legs(None)
+            .map_err(|e| format!("Cannot verify pending orders before environment switch: {e}"))?;
+        if !pending.is_empty() {
+            let ids: Vec<String> = pending
                 .iter()
-                .filter(|s| s.status.counts_as_open())
-                .map(|s| format!("{}:{}", s.symbol, s.status.as_str()))
+                .map(|(exec, _)| format!("{}:{}", exec.symbol, exec.status.as_str()))
                 .collect();
-            if !open.is_empty() {
-                return Err(format!(
-                    "Cannot switch trading environment while {} position(s) are open ({}). Flatten them first — closes dispatch through the current environment's venues.",
-                    open.len(),
-                    open.join(", ")
-                ));
-            }
+            return Err(format!(
+                "Cannot switch trading environment while {} signal(s) await reconciliation ({}). Let them settle or resolve the exposure first.",
+                pending.len(),
+                ids.join(", ")
+            ));
+        }
+        let signals = state
+            .state_store
+            .list_open_signals(None)
+            .map_err(|e| format!("Cannot verify open positions before environment switch: {e}"))?;
+        let open: Vec<String> = signals
+            .iter()
+            .filter(|s| s.status.counts_as_open())
+            .map(|s| format!("{}:{}", s.symbol, s.status.as_str()))
+            .collect();
+        if !open.is_empty() {
+            return Err(format!(
+                "Cannot switch trading environment while {} position(s) are open ({}). Flatten them first — closes dispatch through the current environment's venues.",
+                open.len(),
+                open.join(", ")
+            ));
         }
     }
     if target == crate::state::TradingEnvironment::Live {
@@ -2348,9 +2364,15 @@ pub fn set_live_mode_impl(enabled: bool, state: &AppEngineState) -> Result<bool,
 }
 
 pub fn set_engine_paused_impl(paused: bool, state: &AppEngineState) -> Result<bool, String> {
-    let mut p = state.is_paused.write();
-    *p = paused;
-    Ok(*p)
+    // Durable: a restart must not silently resume a halted engine. A kv
+    // write failure refuses the toggle — an in-memory-only pause would
+    // lull the operator into thinking the halt survives restarts.
+    state
+        .state_store
+        .kv_set("engine.paused", if paused { "1" } else { "0" })
+        .map_err(|e| format!("Failed to persist pause state: {e}"))?;
+    *state.is_paused.write() = paused;
+    Ok(paused)
 }
 
 pub fn get_engine_settings_impl(state: &AppEngineState) -> Result<EngineSettingsDto, String> {
@@ -2628,23 +2650,27 @@ pub fn save_engine_settings_impl(
             };
             flag || account_enabled(venue)
         };
-        if let Ok(signals) = state.state_store.list_open_signals() {
-            let open_venues: Vec<String> = signals
-                .iter()
-                .filter(|s| s.status.counts_as_open())
-                .flat_map(|s| s.legs.iter().map(|l| l.venue.to_lowercase()))
-                .collect();
-            let blocked: Vec<String> = enablement
-                .iter()
-                .filter(|(v, on)| !*on && was_enabled(v) && open_venues.iter().any(|o| o == v))
-                .map(|(v, _)| v.clone())
-                .collect();
-            if !blocked.is_empty() {
-                return Err(format!(
-                    "Cannot disable venue(s) {} while live position(s) route through them. Flatten them first.",
-                    blocked.join(", ")
-                ));
-            }
+        // Fail closed on read errors — an unverifiable ledger is not "no
+        // open positions", so the venue-disable check refuses to proceed.
+        let signals = state
+            .state_store
+            .list_open_signals(None)
+            .map_err(|e| format!("Cannot verify open positions before disabling venues: {e}"))?;
+        let open_venues: Vec<String> = signals
+            .iter()
+            .filter(|s| s.status.counts_as_open())
+            .flat_map(|s| s.legs.iter().map(|l| l.venue.to_lowercase()))
+            .collect();
+        let blocked: Vec<String> = enablement
+            .iter()
+            .filter(|(v, on)| !*on && was_enabled(v) && open_venues.iter().any(|o| o == v))
+            .map(|(v, _)| v.clone())
+            .collect();
+        if !blocked.is_empty() {
+            return Err(format!(
+                "Cannot disable venue(s) {} while live position(s) route through them. Flatten them first.",
+                blocked.join(", ")
+            ));
         }
     }
     {
@@ -3190,7 +3216,9 @@ fn compute_matrix_baselines(
                 if dt.is_finite() && dt > 0.0 {
                     let vals: Vec<f64> = series.iter().map(|o| o.spread_bps).collect();
                     OuModelParams::fit(&vals, dt).filter(|p| {
-                        p.half_life.is_finite() && p.half_life > 0.0 && p.r_squared >= OU_MIN_R2
+                        p.half_life.is_finite()
+                            && p.half_life > 0.0
+                            && p.r_squared.is_some_and(|r| r >= OU_MIN_R2)
                     })
                 } else {
                     None
@@ -4102,6 +4130,9 @@ pub(crate) async fn maybe_record_margin_snapshots(state: &AppEngineState, now_ms
             }
             Err(_) => continue,
         };
+        // Feed the drawdown breaker from the background lane too — the
+        // halt must not depend on someone watching the Risk Overview.
+        crate::execution::feed_breaker_equity_usd(state, vid, account.equity);
         let equity = match account.equity.to_string().parse::<f64>() {
             Ok(v) if v.is_finite() && v >= 0.0 => v,
             _ => continue,
@@ -6250,6 +6281,41 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
+    /// Regression (#45): failed unlock attempts are throttled — a retry
+    /// inside the backoff window is refused before touching the KDF, and
+    /// the window grows with consecutive failures. A successful unlock
+    /// resets the counter.
+    #[tokio::test]
+    async fn test_vault_unlock_backoff_throttles_retries() {
+        let (state, dir) = test_state_with_vault("unlock-backoff");
+        initialize_vault_impl("correct password", &state).expect("init vault");
+        let _ = lock_vault_impl(&state);
+
+        // First failure counts and opens a 1s backoff window.
+        let err = unlock_vault_impl("wrong password", &state).expect_err("must fail");
+        assert!(
+            !err.contains("Too many"),
+            "first failure reaches the KDF: {err}"
+        );
+        // Immediate retry is refused without an unlock attempt.
+        let err = unlock_vault_impl("wrong password", &state).expect_err("throttled");
+        assert!(
+            err.contains("Too many failed unlock attempts"),
+            "backoff refusal: {err}"
+        );
+        // Even the CORRECT password is refused inside the window — the
+        // throttle applies to the attempt, not the credential.
+        let err = unlock_vault_impl("correct password", &state).expect_err("still throttled");
+        assert!(err.contains("Too many"), "throttled: {err}");
+
+        // Waiting out the window lets a correct unlock through and resets.
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        unlock_vault_impl("correct password", &state).expect("unlock after backoff");
+        let (failures, _) = *state.vault_unlock_backoff.lock();
+        assert_eq!(failures, 0, "success resets the backoff counter");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     /// Two AMM records carrying DIFFERENT raw keys can never share the one
     /// stronghold record — migration refuses rather than silently picking
     /// a winner; both records keep their vault-held keys.
@@ -6465,32 +6531,35 @@ mod tests {
 
         state
             .state_store
-            .record_signal_execution(&crate::state_store::NewSignalExecution {
-                id: "sig-lock-gate-1".into(),
-                strategy_id: "futures".into(),
-                symbol: "BTC-USDC".into(),
-                route_id: None,
-                expected_net_usd: None,
-                note: None,
-                legs: vec![
-                    crate::state_store::NewSignalLeg {
-                        account_id: None,
-                        venue: "hyperliquid".into(),
-                        side: crate::state_store::LegSide::Long,
-                        symbol: Some("BTC-USDC".into()),
-                        intended_qty: 0.01,
-                        intended_price: Some(100_000.0),
-                    },
-                    crate::state_store::NewSignalLeg {
-                        account_id: None,
-                        venue: "lighter".into(),
-                        side: crate::state_store::LegSide::Short,
-                        symbol: Some("BTC-USDC".into()),
-                        intended_qty: 0.01,
-                        intended_price: Some(100_000.0),
-                    },
-                ],
-            })
+            .record_signal_execution(
+                &crate::state_store::NewSignalExecution {
+                    id: "sig-lock-gate-1".into(),
+                    strategy_id: "futures".into(),
+                    symbol: "BTC-USDC".into(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: vec![
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "hyperliquid".into(),
+                            side: crate::state_store::LegSide::Long,
+                            symbol: Some("BTC-USDC".into()),
+                            intended_qty: 0.01,
+                            intended_price: Some(100_000.0),
+                        },
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "lighter".into(),
+                            side: crate::state_store::LegSide::Short,
+                            symbol: Some("BTC-USDC".into()),
+                            intended_qty: 0.01,
+                            intended_price: Some(100_000.0),
+                        },
+                    ],
+                },
+                "live",
+            )
             .expect("record signal");
         state
             .state_store
@@ -6529,32 +6598,35 @@ mod tests {
 
         state
             .state_store
-            .record_signal_execution(&crate::state_store::NewSignalExecution {
-                id: "sig-cred-gate-1".into(),
-                strategy_id: "futures".into(),
-                symbol: "BTC-USDC".into(),
-                route_id: None,
-                expected_net_usd: None,
-                note: None,
-                legs: vec![
-                    crate::state_store::NewSignalLeg {
-                        account_id: None,
-                        venue: "hyperliquid".into(),
-                        side: crate::state_store::LegSide::Long,
-                        symbol: Some("BTC-USDC".into()),
-                        intended_qty: 0.01,
-                        intended_price: Some(100_000.0),
-                    },
-                    crate::state_store::NewSignalLeg {
-                        account_id: None,
-                        venue: "lighter".into(),
-                        side: crate::state_store::LegSide::Short,
-                        symbol: Some("BTC-USDC".into()),
-                        intended_qty: 0.01,
-                        intended_price: Some(100_000.0),
-                    },
-                ],
-            })
+            .record_signal_execution(
+                &crate::state_store::NewSignalExecution {
+                    id: "sig-cred-gate-1".into(),
+                    strategy_id: "futures".into(),
+                    symbol: "BTC-USDC".into(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: vec![
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "hyperliquid".into(),
+                            side: crate::state_store::LegSide::Long,
+                            symbol: Some("BTC-USDC".into()),
+                            intended_qty: 0.01,
+                            intended_price: Some(100_000.0),
+                        },
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "lighter".into(),
+                            side: crate::state_store::LegSide::Short,
+                            symbol: Some("BTC-USDC".into()),
+                            intended_qty: 0.01,
+                            intended_price: Some(100_000.0),
+                        },
+                    ],
+                },
+                "live",
+            )
             .expect("record signal");
         state
             .state_store
@@ -6603,32 +6675,35 @@ mod tests {
 
         state
             .state_store
-            .record_signal_execution(&crate::state_store::NewSignalExecution {
-                id: "sig-venue-gate-1".into(),
-                strategy_id: "futures".into(),
-                symbol: "BTC-USDC".into(),
-                route_id: None,
-                expected_net_usd: None,
-                note: None,
-                legs: vec![
-                    crate::state_store::NewSignalLeg {
-                        account_id: None,
-                        venue: "hyperliquid".into(),
-                        side: crate::state_store::LegSide::Long,
-                        symbol: Some("BTC-USDC".into()),
-                        intended_qty: 0.01,
-                        intended_price: Some(100_000.0),
-                    },
-                    crate::state_store::NewSignalLeg {
-                        account_id: None,
-                        venue: "lighter".into(),
-                        side: crate::state_store::LegSide::Short,
-                        symbol: Some("BTC-USDC".into()),
-                        intended_qty: 0.01,
-                        intended_price: Some(100_000.0),
-                    },
-                ],
-            })
+            .record_signal_execution(
+                &crate::state_store::NewSignalExecution {
+                    id: "sig-venue-gate-1".into(),
+                    strategy_id: "futures".into(),
+                    symbol: "BTC-USDC".into(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: vec![
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "hyperliquid".into(),
+                            side: crate::state_store::LegSide::Long,
+                            symbol: Some("BTC-USDC".into()),
+                            intended_qty: 0.01,
+                            intended_price: Some(100_000.0),
+                        },
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "lighter".into(),
+                            side: crate::state_store::LegSide::Short,
+                            symbol: Some("BTC-USDC".into()),
+                            intended_qty: 0.01,
+                            intended_price: Some(100_000.0),
+                        },
+                    ],
+                },
+                "testnet",
+            )
             .expect("record signal");
         state
             .state_store
@@ -7206,7 +7281,6 @@ mod tests {
             None,
             "futures",
             None,
-            None,
             &state,
         )
         .await
@@ -7229,7 +7303,6 @@ mod tests {
             None,
             None,
             "radar",
-            None,
             None,
             &state,
         )
@@ -7254,7 +7327,6 @@ mod tests {
             None,
             None,
             "radar",
-            None,
             None,
             &state,
         )
@@ -7560,7 +7632,7 @@ mod tests {
         assert_eq!(short_leg.venue, "lighter");
 
         // Open aggregation yields two same-venue rows with distinct symbols.
-        let signals = state.state_store.list_open_signals().expect("signals");
+        let signals = state.state_store.list_open_signals(None).expect("signals");
         let positions = crate::state_store::aggregate_open_positions(&signals, &|venue, symbol| {
             state
                 .market_data_hub
@@ -8940,32 +9012,35 @@ mod tests {
         let state = AppEngineState::new();
         state
             .state_store
-            .record_signal_execution(&crate::state_store::NewSignalExecution {
-                id: "sig-env-block-1".into(),
-                strategy_id: "futures".into(),
-                symbol: "BTC-USDC".into(),
-                route_id: None,
-                expected_net_usd: None,
-                note: None,
-                legs: vec![
-                    crate::state_store::NewSignalLeg {
-                        account_id: None,
-                        venue: "hyperliquid".into(),
-                        side: crate::state_store::LegSide::Long,
-                        symbol: Some("BTC-USDC".into()),
-                        intended_qty: 0.01,
-                        intended_price: Some(100_000.0),
-                    },
-                    crate::state_store::NewSignalLeg {
-                        account_id: None,
-                        venue: "lighter".into(),
-                        side: crate::state_store::LegSide::Short,
-                        symbol: Some("BTC-USDC".into()),
-                        intended_qty: 0.01,
-                        intended_price: Some(100_000.0),
-                    },
-                ],
-            })
+            .record_signal_execution(
+                &crate::state_store::NewSignalExecution {
+                    id: "sig-env-block-1".into(),
+                    strategy_id: "futures".into(),
+                    symbol: "BTC-USDC".into(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: vec![
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "hyperliquid".into(),
+                            side: crate::state_store::LegSide::Long,
+                            symbol: Some("BTC-USDC".into()),
+                            intended_qty: 0.01,
+                            intended_price: Some(100_000.0),
+                        },
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "lighter".into(),
+                            side: crate::state_store::LegSide::Short,
+                            symbol: Some("BTC-USDC".into()),
+                            intended_qty: 0.01,
+                            intended_price: Some(100_000.0),
+                        },
+                    ],
+                },
+                "testnet",
+            )
             .expect("record signal");
         state
             .state_store
@@ -9124,7 +9199,7 @@ mod tests {
         // any account/book/order work is dispatched.
         let sim_err = execute_spatial_arbitrage_inner(
             "BTC-USDC", "aster", "vanta", 100.0, None, None, None, None, None, None, None,
-            "futures", None, None, &state,
+            "futures", None, &state,
         )
         .await;
         let sim_err = sim_err.unwrap_err();
@@ -9134,7 +9209,7 @@ mod tests {
         );
         assert!(state
             .state_store
-            .blocking_signals("BTC-USDC")
+            .blocking_signals("BTC-USDC", None)
             .expect("blocking signals")
             .is_empty());
 
@@ -9142,7 +9217,7 @@ mod tests {
         // regardless of which venues the route names.
         let decibel_err = execute_spatial_arbitrage_inner(
             "BTC-USDC", "aster", "decibel", 100.0, None, None, None, None, None, None, None,
-            "futures", None, None, &state,
+            "futures", None, &state,
         )
         .await;
         assert!(decibel_err.is_err());
@@ -9587,32 +9662,35 @@ mod tests {
             // it stale-Closed (crash-window between signal-close and
             // lot-close persists).
             store
-                .record_signal_execution(&crate::state_store::NewSignalExecution {
-                    id: "sig-open".into(),
-                    strategy_id: "futures".into(),
-                    symbol: "BTC-USDC".into(),
-                    route_id: None,
-                    expected_net_usd: None,
-                    note: None,
-                    legs: vec![
-                        crate::state_store::NewSignalLeg {
-                            account_id: None,
-                            venue: "hyperliquid".into(),
-                            side: crate::state_store::LegSide::Long,
-                            symbol: None,
-                            intended_qty: 0.1,
-                            intended_price: None,
-                        },
-                        crate::state_store::NewSignalLeg {
-                            account_id: None,
-                            venue: "lighter".into(),
-                            side: crate::state_store::LegSide::Short,
-                            symbol: None,
-                            intended_qty: 0.1,
-                            intended_price: None,
-                        },
-                    ],
-                })
+                .record_signal_execution(
+                    &crate::state_store::NewSignalExecution {
+                        id: "sig-open".into(),
+                        strategy_id: "futures".into(),
+                        symbol: "BTC-USDC".into(),
+                        route_id: None,
+                        expected_net_usd: None,
+                        note: None,
+                        legs: vec![
+                            crate::state_store::NewSignalLeg {
+                                account_id: None,
+                                venue: "hyperliquid".into(),
+                                side: crate::state_store::LegSide::Long,
+                                symbol: None,
+                                intended_qty: 0.1,
+                                intended_price: None,
+                            },
+                            crate::state_store::NewSignalLeg {
+                                account_id: None,
+                                venue: "lighter".into(),
+                                side: crate::state_store::LegSide::Short,
+                                symbol: None,
+                                intended_qty: 0.1,
+                                intended_price: None,
+                            },
+                        ],
+                    },
+                    "testnet",
+                )
                 .expect("record");
             store
                 .apply_leg_fill(
@@ -9651,6 +9729,7 @@ mod tests {
                     0.1,
                     64_440.0,
                     0.5,
+                    "testnet".into(),
                 );
                 let lot = ledger.lots.get("spatial-9").unwrap().clone();
                 state.state_store.upsert_cycle_lot(&lot).unwrap();
@@ -9701,32 +9780,35 @@ mod tests {
         {
             let state = AppEngineState::new_inner_for_test(store.clone());
             store
-                .record_signal_execution(&crate::state_store::NewSignalExecution {
-                    id: "sig-pre-v30".into(),
-                    strategy_id: "futures".into(),
-                    symbol: "BTC-USDC".into(),
-                    route_id: None,
-                    expected_net_usd: None,
-                    note: None,
-                    legs: vec![
-                        crate::state_store::NewSignalLeg {
-                            account_id: None,
-                            venue: "hyperliquid".into(),
-                            side: crate::state_store::LegSide::Long,
-                            symbol: None,
-                            intended_qty: 0.1,
-                            intended_price: None,
-                        },
-                        crate::state_store::NewSignalLeg {
-                            account_id: None,
-                            venue: "lighter".into(),
-                            side: crate::state_store::LegSide::Short,
-                            symbol: None,
-                            intended_qty: 0.1,
-                            intended_price: None,
-                        },
-                    ],
-                })
+                .record_signal_execution(
+                    &crate::state_store::NewSignalExecution {
+                        id: "sig-pre-v30".into(),
+                        strategy_id: "futures".into(),
+                        symbol: "BTC-USDC".into(),
+                        route_id: None,
+                        expected_net_usd: None,
+                        note: None,
+                        legs: vec![
+                            crate::state_store::NewSignalLeg {
+                                account_id: None,
+                                venue: "hyperliquid".into(),
+                                side: crate::state_store::LegSide::Long,
+                                symbol: None,
+                                intended_qty: 0.1,
+                                intended_price: None,
+                            },
+                            crate::state_store::NewSignalLeg {
+                                account_id: None,
+                                venue: "lighter".into(),
+                                side: crate::state_store::LegSide::Short,
+                                symbol: None,
+                                intended_qty: 0.1,
+                                intended_price: None,
+                            },
+                        ],
+                    },
+                    "testnet",
+                )
                 .expect("record");
             store
                 .apply_leg_fill(
@@ -9788,32 +9870,35 @@ mod tests {
         {
             let _state = AppEngineState::new_inner_for_test(store.clone());
             store
-                .record_signal_execution(&crate::state_store::NewSignalExecution {
-                    id: "sig-trimmed".into(),
-                    strategy_id: "futures".into(),
-                    symbol: "BTC-USDC".into(),
-                    route_id: None,
-                    expected_net_usd: None,
-                    note: None,
-                    legs: vec![
-                        crate::state_store::NewSignalLeg {
-                            account_id: None,
-                            venue: "hyperliquid".into(),
-                            side: crate::state_store::LegSide::Long,
-                            symbol: None,
-                            intended_qty: 0.1,
-                            intended_price: None,
-                        },
-                        crate::state_store::NewSignalLeg {
-                            account_id: None,
-                            venue: "lighter".into(),
-                            side: crate::state_store::LegSide::Short,
-                            symbol: None,
-                            intended_qty: 0.1,
-                            intended_price: None,
-                        },
-                    ],
-                })
+                .record_signal_execution(
+                    &crate::state_store::NewSignalExecution {
+                        id: "sig-trimmed".into(),
+                        strategy_id: "futures".into(),
+                        symbol: "BTC-USDC".into(),
+                        route_id: None,
+                        expected_net_usd: None,
+                        note: None,
+                        legs: vec![
+                            crate::state_store::NewSignalLeg {
+                                account_id: None,
+                                venue: "hyperliquid".into(),
+                                side: crate::state_store::LegSide::Long,
+                                symbol: None,
+                                intended_qty: 0.1,
+                                intended_price: None,
+                            },
+                            crate::state_store::NewSignalLeg {
+                                account_id: None,
+                                venue: "lighter".into(),
+                                side: crate::state_store::LegSide::Short,
+                                symbol: None,
+                                intended_qty: 0.1,
+                                intended_price: None,
+                            },
+                        ],
+                    },
+                    "testnet",
+                )
                 .expect("record");
             for (side, px) in [
                 (crate::state_store::LegSide::Long, 64_200.0),
@@ -9833,32 +9918,35 @@ mod tests {
             // Trim child already Closed on the crash boundary — its fills
             // still count toward the residual.
             store
-                .record_signal_execution(&crate::state_store::NewSignalExecution {
-                    id: "trim-sig-trimmed-00ff".into(),
-                    strategy_id: "futures".into(),
-                    symbol: "BTC-USDC".into(),
-                    route_id: None,
-                    expected_net_usd: None,
-                    note: None,
-                    legs: vec![
-                        crate::state_store::NewSignalLeg {
-                            account_id: None,
-                            venue: "hyperliquid".into(),
-                            side: crate::state_store::LegSide::Short,
-                            symbol: Some("BTC-USDC".into()),
-                            intended_qty: 0.04,
-                            intended_price: None,
-                        },
-                        crate::state_store::NewSignalLeg {
-                            account_id: None,
-                            venue: "lighter".into(),
-                            side: crate::state_store::LegSide::Long,
-                            symbol: Some("BTC-USDC".into()),
-                            intended_qty: 0.04,
-                            intended_price: None,
-                        },
-                    ],
-                })
+                .record_signal_execution(
+                    &crate::state_store::NewSignalExecution {
+                        id: "trim-sig-trimmed-00ff".into(),
+                        strategy_id: "futures".into(),
+                        symbol: "BTC-USDC".into(),
+                        route_id: None,
+                        expected_net_usd: None,
+                        note: None,
+                        legs: vec![
+                            crate::state_store::NewSignalLeg {
+                                account_id: None,
+                                venue: "hyperliquid".into(),
+                                side: crate::state_store::LegSide::Short,
+                                symbol: Some("BTC-USDC".into()),
+                                intended_qty: 0.04,
+                                intended_price: None,
+                            },
+                            crate::state_store::NewSignalLeg {
+                                account_id: None,
+                                venue: "lighter".into(),
+                                side: crate::state_store::LegSide::Long,
+                                symbol: Some("BTC-USDC".into()),
+                                intended_qty: 0.04,
+                                intended_price: None,
+                            },
+                        ],
+                    },
+                    "testnet",
+                )
                 .expect("record trim");
             for (side, px) in [
                 (crate::state_store::LegSide::Short, 64_300.0),
@@ -9904,32 +9992,35 @@ mod tests {
         // Open pair: long 1.0 @ 64200 (fee 0.5), short 1.0 @ 64440 (fee 0.5).
         state
             .state_store
-            .record_signal_execution(&NewSignalExecution {
-                id: "sig-trim".into(),
-                strategy_id: "futures".into(),
-                symbol: "BTC-USDC".into(),
-                route_id: None,
-                expected_net_usd: None,
-                note: None,
-                legs: vec![
-                    NewSignalLeg {
-                        account_id: None,
-                        venue: "hyperliquid".into(),
-                        side: LegSide::Long,
-                        symbol: None,
-                        intended_qty: 1.0,
-                        intended_price: None,
-                    },
-                    NewSignalLeg {
-                        account_id: None,
-                        venue: "lighter".into(),
-                        side: LegSide::Short,
-                        symbol: None,
-                        intended_qty: 1.0,
-                        intended_price: None,
-                    },
-                ],
-            })
+            .record_signal_execution(
+                &NewSignalExecution {
+                    id: "sig-trim".into(),
+                    strategy_id: "futures".into(),
+                    symbol: "BTC-USDC".into(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: vec![
+                        NewSignalLeg {
+                            account_id: None,
+                            venue: "hyperliquid".into(),
+                            side: LegSide::Long,
+                            symbol: None,
+                            intended_qty: 1.0,
+                            intended_price: None,
+                        },
+                        NewSignalLeg {
+                            account_id: None,
+                            venue: "lighter".into(),
+                            side: LegSide::Short,
+                            symbol: None,
+                            intended_qty: 1.0,
+                            intended_price: None,
+                        },
+                    ],
+                },
+                "testnet",
+            )
             .expect("record");
         state
             .state_store
@@ -9953,6 +10044,7 @@ mod tests {
                 1.0,
                 64_440.0,
                 1.0,
+                "testnet".into(),
             );
             let lot = ledger.lots.get("spatial-trim-1").unwrap().clone();
             state.state_store.upsert_cycle_lot(&lot).unwrap();
@@ -9964,32 +10056,35 @@ mod tests {
         // inverse of the entry sides.
         state
             .state_store
-            .record_signal_execution(&NewSignalExecution {
-                id: "trim-sig-trim-a1".into(),
-                strategy_id: "futures".into(),
-                symbol: "BTC-USDC".into(),
-                route_id: None,
-                expected_net_usd: None,
-                note: Some("liq trim of sig-trim".into()),
-                legs: vec![
-                    NewSignalLeg {
-                        account_id: None,
-                        venue: "hyperliquid".into(),
-                        side: LegSide::Short,
-                        symbol: Some("BTC-USDC".into()),
-                        intended_qty: 0.4,
-                        intended_price: None,
-                    },
-                    NewSignalLeg {
-                        account_id: None,
-                        venue: "lighter".into(),
-                        side: LegSide::Long,
-                        symbol: Some("BTC-USDC".into()),
-                        intended_qty: 0.4,
-                        intended_price: None,
-                    },
-                ],
-            })
+            .record_signal_execution(
+                &NewSignalExecution {
+                    id: "trim-sig-trim-a1".into(),
+                    strategy_id: "futures".into(),
+                    symbol: "BTC-USDC".into(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: Some("liq trim of sig-trim".into()),
+                    legs: vec![
+                        NewSignalLeg {
+                            account_id: None,
+                            venue: "hyperliquid".into(),
+                            side: LegSide::Short,
+                            symbol: Some("BTC-USDC".into()),
+                            intended_qty: 0.4,
+                            intended_price: None,
+                        },
+                        NewSignalLeg {
+                            account_id: None,
+                            venue: "lighter".into(),
+                            side: LegSide::Long,
+                            symbol: Some("BTC-USDC".into()),
+                            intended_qty: 0.4,
+                            intended_price: None,
+                        },
+                    ],
+                },
+                "testnet",
+            )
             .expect("record trim");
         state
             .state_store
@@ -10098,32 +10193,35 @@ mod tests {
         // exclude `trim-` fills or it would over-fill the shrunken lot.
         state
             .state_store
-            .record_signal_execution(&NewSignalExecution {
-                id: "flat-sig-trim-b2".into(),
-                strategy_id: "futures".into(),
-                symbol: "BTC-USDC".into(),
-                route_id: None,
-                expected_net_usd: None,
-                note: None,
-                legs: vec![
-                    NewSignalLeg {
-                        account_id: None,
-                        venue: "hyperliquid".into(),
-                        side: LegSide::Short,
-                        symbol: Some("BTC-USDC".into()),
-                        intended_qty: 0.5,
-                        intended_price: None,
-                    },
-                    NewSignalLeg {
-                        account_id: None,
-                        venue: "lighter".into(),
-                        side: LegSide::Long,
-                        symbol: Some("BTC-USDC".into()),
-                        intended_qty: 0.5,
-                        intended_price: None,
-                    },
-                ],
-            })
+            .record_signal_execution(
+                &NewSignalExecution {
+                    id: "flat-sig-trim-b2".into(),
+                    strategy_id: "futures".into(),
+                    symbol: "BTC-USDC".into(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: vec![
+                        NewSignalLeg {
+                            account_id: None,
+                            venue: "hyperliquid".into(),
+                            side: LegSide::Short,
+                            symbol: Some("BTC-USDC".into()),
+                            intended_qty: 0.5,
+                            intended_price: None,
+                        },
+                        NewSignalLeg {
+                            account_id: None,
+                            venue: "lighter".into(),
+                            side: LegSide::Long,
+                            symbol: Some("BTC-USDC".into()),
+                            intended_qty: 0.5,
+                            intended_price: None,
+                        },
+                    ],
+                },
+                "testnet",
+            )
             .expect("record flat");
         state
             .state_store
@@ -10752,32 +10850,35 @@ mod tests {
             let id = format!("slip-{i}");
             state
                 .state_store
-                .record_signal_execution(&crate::state_store::NewSignalExecution {
-                    id: id.clone(),
-                    strategy_id: "futures".into(),
-                    symbol: "BTC-USDC".into(),
-                    route_id: None,
-                    expected_net_usd: None,
-                    note: None,
-                    legs: vec![
-                        crate::state_store::NewSignalLeg {
-                            account_id: None,
-                            venue: "hyperliquid".into(),
-                            side: crate::state_store::LegSide::Long,
-                            symbol: None,
-                            intended_qty: 1.0,
-                            intended_price: Some(100.0),
-                        },
-                        crate::state_store::NewSignalLeg {
-                            account_id: None,
-                            venue: "lighter".into(),
-                            side: crate::state_store::LegSide::Short,
-                            symbol: None,
-                            intended_qty: 1.0,
-                            intended_price: Some(100.5),
-                        },
-                    ],
-                })
+                .record_signal_execution(
+                    &crate::state_store::NewSignalExecution {
+                        id: id.clone(),
+                        strategy_id: "futures".into(),
+                        symbol: "BTC-USDC".into(),
+                        route_id: None,
+                        expected_net_usd: None,
+                        note: None,
+                        legs: vec![
+                            crate::state_store::NewSignalLeg {
+                                account_id: None,
+                                venue: "hyperliquid".into(),
+                                side: crate::state_store::LegSide::Long,
+                                symbol: None,
+                                intended_qty: 1.0,
+                                intended_price: Some(100.0),
+                            },
+                            crate::state_store::NewSignalLeg {
+                                account_id: None,
+                                venue: "lighter".into(),
+                                side: crate::state_store::LegSide::Short,
+                                symbol: None,
+                                intended_qty: 1.0,
+                                intended_price: Some(100.5),
+                            },
+                        ],
+                    },
+                    "testnet",
+                )
                 .expect("record signal");
             // Long pays +0.1 over quote (+10 bps); short fills 0.1 under
             // quote (+0.1/100.5 ≈ +9.95 bps adverse).
@@ -11300,7 +11401,6 @@ mod tests {
             None,
             "futures",
             None,
-            None,
             &state,
         )
         .await
@@ -11322,7 +11422,6 @@ mod tests {
             None,
             "futures",
             None,
-            None,
             &state,
         )
         .await
@@ -11342,32 +11441,35 @@ mod tests {
         );
         state
             .state_store
-            .record_signal_execution(&crate::state_store::NewSignalExecution {
-                id: "grid-open-1".into(),
-                strategy_id: "futures".into(),
-                symbol: "BTC-USDC".into(),
-                route_id: None,
-                expected_net_usd: None,
-                note: None,
-                legs: vec![
-                    crate::state_store::NewSignalLeg {
-                        account_id: None,
-                        venue: "hyperliquid".into(),
-                        side: crate::state_store::LegSide::Long,
-                        symbol: None,
-                        intended_qty: 0.1,
-                        intended_price: Some(100.0),
-                    },
-                    crate::state_store::NewSignalLeg {
-                        account_id: None,
-                        venue: "lighter".into(),
-                        side: crate::state_store::LegSide::Short,
-                        symbol: None,
-                        intended_qty: 0.1,
-                        intended_price: Some(100.5),
-                    },
-                ],
-            })
+            .record_signal_execution(
+                &crate::state_store::NewSignalExecution {
+                    id: "grid-open-1".into(),
+                    strategy_id: "futures".into(),
+                    symbol: "BTC-USDC".into(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: vec![
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "hyperliquid".into(),
+                            side: crate::state_store::LegSide::Long,
+                            symbol: None,
+                            intended_qty: 0.1,
+                            intended_price: Some(100.0),
+                        },
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "lighter".into(),
+                            side: crate::state_store::LegSide::Short,
+                            symbol: None,
+                            intended_qty: 0.1,
+                            intended_price: Some(100.5),
+                        },
+                    ],
+                },
+                "testnet",
+            )
             .expect("record signal");
         state
             .state_store
@@ -11390,7 +11492,6 @@ mod tests {
             None,
             None,
             "futures",
-            None,
             None,
             &state,
         )
@@ -11912,7 +12013,7 @@ mod tests {
         let metrics = state
             .virtual_ledger
             .read()
-            .compute_strategy_metrics("spatial_spread");
+            .compute_strategy_metrics("spatial_spread", "testnet");
         assert_eq!(metrics.total_cycles_initiated, 1);
 
         let perfs = get_strategy_performance_impl(None, &state).expect("performance");
@@ -12078,13 +12179,13 @@ mod tests {
         assert!(
             state
                 .state_store
-                .ticker_net_position("BTC-USDC")
+                .ticker_net_position("BTC-USDC", None)
                 .unwrap()
                 .abs()
                 < 1e-9
         );
         // Balanced signals no longer block the ticker.
-        assert!(!state.state_store.ticker_blocked("BTC-USDC").unwrap());
+        assert!(!state.state_store.ticker_blocked("BTC-USDC", None).unwrap());
     }
 
     #[tokio::test]
@@ -12111,32 +12212,35 @@ mod tests {
         // leg filled. The ticker must refuse new orders until it reconciles.
         state
             .state_store
-            .record_signal_execution(&crate::state_store::NewSignalExecution {
-                id: "sig-stuck".into(),
-                strategy_id: "futures".into(),
-                symbol: "BTC-USDC".into(),
-                route_id: None,
-                expected_net_usd: Some(5.0),
-                note: None,
-                legs: vec![
-                    crate::state_store::NewSignalLeg {
-                        account_id: None,
-                        venue: "hyperliquid".into(),
-                        side: crate::state_store::LegSide::Long,
-                        symbol: None,
-                        intended_qty: 0.1,
-                        intended_price: None,
-                    },
-                    crate::state_store::NewSignalLeg {
-                        account_id: None,
-                        venue: "lighter".into(),
-                        side: crate::state_store::LegSide::Short,
-                        symbol: None,
-                        intended_qty: 0.1,
-                        intended_price: None,
-                    },
-                ],
-            })
+            .record_signal_execution(
+                &crate::state_store::NewSignalExecution {
+                    id: "sig-stuck".into(),
+                    strategy_id: "futures".into(),
+                    symbol: "BTC-USDC".into(),
+                    route_id: None,
+                    expected_net_usd: Some(5.0),
+                    note: None,
+                    legs: vec![
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "hyperliquid".into(),
+                            side: crate::state_store::LegSide::Long,
+                            symbol: None,
+                            intended_qty: 0.1,
+                            intended_price: None,
+                        },
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "lighter".into(),
+                            side: crate::state_store::LegSide::Short,
+                            symbol: None,
+                            intended_qty: 0.1,
+                            intended_price: None,
+                        },
+                    ],
+                },
+                "testnet",
+            )
             .expect("record signal");
         state
             .state_store
@@ -12253,6 +12357,7 @@ mod tests {
                     predicted_win_probability: None,
                 },
             ],
+            false,
             &state,
         )
         .await
@@ -12318,22 +12423,25 @@ mod tests {
         // In-flight signal on BTC-USDC blocks every candidate in the batch.
         state
             .state_store
-            .record_signal_execution(&crate::state_store::NewSignalExecution {
-                id: "sig-flight".into(),
-                strategy_id: "futures".into(),
-                symbol: "BTC-USDC".into(),
-                route_id: None,
-                expected_net_usd: None,
-                note: None,
-                legs: vec![crate::state_store::NewSignalLeg {
-                    account_id: None,
-                    venue: "hyperliquid".into(),
-                    side: crate::state_store::LegSide::Long,
-                    symbol: None,
-                    intended_qty: 0.1,
-                    intended_price: None,
-                }],
-            })
+            .record_signal_execution(
+                &crate::state_store::NewSignalExecution {
+                    id: "sig-flight".into(),
+                    strategy_id: "futures".into(),
+                    symbol: "BTC-USDC".into(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: vec![crate::state_store::NewSignalLeg {
+                        account_id: None,
+                        venue: "hyperliquid".into(),
+                        side: crate::state_store::LegSide::Long,
+                        symbol: None,
+                        intended_qty: 0.1,
+                        intended_price: None,
+                    }],
+                },
+                "testnet",
+            )
             .expect("record in-flight signal");
 
         let outcomes = execute_spatial_candidates_impl(
@@ -12375,6 +12483,7 @@ mod tests {
                     predicted_win_probability: None,
                 },
             ],
+            false,
             &state,
         )
         .await
@@ -12422,22 +12531,25 @@ mod tests {
 
         state
             .state_store
-            .record_signal_execution(&crate::state_store::NewSignalExecution {
-                id: "sig-hist".into(),
-                strategy_id: "futures".into(),
-                symbol: "BTC-USDC".into(),
-                route_id: None,
-                expected_net_usd: None,
-                note: None,
-                legs: vec![crate::state_store::NewSignalLeg {
-                    account_id: Some(account.id.clone()),
-                    venue: "hyperliquid".into(),
-                    side: crate::state_store::LegSide::Long,
-                    symbol: None,
-                    intended_qty: 0.1,
-                    intended_price: None,
-                }],
-            })
+            .record_signal_execution(
+                &crate::state_store::NewSignalExecution {
+                    id: "sig-hist".into(),
+                    strategy_id: "futures".into(),
+                    symbol: "BTC-USDC".into(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: vec![crate::state_store::NewSignalLeg {
+                        account_id: Some(account.id.clone()),
+                        venue: "hyperliquid".into(),
+                        side: crate::state_store::LegSide::Long,
+                        symbol: None,
+                        intended_qty: 0.1,
+                        intended_price: None,
+                    }],
+                },
+                "testnet",
+            )
             .expect("record signal");
 
         let err = delete_account_impl(&account.id, &state).expect_err("must refuse");
@@ -12898,15 +13010,18 @@ mod tests {
         };
         state
             .state_store
-            .record_signal_execution(&NewSignalExecution {
-                id: root_id.to_string(),
-                strategy_id: strategy.to_string(),
-                symbol: "BTC-USDC".to_string(),
-                route_id: None,
-                expected_net_usd: None,
-                note: None,
-                legs: legs("hyperliquid", "lighter"),
-            })
+            .record_signal_execution(
+                &NewSignalExecution {
+                    id: root_id.to_string(),
+                    strategy_id: strategy.to_string(),
+                    symbol: "BTC-USDC".to_string(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: legs("hyperliquid", "lighter"),
+                },
+                "testnet",
+            )
             .expect("root records");
         state
             .state_store
@@ -12922,32 +13037,35 @@ mod tests {
         // production flatten path.
         state
             .state_store
-            .record_signal_execution(&NewSignalExecution {
-                id: close_id.clone(),
-                strategy_id: strategy.to_string(),
-                symbol: "BTC-USDC".to_string(),
-                route_id: None,
-                expected_net_usd: None,
-                note: None,
-                legs: vec![
-                    NewSignalLeg {
-                        account_id: None,
-                        venue: "hyperliquid".to_string(),
-                        side: LegSide::Short,
-                        symbol: None,
-                        intended_qty: 1.0,
-                        intended_price: None,
-                    },
-                    NewSignalLeg {
-                        account_id: None,
-                        venue: "lighter".to_string(),
-                        side: LegSide::Long,
-                        symbol: None,
-                        intended_qty: 1.0,
-                        intended_price: None,
-                    },
-                ],
-            })
+            .record_signal_execution(
+                &NewSignalExecution {
+                    id: close_id.clone(),
+                    strategy_id: strategy.to_string(),
+                    symbol: "BTC-USDC".to_string(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: vec![
+                        NewSignalLeg {
+                            account_id: None,
+                            venue: "hyperliquid".to_string(),
+                            side: LegSide::Short,
+                            symbol: None,
+                            intended_qty: 1.0,
+                            intended_price: None,
+                        },
+                        NewSignalLeg {
+                            account_id: None,
+                            venue: "lighter".to_string(),
+                            side: LegSide::Long,
+                            symbol: None,
+                            intended_qty: 1.0,
+                            intended_price: None,
+                        },
+                    ],
+                },
+                "testnet",
+            )
             .expect("close child records");
         // Sell to close the long @ exit_long_px; buy back the short @
         // exit_short_px.
@@ -13028,35 +13146,91 @@ mod tests {
         // Closed with no fills at all: nothing valuable, excluded and counted.
         state
             .state_store
-            .record_signal_execution(&NewSignalExecution {
-                id: "sig-empty".to_string(),
-                strategy_id: "futures".to_string(),
-                symbol: "BTC-USDC".to_string(),
-                route_id: None,
-                expected_net_usd: None,
-                note: None,
-                legs: vec![NewSignalLeg {
-                    account_id: None,
-                    venue: "hyperliquid".to_string(),
-                    side: crate::state_store::LegSide::Long,
-                    symbol: None,
-                    intended_qty: 1.0,
-                    intended_price: None,
-                }],
-            })
+            .record_signal_execution(
+                &NewSignalExecution {
+                    id: "sig-empty".to_string(),
+                    strategy_id: "futures".to_string(),
+                    symbol: "BTC-USDC".to_string(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: vec![NewSignalLeg {
+                        account_id: None,
+                        venue: "hyperliquid".to_string(),
+                        side: crate::state_store::LegSide::Long,
+                        symbol: None,
+                        intended_qty: 1.0,
+                        intended_price: None,
+                    }],
+                },
+                "testnet",
+            )
             .expect("empty root records");
         state
             .state_store
             .update_signal_status("sig-empty", SignalStatus::Closed, None)
             .expect("empty root closes");
-        // Open families never enter the sums either way.
-        seed_closed_family(
-            &state, "sig-open", "futures", 60000.0, 60120.0, 60050.0, 60100.0,
-        );
+        // Open families never enter the sums either way — record a root
+        // with fills and leave it non-terminal (a terminal signal cannot
+        // reopen; that refusal is itself covered elsewhere).
+        state
+            .state_store
+            .record_signal_execution(
+                &NewSignalExecution {
+                    id: "sig-open".to_string(),
+                    strategy_id: "futures".to_string(),
+                    symbol: "BTC-USDC".to_string(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: vec![
+                        NewSignalLeg {
+                            account_id: None,
+                            venue: "hyperliquid".to_string(),
+                            side: crate::state_store::LegSide::Long,
+                            symbol: None,
+                            intended_qty: 1.0,
+                            intended_price: None,
+                        },
+                        NewSignalLeg {
+                            account_id: None,
+                            venue: "lighter".to_string(),
+                            side: crate::state_store::LegSide::Short,
+                            symbol: None,
+                            intended_qty: 1.0,
+                            intended_price: None,
+                        },
+                    ],
+                },
+                "testnet",
+            )
+            .expect("open root records");
+        state
+            .state_store
+            .apply_leg_fill(
+                "sig-open",
+                crate::state_store::LegSide::Long,
+                1.0,
+                60000.0,
+                2.0,
+                None,
+            )
+            .expect("open long fills");
+        state
+            .state_store
+            .apply_leg_fill(
+                "sig-open",
+                crate::state_store::LegSide::Short,
+                1.0,
+                60120.0,
+                2.0,
+                None,
+            )
+            .expect("open short fills");
         state
             .state_store
             .update_signal_status("sig-open", SignalStatus::Imbalanced, None)
-            .expect("reopen root");
+            .expect("root stays non-terminal");
         let pnl = get_strategy_fill_pnl_impl("futures", &state).expect("pnl");
         assert_eq!(pnl.closed_families, 0);
         assert_eq!(pnl.open_families, 1);
@@ -13482,7 +13656,7 @@ mod tests {
 
         assert!(!state
             .state_store
-            .ticker_blocked("BTC-USDC")
+            .ticker_blocked("BTC-USDC", None)
             .expect("blocked"));
         for sig in state
             .state_store
@@ -13594,22 +13768,25 @@ mod tests {
         for (id, strategy) in [("root-fut", "futures"), ("root-spot", "spot")] {
             state
                 .state_store
-                .record_signal_execution(&NewSignalExecution {
-                    id: id.into(),
-                    strategy_id: strategy.into(),
-                    symbol: "BTC-USDC".into(),
-                    route_id: None,
-                    expected_net_usd: None,
-                    note: None,
-                    legs: vec![NewSignalLeg {
-                        account_id: None,
-                        venue: "hyperliquid".into(),
-                        side: LegSide::Long,
-                        symbol: None,
-                        intended_qty: 0.1,
-                        intended_price: None,
-                    }],
-                })
+                .record_signal_execution(
+                    &NewSignalExecution {
+                        id: id.into(),
+                        strategy_id: strategy.into(),
+                        symbol: "BTC-USDC".into(),
+                        route_id: None,
+                        expected_net_usd: None,
+                        note: None,
+                        legs: vec![NewSignalLeg {
+                            account_id: None,
+                            venue: "hyperliquid".into(),
+                            side: LegSide::Long,
+                            symbol: None,
+                            intended_qty: 0.1,
+                            intended_price: None,
+                        }],
+                    },
+                    "testnet",
+                )
                 .expect("record root");
             state
                 .state_store
@@ -13726,22 +13903,25 @@ mod tests {
             .expect("open position");
         state
             .state_store
-            .record_signal_execution(&NewSignalExecution {
-                id: "root-passive".into(),
-                strategy_id: "futures".into(),
-                symbol: "BTC-USDC".into(),
-                route_id: None,
-                expected_net_usd: None,
-                note: None,
-                legs: vec![NewSignalLeg {
-                    account_id: None,
-                    venue: "hyperliquid".into(),
-                    side: LegSide::Long,
-                    symbol: None,
-                    intended_qty: 0.1,
-                    intended_price: None,
-                }],
-            })
+            .record_signal_execution(
+                &NewSignalExecution {
+                    id: "root-passive".into(),
+                    strategy_id: "futures".into(),
+                    symbol: "BTC-USDC".into(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: vec![NewSignalLeg {
+                        account_id: None,
+                        venue: "hyperliquid".into(),
+                        side: LegSide::Long,
+                        symbol: None,
+                        intended_qty: 0.1,
+                        intended_price: None,
+                    }],
+                },
+                "testnet",
+            )
             .expect("record root");
         state
             .state_store
@@ -13983,7 +14163,7 @@ mod tests {
             let dt = span_ms as f64 / 1000.0 / (n - 1) as f64;
             let vals: Vec<f64> = series.iter().map(|o| o.spread_bps).collect();
             if let Some(p) = OuModelParams::fit(&vals, dt)
-                .filter(|p| p.half_life > 0.0 && p.r_squared >= OU_MIN_R2)
+                .filter(|p| p.half_life > 0.0 && p.r_squared.is_some_and(|r| r >= OU_MIN_R2))
             {
                 expected_recs.push(
                     ((2.0 * p.half_life).round() as u64)
@@ -14334,28 +14514,44 @@ mod tests {
         assert!(res.execution_success);
         assert!(res.spread_bps > 200.0, "spread {}", res.spread_bps);
 
-        // Paper account holds the three spread legs.
-        let acc = state
-            .get_paper_exchange("lighter")
-            .expect("lighter paper")
-            .fetch_account()
-            .await
-            .expect("account");
-        assert!(acc.get_position("BTC-USDC").is_some());
-        assert!(acc.get_position("BTC-ETH").is_some());
-        assert!(acc.get_position("ETH-USDC").is_some());
-
-        // Three imbalanced triangle signals block the leg symbols.
+        // Each leg persists as its own pre-submit signal under the leg's
+        // exact symbol. On a position-model venue the three leg positions
+        // are still live after the round trip — the cycle resolves Balanced
+        // (tracked, flattenable), not Closed.
         for sym in ["BTC-USDC", "BTC-ETH", "ETH-USDC"] {
-            let blockers = state
+            let leg_signals: Vec<_> = state
                 .state_store
-                .blocking_signals(sym)
-                .expect("blocking signals");
-            assert_eq!(blockers.len(), 1, "one triangle residual on {sym}");
-            assert_eq!(blockers[0].strategy_id, "triangle");
+                .list_signals(Some(sym), None)
+                .unwrap()
+                .into_iter()
+                .filter(|s| s.strategy_id == "triangle")
+                .collect();
+            assert_eq!(leg_signals.len(), 1, "one triangle leg signal on {sym}");
+            let leg = &leg_signals[0];
+            assert_eq!(leg.status, crate::state_store::SignalStatus::Balanced);
+            assert!(
+                leg.legs.iter().all(|l| l.filled_qty > 0.0),
+                "leg filled on {sym}: {:?}",
+                leg.legs
+            );
         }
 
-        // Re-entry on the same cycle is refused while legs are open.
+        // A completed cycle carries no ledger blocking — the signals are
+        // Closed, so no symbol stays blocked.
+        for sym in ["BTC-USDC", "BTC-ETH", "ETH-USDC"] {
+            assert!(
+                state
+                    .state_store
+                    .blocking_signals(sym, None)
+                    .expect("blocking signals")
+                    .is_empty(),
+                "completed cycle must not block {sym}"
+            );
+        }
+
+        // The paper venue books each leg fill as a position (no base-asset
+        // netting on the sim), so venue truth still shows per-symbol
+        // exposure — the position guard refuses re-entry until flattened.
         let again = execute_triangle_arbitrage_impl(
             TriangleExecutionParams {
                 id,
@@ -14369,12 +14565,12 @@ mod tests {
             &state,
         )
         .await;
-        assert!(again.is_err(), "open legs must block re-entry");
+        assert!(again.is_err(), "open venue positions must block re-entry");
 
-        // Each leg unwinds through the existing flatten path, freeing the slot.
-        // Re-seed first: the flatten path requires fresh (2s) hub books, and
-        // under parallel-suite load the execute above can age the seeded
-        // books past that — a scheduling artifact, not leg state.
+        // Each leg unwinds through the flatten path, freeing the venue.
+        // Re-seed first: flatten requires fresh (2s) hub books, and under
+        // parallel-suite load the execute above can age the seeded books
+        // past that — a scheduling artifact, not leg state.
         seed_triangle_books(&state);
         for sym in ["BTC-USDC", "BTC-ETH", "ETH-USDC"] {
             let flat = flatten_ticker_positions_impl(
@@ -14610,7 +14806,10 @@ mod tests {
         .await
         .expect("spatial open");
 
-        // Adverse excursion: live edge ~9 bps net vs ~22 entry -> stopped.
+        // Adverse excursion: the spread WIDENS past entry+stop (a narrowing
+        // edge is convergence profit, never a stop). Entry edge was ~37 bps
+        // (64440 bid vs 64205 ask); 64480 puts live ~43 bps — widened ~6 bps
+        // past the 5 bps stop band.
         seed_test_book(
             &state,
             "hyperliquid",
@@ -14618,7 +14817,7 @@ mod tests {
             dec!(64200.0),
             dec!(64205.0),
         );
-        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64350.0), dec!(64355.0));
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(64480.0), dec!(64485.0));
         let checks = check_spatial_convergence_impl(Some("BTC-USDC"), "futures", &state)
             .await
             .expect("stop check");
@@ -14712,32 +14911,35 @@ mod tests {
         // In-flight signal with no baseline row: never auto-exited.
         state
             .state_store
-            .record_signal_execution(&crate::state_store::NewSignalExecution {
-                id: "sig-nobaseline".into(),
-                strategy_id: "futures".into(),
-                symbol: "BTC-USDC".into(),
-                route_id: None,
-                expected_net_usd: None,
-                note: None,
-                legs: vec![
-                    crate::state_store::NewSignalLeg {
-                        account_id: None,
-                        venue: "hyperliquid".into(),
-                        side: crate::state_store::LegSide::Long,
-                        symbol: None,
-                        intended_qty: 0.1,
-                        intended_price: None,
-                    },
-                    crate::state_store::NewSignalLeg {
-                        account_id: None,
-                        venue: "lighter".into(),
-                        side: crate::state_store::LegSide::Short,
-                        symbol: None,
-                        intended_qty: 0.1,
-                        intended_price: None,
-                    },
-                ],
-            })
+            .record_signal_execution(
+                &crate::state_store::NewSignalExecution {
+                    id: "sig-nobaseline".into(),
+                    strategy_id: "futures".into(),
+                    symbol: "BTC-USDC".into(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: vec![
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "hyperliquid".into(),
+                            side: crate::state_store::LegSide::Long,
+                            symbol: None,
+                            intended_qty: 0.1,
+                            intended_price: None,
+                        },
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "lighter".into(),
+                            side: crate::state_store::LegSide::Short,
+                            symbol: None,
+                            intended_qty: 0.1,
+                            intended_price: None,
+                        },
+                    ],
+                },
+                "testnet",
+            )
             .expect("record signal");
         let checks = check_spatial_convergence_impl(Some("BTC-USDC"), "futures", &state)
             .await

@@ -19,6 +19,7 @@ const position: OpenPositionDto = {
   feesUsd: 1.0,
   notionalUsd: 90000,
   openedAt: "2026-01-01T00:00:00Z",
+  reduceOnly: false,
 };
 
 const baseProps = {
@@ -95,38 +96,13 @@ test("position card has right-click context menu hint", () => {
   assert.match(html, /Left-click: position details · Right-click: Reduce-Only \/ Clear actions/);
 });
 
-test("position card renders Reduce-Only badge when marked reduce-only", () => {
-  const storage = new Map<string, string>();
-  storage.set("arbitrageur:reduce_only_positions", JSON.stringify(["BTC-USDC"]));
-  const mockLocalStorage = {
-    getItem: (key: string) => storage.get(key) ?? null,
-    setItem: (key: string, val: string) => {
-      storage.set(key, val);
-    },
-    removeItem: (key: string) => {
-      storage.delete(key);
-    },
-    clear: () => {
-      storage.clear();
-    },
-  };
-
-  const origWindow = (globalThis as any).window;
-  (globalThis as any).window = {
-    localStorage: mockLocalStorage,
-    dispatchEvent: () => true,
-  };
-
-  try {
-    const html = renderToStaticMarkup(React.createElement(PositionsPanel, baseProps));
-    assert.match(html, /Reduce-Only/);
-    assert.match(html, /No new step increases; position closes on target profit/);
-  } finally {
-    if (origWindow === undefined) {
-      delete (globalThis as any).window;
-    } else {
-      (globalThis as any).window = origWindow;
-    }
-  }
+test("position card renders Reduce-Only badge when the DTO flag is set", () => {
+  // The durable flag rides the backend DTO — no client-side storage.
+  const flagged: OpenPositionDto = { ...position, reduceOnly: true };
+  const html = renderToStaticMarkup(
+    React.createElement(PositionsPanel, { ...baseProps, positions: [flagged] }),
+  );
+  assert.match(html, /Reduce-Only/);
+  assert.match(html, /No new step increases; position closes on target profit/);
 });
 

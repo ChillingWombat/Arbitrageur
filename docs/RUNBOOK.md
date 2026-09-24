@@ -108,13 +108,21 @@ This document captures the failure modes, production bugs identified during the 
 
 ### 2.2 Incident Response Procedures
 
+**Out-of-band alerting:** events marked *(alerts)* below also fire a JSON
+POST to `ARBITRAGEUR_ALERT_WEBHOOK` when it is configured
+(`ops/deploy/arbitrageur.env.sample`), so they reach the operator without
+the UI being open. systemd deployments additionally get service-failure
+pages via `OnFailure=` → `/etc/arbitrageur/alert.sh`. Without a configured
+webhook these events are journal/UI-only — check `journalctl -u
+arbitrageur@<port>` for the startup line reporting channel state.
+
 | Trigger Event | Automated System Response | Operator Action |
 |---|---|---|
 | **Leg B Reject** | Leg A automatically unwound with Market order | Verify both exchange balances show 0 delta. |
-| **Circuit Breaker Tripped** | All new orders halted, process stays active | Inspect logs for root cause; once resolved, run reset. |
+| **Circuit Breaker Tripped** | All new orders halted, process stays active; with `ARBITRAGEUR_ALERT_WEBHOOK` configured, one JSON POST is fired on the trip transition (not per re-trip) | Inspect logs for root cause; once resolved, run reset. |
 | **Margin Warning (< 15%)** | Warning logged, opening trades restricted | Transfer collateral to the margin-deficient exchange. |
 | **HTTP 429 Rate Limit** | Request coordinator enforces exponential backoff | Lower poll frequency in config to increase interval. |
-| **Signal `unresolved` / `imbalanced`** | Reconciliation supervisor polls every 5 s; stale working orders get a bounded cancel (3 attempts); entries stay blocked on the ticker | The radar page shows a red attention strip listing each escalated signal with its note. Verify positions at both venues, then use **Reconcile Orders Now** (Portfolio monitor) to force a fresh poll pass. If the venue confirms the order closed but the ledger disagrees, resolve manually and check logs for the identity-mismatch reason. |
+| **Signal `unresolved` / `imbalanced`** | Reconciliation supervisor polls every 5 s; stale working orders get a bounded cancel (3 attempts); entries stay blocked on the ticker; with `ARBITRAGEUR_ALERT_WEBHOOK` configured, the transition to `unresolved` fires one out-of-band JSON POST | The radar page shows a red attention strip listing each escalated signal with its note. Verify positions at both venues, then use **Reconcile Orders Now** (Portfolio monitor) to force a fresh poll pass. If the venue confirms the order closed but the ledger disagrees, resolve manually and check logs for the identity-mismatch reason. |
 | **Residual one-sided exposure (imbalanced entry)** | The supervisor automatically submits reduce-only flattens for the uncovered residual as `flat-{parent}-*` child signals (routed through the resolved Auto Position Exit policy — limit-first with market fallback), then reconciles them to terminal state; bounded to 3 attempts | If attempts are exhausted, the signal stays `unresolved`/`imbalanced` — flatten the residual manually at the venue, then run **Reconcile Orders Now**. |
 
 ### 2.3 Order Reconciliation

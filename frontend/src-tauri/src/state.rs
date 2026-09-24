@@ -104,6 +104,48 @@ struct EnvCredentials {
     boros: Option<ExchangeCredentials>,
 }
 
+/// Every `Option<String>` field above is a copied secret (api keys,
+/// secrets, passphrases, private keys, endpoint URLs that can embed
+/// provider keys). Wipe them on drop — `ExchangeCredentials` values already
+/// zeroize themselves. Credential sync rebuilds this struct on every pass;
+/// without this, raw copies linger in freed heap until reuse.
+impl Drop for EnvCredentials {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        fn z(field: &mut Option<String>) {
+            if let Some(v) = field.as_mut() {
+                v.zeroize();
+            }
+        }
+        z(&mut self.aster.0);
+        z(&mut self.aster.1);
+        z(&mut self.hl_wallet);
+        z(&mut self.hl_pk);
+        z(&mut self.lighter_key);
+        z(&mut self.rh_key);
+        z(&mut self.vanta_acc);
+        z(&mut self.vanta_key);
+        z(&mut self.vanta_sec);
+        z(&mut self.binance_key);
+        z(&mut self.binance_sec);
+        z(&mut self.okx_key);
+        z(&mut self.okx_sec);
+        z(&mut self.okx_pass);
+        z(&mut self.okx_url);
+        z(&mut self.cb_key);
+        z(&mut self.cb_sec);
+        z(&mut self.cb_pass);
+        z(&mut self.kraken_key);
+        z(&mut self.kraken_sec);
+        z(&mut self.decibel_key);
+        z(&mut self.decibel_node_key);
+        z(&mut self.decibel_wallet);
+        z(&mut self.decibel_pk);
+        z(&mut self.popdex_wallet);
+        z(&mut self.popdex_agent);
+    }
+}
+
 #[derive(Clone, Serialize, Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct TickerStrategyConfigDto {
@@ -866,7 +908,10 @@ impl Default for EngineSettingsDto {
             arcus_secret: "".into(),
             arcus_url: default_arcus_url(),
             configured_venues: Vec::new(),
-            spread_samples_max_days: None,
+            // 14-day raw telemetry retention by default — the DB grew
+            // unbounded when this defaulted to None. Row caps still apply
+            // unconditionally for operators who set the window to 0/None.
+            spread_samples_max_days: Some(14),
             spread_samples_max_gb: None,
             referral_lighter: default_referral_lighter(),
             referral_robinhood: default_referral_robinhood(),
@@ -1211,7 +1256,9 @@ pub struct AppEngineState {
     /// demo endpoints. Drives adapter selection in `get_venues`, account
     /// eligibility, and the `is_live` flag on persisted records (testnet
     /// fills are real venue flow but not real money).
-    pub environment: RwLock<TradingEnvironment>,
+    /// Shared so the circuit-breaker trip hook (registered before the
+    /// struct exists) reports the *current* environment in alerts.
+    pub environment: Arc<RwLock<TradingEnvironment>>,
     /// Which equity universe the breaker baseline tracks (None = not yet
     /// anchored). Paper<->live switches change the account universe, which is
     /// not a trading loss — the next risk snapshot re-anchors instead of
@@ -1223,6 +1270,11 @@ pub struct AppEngineState {
     /// to totals/drawdown (a blip is not a loss) until the Safety-tab grace
     /// period expires, after which it escalates to ERROR.
     pub last_good_accounts: Mutex<std::collections::HashMap<String, (AccountSnapshot, i64)>>,
+    /// Per-venue last-observed equity in USD basis, keyed `{env}-{venue}` —
+    /// the portfolio-equity input to the drawdown breaker. Updated by every
+    /// lane that reads an account (risk overview, margin poller) so the
+    /// breaker is fed even while nobody polls the UI.
+    pub breaker_venue_equity: Mutex<std::collections::HashMap<String, Decimal>>,
     pub total_realized_profit: RwLock<Decimal>,
     pub total_realized_profit_live: RwLock<Decimal>,
     pub execution_logs: RwLock<Vec<ExecutionLogEntry>>,
@@ -1280,6 +1332,11 @@ pub struct AppEngineState {
     /// Throttles the vault-locked risk-overview pause warnings — one per
     /// 5 min while locked instead of one per venue per poll cycle.
     pub risk_locked_warn_at: Mutex<Option<std::time::Instant>>,
+    /// Failed vault-unlock attempts and the next permitted try. Exponential
+    /// backoff throttles online password guessing (the KDF still bounds
+    /// offline attempts); in-memory is sufficient — a restart resets the
+    /// counter but the KDF cost floor remains.
+    pub vault_unlock_backoff: Mutex<(u32, std::time::Instant)>,
     /// Last margin-snapshot write per venue (epoch ms). Bounds the snapshot
     /// cadence: fills and heartbeats record at most one row per venue per
     /// `MARGIN_SNAPSHOT_MIN_INTERVAL_MS`.
@@ -1692,16 +1749,8 @@ impl AppEngineState {
         // testnet and stay ineligible under Testnet mode rather than being
         // simulated. Endpoint overrides are live-only; a testnet adapter
         // always uses the venue's canonical demo host.
-        let tn_hl = Arc::new(HyperliquidAdapter::new(
-            Some("https://api.hyperliquid-testnet.xyz".to_string()),
-            None,
-            None,
-        ));
-        let tn_lighter = Arc::new(LighterAdapter::new(
-            Some("https://testnet.zklighter.elliot.ai".to_string()),
-            None,
-            None,
-        ));
+        let tn_hl = Arc::new(HyperliquidAdapter::for_testnet(None, None));
+        let tn_lighter = Arc::new(LighterAdapter::for_testnet(None, None));
         let tn_vanta = Arc::new(VantaAdapter::new(
             Some("https://testnet-api.orderly.org".to_string()),
             None,
@@ -1726,11 +1775,7 @@ impl AppEngineState {
             None,
             None,
         ));
-        let tn_decibel = Arc::new(DecibelAdapter::new(
-            Some("https://api.testnet.aptoslabs.com/decibel".to_string()),
-            None,
-            None,
-        ));
+        let tn_decibel = Arc::new(DecibelAdapter::for_testnet(None, None));
         let tn_popdex = Arc::new(PopDexAdapter::new(Some("testnet".to_string())));
 
         let market_data_hub = MarketDataHub::new(1024, 400);
@@ -1758,6 +1803,50 @@ impl AppEngineState {
             .unwrap_or(dec!(250.0)),
         };
         let cb = Arc::new(CircuitBreaker::new(cb_config, dec!(200000.0)));
+        // Durable halt state: a tripped breaker must survive a restart —
+        // otherwise a crash mid-drawdown silently re-arms trading. The kv
+        // snapshot also restores the UTC-day baseline so a same-day restart
+        // does not reset the day's drawdown window.
+        if let Ok(Some(raw)) = state_store.kv_get("cb.snapshot") {
+            match serde_json::from_str::<arbitrageur_risk::circuit_breaker::CircuitBreakerSnapshot>(
+                &raw,
+            ) {
+                Ok(snap) => {
+                    if snap.tripped {
+                        tracing::warn!(
+                            "circuit breaker restored TRIPPED: {}",
+                            snap.trip_reason.as_deref().unwrap_or("unknown")
+                        );
+                    }
+                    cb.restore(&snap);
+                }
+                Err(e) => {
+                    tracing::warn!("circuit breaker snapshot unreadable, starting fresh: {e}")
+                }
+            }
+        }
+        {
+            let store = state_store.clone();
+            cb.set_persist_hook(std::sync::Arc::new(move |snap| {
+                if let Ok(json) = serde_json::to_string(snap) {
+                    let _ = store.kv_set("cb.snapshot", &json);
+                }
+            }));
+        }
+        // Shared with the breaker's trip hook (below) so out-of-band
+        // alerts carry the live environment even after a runtime switch.
+        let environment = Arc::new(RwLock::new(TradingEnvironment::from_mode(
+            &initial_settings.trading_mode,
+        )));
+        crate::alerting::init(&cb, environment.clone());
+        // An operator pause is a halt decision — it must survive a
+        // restart (a crashed/closed app must not resume trading on its
+        // own). Read before the struct literal moves `state_store`.
+        let engine_paused_initial = state_store
+            .kv_get("engine.paused")
+            .ok()
+            .flatten()
+            .is_some_and(|v| v == "1");
         let delta_guard = RwLock::new(DeltaGuard::new(
             Decimal::from_f64_retain(initial_settings.delta_max_unhedged_usd_per_asset)
                 .unwrap_or(dec!(2500.0)),
@@ -1765,7 +1854,6 @@ impl AppEngineState {
         let router = SmartOrderRouter::new(dec!(15.0)); // 15 bps slippage tolerance
         let coordinator = Arc::new(AtomicArbitrageCoordinator::new(router, cb.clone()));
         let kalman_filter = RwLock::new(HedgeRatioKalmanFilter::new(1e-4, 1e-2));
-        let initial_env = TradingEnvironment::from_mode(&initial_settings.trading_mode);
         let settings = RwLock::new(initial_settings);
 
         // Reload the persisted execution log so the Log Monitor keeps history
@@ -1797,7 +1885,7 @@ impl AppEngineState {
         //      realized fields — an honest gap, never a fabricated outcome.
         {
             use crate::state_store::LegSide;
-            let open_signals = state_store.list_open_signals().unwrap_or_default();
+            let open_signals = state_store.list_open_signals(None).unwrap_or_default();
             // Lazy full-history list: needed only when a rebuild candidate
             // has family children (a mid-hold trim's fills reduce what the
             // rebuilt lot should carry — `flat-`/`trim-` children may be
@@ -1888,6 +1976,7 @@ impl AppEngineState {
                     matched,
                     short_px,
                     entry_fees,
+                    sig.environment.clone(),
                 );
                 if let Some(lot) = ledger.lots.get(&id) {
                     if let Err(e) = state_store.upsert_cycle_lot(lot) {
@@ -1979,9 +2068,10 @@ impl AppEngineState {
             delta_guard,
             coordinator,
             kalman_filter,
-            environment: RwLock::new(initial_env),
+            environment,
             last_risk_live_universe: RwLock::new(None),
             last_good_accounts: Mutex::new(std::collections::HashMap::new()),
+            breaker_venue_equity: Mutex::new(std::collections::HashMap::new()),
             total_realized_profit: RwLock::new(initial_pnl_testnet),
             total_realized_profit_live: RwLock::new(initial_pnl_live),
             execution_logs: RwLock::new(initial_logs),
@@ -1993,7 +2083,7 @@ impl AppEngineState {
             evm_stronghold,
             state_store,
             virtual_ledger,
-            is_paused: RwLock::new(false),
+            is_paused: RwLock::new(engine_paused_initial),
             execution_lock: tokio::sync::Mutex::new(()),
             reconcile_lock: tokio::sync::Mutex::new(()),
             #[cfg(test)]
@@ -2005,6 +2095,7 @@ impl AppEngineState {
             sample_prune_at: Mutex::new(0),
             liq_trim_at: Mutex::new(std::collections::HashMap::new()),
             risk_locked_warn_at: Mutex::new(None),
+            vault_unlock_backoff: Mutex::new((0, std::time::Instant::now())),
             margin_snapshot_at: Mutex::new(std::collections::HashMap::new()),
             latency_ema: Mutex::new(std::collections::HashMap::new()),
             latency_probe_at: Mutex::new(std::collections::HashMap::new()),
@@ -3200,6 +3291,9 @@ mod tests {
         assert_eq!(s.vanta_url, "https://api.orderly.org");
         assert_eq!(s.polymarket_url, "https://clob.polymarket.com");
         assert_eq!(s.kalshi_url, "https://trading-api.kalshi.com");
+        // #43: raw telemetry retains 14 days by default — None let the
+        // state DB grow without bound.
+        assert_eq!(s.spread_samples_max_days, Some(14));
     }
 
     #[test]
@@ -3390,5 +3484,81 @@ mod tests {
         acc2.equity = dec!(1000);
         state.normalize_account_usd("binance", &mut acc2);
         assert_eq!(acc2.equity, dec!(1000));
+    }
+
+    #[test]
+    fn production_adapter_resolution_never_yields_a_simulation() {
+        // SimulatedExchange exists only behind #[cfg(test)] registries and
+        // the explicit `simulate` CLI subcommand — the production venue
+        // registry must resolve to the pinned concrete adapters (endpoint-
+        // separated by environment), never a fabricated market.
+        let state = AppEngineState::new();
+        {
+            let mut s = state.settings.write();
+            s.lighter_enabled = true;
+            s.binance_enabled = true;
+        }
+
+        // Testnet: resolution returns the pinned tn_* adapter itself.
+        let tn = state.venues_for_env(TradingEnvironment::Testnet);
+        let (vid, _name, adapter) = tn.iter().find(|(v, _, _)| *v == "lighter").unwrap();
+        assert_eq!(*vid, "lighter");
+        assert!(
+            Arc::ptr_eq(
+                adapter,
+                &(state.tn_lighter.clone() as Arc<dyn arbitrageur_core::exchange::ExchangeAdapter>)
+            ) || adapter
+                .rest_base_url()
+                .map(|u| u.contains("testnet.zklighter"))
+                .unwrap_or(false),
+            "testnet lighter must resolve to the pinned testnet adapter, got {:?}",
+            adapter.rest_base_url()
+        );
+        assert!(
+            adapter
+                .rest_base_url()
+                .map(|u| u.contains("testnet.zklighter"))
+                .unwrap_or(false),
+            "testnet adapter must use the venue demo endpoint"
+        );
+
+        // Live: the same venue resolves to a DIFFERENT pinned adapter on
+        // the mainnet endpoint — environments never cross.
+        let live = state.venues_for_env(TradingEnvironment::Live);
+        let (_, _, live_adapter) = live.iter().find(|(v, _, _)| *v == "lighter").unwrap();
+        assert!(
+            live_adapter
+                .rest_base_url()
+                .map(|u| u.contains("mainnet.zklighter"))
+                .unwrap_or(false),
+            "live adapter must use the mainnet endpoint: {:?}",
+            live_adapter.rest_base_url()
+        );
+        assert!(!std::ptr::eq(
+            Arc::as_ptr(adapter),
+            Arc::as_ptr(live_adapter)
+        ));
+
+        // A fresh state with nothing enabled admits and resolves nothing —
+        // there is no silent simulated fallback anywhere in resolution.
+        let empty = AppEngineState::new();
+        assert!(empty.get_venues().is_empty());
+        for v in [
+            "lighter",
+            "binance",
+            "hyperliquid",
+            "vanta",
+            "okx",
+            "kraken",
+        ] {
+            assert!(empty.get_adapter(v).is_none(), "{v} resolved unadmitted");
+        }
+        // Near-matches and junk never canonicalize to a venue either.
+        for junk in ["lighte", "lighter2", "", " hyper liquid ", "lighters"] {
+            assert!(
+                empty.get_adapter(junk).is_none(),
+                "{junk:?} must not resolve"
+            );
+        }
     }
 }

@@ -15,6 +15,12 @@ pub struct ArbitrageCycleLot {
     pub id: String,
     pub strategy_id: String,
     pub symbol: String,
+    /// Trading environment the cycle ran under (`"testnet"`/`"live"`;
+    /// `"unknown"` for pre-v33 persisted lots). Metrics and exposure
+    /// aggregation filter on this — a lot is only attributed to the
+    /// environment that created it, never blended across.
+    #[serde(default = "default_unknown_environment")]
+    pub environment: String,
     pub venue_long: String,
     pub venue_short: String,
     pub entry_time: DateTime<Utc>,
@@ -54,6 +60,10 @@ pub struct VirtualStrategyLedger {
     pub lots: HashMap<String, ArbitrageCycleLot>,
 }
 
+fn default_unknown_environment() -> String {
+    "unknown".to_string()
+}
+
 impl VirtualStrategyLedger {
     pub fn new() -> Self {
         Self {
@@ -76,11 +86,13 @@ impl VirtualStrategyLedger {
         short_qty: f64,
         short_entry_price: f64,
         entry_fees_usd: f64,
+        environment: String,
     ) {
         let lot = ArbitrageCycleLot {
             id: id.clone(),
             strategy_id,
             symbol,
+            environment,
             venue_long,
             venue_short,
             entry_time: Utc::now(),
@@ -159,13 +171,18 @@ impl VirtualStrategyLedger {
     }
 
     /// Computes the net physical orderbook exposure on a specific venue for a symbol.
-    /// Aggregates across all active/open strategy lots:
+    /// Aggregates across all active/open strategy lots in `environment`:
     /// Long positions on this venue add positive exposure, Short positions subtract exposure.
     /// Returns net_qty: positive means net long, negative means net short.
-    pub fn compute_venue_net_exposure(&self, venue: &str, symbol: &str) -> f64 {
+    /// Unknown-environment lots (pre-v33) count toward neither environment —
+    /// cross-env exposure must never block or net off.
+    pub fn compute_venue_net_exposure(&self, venue: &str, symbol: &str, environment: &str) -> f64 {
         let mut net_qty = 0.0;
         for lot in self.lots.values() {
-            if lot.status == CycleStatus::Open && lot.symbol == symbol {
+            if lot.status == CycleStatus::Open
+                && lot.symbol == symbol
+                && lot.environment == environment
+            {
                 if lot.venue_long == venue {
                     net_qty += lot.long_qty;
                 }
@@ -179,12 +196,19 @@ impl VirtualStrategyLedger {
 
     /// Computes comprehensive strategy performance metrics:
     /// cycles completed, win rate, avg/total PnL (BPS & USD), Max Drawdown, Sharpe, and APR/APY.
-    pub fn compute_strategy_metrics(&self, strategy_id: &str) -> StrategyMetrics {
+    /// `environment` scopes the aggregation — lots only count toward the
+    /// environment that created them; `"unknown"` legacy lots are excluded
+    /// from every environment's metrics rather than guessed into one.
+    pub fn compute_strategy_metrics(
+        &self,
+        strategy_id: &str,
+        environment: &str,
+    ) -> StrategyMetrics {
         let mut total_initiated = 0;
         let mut completed_lots = Vec::new();
 
         for lot in self.lots.values() {
-            if lot.strategy_id == strategy_id {
+            if lot.strategy_id == strategy_id && lot.environment == environment {
                 total_initiated += 1;
                 if lot.status != CycleStatus::Open && lot.realized_pnl_usd.is_some() {
                     completed_lots.push(lot);
@@ -315,6 +339,7 @@ mod tests {
             1.0,
             60120.0,
             5.0,
+            "live".into(),
         );
 
         // Strategy B opens Long 0.4 BTC on Lighter, Short 0.4 BTC on Hyperliquid
@@ -330,15 +355,16 @@ mod tests {
             0.4,
             60140.0,
             2.0,
+            "live".into(),
         );
 
         // Verify physical orderbook net exposure:
         // Hyperliquid: +1.0 (from A) - 0.4 (from B) = +0.6 BTC
-        let hl_net = ledger.compute_venue_net_exposure("Hyperliquid", "BTC-USDC");
+        let hl_net = ledger.compute_venue_net_exposure("Hyperliquid", "BTC-USDC", "live");
         assert!((hl_net - 0.6).abs() < 1e-5);
 
         // Lighter: -1.0 (from A) + 0.4 (from B) = -0.6 BTC
-        let lgt_net = ledger.compute_venue_net_exposure("Lighter", "BTC-USDC");
+        let lgt_net = ledger.compute_venue_net_exposure("Lighter", "BTC-USDC", "live");
         assert!((lgt_net - (-0.6)).abs() < 1e-5);
 
         // Close lot-1 with profit:
@@ -351,11 +377,11 @@ mod tests {
         assert!((lot1.realized_pnl_usd.unwrap() - 160.0).abs() < 1e-5);
 
         // Now Hyperliquid net exposure is only from lot-2: -0.4 BTC
-        let hl_net_after = ledger.compute_venue_net_exposure("Hyperliquid", "BTC-USDC");
+        let hl_net_after = ledger.compute_venue_net_exposure("Hyperliquid", "BTC-USDC", "live");
         assert!((hl_net_after - (-0.4)).abs() < 1e-5);
 
         // Compute metrics for spatial_spread
-        let metrics = ledger.compute_strategy_metrics("spatial_spread");
+        let metrics = ledger.compute_strategy_metrics("spatial_spread", "live");
         assert_eq!(metrics.total_cycles_completed, 1);
         assert_eq!(metrics.winning_cycles, 1);
         assert_eq!(metrics.win_rate_pct, 100.0);

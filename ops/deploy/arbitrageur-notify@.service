@@ -1,0 +1,28 @@
+[Unit]
+Description=Arbitrageur failure notifier (port %i)
+# Runs once when arbitrageur@%i.service enters a failed state (see
+# OnFailure= in the trading unit). Executes the operator's alert script —
+# install /etc/arbitrageur/alert.sh from ops/deploy/alert.sh.sample and
+# configure your channel (webhook URL, mail, pager) inside it.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# Missing script is not an error: OnFailure= also fires on hosts that
+# never installed the alert hook — a conditional ExecStart keeps the
+# journal clean instead of spamming unit failures about a notifier.
+ExecStart=/bin/sh -c 'test -x /etc/arbitrageur/alert.sh && exec /etc/arbitrageur/alert.sh %i || true'
+EnvironmentFile=-/etc/arbitrageur/arbitrageur.env
+EnvironmentFile=-/etc/arbitrageur/arbitrageur-%i.env
+User=arbitrageur
+Group=arbitrageur
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+LockPersonality=true

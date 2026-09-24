@@ -319,6 +319,10 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
   // UI status
   const saveBtn = useSaveButton();
   const [saveError, setSaveError] = useState<string | null>(null);
+  // True when the initial params read failed — the form then holds defaults,
+  // so a save would silently overwrite live settings. Block it until a
+  // successful load repopulates real values.
+  const [paramsLoadFailed, setParamsLoadFailed] = useState(false);
 
   // Strategy Account Routing state
   const [routes, setRoutes] = useState<StrategyAccountRouteDto[]>([]);
@@ -346,6 +350,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
   useEffect(() => {
     if (!isOpen) return;
 
+    setParamsLoadFailed(false);
     api
       .getStrategyParams(activeStrategyTab)
       .then((p) => {
@@ -402,6 +407,8 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
       })
       .catch((err) => {
         console.warn("Failed to load strategy params in modal:", err);
+        setParamsLoadFailed(true);
+        setSaveError("Could not load current strategy parameters — editing is disabled until the record reads back.");
       });
 
     // Manual hide list is global and shared — load it whenever the modal opens
@@ -1457,8 +1464,25 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
   const handleSave = async () => {
     setSaveError(null);
     const ok = await saveBtn.run(async () => {
+    if (paramsLoadFailed) {
+      const msg = "Current parameters never loaded — refusing to write form defaults over live settings.";
+      setSaveError(msg);
+      throw new Error(msg);
+    }
     const canonicalWindow = formatDuration(manualWindowSecs);
-    const currentRecord = await api.getStrategyParams(activeStrategyTab).catch(() => null);
+    // Fail closed on read errors: the save writes the whole record, so
+    // without the current values untouched fields would be reset to
+    // defaults over the live settings. `null` (no record yet) is fine —
+    // defaults then are genuinely the first write.
+    let currentRecord: StrategyParamsDto | null = null;
+    try {
+      currentRecord = await api.getStrategyParams(activeStrategyTab);
+    } catch (err) {
+      const msg =
+        "Could not load current strategy parameters — refusing to write defaults over live settings.";
+      setSaveError(msg);
+      throw err instanceof Error ? err : new Error(msg);
+    }
     const updatedParams: StrategyParamsDto = {
       strategyId: activeStrategyTab,
       targetProfitBps,

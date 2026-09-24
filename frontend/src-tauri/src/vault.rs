@@ -1079,6 +1079,52 @@ mod tests {
     }
 
     #[test]
+    fn test_corrupt_vault_fails_closed_no_secret_material() {
+        let (dir, file) = temp_vault_path("corrupt");
+        fs::create_dir_all(&dir).unwrap();
+
+        // Garbage without magic: falls to the legacy path and bails on
+        // length/decrypt — never a panic, never an unlock.
+        fs::write(&file, b"not-a-vault-file-garbage-bytes").unwrap();
+        let mut vault = SecureVault::new_with_path(file.clone());
+        assert!(vault.is_initialized(), "file exists = initialized marker");
+        assert!(vault.unlock("correct horse battery").is_err());
+        assert!(!vault.is_unlocked());
+        assert!(vault.get_data().is_err());
+
+        // Valid magic but truncated header.
+        let mut truncated = VAULT_MAGIC.to_vec();
+        truncated.extend_from_slice(&[0u8; 4]);
+        fs::write(&file, &truncated).unwrap();
+        let mut vault = SecureVault::new_with_path(file.clone());
+        assert!(vault.unlock("correct horse battery").is_err());
+        assert!(!vault.is_unlocked());
+
+        // Real vault, then ciphertext corruption — GCM tag rejects it and
+        // no partial plaintext reaches the cache.
+        fs::remove_file(&file).unwrap();
+        let mut vault = SecureVault::new_with_path(file.clone());
+        vault.initialize("correct horse battery").unwrap();
+        let mut bytes = fs::read(&file).unwrap();
+        let n = bytes.len();
+        bytes[n - 1] ^= 0xff;
+        bytes[n - 5] ^= 0x01;
+        fs::write(&file, &bytes).unwrap();
+        let mut vault = SecureVault::new_with_path(file);
+        let err = vault.unlock("correct horse battery").unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("Incorrect password or corrupted vault"),
+            "{err}"
+        );
+        assert!(!vault.is_unlocked());
+        assert!(vault.decrypted_cache.is_none());
+        assert!(vault.encryption_key.is_none());
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn test_legacy_vault_migrates_to_v2() {
         let (dir, file) = temp_vault_path("legacy");
 

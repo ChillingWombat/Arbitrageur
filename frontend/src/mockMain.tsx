@@ -149,6 +149,7 @@ const FIXTURES: Record<string, (args?: Record<string, unknown>) => unknown> = {
       ],
       expectedNetUsd: 1.1, unrealizedPnlUsd: 0.26, feesUsd: 0.84, notionalUsd: 2206,
       openedAt: new Date(now - 5400_000).toISOString(),
+      reduceOnly: false,
     },
   ],
   get_venue_balances: () => VENUES.slice(0, 4).map((v, i) => ({

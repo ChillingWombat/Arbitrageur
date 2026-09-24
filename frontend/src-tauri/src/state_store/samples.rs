@@ -33,7 +33,7 @@ impl StateStore {
         if entries.is_empty() || ts_ms < 0 {
             return Ok(());
         }
-        let mut conn = self.conn.lock();
+        let mut conn = self.telemetry().lock();
         // Same-instrument gate: once a key has an established scale, rows
         // irreconcilable with it are a symbol collision at the source —
         // refuse to persist them at all. A fresh key has no incumbent yet,
@@ -82,6 +82,43 @@ impl StateStore {
         Ok(())
     }
 
+    /// Minimum interval between persisted frames per (symbol, venue). WS
+    /// feeds can push hundreds of book deltas a second; telemetry is
+    /// lossy-at-worst, so excess frames drop here rather than queue on the
+    /// telemetry writer. Poll-cadence callers keep `record_spread_samples_mode`.
+    pub const SAMPLE_MIN_INTERVAL_MS: i64 = 500;
+
+    /// Frame-rate variant of [`Self::record_spread_samples_mode`]: entries
+    /// whose (symbol, venue) pair was persisted within
+    /// [`SAMPLE_MIN_INTERVAL_MS`](Self::SAMPLE_MIN_INTERVAL_MS) are dropped
+    /// before the write is even attempted.
+    pub fn record_spread_samples_throttled(
+        &self,
+        symbol: &str,
+        merge_usd: bool,
+        ts_ms: i64,
+        entries: &[VenueSampleEntry],
+    ) -> anyhow::Result<()> {
+        let kept: Vec<VenueSampleEntry> = {
+            let mut wm = self.sample_watermarks.lock();
+            entries
+                .iter()
+                .filter(|e| {
+                    let key = (symbol.to_string(), e.venue_id.clone());
+                    if wm.get(&key).is_some_and(|last| {
+                        ts_ms.saturating_sub(*last) < Self::SAMPLE_MIN_INTERVAL_MS
+                    }) {
+                        return false;
+                    }
+                    wm.insert(key, ts_ms);
+                    true
+                })
+                .cloned()
+                .collect()
+        };
+        self.record_spread_samples_mode(symbol, merge_usd, ts_ms, &kept)
+    }
+
     /// Samples for a symbol in `[from_ts_ms, to_ts_ms]`, ordered by time then venue.
     /// Matches every storage alias for the asset (canonical base plus
     /// quoted UI forms) so background and UI recording paths read as one.
@@ -119,7 +156,7 @@ impl StateStore {
              WHERE symbol IN ({placeholders}) AND ts_ms >= ? AND ts_ms <= ?
              ORDER BY ts_ms ASC, venue_id ASC"
         );
-        let conn = self.conn.lock();
+        let conn = self.telemetry().lock();
         let mut stmt = conn.prepare(&sql)?;
         let mut params: Vec<&dyn rusqlite::ToSql> =
             keys.iter().map(|k| k as &dyn rusqlite::ToSql).collect();
@@ -162,7 +199,7 @@ impl StateStore {
         let keys = sample_keys(&symbol, merge_usd);
         let placeholders = keys.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!("SELECT MIN(ts_ms) FROM spread_samples WHERE symbol IN ({placeholders})");
-        let conn = self.conn.lock();
+        let conn = self.telemetry().lock();
         let mut stmt = conn.prepare(&sql)?;
         let params: Vec<&dyn rusqlite::ToSql> =
             keys.iter().map(|k| k as &dyn rusqlite::ToSql).collect();
@@ -173,7 +210,7 @@ impl StateStore {
     /// timestamps across every symbol and venue. One table scan; the caller
     /// decides how often that is affordable.
     pub fn spread_samples_stats(&self) -> anyhow::Result<(i64, Option<i64>, Option<i64>)> {
-        let conn = self.conn.lock();
+        let conn = self.telemetry().lock();
         Ok(conn.query_row(
             "SELECT COUNT(*), MIN(ts_ms), MAX(ts_ms) FROM spread_samples",
             [],
@@ -188,7 +225,7 @@ impl StateStore {
         retain_after_ts_ms: i64,
         max_rows: i64,
     ) -> anyhow::Result<()> {
-        let conn = self.conn.lock();
+        let conn = self.telemetry().lock();
         conn.execute(
             "DELETE FROM spread_samples WHERE ts_ms < ?1",
             [retain_after_ts_ms],
@@ -333,7 +370,7 @@ impl StateStore {
     /// identity — collapsing "BTC-USDT"/"BTC-USDC" to "BTC" would make the
     /// rollup driver read a key with no samples and merge sibling series.
     pub fn distinct_sample_symbols_mode(&self, merge_usd: bool) -> anyhow::Result<Vec<String>> {
-        let conn = self.conn.lock();
+        let conn = self.telemetry().lock();
         let mut stmt = conn.prepare("SELECT DISTINCT symbol FROM spread_samples")?;
         let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
         let mut out: Vec<String> = Vec::new();
@@ -352,7 +389,7 @@ impl StateStore {
     }
 
     pub fn delete_spread_samples_before(&self, retain_after_ts_ms: i64) -> anyhow::Result<usize> {
-        let conn = self.conn.lock();
+        let conn = self.telemetry().lock();
         Ok(conn.execute(
             "DELETE FROM spread_samples WHERE ts_ms < ?1",
             [retain_after_ts_ms],
@@ -443,7 +480,7 @@ impl StateStore {
     }
 
     pub fn delete_oldest_spread_samples(&self, limit: u64) -> anyhow::Result<usize> {
-        let conn = self.conn.lock();
+        let conn = self.telemetry().lock();
         // Rows are append-only with ts_ms = insert time, so rowid order is
         // timestamp order — ORDER BY id walks the PK directly instead of
         // sorting the whole table per batch under a GB retention cap.
@@ -456,7 +493,7 @@ impl StateStore {
     }
 
     pub fn spread_sample_count(&self) -> anyhow::Result<u64> {
-        let conn = self.conn.lock();
+        let conn = self.telemetry().lock();
         let n: i64 = conn.query_row("SELECT COUNT(*) FROM spread_samples", [], |r| r.get(0))?;
         Ok(n.max(0) as u64)
     }

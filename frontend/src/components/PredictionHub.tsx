@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from "react";
 import { Filter, SlidersHorizontal, X } from "lucide-react";
-import type { PredictionOpportunityDto } from "../types";
+import type { PredictionOpportunityDto, StrategyCapabilityDto } from "../types";
 import { BotLifecycleControls } from "./BotLifecycleControls";
 import { EmptyState } from "./EmptyState";
 import { ExecuteButton } from "./ExecuteButton";
@@ -12,6 +12,7 @@ import { describeCommandError } from "../services/api";
 interface PredictionDetailModalProps {
   opp: PredictionOpportunityDto;
   executing: boolean;
+  executeReady: boolean;
   onExecute: (opp: PredictionOpportunityDto) => void;
   onClose: () => void;
 }
@@ -20,7 +21,7 @@ interface PredictionDetailModalProps {
  *  the capacity curve when venue books exist (prediction adapters are
  *  scaffolds — the curve honestly reports "no depth data" until then). */
 const PredictionDetailModal: React.FC<PredictionDetailModalProps> = React.memo(
-  ({ opp, executing, onExecute, onClose }) => {
+  ({ opp, executing, executeReady, onExecute, onClose }) => {
     useEffect(() => {
       const handleKeyDown = (e: KeyboardEvent) => {
         if (e.key === "Escape") onClose();
@@ -101,13 +102,17 @@ const PredictionDetailModal: React.FC<PredictionDetailModalProps> = React.memo(
           </div>
 
           <div className="px-6 py-3.5 border-t border-surface-border bg-surface flex items-center justify-end gap-2 shrink-0">
-            <ExecuteButton
-              executing={executing}
-              disabled={!opp.has_arbitrage}
-              onClick={() => onExecute(opp)}
-              title="execute parity trade"
-              className="!text-xs !py-2.5 !px-2.5 cursor-pointer"
-            />
+            {executeReady ? (
+              <ExecuteButton
+                executing={executing}
+                disabled={!opp.has_arbitrage}
+                onClick={() => onExecute(opp)}
+                title="execute parity trade"
+                className="!text-xs !py-2.5 !px-2.5 cursor-pointer"
+              />
+            ) : (
+              <span className="text-xs font-mono text-muted">execution unavailable</span>
+            )}
           </div>
         </div>
       </div>
@@ -124,6 +129,9 @@ interface PredictionHubProps {
   isPaused?: boolean;
   hasApiConnectivity?: boolean;
   onOpenConfig?: (symbol: string, strategy?: string) => void;
+  /** Backend capability descriptor — prediction scan/execute are scaffolds
+   *  today, so every armed control is hidden when this says not-ready. */
+  capability?: StrategyCapabilityDto;
 }
 
 export const PredictionHub: React.FC<PredictionHubProps> = ({
@@ -133,6 +141,7 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
   isPaused = false,
   hasApiConnectivity = false,
   onOpenConfig,
+  capability,
 }) => {
   const [searchTerm, setSearchTerm] = useState("");
   const [detailOpp, setDetailOpp] = useState<PredictionOpportunityDto | null>(null);
@@ -156,8 +165,11 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
     execErrorTimer.current = window.setTimeout(() => setExecError(null), 8000);
   };
 
+  // Fail closed: an absent descriptor must not arm a stubbed path.
+  const executeReady = capability?.executeReady === true;
+
   const handleExecute = async (opp: PredictionOpportunityDto, opts?: { silent?: boolean }) => {
-    if (!onExecutePrediction) return;
+    if (!onExecutePrediction || !executeReady) return;
     if (bot.phase === "paused" || bot.phase === "reduce_only" || bot.phase === "stopping") return;
     setExecutingId(opp.id);
     try {
@@ -175,7 +187,7 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
 
   // Automated Execution Loop when user manually enables Auto Parity
   useEffect(() => {
-    if (!bot.entriesAllowed || executingId || !opportunities.length || isPaused) return;
+    if (!executeReady || !bot.entriesAllowed || executingId || !opportunities.length || isPaused) return;
 
     const now = Date.now();
     if (now - lastAutoPredExecRef.current < 6000) return; // 6s cooldown
@@ -185,7 +197,7 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
       lastAutoPredExecRef.current = now;
       void handleExecute(bestOpp, { silent: true });
     }
-  }, [bot.entriesAllowed, executingId, opportunities, isPaused]);
+  }, [executeReady, bot.entriesAllowed, executingId, opportunities, isPaused]);
 
   return (
     <div className="p-4 pr-5 space-y-4 overflow-y-auto h-full">
@@ -253,12 +265,20 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
           <BotLifecycleControls
             phase={bot.phase}
             hasOpenPositions={bot.hasOpenPositions}
-            disabled={isPaused || !hasApiConnectivity}
+            disabled={isPaused || !hasApiConnectivity || !executeReady}
             onStart={bot.start}
             onPause={bot.pause}
             onReduceOnly={bot.reduceOnly}
             onStop={() => void bot.stop()}
           />
+          {!executeReady && (
+            <span
+              className="text-xs font-mono text-muted max-w-72 truncate"
+              title={capability?.reason ?? "Execution path unavailable"}
+            >
+              {capability?.reason ?? "execution path unavailable"}
+            </span>
+          )}
           {bot.lastError && (
             <span className="text-xs font-mono text-loss max-w-56 truncate" title={bot.lastError}>
               {bot.lastError}
@@ -357,15 +377,17 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
                   </span>
                 </div>
 
-                <span onClick={(e) => e.stopPropagation()}>
-                  <ExecuteButton
-                    executed={lastExecuted === opp.id}
-                    executing={executingId === opp.id}
-                    onClick={() => handleExecute(opp)}
-                    title="execute parity trade"
-                    className="!px-2 !py-2 !text-xs"
-                  />
-                </span>
+                {executeReady && (
+                  <span onClick={(e) => e.stopPropagation()}>
+                    <ExecuteButton
+                      executed={lastExecuted === opp.id}
+                      executing={executingId === opp.id}
+                      onClick={() => handleExecute(opp)}
+                      title="execute parity trade"
+                      className="!px-2 !py-2 !text-xs"
+                    />
+                  </span>
+                )}
               </div>
             </div>
           ))}
@@ -376,6 +398,7 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
         <PredictionDetailModal
           opp={detailOpp}
           executing={executingId === detailOpp.id}
+          executeReady={executeReady}
           onExecute={(o) => {
             setDetailOpp(null);
             void handleExecute(o);

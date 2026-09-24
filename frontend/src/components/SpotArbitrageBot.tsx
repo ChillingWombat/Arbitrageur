@@ -8,7 +8,7 @@ import {
   Check,
 } from "lucide-react";
 import { api } from "../services/api";
-import type { SpotOpportunityDto, SpotExecutionParams, ExecutionLogEntry } from "../types";
+import type { SpotOpportunityDto, SpotExecutionParams, ExecutionLogEntry, StrategyCapabilityDto } from "../types";
 import type { SpotStrategyParams } from "./TickerConfigModal";
 import { BotLifecycleControls } from "./BotLifecycleControls";
 import { EmptyState } from "./EmptyState";
@@ -24,6 +24,9 @@ interface SpotArbitrageBotProps {
   isPaused?: boolean;
   hasApiConnectivity?: boolean;
   params: SpotStrategyParams;
+  /** Backend capability descriptor — spot is a permanent stub today, so the
+   *  whole execute surface is gated off when this says not-ready. */
+  capability?: StrategyCapabilityDto;
 }
 
 export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
@@ -33,6 +36,7 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
   isPaused = false,
   hasApiConnectivity = false,
   params,
+  capability,
 }) => {
   const [opportunities, setOpportunities] = useState<SpotOpportunityDto[]>([]);
   const [assetFilters, setAssetFilters] = useState<string[]>([]);
@@ -83,11 +87,15 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
     }
   };
 
+  // Fail closed: an absent descriptor must not arm a stubbed path.
+  const executeReady = capability?.executeReady === true;
+
   useEffect(() => {
+    if (capability == null || !capability.scanReady) return;
     loadSpotOpps();
     const interval = setInterval(loadSpotOpps, 3000);
     return () => clearInterval(interval);
-  }, []);
+  }, [capability]);
 
   const handleSelectOpp = (opp: SpotOpportunityDto) => {
     setSelectedOpp(opp);
@@ -132,7 +140,7 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
 
   // Automated Execution Loop when user manually enables the Spot Bot
   useEffect(() => {
-    if (!bot.entriesAllowed || botStatus === "verifying" || botStatus === "dispatching" || isPaused) return;
+    if (!executeReady || !bot.entriesAllowed || botStatus === "verifying" || botStatus === "dispatching" || isPaused) return;
 
     const now = Date.now();
     if (now - lastAutoSpotExecRef.current < 5000) return; // 5s cooldown
@@ -151,6 +159,20 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
 
   const bestOpp = filteredOpportunities.length > 0 ? filteredOpportunities[0] : null;
   const totalSpotPnl = spotLogs.reduce((acc, l) => acc + (l.net_profit || 0), 0);
+
+  if (!executeReady) {
+    return (
+      <div className="flex-1 flex flex-col h-full bg-background overflow-y-auto">
+        <div className="flex-1 flex items-center justify-center p-8">
+          <EmptyState
+            icon={AlertCircle}
+            title="Spot Arbitrage Unavailable"
+            hint={capability?.reason ?? "The backend spot execution path is not implemented."}
+          />
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="flex-1 flex flex-col h-full bg-background overflow-y-auto p-4 pr-5 space-y-4">

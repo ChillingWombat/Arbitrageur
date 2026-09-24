@@ -3,6 +3,9 @@ Description=Arbitrageur headless paper daemon (legacy template name; port %i)
 Documentation=file:///opt/arbitrageur/ops/deploy/README.md
 After=network-online.target
 Wants=network-online.target
+# Crash/failure pages the operator via the paired notifier unit — install
+# /etc/arbitrageur/alert.sh (sample in ops/deploy) to pick the channel.
+OnFailure=arbitrageur-notify@%i.service
 
 [Service]
 Type=simple

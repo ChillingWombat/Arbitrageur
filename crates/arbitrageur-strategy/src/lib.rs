@@ -98,7 +98,10 @@ mod tests {
                 leg_b,
             } => {
                 // Realized cash P&L on an open is fee outflow only
-                assert_eq!(realized_profit, -(leg_a.fee + leg_b.fee));
+                assert_eq!(
+                    realized_profit,
+                    -(leg_a.fee.unwrap_or_default() + leg_b.fee.unwrap_or_default())
+                );
             }
             other => panic!("Expected Success, got {:?}", other),
         }
@@ -162,7 +165,10 @@ mod tests {
                 assert_eq!(leg_a.symbol, "FED-YES");
                 assert_eq!(leg_b.venue, ex_kalshi.venue_id());
                 assert_eq!(leg_b.symbol, "FED-NO");
-                assert_eq!(realized_profit, -(leg_a.fee + leg_b.fee));
+                assert_eq!(
+                    realized_profit,
+                    -(leg_a.fee.unwrap_or_default() + leg_b.fee.unwrap_or_default())
+                );
             }
             other => panic!("Expected Success, got {:?}", other),
         }
@@ -207,7 +213,10 @@ mod tests {
                 assert_eq!(leg_b.venue, ex_kalshi.venue_id());
                 assert_eq!(leg_b.symbol, "ELEC-YES");
                 assert_eq!(leg_b.avg_fill_price, Some(dec!(0.42)));
-                assert_eq!(realized_profit, -(leg_a.fee + leg_b.fee));
+                assert_eq!(
+                    realized_profit,
+                    -(leg_a.fee.unwrap_or_default() + leg_b.fee.unwrap_or_default())
+                );
             }
             other => panic!("Expected Success, got {:?}", other),
         }
@@ -347,7 +356,8 @@ mod tests {
         ex.seed_market("X", dec!(50.0), dec!(50.2), dec!(10.0), dec!(0));
 
         let mut strat =
-            StatArbPairsStrategy::new("Y", "X", ex.clone(), dec!(1.5), dec!(0.5), dec!(2.0));
+            StatArbPairsStrategy::new("Y", "X", ex.clone(), dec!(1.5), dec!(0.5), dec!(2.0))
+                .expect("valid config");
 
         // Manually configure Kalman filter with negative beta
         strat.kalman.state = [0.0, -1.5]; // Beta = -1.5 (inverse relationship)
@@ -355,7 +365,13 @@ mod tests {
         strat.spread_stats.push(dec!(-10.0));
 
         let step_res = strat.step().await.expect("step");
-        if let Some((side_y, side_x, qty_y, qty_x)) = step_res {
+        if let Some(SpreadSignal::Enter {
+            side_y,
+            side_x,
+            qty_y,
+            qty_x,
+        }) = step_res
+        {
             assert!(qty_x > dec!(0));
             assert_eq!(qty_y, dec!(2.0));
             assert_eq!(qty_x, dec!(3.0)); // 2.0 * |-1.5| = 3.0
@@ -364,5 +380,36 @@ mod tests {
                 assert_eq!(side_x, arbitrageur_core::types::Side::Buy);
             }
         }
+    }
+
+    /// Regression (#46): entry/exit z-scores are validated — an exit band
+    /// outside the entry band can never trigger, and non-positive entries
+    /// are meaningless.
+    #[tokio::test]
+    async fn test_stat_arb_config_validation() {
+        let ex = Arc::new(SimulatedExchange::new(
+            "hyperliquid",
+            "Hyperliquid",
+            0,
+            dec!(2.0),
+            dec!(20000.0),
+        ));
+        // exit >= entry is unreachable.
+        assert!(
+            StatArbPairsStrategy::new("Y", "X", ex.clone(), dec!(1.0), dec!(1.5), dec!(2.0))
+                .is_err()
+        );
+        // non-positive entry is meaningless.
+        assert!(
+            StatArbPairsStrategy::new("Y", "X", ex.clone(), dec!(0.0), dec!(0.0), dec!(2.0))
+                .is_err()
+        );
+        // negative exit band rejected.
+        assert!(
+            StatArbPairsStrategy::new("Y", "X", ex.clone(), dec!(1.5), dec!(-0.5), dec!(2.0))
+                .is_err()
+        );
+        // sane config accepted.
+        assert!(StatArbPairsStrategy::new("Y", "X", ex, dec!(1.5), dec!(0.5), dec!(2.0)).is_ok());
     }
 }

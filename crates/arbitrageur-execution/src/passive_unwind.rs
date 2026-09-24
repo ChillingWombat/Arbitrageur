@@ -312,6 +312,12 @@ pub enum PassiveOutcome {
     LimitPartialThenMarket,
     /// Fell back to a market/IOC exit. `reason` always explains why.
     MarketFallback { reason: String },
+    /// Stopped without stacking: a resting order's cancel/fill state could
+    /// not be confirmed terminal, so no further order was dispatched. The
+    /// combined `response` carries the still-working order's identity —
+    /// callers must persist it and leave the position open for the
+    /// reconciliation supervisor to settle.
+    Unresolved { reason: String },
 }
 
 /// Full report of a passive reduce: outcome, per-try limit prices (equal to
@@ -657,6 +663,10 @@ pub async fn execute_passive_reduce_live(
 
         // Still working (or state unverifiable) at timeout: cancel and
         // confirm terminal before another attempt may rest on the book.
+        // If terminal state cannot be confirmed, STOP — a market fallback
+        // here would stack a second reduce order on top of one that may
+        // still be live, flipping the position past flat. The caller gets
+        // `Unresolved` with the outstanding order's identity preserved.
         if !cur.status.is_final() && cur.filled_qty < cur.original_qty {
             let _ = adapter
                 .cancel_order(CancelRequest {
@@ -672,36 +682,38 @@ pub async fn execute_passive_reduce_live(
             {
                 Ok(p) => cur = p,
                 Err(e) => {
+                    let working_id = cur.order_id.clone();
                     attempts.push(cur);
-                    return finish_live(
-                        adapter,
-                        symbol,
-                        side,
-                        qty,
-                        attempts.iter().fold(Decimal::ZERO, |a, r| a + r.filled_qty),
-                        format!("cancel/fill state unverifiable — stopping limit loop ({e:#})"),
-                        tries,
+                    return Ok(PassiveReduceReport {
+                        outcome: PassiveOutcome::Unresolved {
+                            reason: format!(
+                                "cancel/fill state unverifiable — order {working_id} may still be working ({e:#})"
+                            ),
+                        },
+                        limit_tries: tries,
                         limit_prices,
-                        attempts,
-                    )
-                    .await;
+                        response: combine_live_attempts(
+                            adapter.venue_id(),
+                            symbol,
+                            qty,
+                            &attempts,
+                        ),
+                    });
                 }
             }
             if !cur.status.is_final() {
+                let working_id = cur.order_id.clone();
                 attempts.push(cur);
-                return finish_live(
-                    adapter,
-                    symbol,
-                    side,
-                    qty,
-                    attempts.iter().fold(Decimal::ZERO, |a, r| a + r.filled_qty),
-                    "cancel unconfirmed — refusing to stack a second resting reduce order"
-                        .to_string(),
-                    tries,
+                return Ok(PassiveReduceReport {
+                    outcome: PassiveOutcome::Unresolved {
+                        reason: format!(
+                            "cancel unconfirmed — order {working_id} may still be working; refusing to stack a second resting reduce order"
+                        ),
+                    },
+                    limit_tries: tries,
                     limit_prices,
-                    attempts,
-                )
-                .await;
+                    response: combine_live_attempts(adapter.venue_id(), symbol, qty, &attempts),
+                });
             }
         }
 
@@ -808,7 +820,13 @@ fn combine_live_attempts(
     attempts: &[OrderResponse],
 ) -> OrderResponse {
     let filled: Decimal = attempts.iter().map(|r| r.filled_qty).sum();
-    let fee: Decimal = attempts.iter().map(|r| r.fee).sum();
+    // None only when every attempt's fee is venue-unknown — a partial
+    // known-fee sum would understate cost, so unknown wins over reported.
+    let fee: Option<Decimal> = if attempts.iter().all(|r| r.fee.is_some()) {
+        Some(attempts.iter().filter_map(|r| r.fee).sum())
+    } else {
+        None
+    };
     let px_num: Decimal = attempts
         .iter()
         .filter(|r| r.filled_qty > Decimal::ZERO)
@@ -885,7 +903,10 @@ fn combine_partial_with_market(
         filled_qty: total_qty,
         remaining_qty: (limit_resp.original_qty - total_qty).max(Decimal::ZERO),
         avg_fill_price: Some(vwap),
-        fee: limit_resp.fee + mkt_resp.fee,
+        fee: match (limit_resp.fee, mkt_resp.fee) {
+            (Some(a), Some(b)) => Some(a + b),
+            _ => None,
+        },
         fee_currency: limit_resp.fee_currency.clone(),
         raw_response: None,
         timestamp: chrono::Utc::now(),
@@ -1033,7 +1054,7 @@ mod tests {
                 } else {
                     None
                 },
-                fee: dec!(0.01),
+                fee: Some(dec!(0.01)),
                 fee_currency: "USDC".to_string(),
                 raw_response: None,
                 timestamp: chrono::Utc::now(),
@@ -1563,9 +1584,9 @@ mod tests {
             remaining_qty: (order.req.quantity - filled).max(Decimal::ZERO),
             avg_fill_price: (filled > Decimal::ZERO).then_some(dec!(100.5)),
             fee: if filled > Decimal::ZERO {
-                dec!(0.01)
+                Some(dec!(0.01))
             } else {
-                Decimal::ZERO
+                Some(Decimal::ZERO)
             },
             fee_currency: "USDC".to_string(),
             raw_response: None,
@@ -1869,6 +1890,6 @@ mod tests {
         assert_eq!(report.response.filled_qty, dec!(1));
         // limit 0.4 @ 100.5 + market 0.6 @ 100.5 → vwap 100.5
         assert_eq!(report.response.avg_fill_price, Some(dec!(100.5)));
-        assert_eq!(report.response.fee, dec!(0.02));
+        assert_eq!(report.response.fee, Some(dec!(0.02)));
     }
 }

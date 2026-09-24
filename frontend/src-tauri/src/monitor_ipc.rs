@@ -4,7 +4,8 @@
 //! execution. Split out of `commands.rs`.
 
 use crate::commands::{
-    execute_spatial_arbitrage_inner, reject_if_strategy_filtered, EntryPrediction, SimStepResultDto,
+    execute_spatial_arbitrage_inner, reject_if_strategy_filtered, validate_adapter_book,
+    EntryPrediction, SimStepResultDto,
 };
 use crate::state::AppEngineState;
 use std::sync::Arc;
@@ -193,15 +194,31 @@ pub(crate) async fn execute_monitor_opportunity_impl(
 
     // Convert USD size to base qty at the current buy-side ask, adjusted
     // for the quote coin's USD rate (a USDT ask at 0.99 costs fewer real
-    // dollars per unit than its face value suggests).
-    let book = state
-        .market_data_hub
-        .get_valid_orderbook(
-            &arbitrageur_core::types::VenueId(buy_venue.to_string()),
-            &sym,
-            Some(std::time::Duration::from_secs(60)),
-        )
-        .ok_or_else(|| "buy-side orderbook went stale".to_string())?;
+    // dollars per unit than its face value suggests). Sizing reads the same
+    // dispatch-time freshness bound as execution: hub cache ≤2s, else a
+    // fresh fetch through the admitted adapter — a minute-old ask would
+    // silently misprice the quantity.
+    let buy_vid = arbitrageur_core::types::VenueId(buy_venue.to_string());
+    let book = match state.market_data_hub.get_valid_orderbook(
+        &buy_vid,
+        &sym,
+        Some(std::time::Duration::from_secs(2)),
+    ) {
+        Some(b) => b,
+        None => {
+            let adapter = state
+                .get_adapter(buy_venue)
+                .ok_or_else(|| format!("Venue '{buy_venue}' is not admitted for execution"))?;
+            let b = adapter
+                .fetch_orderbook(&sym)
+                .await
+                .map_err(|e| format!("No fresh {buy_venue} orderbook for {sym}: {e}"))?;
+            validate_adapter_book(&b, &buy_vid, &sym)
+                .map_err(|e| format!("Buy-side order book rejected: {e}"))?;
+            state.market_data_hub.update_orderbook(b.clone());
+            b
+        }
+    };
     let ask = book
         .asks
         .first()
@@ -242,7 +259,6 @@ pub(crate) async fn execute_monitor_opportunity_impl(
         None,
         None,
         "radar",
-        None,
         prediction,
         state,
     )
@@ -270,4 +286,152 @@ pub(crate) async fn execute_monitor_opportunity_impl(
     }
 
     Ok(res)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::monitor::{MonitorRowDto, MonitorSnapshotDto};
+    use arbitrageur_core::quote::{BookLevel, OrderBook};
+    use arbitrageur_core::types::{dec, Decimal, VenueId};
+    use chrono::Utc;
+
+    /// Sims stand in for hyperliquid/lighter; venue flags admit them so
+    /// `get_venues`/`get_adapter` resolve like production wiring.
+    fn ipc_state() -> AppEngineState {
+        let state = AppEngineState::new();
+        {
+            let mut s = state.settings.write();
+            s.hyperliquid_enabled = true;
+            s.lighter_enabled = true;
+            s.passive_unwind.timeout_secs = 0;
+        }
+        state.install_test_sim("hyperliquid");
+        state.install_test_sim("lighter");
+        state
+    }
+
+    /// Seed a book into the installed sim only — NOT the hub — so the IPC
+    /// path must exercise the adapter-level fallback fetch.
+    fn seed_sim_book(
+        state: &AppEngineState,
+        venue: &str,
+        symbol: &str,
+        bid: Decimal,
+        ask: Decimal,
+    ) {
+        let mut b = OrderBook::new(VenueId::new(venue), symbol.to_string());
+        b.bids.push(BookLevel::new(bid, dec!(10.0)));
+        b.asks.push(BookLevel::new(ask, dec!(10.0)));
+        b.timestamp = Utc::now();
+        state
+            .test_sims
+            .read()
+            .unwrap()
+            .get(venue)
+            .expect("sim installed")
+            .replace_orderbook(b)
+            .unwrap();
+    }
+
+    fn engine_with_rows(
+        state: &AppEngineState,
+        rows: Vec<MonitorRowDto>,
+    ) -> Arc<crate::monitor::SpreadMonitorEngine> {
+        let engine = crate::monitor::SpreadMonitorEngine::new(state);
+        engine.inject_snapshot(MonitorSnapshotDto {
+            generated_ts_ms: Utc::now().timestamp_millis(),
+            running: true,
+            rows,
+            watchlist: vec![],
+            venues: vec![],
+            exempted: vec![],
+        });
+        engine
+    }
+
+    #[tokio::test]
+    async fn execute_monitor_opportunity_requires_engine_and_snapshot() {
+        // No engine at all — the IPC surfaces a plain "not running".
+        let state = ipc_state();
+        let err = execute_monitor_opportunity_impl("ANTH", "hyperliquid", "lighter", 100.0, &state)
+            .await
+            .expect_err("no engine");
+        assert!(err.contains("not running"), "{err}");
+
+        // Engine installed but no snapshot produced yet.
+        let engine = crate::monitor::SpreadMonitorEngine::new(&state);
+        *state.monitor.lock() = Some(engine);
+        let err = execute_monitor_opportunity_impl("ANTH", "hyperliquid", "lighter", 100.0, &state)
+            .await
+            .expect_err("no snapshot");
+        assert!(err.contains("not produced a snapshot"), "{err}");
+
+        // Snapshot present but the requested row is gone — the opportunity
+        // aged out between render and click; never dispatch on staleness.
+        *state.monitor.lock() = Some(engine_with_rows(
+            &state,
+            vec![MonitorRowDto::test_row("BTC", "hyperliquid", "lighter")],
+        ));
+        let err = execute_monitor_opportunity_impl("ANTH", "hyperliquid", "lighter", 100.0, &state)
+            .await
+            .expect_err("row not tracked");
+        assert!(err.contains("no longer tracked"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn execute_monitor_opportunity_refuses_blocked_row_and_bad_size() {
+        let state = ipc_state();
+        let mut row = MonitorRowDto::test_row("ANTH", "hyperliquid", "lighter");
+        row.executable = false;
+        row.block_reason = Some("session gate blocks entry".into());
+        *state.monitor.lock() = Some(engine_with_rows(&state, vec![row]));
+        // A blocked row surfaces ITS block reason — never a generic error
+        // and never a dispatch.
+        let err = execute_monitor_opportunity_impl("ANTH", "hyperliquid", "lighter", 100.0, &state)
+            .await
+            .expect_err("blocked row must refuse");
+        assert_eq!(err, "session gate blocks entry");
+        // Invalid sizes refuse before any dispatch work.
+        for bad in [0.0, -50.0, f64::NAN, f64::INFINITY] {
+            let err =
+                execute_monitor_opportunity_impl("ANTH", "hyperliquid", "lighter", bad, &state)
+                    .await
+                    .expect_err("bad size");
+            assert!(err.contains("invalid size"), "{err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_monitor_opportunity_dispatches_via_adapter_fallback() {
+        // Full seam: an executable row + NO hub books — sizing must fall
+        // back to a fresh adapter fetch, then dispatch the spatial entry
+        // under the "radar" strategy id.
+        let state = ipc_state();
+        // Crossed books (buy ask > sell bid): negative static edge, but the
+        // row's reversion baseline (-150bps) carries the entry economics —
+        // same economics the commands-level radar test proves.
+        seed_sim_book(&state, "hyperliquid", "ANTH", dec!(100.0), dec!(100.2));
+        seed_sim_book(&state, "lighter", "ANTH", dec!(99.9), dec!(100.1));
+        *state.monitor.lock() = Some(engine_with_rows(
+            &state,
+            vec![MonitorRowDto::test_row("ANTH", "hyperliquid", "lighter")],
+        ));
+
+        let res = execute_monitor_opportunity_impl("ANTH", "hyperliquid", "lighter", 100.0, &state)
+            .await
+            .expect("executable row must dispatch");
+        assert!(res.execution_success, "{}", res.message);
+        // The fills persist under the radar strategy so attribution scopes
+        // them apart from the Simple Spread page.
+        let sigs = state
+            .state_store
+            .list_signals(Some("ANTH"), None)
+            .expect("list");
+        assert!(
+            sigs.iter().any(|s| s.strategy_id == "radar"),
+            "radar signal must persist: {:?}",
+            sigs.iter().map(|s| &s.id).collect::<Vec<_>>()
+        );
+    }
 }

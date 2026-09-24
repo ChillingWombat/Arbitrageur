@@ -322,6 +322,17 @@ fn ready(
     })
 }
 
+/// Stop-inclusive per-episode expectancy (bps): a Win exits at the
+/// reversion band (captures ~t − band), a Stop exits at the stop level on
+/// the entry side (loses ~stop − t), and every resolved episode pays
+/// friction once. A non-win is a real loss — treating Stop as zero-cost
+/// inflated EV and let the auto-apply gate ship losing candidates.
+fn episode_expectancy(p_win: f64, t: f64, band: f64, stop: f64, friction: f64) -> f64 {
+    let win_payoff = (t - band).max(0.0);
+    let stop_loss = (stop - t).max(0.0);
+    p_win * win_payoff - (1.0 - p_win) * stop_loss - friction
+}
+
 fn confidence_for(n_fit: usize, n_val_episodes: usize, carry_known: bool) -> &'static str {
     if n_fit >= 300 && n_val_episodes >= AUTOTUNE_MIN_CAP_EPISODES && carry_known {
         "high"
@@ -566,7 +577,7 @@ pub fn recommend(h: &TuneHistory) -> AutotuneReport {
     let fit_window: Option<u64> = fit_ou.and_then(|p| {
         if p.half_life.is_finite()
             && p.half_life > 0.0
-            && p.r_squared >= AUTOTUNE_OU_MIN_R2
+            && p.r_squared.is_some_and(|r| r >= AUTOTUNE_OU_MIN_R2)
             && h.fit.len() >= AUTOTUNE_OU_MIN_N
         {
             Some((2.0 * p.half_life).round().clamp(
@@ -667,7 +678,7 @@ pub fn recommend(h: &TuneHistory) -> AutotuneReport {
             .count();
         let p_win = wins as f64 / n as f64;
         let wilson = wilson_lower(wins, n)?;
-        let e_net = p_win * t - h.friction_val_bps;
+        let e_net = episode_expectancy(p_win, t, band_val, stop_val, h.friction_val_bps);
         Some(ValEcon {
             n,
             wins,
@@ -684,7 +695,7 @@ pub fn recommend(h: &TuneHistory) -> AutotuneReport {
 
     let val_hl_ok = match (fit_ou, val_ou) {
         (Some(f), Some(v)) => {
-            v.r_squared >= AUTOTUNE_OU_MIN_R2
+            v.r_squared.is_some_and(|r| r >= AUTOTUNE_OU_MIN_R2)
                 && f.half_life.is_finite()
                 && f.half_life > 0.0
                 && v.half_life.is_finite()
@@ -695,7 +706,7 @@ pub fn recommend(h: &TuneHistory) -> AutotuneReport {
     };
     let window_ok = fit_window.is_some()
         && h.fit.len() >= AUTOTUNE_OU_MIN_N
-        && fit_ou.is_some_and(|p| p.r_squared >= AUTOTUNE_OU_MIN_R2)
+        && fit_ou.is_some_and(|p| p.r_squared.is_some_and(|r| r >= AUTOTUNE_OU_MIN_R2))
         && val_hl_ok;
 
     let val_ep_n = val_econ.as_ref().map(|v| v.n).unwrap_or(0);
@@ -713,8 +724,10 @@ pub fn recommend(h: &TuneHistory) -> AutotuneReport {
     {
         let fit_m = match fit_ou {
             Some(p) => format!(
-                "R²={:.2} hl={:.0}s (n={})",
-                p.r_squared,
+                "R²={} hl={:.0}s (n={})",
+                p.r_squared
+                    .map(|r| format!("{r:.2}"))
+                    .unwrap_or_else(|| "n/a".into()),
                 p.half_life,
                 h.fit.len()
             ),
@@ -722,8 +735,10 @@ pub fn recommend(h: &TuneHistory) -> AutotuneReport {
         };
         let val_m = match val_ou {
             Some(p) => format!(
-                "R²={:.2} hl={:.0}s (n={})",
-                p.r_squared,
+                "R²={} hl={:.0}s (n={})",
+                p.r_squared
+                    .map(|r| format!("{r:.2}"))
+                    .unwrap_or_else(|| "n/a".into()),
                 p.half_life,
                 h.validate.len()
             ),
@@ -1136,6 +1151,21 @@ mod tests {
             assert_eq!(r.status, RowStatus::HELD);
             assert_eq!(r.recommended, None);
         }
+    }
+
+    #[test]
+    fn stop_inclusive_expectancy_rejects_losing_candidates() {
+        // Regression (issue #37): a Stop is a real loss, not a zero-cost
+        // non-win. friction=5, band=5, t=15, stop=30 → win payoff 10,
+        // stop loss 15. The old gate (p·t − friction) passed for p>1/3;
+        // honest expectancy stays ≤ 0 until p>0.8.
+        assert!(episode_expectancy(1.0 / 3.0, 15.0, 5.0, 30.0, 5.0) < 0.0);
+        assert!(episode_expectancy(0.5, 15.0, 5.0, 30.0, 5.0) < 0.0);
+        assert!(episode_expectancy(0.79, 15.0, 5.0, 30.0, 5.0) < 0.0);
+        assert!(episode_expectancy(0.9, 15.0, 5.0, 30.0, 5.0) > 0.0);
+        // A stop at/below entry stops every episode instantly — pure
+        // friction bleed, always negative.
+        assert!(episode_expectancy(0.0, 15.0, 5.0, 10.0, 5.0) < 0.0);
     }
 
     #[test]

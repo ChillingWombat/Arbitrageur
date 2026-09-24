@@ -30,7 +30,7 @@ use arbitrageur_core::order::{CancelRequest, OrderRequest, OrderResponse};
 use arbitrageur_core::types::{dec, Decimal, OrderStatus, Side};
 use arbitrageur_execution::passive_unwind::execute_passive_reduce_live;
 use chrono::{DateTime, Utc};
-use rust_decimal::prelude::FromPrimitive;
+use rust_decimal::prelude::{FromPrimitive, ToPrimitive};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -94,19 +94,41 @@ fn signal_age_secs(created_at: &str) -> i64 {
         .unwrap_or(0)
 }
 
+/// Is `filled` materially below the order's intended quantity? Wire-grid
+/// snapping can leave sub-1e-6 relative dust between intended and executed
+/// sizes — below that epsilon the fill counts as complete; anything larger
+/// is residual exposure the signal must keep surfacing.
+fn materially_short(filled: Decimal, intended: Decimal) -> bool {
+    intended > Decimal::ZERO
+        && filled + (intended / dec!(1_000_000)).max(dec!(0.000000001)) < intended
+}
+
 /// Map an authoritative venue snapshot onto a poll outcome for ledger math.
-fn classify_response(resp: &OrderResponse) -> LegPoll {
+/// `intended_qty` is the leg's planned quantity — a terminal response whose
+/// fill does not cover it is partial exposure, never a full fill, whatever
+/// the venue's status field claims.
+fn classify_response(resp: &OrderResponse, intended_qty: Decimal) -> LegPoll {
     match resp.status {
-        OrderStatus::Filled => LegPoll::Filled,
-        OrderStatus::Cancelled | OrderStatus::Rejected | OrderStatus::Expired => {
-            if resp.filled_qty > arbitrageur_core::types::dec!(0)
-                && resp.remaining_qty > arbitrageur_core::types::dec!(0)
-            {
+        OrderStatus::Filled => {
+            // Venue-authoritative full execution — but a `Filled` status
+            // reporting materially less than the intended size is a venue
+            // accounting inconsistency: treat it as partial so the residual
+            // stays on the escalation path instead of silently trusting it.
+            if materially_short(resp.filled_qty, intended_qty) {
                 LegPoll::PartialTerminal
-            } else if resp.filled_qty > arbitrageur_core::types::dec!(0) {
+            } else {
+                LegPoll::Filled
+            }
+        }
+        OrderStatus::Cancelled | OrderStatus::Rejected | OrderStatus::Expired => {
+            if resp.filled_qty <= Decimal::ZERO {
+                LegPoll::CancelledEmpty
+            } else if resp.remaining_qty <= Decimal::ZERO
+                && !materially_short(resp.filled_qty, intended_qty)
+            {
                 LegPoll::Filled
             } else {
-                LegPoll::CancelledEmpty
+                LegPoll::PartialTerminal
             }
         }
         OrderStatus::PartiallyFilled => {
@@ -122,11 +144,17 @@ fn classify_response(resp: &OrderResponse) -> LegPoll {
 /// Derives the durable signal status from this pass's per-leg outcomes.
 /// Pure so the full classification matrix is unit-testable: every input
 /// (poll set, leg count, age, close-vs-entry, cancel notes) is explicit.
+/// `is_flatten_child` marks `flat-{parent}-*` / `trim-{parent}-*` residual
+/// children: for them a venue-proven terminal outcome resolves the ATTEMPT
+/// (Failed when nothing filled, Closed otherwise) so the residual machinery
+/// can redispatch within its attempt bound — an `unresolved` child would
+/// count as open forever and stall every retry.
 fn derive_signal_status(
     polls: &[LegPoll],
     leg_count: usize,
     age: i64,
     is_close_signal: bool,
+    is_flatten_child: bool,
     cancel_notes: Option<&Vec<String>>,
 ) -> (Option<SignalStatus>, Option<String>) {
     // Every persisted leg must be accounted for this pass — a leg missing a
@@ -173,8 +201,14 @@ fn derive_signal_status(
         // An entry where SOME leg filled while another ended empty holds
         // residual one-sided exposure — that is Imbalanced, never Failed
         // (which would unblock the ticker over a live residual).
+        // A flatten/trim child whose orders all ended venue-proven empty is
+        // a failed ATTEMPT: Failed releases it from the open-child dedup so
+        // the residual dispatcher can retry — the parent keeps its open
+        // status and still tracks the underlying exposure.
         return (
-            Some(if is_close_signal {
+            Some(if is_flatten_child {
+                SignalStatus::Failed
+            } else if is_close_signal {
                 SignalStatus::Unresolved
             } else if polls.iter().all(|p| *p == LegPoll::CancelledEmpty) {
                 SignalStatus::Failed
@@ -185,7 +219,15 @@ fn derive_signal_status(
         );
     }
     (
-        Some(SignalStatus::Unresolved),
+        Some(if is_flatten_child {
+            // Terminal with some venue-proven fill — the attempt is over.
+            // Its covered quantity feeds residual math, and the parent
+            // redispatches for the remainder; `unresolved` would strand the
+            // child as open forever and block every retry.
+            SignalStatus::Closed
+        } else {
+            SignalStatus::Unresolved
+        }),
         Some("Leg(s) ended partially filled or with mixed terminal states".into()),
     )
 }
@@ -197,7 +239,13 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
         Err(_) => return ReconcileSummary::default(), // previous pass still running
     };
     let mut summary = ReconcileSummary::default();
-    let pending = match state.state_store.list_pending_order_legs() {
+    // Environment-scoped: legs poll through the active environment's
+    // adapters, so the other environment's order ids must never reach its
+    // venue endpoints. `unknown`-env legacy rows stay in the set.
+    let pending = match state
+        .state_store
+        .list_pending_order_legs(Some(state.env().as_str()))
+    {
         Ok(p) => p,
         Err(e) => {
             tracing::error!("reconcile: failed to list pending order legs: {e}");
@@ -291,7 +339,10 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
                     continue;
                 }
                 let filled = resp.filled_qty.to_string().parse::<f64>().unwrap_or(0.0);
-                let fee = resp.fee.to_string().parse::<f64>().unwrap_or(0.0);
+                let fee = resp
+                    .fee
+                    .map(|v| v.to_string().parse::<f64>().unwrap_or(0.0))
+                    .unwrap_or(0.0);
                 // `fee_usd` only holds USD-stable denominations; a fee in a
                 // non-stable currency is unaccounted, not convertible here.
                 let fee_usd_ok = fee <= 0.0
@@ -373,7 +424,8 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
                         }
                     }
                 }
-                let poll = classify_response(&resp);
+                let intended = Decimal::from_f64_retain(leg.intended_qty).unwrap_or(Decimal::ZERO);
+                let poll = classify_response(&resp, intended);
                 // Terminal legs can never retry — drop the cancel-attempt
                 // counter so resolved orders don't accumulate kv rows.
                 if poll != LegPoll::Working {
@@ -416,15 +468,17 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
         };
         // Close-type signals: `external` closes plus `flat-{parent}-*` /
         // `trim-{parent}-*` children — all exist to reduce exposure, so an
-        // empty terminal leg is never a clean "Failed".
-        let is_close_signal = strategy_id == "external"
-            || signal_id.starts_with("flat-")
-            || signal_id.starts_with("trim-");
+        // empty terminal leg is never a clean "Failed". Flatten children
+        // resolve terminal outcomes against the ATTEMPT (retryable), while
+        // `external` closes stay unresolved for the operator.
+        let is_flatten_child = signal_id.starts_with("flat-") || signal_id.starts_with("trim-");
+        let is_close_signal = strategy_id == "external" || is_flatten_child;
         let (new_status, note): (Option<SignalStatus>, Option<String>) = derive_signal_status(
             polls,
             *leg_count,
             *age,
             is_close_signal,
+            is_flatten_child,
             cancel_notes.get(signal_id),
         );
         if let Some(status) = new_status {
@@ -432,50 +486,71 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
             // `flat-{id}-*` child and closed the parent above — a stale leg
             // poll must never reopen Closed/Failed (HashMap outcome order is
             // arbitrary). Unresolved/imbalanced stay revisable by design.
-            let already_terminal = state
-                .state_store
-                .get_signal(signal_id)
-                .ok()
-                .flatten()
+            let current = state.state_store.get_signal(signal_id).ok().flatten();
+            let already_terminal = current
+                .as_ref()
                 .map(|s| matches!(s.status, SignalStatus::Closed | SignalStatus::Failed))
                 .unwrap_or(false);
             if already_terminal {
                 continue;
             }
-            if state
-                .state_store
-                .update_signal_status(signal_id, status, note.as_deref())
-                .is_ok()
+            // Idempotent escalation: rewriting identical status+note every
+            // pass bumps `updated_at` and re-counts the escalation forever —
+            // persist only real changes. The dispatch/resolve hooks still
+            // run on a steady-state outcome: an Imbalanced parent must keep
+            // retrying residual dispatch within its attempt bounds even
+            // when the status word itself is unchanged.
+            let changed = current
+                .as_ref()
+                .map(|s| s.status != status || s.note.as_deref() != note.as_deref())
+                .unwrap_or(true);
+            if changed
+                && state
+                    .state_store
+                    .update_signal_status(signal_id, status, note.as_deref())
+                    .is_ok()
             {
                 if status == SignalStatus::Unresolved {
                     summary.escalated += 1;
+                    // Out-of-band page: `unresolved` means the supervisor
+                    // could not prove the order's terminal state — a human
+                    // must look. Fires only on the transition (the persist
+                    // above is change-gated), never repeatedly per pass.
+                    crate::alerting::dispatch(
+                        state.env().as_str(),
+                        "signal_unresolved",
+                        format!(
+                            "{signal_id}: {}",
+                            note.as_deref().unwrap_or("escalated to unresolved")
+                        ),
+                    );
                 } else {
                     summary.resolved += 1;
                 }
-                // Auto-compensation (unconditional): an ENTRY signal that
-                // lands imbalanced holds naked one-sided exposure — submit
-                // reduce-only flattens for the residual, persisted as
-                // `flat-{id}-*` children this same supervisor reconciles to
-                // terminal state. Exit manner follows the resolved passive
-                // unwind policy (limit-first with market fallback).
-                if status == SignalStatus::Imbalanced && !is_close_signal {
-                    dispatch_residual_flatten(state, signal_id).await;
-                }
-                // A `flat-{parent}-*` or `trim-{parent}-*` child that just
-                // resolved means its fills are final. When ALL of a parent's
-                // family children are Closed, the parent can leave
-                // `unresolved`/`imbalanced` — never resurrect a parent that
-                // already reached closed/failed. The trim prefix matters: a
-                // trim child resolving last would otherwise never retrigger
-                // the check, stranding the parent open forever.
-                if status == SignalStatus::Closed {
-                    if let Some(parent_id) = signal_id
-                        .strip_prefix("flat-")
-                        .or_else(|| signal_id.strip_prefix("trim-"))
-                        .and_then(|s| s.rsplit_once('-').map(|(p, _)| p.to_string()))
-                    {
-                        resolve_flattened_parent(state, &parent_id);
-                    }
+            }
+            // Auto-compensation (unconditional): an ENTRY signal that
+            // lands imbalanced holds naked one-sided exposure — submit
+            // reduce-only flattens for the residual, persisted as
+            // `flat-{id}-*` children this same supervisor reconciles to
+            // terminal state. Exit manner follows the resolved passive
+            // unwind policy (limit-first with market fallback).
+            if status == SignalStatus::Imbalanced && !is_close_signal {
+                dispatch_residual_flatten(state, signal_id).await;
+            }
+            // A `flat-{parent}-*` or `trim-{parent}-*` child that just
+            // resolved means its fills are final. When ALL of a parent's
+            // family children are Closed, the parent can leave
+            // `unresolved`/`imbalanced` — never resurrect a parent that
+            // already reached closed/failed. The trim prefix matters: a
+            // trim child resolving last would otherwise never retrigger
+            // the check, stranding the parent open forever.
+            if status == SignalStatus::Closed {
+                if let Some(parent_id) = signal_id
+                    .strip_prefix("flat-")
+                    .or_else(|| signal_id.strip_prefix("trim-"))
+                    .and_then(|s| s.rsplit_once('-').map(|(p, _)| p.to_string()))
+                {
+                    resolve_flattened_parent(state, &parent_id);
                 }
             }
         }
@@ -526,7 +601,10 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
                 );
                 continue;
             }
-            let fee = resp.fee.to_string().parse::<f64>().unwrap_or(0.0);
+            let fee = resp
+                .fee
+                .map(|v| v.to_string().parse::<f64>().unwrap_or(0.0))
+                .unwrap_or(0.0);
             if fee <= 0.0 {
                 continue;
             }
@@ -692,6 +770,60 @@ fn residual_leg_quantities(
         .collect()
 }
 
+/// Clamp a ledger-claimed residual to the exposure the venue actually
+/// reports. Returns `Ok(None)` when the venue shows none — the residual is
+/// phantom and submitting would create or destroy unrelated exposure.
+/// `Err` on ambiguous venue mapping → caller fails closed.
+fn observed_residual_qty(
+    adapter: &Arc<dyn ExchangeAdapter>,
+    acc: &arbitrageur_core::position::AccountSnapshot,
+    leg: &SignalLeg,
+    ledger_qty: f64,
+) -> anyhow::Result<Option<f64>> {
+    match adapter.account_position_for(acc, &leg.symbol)? {
+        Some(pos) => {
+            // A derivative position exists — its side must agree with the
+            // residual direction. Opposite-side means the ledger and venue
+            // disagree structurally; refusing beats guessing.
+            let expected = match leg.side {
+                LegSide::Long => Side::Buy,
+                LegSide::Short => Side::Sell,
+            };
+            if pos.side != expected {
+                anyhow::bail!(
+                    "{} residual on {}: venue position is {:?}, ledger expects {:?}",
+                    leg.symbol,
+                    leg.venue,
+                    pos.side,
+                    leg.side
+                );
+            }
+            let clamp = ledger_qty.min(pos.quantity.to_f64().unwrap_or(f64::MAX));
+            Ok((clamp > 1e-9).then_some(clamp))
+        }
+        None => match leg.side {
+            // Spot long residual lives in balances, not positions: a
+            // sell-flatten is bounded by the free balance of the base asset.
+            LegSide::Long => {
+                let base = arbitrageur_core::symbol::canonical_base(&leg.symbol);
+                let asset = base.strip_suffix("-SPOT").unwrap_or(&base);
+                match acc.get_balance(asset) {
+                    Some(b) if b.free > dec!(0) => {
+                        let clamp = ledger_qty.min(b.free.to_f64().unwrap_or(f64::MAX));
+                        Ok((clamp > 1e-9).then_some(clamp))
+                    }
+                    _ => Ok(None),
+                }
+            }
+            // A short residual with no derivative position means a spot sell
+            // already settled — the debt owed back isn't observable from
+            // balances. The ledger quantity came from venue-confirmed fills,
+            // so it stays the bound; the buy-back cannot exceed it.
+            LegSide::Short => Ok(Some(ledger_qty)),
+        },
+    }
+}
+
 /// Auto-compensation for an `imbalanced` entry: persist a `flat-{id}-*`
 /// child signal (durable intent BEFORE any submission), then submit
 /// reduce-only market orders for each residual leg. The child joins the
@@ -800,8 +932,68 @@ async fn dispatch_residual_flatten(state: &AppEngineState, signal_id: &str) {
         }
     }
 
+    // Venue-side verification: the ledger residual is a claim, the venue's
+    // account state is the truth. Each leg is clamped to observed exposure
+    // and legs the venue reports flat are dropped — a stale or overstated
+    // ledger must never send a real order against unrelated balances or
+    // create fresh exposure. Fetch/mapping failures abort the pass without
+    // consuming an attempt (retried next poll); a verified-empty residual
+    // set closes the signal as a phantom.
+    let mut accounts: HashMap<String, arbitrageur_core::position::AccountSnapshot> = HashMap::new();
+    let mut verified: Vec<(SignalLeg, f64)> = Vec::with_capacity(residuals.len());
+    for (leg, ledger_qty) in residuals {
+        let adapter = match state.get_adapter(&leg.venue) {
+            Some(a) => a,
+            None => return, // pre-flighted above; missing now = config race
+        };
+        if !accounts.contains_key(&leg.venue) {
+            match adapter.fetch_account().await {
+                Ok(acc) => {
+                    accounts.insert(leg.venue.clone(), acc);
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "reconcile: {signal_id} residual verification fetch on {} failed ({e}) — retrying next pass",
+                        leg.venue
+                    );
+                    return;
+                }
+            }
+        }
+        match observed_residual_qty(&adapter, &accounts[&leg.venue], &leg, ledger_qty) {
+            Ok(Some(clamped)) => verified.push((leg, clamped)),
+            Ok(None) => {
+                tracing::warn!(
+                    "reconcile: {signal_id} {} residual on {} is phantom — venue shows no exposure; not submitting",
+                    leg.symbol,
+                    leg.venue
+                );
+            }
+            Err(e) => {
+                tracing::error!(
+                    "reconcile: {signal_id} residual verification on {} failed: {e}",
+                    leg.venue
+                );
+                let _ = state.state_store.update_signal_status(
+                    signal_id,
+                    SignalStatus::Unresolved,
+                    Some("residual venue verification ambiguous — manual check required"),
+                );
+                return;
+            }
+        }
+    }
+    if verified.is_empty() {
+        let _ = state.state_store.update_signal_status(
+            signal_id,
+            SignalStatus::Closed,
+            Some("residual verified flat at venue — ledger overstated"),
+        );
+        return;
+    }
+
     let close_id = format!("flat-{}-{:04x}", signal_id, rand::random::<u16>());
-    let legs: Vec<NewSignalLeg> = residuals
+    let legs: Vec<NewSignalLeg> = verified
         .iter()
         .map(|(l, qty)| NewSignalLeg {
             account_id: l.account_id.clone(),
@@ -815,9 +1007,8 @@ async fn dispatch_residual_flatten(state: &AppEngineState, signal_id: &str) {
             intended_price: None,
         })
         .collect();
-    if let Err(e) = state
-        .state_store
-        .record_signal_execution(&NewSignalExecution {
+    if let Err(e) = state.state_store.record_signal_execution(
+        &NewSignalExecution {
             id: close_id.clone(),
             strategy_id: exec.strategy_id.clone(),
             symbol: exec.symbol.clone(),
@@ -825,8 +1016,9 @@ async fn dispatch_residual_flatten(state: &AppEngineState, signal_id: &str) {
             expected_net_usd: None,
             note: Some(format!("auto residual flatten of {signal_id}")),
             legs,
-        })
-    {
+        },
+        state.env().as_str(),
+    ) {
         tracing::error!("reconcile: failed to persist residual flatten {close_id}: {e}");
         return;
     }
@@ -846,7 +1038,7 @@ async fn dispatch_residual_flatten(state: &AppEngineState, signal_id: &str) {
             first_dispatch_err = Some(e);
         }
     };
-    for (leg, qty) in &residuals {
+    for (leg, qty) in &verified {
         let child_side = match leg.side {
             LegSide::Long => LegSide::Short,
             LegSide::Short => LegSide::Long,
@@ -958,7 +1150,10 @@ async fn dispatch_residual_flatten(state: &AppEngineState, signal_id: &str) {
         }
         if resp.filled_qty > dec!(0) {
             let qty_f = resp.filled_qty.to_string().parse::<f64>().unwrap_or(0.0);
-            let fee_f = resp.fee.to_string().parse::<f64>().unwrap_or(0.0);
+            let fee_f = resp
+                .fee
+                .map(|v| v.to_string().parse::<f64>().unwrap_or(0.0))
+                .unwrap_or(0.0);
             let px_f = resp
                 .avg_fill_price
                 .and_then(|p| p.to_string().parse::<f64>().ok())
@@ -1060,7 +1255,7 @@ mod tests {
             filled_qty: filled,
             remaining_qty: remaining,
             avg_fill_price: None,
-            fee: dec!(0),
+            fee: Some(dec!(0)),
             fee_currency: "USD".into(),
             raw_response: None,
             timestamp: Utc::now(),
@@ -1069,40 +1264,115 @@ mod tests {
 
     #[test]
     fn classify_terminal_and_working_states() {
+        let intended = dec!(1);
         assert_eq!(
-            classify_response(&resp(OrderStatus::Filled, dec!(1), dec!(0))),
+            classify_response(&resp(OrderStatus::Filled, dec!(1), dec!(0)), intended),
             LegPoll::Filled
         );
         assert_eq!(
-            classify_response(&resp(OrderStatus::Cancelled, dec!(0), dec!(1))),
+            classify_response(&resp(OrderStatus::Cancelled, dec!(0), dec!(1)), intended),
             LegPoll::CancelledEmpty
         );
         assert_eq!(
-            classify_response(&resp(OrderStatus::Rejected, dec!(0), dec!(1))),
+            classify_response(&resp(OrderStatus::Rejected, dec!(0), dec!(1)), intended),
             LegPoll::CancelledEmpty
         );
         assert_eq!(
-            classify_response(&resp(OrderStatus::Expired, dec!(0), dec!(1))),
+            classify_response(&resp(OrderStatus::Expired, dec!(0), dec!(1)), intended),
             LegPoll::CancelledEmpty
         );
         // Cancelled-after-partial is terminal with nonzero residue — never
         // auto-resolvable.
         assert_eq!(
-            classify_response(&resp(OrderStatus::Cancelled, dec!(0.4), dec!(0.6))),
+            classify_response(
+                &resp(OrderStatus::Cancelled, dec!(0.4), dec!(0.6)),
+                intended
+            ),
             LegPoll::PartialTerminal
         );
         // Terminal with full fill but odd status spelling still counts.
         assert_eq!(
-            classify_response(&resp(OrderStatus::Cancelled, dec!(1), dec!(0))),
+            classify_response(&resp(OrderStatus::Cancelled, dec!(1), dec!(0)), intended),
+            LegPoll::Filled
+        );
+        // A terminal cancel that reports zero remaining but less than the
+        // intended quantity is STILL partial exposure — the venue ended the
+        // order early, not filled it.
+        assert_eq!(
+            classify_response(
+                &resp(OrderStatus::Cancelled, dec!(0.999), dec!(0)),
+                intended
+            ),
+            LegPoll::PartialTerminal
+        );
+        assert_eq!(
+            classify_response(&resp(OrderStatus::Expired, dec!(0.5), dec!(0)), intended),
+            LegPoll::PartialTerminal
+        );
+        // `Filled` status with materially short quantity is a venue
+        // inconsistency — escalate rather than trust the status word.
+        assert_eq!(
+            classify_response(&resp(OrderStatus::Filled, dec!(0.4), dec!(0)), intended),
+            LegPoll::PartialTerminal
+        );
+        // Wire-grid dust (sub-ppm) still counts as filled.
+        assert_eq!(
+            classify_response(
+                &resp(OrderStatus::Cancelled, dec!(0.9999999995), dec!(0)),
+                intended
+            ),
             LegPoll::Filled
         );
         assert_eq!(
-            classify_response(&resp(OrderStatus::New, dec!(0), dec!(1))),
+            classify_response(&resp(OrderStatus::New, dec!(0), dec!(1)), intended),
             LegPoll::Working
         );
         assert_eq!(
-            classify_response(&resp(OrderStatus::PartiallyFilled, dec!(0.4), dec!(0.6))),
+            classify_response(
+                &resp(OrderStatus::PartiallyFilled, dec!(0.4), dec!(0.6)),
+                intended
+            ),
             LegPoll::Working
+        );
+    }
+
+    #[test]
+    fn classify_overfill_is_filled_not_clamped() {
+        // Regression (#30): a venue reporting MORE than the intended
+        // quantity is a truthful surplus, never a shortfall — the fill must
+        // classify Filled so the verbatim quantity lands in the ledger,
+        // where `signal_delta` exposes the excess as real exposure. A clamp
+        // at `intended` would hide it forever.
+        let intended = dec!(1);
+        assert_eq!(
+            classify_response(&resp(OrderStatus::Filled, dec!(1.2), dec!(0)), intended),
+            LegPoll::Filled
+        );
+        // Terminal-cancelled with remaining zero and a surplus fill: still
+        // provably full, not partial.
+        assert_eq!(
+            classify_response(&resp(OrderStatus::Cancelled, dec!(1.2), dec!(0)), intended),
+            LegPoll::Filled
+        );
+        // Boundary: exactly intended is filled; the ppm-epsilon edge is
+        // filled; one real unit below the edge is residual exposure.
+        assert_eq!(
+            classify_response(&resp(OrderStatus::Filled, dec!(1), dec!(0)), intended),
+            LegPoll::Filled
+        );
+        assert_eq!(
+            classify_response(
+                &resp(OrderStatus::Filled, dec!(0.999999), dec!(0)),
+                intended
+            ),
+            LegPoll::Filled
+        );
+        assert_eq!(
+            classify_response(
+                &resp(OrderStatus::Filled, dec!(0.999998), dec!(0)),
+                intended
+            ),
+            LegPoll::PartialTerminal
         );
     }
 
@@ -1142,6 +1412,7 @@ mod tests {
             strategy_id: "strat".into(),
             symbol: "BTC-USD".into(),
             status: SignalStatus::Imbalanced,
+            environment: "testnet".into(),
             route_id: None,
             account_long_id: None,
             account_short_id: None,
@@ -1201,13 +1472,20 @@ mod tests {
 
     #[test]
     fn derive_status_all_filled_entry_balances() {
-        let (st, _) = derive_signal_status(&[LegPoll::Filled, LegPoll::Filled], 2, 10, false, None);
+        let (st, _) = derive_signal_status(
+            &[LegPoll::Filled, LegPoll::Filled],
+            2,
+            10,
+            false,
+            false,
+            None,
+        );
         assert_eq!(st, Some(SignalStatus::Balanced));
     }
 
     #[test]
     fn derive_status_all_filled_close_resolves() {
-        let (st, _) = derive_signal_status(&[LegPoll::Filled], 1, 10, true, None);
+        let (st, _) = derive_signal_status(&[LegPoll::Filled], 1, 10, true, false, None);
         assert_eq!(st, Some(SignalStatus::Closed));
     }
 
@@ -1217,6 +1495,7 @@ mod tests {
             &[LegPoll::CancelledEmpty, LegPoll::CancelledEmpty],
             2,
             10,
+            false,
             false,
             None,
         );
@@ -1232,6 +1511,7 @@ mod tests {
             2,
             10,
             false,
+            false,
             None,
         );
         assert_eq!(st, Some(SignalStatus::Imbalanced));
@@ -1240,7 +1520,7 @@ mod tests {
     #[test]
     fn derive_status_empty_close_is_never_clean() {
         // A close that ended empty may still hold the position.
-        let (st, _) = derive_signal_status(&[LegPoll::CancelledEmpty], 1, 10, true, None);
+        let (st, _) = derive_signal_status(&[LegPoll::CancelledEmpty], 1, 10, true, false, None);
         assert_eq!(st, Some(SignalStatus::Unresolved));
     }
 
@@ -1251,16 +1531,67 @@ mod tests {
             2,
             10,
             false,
+            false,
             None,
         );
         assert_eq!(st, Some(SignalStatus::Unresolved));
     }
 
     #[test]
+    fn derive_status_flatten_child_empty_fails_retryable() {
+        // A `flat-{parent}-*` child whose orders all ended venue-proven
+        // empty is a failed ATTEMPT — Failed releases it from the
+        // open-child dedup so residual dispatch can retry (bounded).
+        let (st, _) = derive_signal_status(
+            &[LegPoll::CancelledEmpty],
+            1,
+            10,
+            true, // is_close_signal
+            true, // is_flatten_child
+            None,
+        );
+        assert_eq!(st, Some(SignalStatus::Failed));
+        // Same zero-fill terminal outcome on an `external` close stays
+        // unresolved — the operator owns it, no auto-retry machinery.
+        let (st, _) = derive_signal_status(
+            &[LegPoll::CancelledEmpty],
+            1,
+            10,
+            true,  // is_close_signal
+            false, // is_flatten_child
+            None,
+        );
+        assert_eq!(st, Some(SignalStatus::Unresolved));
+    }
+
+    #[test]
+    fn derive_status_flatten_child_partial_closes() {
+        // A flatten child that ended terminal with some fill is done —
+        // its covered quantity feeds residual math and the parent
+        // redispatches for the remainder; `unresolved` would strand the
+        // child open and block every retry.
+        let (st, _) = derive_signal_status(
+            &[LegPoll::Filled, LegPoll::PartialTerminal],
+            2,
+            10,
+            true, // is_close_signal
+            true, // is_flatten_child
+            None,
+        );
+        assert_eq!(st, Some(SignalStatus::Closed));
+    }
+
+    #[test]
     fn derive_status_working_holds_then_escalates() {
         // Before the deadline: no status change.
-        let (st, note) =
-            derive_signal_status(&[LegPoll::Filled, LegPoll::Working], 2, 10, false, None);
+        let (st, note) = derive_signal_status(
+            &[LegPoll::Filled, LegPoll::Working],
+            2,
+            10,
+            false,
+            false,
+            None,
+        );
         assert_eq!(st, None);
         assert!(note.is_none());
         // Past the deadline: escalate.
@@ -1268,6 +1599,7 @@ mod tests {
             &[LegPoll::Filled, LegPoll::Working],
             2,
             NON_FINAL_DEADLINE_SECS + 1,
+            false,
             false,
             None,
         );
@@ -1278,12 +1610,13 @@ mod tests {
     #[test]
     fn derive_status_unknown_or_missing_leg_holds_then_escalates() {
         // Fewer polls than legs — an unproven leg can never resolve early.
-        let (st, _) = derive_signal_status(&[LegPoll::Filled], 2, 10, false, None);
+        let (st, _) = derive_signal_status(&[LegPoll::Filled], 2, 10, false, false, None);
         assert_eq!(st, None);
         let (st, _) = derive_signal_status(
             &[LegPoll::Filled],
             2,
             NON_FINAL_DEADLINE_SECS + 1,
+            false,
             false,
             None,
         );
@@ -1293,6 +1626,7 @@ mod tests {
             &[LegPoll::Filled, LegPoll::Unknown],
             2,
             NON_FINAL_DEADLINE_SECS + 1,
+            false,
             false,
             None,
         );
@@ -1306,6 +1640,7 @@ mod tests {
             &[LegPoll::Working],
             1,
             NON_FINAL_DEADLINE_SECS + 1,
+            false,
             false,
             Some(&notes),
         );
@@ -1321,7 +1656,10 @@ mod tests {
         cancel_error: std::sync::Mutex<Option<String>>,
         placed: std::sync::Mutex<Vec<OrderRequest>>,
         place_response: std::sync::Mutex<Option<OrderResponse>>,
+        fetch_calls: std::sync::Mutex<usize>,
         no_reduce_only: bool,
+        positions: Vec<arbitrageur_core::position::Position>,
+        balances: Vec<arbitrageur_core::position::Balance>,
     }
 
     impl MockVenue {
@@ -1333,7 +1671,10 @@ mod tests {
                 cancel_error: std::sync::Mutex::new(None),
                 placed: std::sync::Mutex::new(Vec::new()),
                 place_response: std::sync::Mutex::new(None),
+                fetch_calls: std::sync::Mutex::new(0),
                 no_reduce_only: false,
+                positions: Vec::new(),
+                balances: Vec::new(),
             }
         }
 
@@ -1342,6 +1683,41 @@ mod tests {
                 no_reduce_only: true,
                 ..Self::new(venue, responses)
             }
+        }
+
+        /// Seed a derivative position the residual-flatten verification can
+        /// observe — the venue-side truth the ledger residual is checked
+        /// against before any order goes out.
+        fn with_position(mut self, symbol: &str, side: Side, qty: Decimal) -> Self {
+            self.positions.push(arbitrageur_core::position::Position {
+                venue: VenueId::new(self.venue),
+                symbol: symbol.to_string(),
+                side,
+                quantity: qty,
+                entry_price: dec!(100),
+                mark_price: dec!(100),
+                unrealized_pnl: dec!(0),
+                realized_pnl: dec!(0),
+                liquidation_price: None,
+                leverage: dec!(1),
+                initial_margin: dec!(0),
+                maintenance_margin: dec!(0),
+                updated_at: Utc::now(),
+            });
+            self
+        }
+
+        /// Seed a spot balance — a sell-side residual on a venue with no
+        /// position model verifies against the free base balance.
+        fn with_balance(mut self, currency: &str, free: Decimal) -> Self {
+            self.balances.push(arbitrageur_core::position::Balance {
+                venue: VenueId::new(self.venue),
+                currency: currency.to_string(),
+                total: free,
+                free,
+                locked: dec!(0),
+            });
+            self
         }
     }
 
@@ -1388,7 +1764,16 @@ mod tests {
         async fn fetch_account(
             &self,
         ) -> anyhow::Result<arbitrageur_core::position::AccountSnapshot> {
-            unimplemented!()
+            Ok(arbitrageur_core::position::AccountSnapshot {
+                venue: VenueId::new(self.venue),
+                equity: dec!(10000),
+                free_margin: dec!(10000),
+                maintenance_margin: dec!(0),
+                margin_usage_pct: dec!(0),
+                balances: self.balances.clone(),
+                positions: self.positions.clone(),
+                timestamp: Utc::now(),
+            })
         }
         async fn place_order(&self, o: OrderRequest) -> anyhow::Result<OrderResponse> {
             self.placed.lock().unwrap().push(o);
@@ -1422,6 +1807,7 @@ mod tests {
             order_id: &str,
             _cid: Option<&str>,
         ) -> anyhow::Result<OrderResponse> {
+            *self.fetch_calls.lock().unwrap() += 1;
             let mut q = self.responses.lock().unwrap();
             let r = if q.len() > 1 {
                 q.pop_front().unwrap()
@@ -1465,25 +1851,28 @@ mod tests {
         let sid = format!("sig-{}", rand::random::<u32>());
         state
             .state_store
-            .record_signal_execution(&crate::state_store::NewSignalExecution {
-                id: sid.clone(),
-                strategy_id: strategy_id.into(),
-                symbol: "BTC-USD".into(),
-                route_id: None,
-                expected_net_usd: None,
-                note: None,
-                legs: legs
-                    .iter()
-                    .map(|(v, side)| crate::state_store::NewSignalLeg {
-                        account_id: None,
-                        venue: (*v).into(),
-                        side: *side,
-                        symbol: Some("BTC-USD".into()),
-                        intended_qty: 1.0,
-                        intended_price: None,
-                    })
-                    .collect(),
-            })
+            .record_signal_execution(
+                &crate::state_store::NewSignalExecution {
+                    id: sid.clone(),
+                    strategy_id: strategy_id.into(),
+                    symbol: "BTC-USD".into(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: legs
+                        .iter()
+                        .map(|(v, side)| crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: (*v).into(),
+                            side: *side,
+                            symbol: Some("BTC-USD".into()),
+                            intended_qty: 1.0,
+                            intended_price: None,
+                        })
+                        .collect(),
+                },
+                "testnet",
+            )
             .unwrap();
         for (v, side) in &legs {
             state
@@ -1497,7 +1886,7 @@ mod tests {
     fn mock_filled() -> OrderResponse {
         let mut r = resp(OrderStatus::Filled, dec!(1), dec!(0));
         r.avg_fill_price = Some(dec!(100));
-        r.fee = dec!(0.5);
+        r.fee = Some(dec!(0.5));
         r
     }
 
@@ -1564,7 +1953,13 @@ mod tests {
         );
         state.test_adapters.write().unwrap().insert(
             "kraken".into(),
-            Arc::new(MockVenue::new("kraken", vec![Ok(mock_filled())])),
+            Arc::new(
+                MockVenue::new("kraken", vec![Ok(mock_filled())]).with_position(
+                    "BTC-USD",
+                    Side::Buy,
+                    dec!(1),
+                ),
+            ),
         );
         state.test_adapters.write().unwrap().insert(
             "aster".into(),
@@ -1732,7 +2127,13 @@ mod tests {
             vec![("kraken", LegSide::Long), ("aster", LegSide::Short)],
         );
 
-        let kraken = Arc::new(MockVenue::new("kraken", vec![Ok(mock_filled())]));
+        let kraken = Arc::new(
+            MockVenue::new("kraken", vec![Ok(mock_filled())]).with_position(
+                "BTC-USD",
+                Side::Buy,
+                dec!(1),
+            ),
+        );
         let mut place = mock_filled();
         place.order_id = "flat-oid-1".into();
         *kraken.place_response.lock().unwrap() = Some(place);
@@ -1787,7 +2188,9 @@ mod tests {
             vec![("coinbase", LegSide::Long), ("kraken", LegSide::Short)],
         );
 
-        let coinbase = Arc::new(MockVenue::spot("coinbase", vec![Ok(mock_filled())]));
+        let coinbase = Arc::new(
+            MockVenue::spot("coinbase", vec![Ok(mock_filled())]).with_balance("BTC", dec!(1)),
+        );
         let mut place = mock_filled();
         place.order_id = "flat-oid-spot".into();
         *coinbase.place_response.lock().unwrap() = Some(place);
@@ -1828,32 +2231,35 @@ mod tests {
         let sid = format!("sig-{}", rand::random::<u32>());
         state
             .state_store
-            .record_signal_execution(&crate::state_store::NewSignalExecution {
-                id: sid.clone(),
-                strategy_id: "futures".into(),
-                symbol: "BTC-USD".into(),
-                route_id: None,
-                expected_net_usd: None,
-                note: None,
-                legs: vec![
-                    crate::state_store::NewSignalLeg {
-                        account_id: None,
-                        venue: "kraken".into(), // the rejected leg — no order id
-                        side: LegSide::Long,
-                        symbol: Some("BTC-USD".into()),
-                        intended_qty: 1.0,
-                        intended_price: None,
-                    },
-                    crate::state_store::NewSignalLeg {
-                        account_id: None,
-                        venue: "aster".into(), // accepted, fills via poll
-                        side: LegSide::Short,
-                        symbol: Some("BTC-USD".into()),
-                        intended_qty: 1.0,
-                        intended_price: None,
-                    },
-                ],
-            })
+            .record_signal_execution(
+                &crate::state_store::NewSignalExecution {
+                    id: sid.clone(),
+                    strategy_id: "futures".into(),
+                    symbol: "BTC-USD".into(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: vec![
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "kraken".into(), // the rejected leg — no order id
+                            side: LegSide::Long,
+                            symbol: Some("BTC-USD".into()),
+                            intended_qty: 1.0,
+                            intended_price: None,
+                        },
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "aster".into(), // accepted, fills via poll
+                            side: LegSide::Short,
+                            symbol: Some("BTC-USD".into()),
+                            intended_qty: 1.0,
+                            intended_price: None,
+                        },
+                    ],
+                },
+                "testnet",
+            )
             .unwrap();
         // Only the accepted leg carries an order id; the coordinator has
         // already finished and parked the signal at unresolved.
@@ -1875,7 +2281,13 @@ mod tests {
             .apply_leg_order_state(&sid, LegSide::Short, 1.0, Some(100.0), 0.5)
             .unwrap();
 
-        let aster = Arc::new(MockVenue::new("aster", vec![Ok(mock_filled())]));
+        let aster = Arc::new(
+            MockVenue::new("aster", vec![Ok(mock_filled())]).with_position(
+                "BTC-USD",
+                Side::Sell,
+                dec!(1),
+            ),
+        );
         let mut place = mock_filled();
         place.order_id = "flat-oid-x".into();
         *aster.place_response.lock().unwrap() = Some(place);
@@ -1913,32 +2325,35 @@ mod tests {
         let sid = format!("sig-{}", rand::random::<u32>());
         state
             .state_store
-            .record_signal_execution(&crate::state_store::NewSignalExecution {
-                id: sid.clone(),
-                strategy_id: "futures".into(),
-                symbol: "BTC-USD".into(),
-                route_id: None,
-                expected_net_usd: None,
-                note: None,
-                legs: vec![
-                    crate::state_store::NewSignalLeg {
-                        account_id: None,
-                        venue: "kraken".into(),
-                        side: LegSide::Long,
-                        symbol: Some("BTC-USD".into()),
-                        intended_qty: 1.0,
-                        intended_price: None,
-                    },
-                    crate::state_store::NewSignalLeg {
-                        account_id: None,
-                        venue: "aster".into(),
-                        side: LegSide::Short,
-                        symbol: Some("BTC-USD".into()),
-                        intended_qty: 1.0,
-                        intended_price: None,
-                    },
-                ],
-            })
+            .record_signal_execution(
+                &crate::state_store::NewSignalExecution {
+                    id: sid.clone(),
+                    strategy_id: "futures".into(),
+                    symbol: "BTC-USD".into(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: vec![
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "kraken".into(),
+                            side: LegSide::Long,
+                            symbol: Some("BTC-USD".into()),
+                            intended_qty: 1.0,
+                            intended_price: None,
+                        },
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "aster".into(),
+                            side: LegSide::Short,
+                            symbol: Some("BTC-USD".into()),
+                            intended_qty: 1.0,
+                            intended_price: None,
+                        },
+                    ],
+                },
+                "testnet",
+            )
             .unwrap();
         state
             .state_store
@@ -1956,22 +2371,25 @@ mod tests {
         let stuck_id = format!("flat-{}-dead", sid);
         state
             .state_store
-            .record_signal_execution(&crate::state_store::NewSignalExecution {
-                id: stuck_id.clone(),
-                strategy_id: "futures".into(),
-                symbol: "BTC-USD".into(),
-                route_id: None,
-                expected_net_usd: None,
-                note: Some(format!("auto residual flatten of {sid}")),
-                legs: vec![crate::state_store::NewSignalLeg {
-                    account_id: None,
-                    venue: "aster".into(),
-                    side: LegSide::Long,
-                    symbol: Some("BTC-USD".into()),
-                    intended_qty: 1.0,
-                    intended_price: None,
-                }],
-            })
+            .record_signal_execution(
+                &crate::state_store::NewSignalExecution {
+                    id: stuck_id.clone(),
+                    strategy_id: "futures".into(),
+                    symbol: "BTC-USD".into(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: Some(format!("auto residual flatten of {sid}")),
+                    legs: vec![crate::state_store::NewSignalLeg {
+                        account_id: None,
+                        venue: "aster".into(),
+                        side: LegSide::Long,
+                        symbol: Some("BTC-USD".into()),
+                        intended_qty: 1.0,
+                        intended_price: None,
+                    }],
+                },
+                "testnet",
+            )
             .unwrap();
         // Backdate past the residual-retry throttle so this pass redispatches.
         state.state_store.force_signal_age_for_test(
@@ -1979,7 +2397,13 @@ mod tests {
             &(Utc::now() - chrono::Duration::seconds(120)).to_rfc3339(),
         );
 
-        let aster = Arc::new(MockVenue::new("aster", vec![Ok(mock_filled())]));
+        let aster = Arc::new(
+            MockVenue::new("aster", vec![Ok(mock_filled())]).with_position(
+                "BTC-USD",
+                Side::Sell,
+                dec!(1),
+            ),
+        );
         let mut place = mock_filled();
         place.order_id = "flat-oid-y".into();
         *aster.place_response.lock().unwrap() = Some(place);
@@ -2007,5 +2431,141 @@ mod tests {
         reconcile_pending_orders(&state).await;
         let sig = state.state_store.get_signal(&sid).unwrap().unwrap();
         assert_eq!(sig.status, SignalStatus::Closed);
+    }
+
+    #[tokio::test]
+    async fn e2e_overfill_records_venue_truth_verbatim() {
+        // Regression (#30): a venue reporting filled 1.2 against intended
+        // 1.0 must land in the ledger as 1.2 — the +0.2 surplus is real
+        // exposure `signal_delta` exposes. Clamping to `intended` would
+        // hide it behind a clean Balanced status forever.
+        let (state, sid) = seeded_state(
+            "futures",
+            vec![("kraken", LegSide::Long), ("aster", LegSide::Short)],
+        );
+        let mut over = resp(OrderStatus::Filled, dec!(1.2), dec!(0));
+        over.avg_fill_price = Some(dec!(100));
+        over.fee = Some(dec!(0.5));
+        state.test_adapters.write().unwrap().insert(
+            "kraken".into(),
+            Arc::new(MockVenue::new("kraken", vec![Ok(over)])),
+        );
+        state.test_adapters.write().unwrap().insert(
+            "aster".into(),
+            Arc::new(MockVenue::new("aster", vec![Ok(mock_filled())])),
+        );
+
+        let sum = reconcile_pending_orders(&state).await;
+        assert_eq!(sum.resolved, 1);
+        let sig = state.state_store.get_signal(&sid).unwrap().unwrap();
+        assert_eq!(sig.status, SignalStatus::Balanced);
+        let long = sig.legs.iter().find(|l| l.side == LegSide::Long).unwrap();
+        assert_eq!(
+            long.filled_qty, 1.2,
+            "over-fill must persist verbatim, not clamp to intended 1.0"
+        );
+        let delta = state.state_store.signal_delta(&sid).unwrap();
+        assert!(
+            (delta - 0.2).abs() < 1e-9,
+            "surplus must surface as nonzero delta, got {delta}"
+        );
+    }
+
+    #[tokio::test]
+    async fn e2e_manual_lock_skips_fee_enrichment() {
+        // Regression (#45): a locked-at-boot vault must never leak venue
+        // polls — the fee-enrichment path shares the same credential gate
+        // as order polling, so a manual lock means ZERO fetch_order calls
+        // and no fabricated fee writes.
+        let (state, sid) = seeded_state(
+            "futures",
+            vec![("kraken", LegSide::Long), ("aster", LegSide::Short)],
+        );
+        // Short leg already filled by the submit ack with fee_usd = 0 —
+        // exactly the unpriced row fee enrichment targets.
+        state
+            .state_store
+            .apply_leg_fill(&sid, LegSide::Short, 1.0, 100.0, 0.0, Some("oid-aster"))
+            .unwrap();
+        let kraken = Arc::new(MockVenue::new("kraken", vec![Ok(mock_filled())]));
+        let aster = Arc::new(MockVenue::new("aster", vec![Ok(mock_filled())]));
+        state
+            .test_adapters
+            .write()
+            .unwrap()
+            .insert("kraken".into(), kraken.clone());
+        state
+            .test_adapters
+            .write()
+            .unwrap()
+            .insert("aster".into(), aster.clone());
+
+        state.vault.write().initialize("test-password-123").unwrap();
+        state.vault.write().lock();
+        let sum = reconcile_pending_orders(&state).await;
+        assert!(sum.vault_locked);
+        assert_eq!(
+            *kraken.fetch_calls.lock().unwrap(),
+            0,
+            "manual lock must not poll venue truth"
+        );
+        assert_eq!(
+            *aster.fetch_calls.lock().unwrap(),
+            0,
+            "fee enrichment must not poll under manual lock"
+        );
+        let sig = state.state_store.get_signal(&sid).unwrap().unwrap();
+        let short = sig.legs.iter().find(|l| l.side == LegSide::Short).unwrap();
+        assert_eq!(short.fee_usd, 0.0, "locked boot must not fabricate fees");
+    }
+
+    #[tokio::test]
+    async fn e2e_fee_enrichment_polls_unpriced_leg_once_per_boot() {
+        // The same unpriced leg, unlocked: exactly one enrichment
+        // `fetch_order` — `fee_enrich_done` bounds the poll per boot, and
+        // the persisted fee then excludes the row from later passes.
+        let (state, sid) = seeded_state(
+            "futures",
+            vec![("kraken", LegSide::Long), ("aster", LegSide::Short)],
+        );
+        state
+            .state_store
+            .apply_leg_fill(&sid, LegSide::Short, 1.0, 100.0, 0.0, Some("oid-aster"))
+            .unwrap();
+        let kraken = Arc::new(MockVenue::new("kraken", vec![Ok(mock_filled())]));
+        let mut fee_resp = resp(OrderStatus::Filled, dec!(1), dec!(0));
+        fee_resp.avg_fill_price = Some(dec!(100));
+        fee_resp.fee = Some(dec!(0.75));
+        fee_resp.fee_currency = "USDC".into();
+        let aster = Arc::new(MockVenue::new("aster", vec![Ok(fee_resp)]));
+        state
+            .test_adapters
+            .write()
+            .unwrap()
+            .insert("kraken".into(), kraken.clone());
+        state
+            .test_adapters
+            .write()
+            .unwrap()
+            .insert("aster".into(), aster.clone());
+
+        let sum = reconcile_pending_orders(&state).await;
+        assert!(!sum.vault_locked);
+        let sig = state.state_store.get_signal(&sid).unwrap().unwrap();
+        let short = sig.legs.iter().find(|l| l.side == LegSide::Short).unwrap();
+        assert_eq!(short.fee_usd, 0.75, "venue-reported fee must persist");
+        assert_eq!(
+            *aster.fetch_calls.lock().unwrap(),
+            1,
+            "enrichment polls the unpriced leg exactly once"
+        );
+
+        // A second pass must not re-poll — the durable bound holds.
+        reconcile_pending_orders(&state).await;
+        assert_eq!(
+            *aster.fetch_calls.lock().unwrap(),
+            1,
+            "enrichment is one-shot per boot"
+        );
     }
 }

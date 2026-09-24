@@ -261,7 +261,7 @@ mod tests {
         assert_eq!(resp.filled_qty, dec!(0));
         assert_eq!(resp.remaining_qty, dec!(1.0));
         assert_eq!(resp.avg_fill_price, None);
-        assert_eq!(resp.fee, dec!(0));
+        assert_eq!(resp.fee, Some(dec!(0)));
 
         let book = exchange.fetch_orderbook("BTC-USDC").await.expect("book");
         assert_eq!(book.asks[0].size, dec!(2.0));

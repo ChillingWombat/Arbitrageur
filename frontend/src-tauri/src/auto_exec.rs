@@ -697,8 +697,12 @@ impl OpportunityExecutor {
         // DB errors fail closed: an unreadable ledger blocks the symbol.
         let blocking_signal = state
             .state_store
-            .ticker_blocked(&signal.symbol)
-            .unwrap_or(true);
+            .ticker_blocked(&signal.symbol, Some(state.env().as_str()))
+            .unwrap_or(true)
+            || state
+                .state_store
+                .ticker_reduce_only(&signal.symbol, BOT_STRATEGY_ID, state.env().as_str())
+                .unwrap_or(true);
         let (circuit_ok, circuit_reason) = match state.circuit_breaker.is_trading_allowed() {
             Ok(()) => (true, None),
             Err(r) => (false, Some(r)),
@@ -1291,32 +1295,35 @@ mod tests {
     ) {
         state
             .state_store
-            .record_signal_execution(&NewSignalExecution {
-                id: id.to_string(),
-                strategy_id: "radar".to_string(),
-                symbol: symbol.to_string(),
-                route_id: None,
-                expected_net_usd: None,
-                note: None,
-                legs: vec![
-                    NewSignalLeg {
-                        account_id: None,
-                        venue: buy.to_string(),
-                        side: LegSide::Long,
-                        symbol: None,
-                        intended_qty: 0.01,
-                        intended_price: None,
-                    },
-                    NewSignalLeg {
-                        account_id: None,
-                        venue: sell.to_string(),
-                        side: LegSide::Short,
-                        symbol: None,
-                        intended_qty: 0.01,
-                        intended_price: None,
-                    },
-                ],
-            })
+            .record_signal_execution(
+                &NewSignalExecution {
+                    id: id.to_string(),
+                    strategy_id: "radar".to_string(),
+                    symbol: symbol.to_string(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: vec![
+                        NewSignalLeg {
+                            account_id: None,
+                            venue: buy.to_string(),
+                            side: LegSide::Long,
+                            symbol: None,
+                            intended_qty: 0.01,
+                            intended_price: None,
+                        },
+                        NewSignalLeg {
+                            account_id: None,
+                            venue: sell.to_string(),
+                            side: LegSide::Short,
+                            symbol: None,
+                            intended_qty: 0.01,
+                            intended_price: None,
+                        },
+                    ],
+                },
+                state.env().as_str(),
+            )
             .expect("record ledger signal");
         if !matches!(status, SignalStatus::InFlight) {
             state

@@ -78,12 +78,10 @@ pub struct SignedLighterTx {
 const APPROVED_LIGHTER_SIGNER_SHA256: &str =
     "8cb2fbcadab0b9b3fed4a524998b825818b677fcf9c49bc1f18b4ca02a233753";
 
-fn sha256_hex(path: &std::path::Path) -> anyhow::Result<String> {
+fn sha256_hex_reader(reader: impl std::io::Read, path: &std::path::Path) -> anyhow::Result<String> {
     use sha2::{Digest, Sha256};
     use std::io::Read;
-    let file = std::fs::File::open(path)
-        .map_err(|e| anyhow::anyhow!("Cannot read {} for hashing: {e}", path.display()))?;
-    let mut reader = std::io::BufReader::new(file);
+    let mut reader = std::io::BufReader::new(reader);
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 8192];
     loop {
@@ -98,7 +96,35 @@ fn sha256_hex(path: &std::path::Path) -> anyhow::Result<String> {
     Ok(hex::encode(hasher.finalize()))
 }
 
-fn verify_signer_digest(path: &std::path::Path, expected_hex: &str) -> anyhow::Result<()> {
+#[allow(dead_code)] // exercised by tests; non-unix verify path
+fn sha256_hex(path: &std::path::Path) -> anyhow::Result<String> {
+    let file = std::fs::File::open(path)
+        .map_err(|e| anyhow::anyhow!("Cannot read {} for hashing: {e}", path.display()))?;
+    sha256_hex_reader(file, path)
+}
+
+/// Result of digest verification: the path `dlopen` should be pointed at
+/// plus a guard keeping the hashed inode pinned open until dlopen has
+/// consumed it — closes the hash→dlopen TOCTOU (review §M-6). On unix the
+/// target is `/proc/self/fd/N`, so a rename or replace of the on-disk path
+/// between hashing and loading cannot swap in a different file. Elsewhere
+/// the digest check and the open stay path-based.
+struct VerifiedSigner {
+    /// The open fd the digest was computed over — held purely for its
+    /// pinning side-effect; dropped after `dlopen` returns.
+    _guard: Option<std::fs::File>,
+    target: String,
+}
+
+/// Validate `expected_hex`, verify `path`'s SHA-256 against it, and return
+/// a guard plus the path `dlopen` should be pointed at. On unix the guard
+/// is the open fd the hash was computed over and the target is
+/// `/proc/self/fd/N` — the same inode, pinned. Elsewhere the digest check
+/// and the open stay path-based.
+fn verify_signer_digest(
+    path: &std::path::Path,
+    expected_hex: &str,
+) -> anyhow::Result<VerifiedSigner> {
     let expected = expected_hex.trim();
     if expected.len() != 64 || !expected.chars().all(|c| c.is_ascii_hexdigit()) {
         anyhow::bail!(
@@ -106,14 +132,38 @@ fn verify_signer_digest(path: &std::path::Path, expected_hex: &str) -> anyhow::R
         );
     }
     let expected_lower = expected.to_lowercase();
-    let actual = sha256_hex(path)?;
-    if actual != expected_lower {
-        anyhow::bail!(
-            "Lighter signer integrity mismatch for {}: expected {expected_lower}, got {actual}",
-            path.display()
-        );
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        let file = std::fs::File::open(path)
+            .map_err(|e| anyhow::anyhow!("Cannot read {} for hashing: {e}", path.display()))?;
+        let actual = sha256_hex_reader(&file, path)?;
+        if actual != expected_lower {
+            anyhow::bail!(
+                "Lighter signer integrity mismatch for {}: expected {expected_lower}, got {actual}",
+                path.display()
+            );
+        }
+        let target = format!("/proc/self/fd/{}", file.as_raw_fd());
+        Ok(VerifiedSigner {
+            _guard: Some(file),
+            target,
+        })
     }
-    Ok(())
+    #[cfg(not(unix))]
+    {
+        let actual = sha256_hex(path)?;
+        if actual != expected_lower {
+            anyhow::bail!(
+                "Lighter signer integrity mismatch for {}: expected {expected_lower}, got {actual}",
+                path.display()
+            );
+        }
+        Ok(VerifiedSigner {
+            _guard: None,
+            target: path.display().to_string(),
+        })
+    }
 }
 
 /// Candidate locations for `liblighter_signer.so`, in priority order:
@@ -153,10 +203,10 @@ fn load_library() -> anyhow::Result<libloading::Library> {
         if expected.len() != 64 || !expected.chars().all(|c| c.is_ascii_hexdigit()) {
             anyhow::bail!("LIGHTER_SIGNER_SHA256 must be exactly 64 hex chars");
         }
-        verify_signer_digest(env_path, &expected)?;
-        // SAFETY: digest-verified explicit override; all calls go through
-        // narrow, validated wrappers below.
-        return unsafe { libloading::Library::new(env_path) }.map_err(|e| {
+        let verified = verify_signer_digest(env_path, &expected)?;
+        // SAFETY: digest-verified explicit override loaded through the
+        // pinned fd; all calls go through narrow, validated wrappers below.
+        return unsafe { libloading::Library::new(&verified.target) }.map_err(|e| {
             anyhow::anyhow!(
                 "Failed to load LIGHTER_SIGNER_LIB override {}: {e}",
                 env_path.display()
@@ -171,10 +221,11 @@ fn load_library() -> anyhow::Result<libloading::Library> {
         }
         // Hard integrity error on mismatch: never load, never fall through
         // to the next candidate.
-        verify_signer_digest(path, APPROVED_LIGHTER_SIGNER_SHA256)?;
-        // SAFETY: digest matches the approved vendored library; all calls go
-        // through narrow, validated wrappers below.
-        match unsafe { libloading::Library::new(path) } {
+        let verified = verify_signer_digest(path, APPROVED_LIGHTER_SIGNER_SHA256)?;
+        // SAFETY: digest matches the approved vendored library, loaded
+        // through the pinned fd; all calls go through narrow, validated
+        // wrappers below.
+        match unsafe { libloading::Library::new(&verified.target) } {
             Ok(lib) => return Ok(lib),
             Err(e) => tried.push(format!("{} ({})", path.display(), e)),
         }
@@ -281,6 +332,21 @@ pub struct CreateOrderParams {
 
 /// Sign a Lighter L2 create-order transaction locally (no network).
 ///
+/// Reclaim a `CString` allocation whose bytes must not linger: zero the
+/// buffer (including the NUL) before freeing so key material does not
+/// survive in the heap after drop.
+///
+/// SAFETY: `ptr` must be a pointer previously produced by
+/// `CString::into_raw` (or null), and must not be used afterwards.
+unsafe fn reclaim_cstring(ptr: *mut c_char) {
+    if ptr.is_null() {
+        return;
+    }
+    let len = CStr::from_ptr(ptr).to_bytes().len();
+    std::ptr::write_bytes(ptr as *mut u8, 0, len + 1);
+    drop(CString::from_raw(ptr));
+}
+
 /// `api_key_private_key` is the hex API-key secret (with or without `0x`);
 /// `base_url` selects the deployment the client handle binds to.
 #[allow(clippy::too_many_arguments)]
@@ -309,9 +375,10 @@ pub fn sign_create_order(
             params.account_index,
         );
         // CreateClient copies both strings synchronously (GoString), so the
-        // buffers are reclaimed immediately after the call returns.
+        // buffers are reclaimed immediately after the call returns — the
+        // key buffer is zeroized first.
         drop(CString::from_raw(url_raw));
-        drop(CString::from_raw(key_raw));
+        reclaim_cstring(key_raw);
         let err_str = if err.is_null() {
             None
         } else {
@@ -379,9 +446,10 @@ pub fn sign_cancel_order(
             account_index,
         );
         // CreateClient copies both strings synchronously (GoString), so the
-        // buffers are reclaimed immediately after the call returns.
+        // buffers are reclaimed immediately after the call returns — the
+        // key buffer is zeroized first.
         drop(CString::from_raw(url_raw));
-        drop(CString::from_raw(key_raw));
+        reclaim_cstring(key_raw);
         let err_str = if err.is_null() {
             None
         } else {
@@ -440,7 +508,7 @@ pub fn create_auth_token(
             account_index,
         );
         drop(CString::from_raw(url_raw));
-        drop(CString::from_raw(key_raw));
+        reclaim_cstring(key_raw);
         let err_str = if err.is_null() {
             None
         } else {

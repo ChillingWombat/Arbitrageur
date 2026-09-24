@@ -26,9 +26,12 @@ pub fn get_strategy_performance_impl(
         ],
     };
 
+    // Environment-scoped: metrics only aggregate lots opened under the
+    // ACTIVE environment — live and testnet history never blend.
+    let env = state.env().as_str();
     let metrics = strat_ids
         .into_iter()
-        .map(|id| ledger.compute_strategy_metrics(&id))
+        .map(|id| ledger.compute_strategy_metrics(&id, env))
         .collect();
 
     Ok(metrics)
@@ -127,16 +130,25 @@ pub fn get_calibration_report_impl(
 /// their root + `flat-*` child fills via side-signed cash flows; families
 /// that cannot be valued (no strategy tag, or no priced fills) are excluded
 /// from the sums and reported as `unattributed_closed_families`.
+/// Environment-scoped: only signals recorded under the ACTIVE environment
+/// aggregate — live and testnet fills never blend. Legacy `unknown` rows
+/// (pre-v32, un-attributable) are excluded from both environments' sums
+/// rather than guessed into one.
 pub fn get_strategy_fill_pnl_impl(
     strategy_id: &str,
     state: &AppEngineState,
 ) -> Result<crate::attribution::StrategyFillPnl, String> {
     use crate::state_store::LegSide;
     let want = crate::attribution::attribute_strategy_id(strategy_id);
+    let env = state.env().as_str();
     let signals = state
         .state_store
         .list_signals(None, None)
         .map_err(|e| e.to_string())?;
+    let signals: Vec<_> = signals
+        .into_iter()
+        .filter(|s| s.environment == env)
+        .collect();
     let mut net_usd = 0.0_f64;
     let mut notional = 0.0_f64;
     let mut closed = 0_usize;

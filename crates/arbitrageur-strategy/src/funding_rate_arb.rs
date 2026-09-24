@@ -77,6 +77,22 @@ impl FundingRateArbStrategy {
             (&self.exchange_b, &self.exchange_a)
         };
 
+        // Position guard: a carry already open on this symbol must not be
+        // stacked — the scanner fires every poll while funding persists.
+        // Fail closed: unverifiable venue state refuses the entry.
+        let (acc_long, acc_short) =
+            tokio::try_join!(long_ex.fetch_account(), short_ex.fetch_account())?;
+        for (ex, acc) in [(long_ex, &acc_long), (short_ex, &acc_short)] {
+            if let Some(pos) = ex.account_position_for(acc, &self.symbol)? {
+                anyhow::bail!(
+                    "carry already open on {} for {} (qty {}); refusing to stack",
+                    ex.venue_id().as_str(),
+                    self.symbol,
+                    pos.quantity
+                );
+            }
+        }
+
         // Determine prices to size order and build protective slippage-bounded IOC orders
         let (ticker_long, ticker_short) = tokio::try_join!(
             long_ex.fetch_ticker(&self.symbol),

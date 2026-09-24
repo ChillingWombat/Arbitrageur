@@ -39,6 +39,7 @@ import {
 import { computeBotCycleStats } from "../services/botCycleStats";
 import { flattenResidualMessage } from "../services/flatten";
 import { EmptyState } from "./EmptyState";
+import { ConfirmActionModal } from "./ConfirmActionModal";
 import { VenueLogo } from "./VenueLogo";
 import { ExecuteButton } from "./ExecuteButton";
 import { CapacityChart } from "./CapacityChart";
@@ -1163,6 +1164,10 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({ venueCaps }) =
   const [botError, setBotError] = useState<string | null>(null);
   const [flattening, setFlattening] = useState(false);
   const [flattenError, setFlattenError] = useState<string | null>(null);
+  // Signal pending terminal-resolution confirmation — the acknowledge writes
+  // a durable terminal status, so it gets the same confirm modal as flattens.
+  const [pendingAck, setPendingAck] = useState<{ id: string; status: string; symbol: string } | null>(null);
+  const [ackError, setAckError] = useState<string | null>(null);
   // Durable radar signal ledger backing the bot stat cards (null = unread).
   const [signals, setSignals] = useState<SignalExecutionDto[] | null>(null);
   const [fillPnl, setFillPnl] = useState<StrategyFillPnl | null>(null);
@@ -1397,15 +1402,15 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({ venueCaps }) =
         </div>
 
         <div className="flex items-center space-x-3 shrink-0">
-          {(execError || flattenError) && (
+          {(execError || flattenError || ackError) && (
             <span
               className="text-xs font-mono text-loss max-w-72 truncate"
-              title={execError ?? flattenError ?? ""}
+              title={execError ?? flattenError ?? ackError ?? ""}
             >
-              {execError ?? flattenError}
+              {execError ?? flattenError ?? ackError}
             </span>
           )}
-          {execSuccess && !execError && !flattenError && (
+          {execSuccess && !execError && !flattenError && !ackError && (
             <span
               className="text-xs font-mono text-profit max-w-96 truncate"
               title={execSuccess}
@@ -1483,20 +1488,7 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({ venueCaps }) =
                 <button
                   className="ml-auto px-1.5 py-0.5 rounded border border-slate-600 text-muted hover:bg-slate-700/40 transition cursor-pointer"
                   title="After checking both venues yourself: unresolved → mark failed (nothing executed); imbalanced → mark closed (you flattened the residual manually)"
-                  onClick={async () => {
-                    const resolution = s.status === "imbalanced" ? "closed" : "failed";
-                    const ok = window.confirm(
-                      s.status === "imbalanced"
-                        ? "Mark this imbalanced signal CLOSED? Only do this after verifying the residual exposure has been flattened on the venue."
-                        : "Mark this unresolved signal FAILED? Only do this after verifying no working orders or open exposure remain on either venue.",
-                    );
-                    if (!ok) return;
-                    try {
-                      await api.acknowledgeSignal(s.id, resolution);
-                    } catch (e) {
-                      console.error("Acknowledge signal failed:", e);
-                    }
-                  }}
+                  onClick={() => setPendingAck({ id: s.id, status: s.status, symbol: s.symbol })}
                 >
                   acknowledge
                 </button>
@@ -1774,6 +1766,41 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({ venueCaps }) =
           />
         );
       })()}
+
+      <ConfirmActionModal
+        spec={
+          pendingAck
+            ? {
+                title:
+                  pendingAck.status === "imbalanced"
+                    ? "Mark Signal Closed"
+                    : "Mark Signal Failed",
+                subtitle: pendingAck.symbol,
+                body:
+                  pendingAck.status === "imbalanced"
+                    ? "Mark this imbalanced signal CLOSED? Only do this after verifying the residual exposure has been flattened on the venue."
+                    : "Mark this unresolved signal FAILED? Only do this after verifying no working orders or open exposure remain on either venue.",
+                confirmLabel: "Acknowledge",
+              }
+            : null
+        }
+        onConfirm={async () => {
+          if (!pendingAck) return;
+          setAckError(null);
+          try {
+            await api.acknowledgeSignal(
+              pendingAck.id,
+              pendingAck.status === "imbalanced" ? "closed" : "failed",
+            );
+          } catch (e) {
+            const msg = e instanceof Error ? e.message : String(e);
+            setAckError(msg);
+            throw new Error(msg);
+          }
+        }}
+        onCancel={() => setPendingAck(null)}
+        onError={(msg) => setAckError(msg)}
+      />
     </div>
   );
 };

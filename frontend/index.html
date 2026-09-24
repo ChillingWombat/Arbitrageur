@@ -25,8 +25,12 @@
           showFatal("Global JavaScript Error", (e.message || "Script load failure") + " (" + (e.filename || "unknown") + ":" + (e.lineno || 0) + ":" + (e.colno || 0) + ")", e.error ? (e.error.stack || e.error) : "");
         });
         window.addEventListener("unhandledrejection", function(e) {
+          // Command rejections are ordinary failures — they surface as
+          // toasts at their call sites. The fatal overlay stays reserved
+          // for synchronous render crashes; a rejected promise never means
+          // the app itself is dead.
           var r = e.reason;
-          showFatal("Unhandled Promise Rejection", (r && (r.message || r)) || "Unknown error", r && (r.stack || r));
+          console.error("[UNHANDLED REJECTION]", (r && (r.message || r)) || "Unknown error", r && (r.stack || r));
         });
       })();
     </script>

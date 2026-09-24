@@ -98,7 +98,9 @@ pub struct OrderResponse {
     pub filled_qty: Decimal,
     pub remaining_qty: Decimal,
     pub avg_fill_price: Option<Decimal>,
-    pub fee: Decimal,
+    /// Order-level fee rollup. `None` when the venue response carries no
+    /// commission field — a fabricated rate would misstate realized PnL.
+    pub fee: Option<Decimal>,
     pub fee_currency: String,
     pub raw_response: Option<String>,
     pub timestamp: DateTime<Utc>,

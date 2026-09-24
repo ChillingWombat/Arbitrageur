@@ -73,22 +73,25 @@ impl HedgeRatioKalmanFilter {
         self.state[0] += k0 * residual;
         self.state[1] += k1 * residual;
 
-        // 7. Covariance update:
-        // P = (I - K * H) * P
-        let kh00 = k0 * h[0];
-        let kh01 = k0 * h[1];
-        let kh10 = k1 * h[0];
-        let kh11 = k1 * h[1];
+        // 7. Covariance update — Joseph stabilized form:
+        //    P = (I - K·H)·P·(I - K·H)ᵀ + K·R·Kᵀ
+        // The plain (I - K·H)·P form can drift non-PSD under floating-point
+        // error; Joseph form is a sum of two PSD terms and stays
+        // positive-semidefinite regardless of K accuracy.
+        let m00 = 1.0 - k0 * h[0];
+        let m01 = -k0 * h[1];
+        let m10 = -k1 * h[0];
+        let m11 = 1.0 - k1 * h[1];
 
-        let i_minus_kh00 = 1.0 - kh00;
-        let i_minus_kh01 = -kh01;
-        let i_minus_kh10 = -kh10;
-        let i_minus_kh11 = 1.0 - kh11;
+        let mp00 = m00 * self.p[0][0] + m01 * self.p[1][0];
+        let mp01 = m00 * self.p[0][1] + m01 * self.p[1][1];
+        let mp10 = m10 * self.p[0][0] + m11 * self.p[1][0];
+        let mp11 = m10 * self.p[0][1] + m11 * self.p[1][1];
 
-        let new_p00 = i_minus_kh00 * self.p[0][0] + i_minus_kh01 * self.p[1][0];
-        let new_p01 = i_minus_kh00 * self.p[0][1] + i_minus_kh01 * self.p[1][1];
-        let new_p10 = i_minus_kh10 * self.p[0][0] + i_minus_kh11 * self.p[1][0];
-        let new_p11 = i_minus_kh10 * self.p[0][1] + i_minus_kh11 * self.p[1][1];
+        let new_p00 = mp00 * m00 + mp01 * m01 + self.r * k0 * k0;
+        let new_p01 = mp00 * m10 + mp01 * m11 + self.r * k0 * k1;
+        let new_p10 = mp10 * m00 + mp11 * m01 + self.r * k1 * k0;
+        let new_p11 = mp10 * m10 + mp11 * m11 + self.r * k1 * k1;
 
         let sym_p01 = (new_p01 + new_p10) * 0.5;
         self.p = [[new_p00.max(1e-12), sym_p01], [sym_p01, new_p11.max(1e-12)]];
@@ -109,6 +112,54 @@ impl HedgeRatioKalmanFilter {
             self.latest_residual / self.latest_variance.sqrt()
         } else {
             0.0
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression (#46): the Joseph-form covariance update must keep P
+    /// positive-semidefinite even under adversarial observation scales —
+    /// alternating huge/tiny x values stress the (I−K·H)·P round-off that
+    /// previously could produce negative variances.
+    #[test]
+    fn covariance_stays_psd_under_adversarial_inputs() {
+        let mut kf = HedgeRatioKalmanFilter::new(1e-4, 1e-2);
+        for i in 0..2000 {
+            let x = if i % 2 == 0 { 1e6_f64 } else { 1e-6 };
+            let y = x * 1.5 + (i as f64 * 0.001).sin();
+            kf.update(x, y);
+            let det = kf.p[0][0] * kf.p[1][1] - kf.p[0][1] * kf.p[1][0];
+            assert!(
+                kf.p[0][0] >= 0.0,
+                "p00 negative at step {i}: {}",
+                kf.p[0][0]
+            );
+            assert!(
+                kf.p[1][1] >= 0.0,
+                "p11 negative at step {i}: {}",
+                kf.p[1][1]
+            );
+            assert!(
+                det >= -1e-18,
+                "covariance lost PSD at step {i}: det={det} p={:?}",
+                kf.p
+            );
+        }
+    }
+
+    #[test]
+    fn covariance_stays_psd_with_singular_observation() {
+        // R ≈ 0 with a repeated observation drives S→0; gain blows up and
+        // the plain-form update can go non-PSD.
+        let mut kf = HedgeRatioKalmanFilter::new(0.0, 1e-12);
+        for _ in 0..500 {
+            kf.update(7.0, 10.5);
+            let det = kf.p[0][0] * kf.p[1][1] - kf.p[0][1] * kf.p[1][0];
+            assert!(kf.p[0][0] >= 0.0 && kf.p[1][1] >= 0.0);
+            assert!(det >= -1e-24, "det={det}");
         }
     }
 }

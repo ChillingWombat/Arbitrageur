@@ -392,17 +392,13 @@ impl BinanceAdapter {
         } else {
             None
         };
-        let cum_quote = if executed_qty > dec!(0) {
+        if executed_qty > dec!(0) {
             dec_from_json(v.get("cumQuote"))
                 .filter(|q| *q >= dec!(0))
                 .ok_or_else(|| {
                     anyhow::anyhow!("Binance filled order response missing valid cumQuote: {v}")
-                })?
-        } else {
-            dec!(0)
-        };
-        // Binance USDT-M VIP0 taker fee: 5 BPS of notional.
-        let fee = cum_quote * Decimal::new(5, 4);
+                })?;
+        }
         Ok(OrderResponse {
             order_id,
             client_order_id: client_order_id.to_string(),
@@ -413,7 +409,7 @@ impl BinanceAdapter {
             filled_qty: executed_qty,
             remaining_qty,
             avg_fill_price: avg_price,
-            fee,
+            fee: None,
             fee_currency: "USDT".to_string(),
             raw_response: Some(v.to_string()),
             timestamp: Utc::now(),
@@ -425,6 +421,7 @@ impl BinanceAdapter {
         path: &str,
         params: &BTreeMap<&str, String>,
     ) -> anyhow::Result<serde_json::Value> {
+        self.rate_limiter.acquire_signed().await?;
         let (api_key, query_string) = self.sign_params(params)?;
         let url = format!("{}{}?{}", self.base_url, path, query_string);
         let resp = self
@@ -454,6 +451,7 @@ impl BinanceAdapter {
         path: &str,
         params: &BTreeMap<&str, String>,
     ) -> anyhow::Result<serde_json::Value> {
+        self.rate_limiter.acquire_signed().await?;
         let (api_key, query_string) = self.sign_params(params)?;
         let url = format!("{}{}?{}", self.base_url, path, query_string);
         let resp = self
@@ -885,7 +883,10 @@ impl ExchangeAdapter for BinanceAdapter {
         let (type_str, tif_str) = match order.order_type {
             OrderType::Market => ("MARKET", None),
             OrderType::PostOnly => ("LIMIT", Some("GTX")),
-            OrderType::Limit | OrderType::ImmediateOrCancel => {
+            // IOC is the order semantic — a contradictory TIF field must
+            // not silently turn it into a resting GTC order.
+            OrderType::ImmediateOrCancel => ("LIMIT", Some("IOC")),
+            OrderType::Limit => {
                 let tif = match order.time_in_force {
                     TimeInForce::ImmediateOrCancel => "IOC",
                     TimeInForce::FillOrKill => "FOK",
@@ -894,6 +895,14 @@ impl ExchangeAdapter for BinanceAdapter {
                 };
                 ("LIMIT", Some(tif))
             }
+        };
+        // A post_only flag on the request carries the same maker-only
+        // intent — honor it as GTX rather than letting it degrade to a
+        // taker-capable limit.
+        let (type_str, tif_str) = if order.post_only && type_str == "LIMIT" {
+            ("LIMIT", Some("GTX"))
+        } else {
+            (type_str, tif_str)
         };
         params.insert("type", type_str.to_string());
         if let Some(tif) = tif_str {
@@ -933,7 +942,11 @@ impl ExchangeAdapter for BinanceAdapter {
         params.insert("recvWindow", "5000".to_string());
 
         let v = self.signed_post("/fapi/v1/order", &params).await?;
-        Self::parse_order_response(&v, &order)
+        // Verify the ack against the snapped wire quantity — the venue
+        // echoes what was sent, not the pre-floor request amount.
+        let mut expected = order.clone();
+        expected.quantity = qty_wire;
+        Self::parse_order_response(&v, &expected)
     }
 
     async fn wire_base_qty(&self, symbol: &str, qty: Decimal) -> anyhow::Result<Decimal> {
@@ -1118,8 +1131,9 @@ mod tests {
         assert_eq!(resp.status, OrderStatus::Filled);
         assert_eq!(resp.filled_qty, dec!(0.01));
         assert_eq!(resp.avg_fill_price, Some(dec!(80000.5)));
-        // 5 BPS taker of 800.005 notional.
-        assert!((resp.fee - dec!(0.4000025)).abs() < dec!(0.0000001));
+        // The order response carries no venue commission field — fee is
+        // reported unknown, never fabricated.
+        assert_eq!(resp.fee, None);
         let rej: serde_json::Value = serde_json::json!({
             "symbol": "BTCUSDT",
             "orderId": 12346,

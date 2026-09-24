@@ -199,6 +199,10 @@ pub struct HyperliquidAdapter {
     /// Signer+account pair verified via `userRole` for the currently-held
     /// credentials; cleared whenever credentials actually change.
     verified_signer: RwLock<Option<VerifiedSigner>>,
+    /// Which EIP-712 domain the L1 action signs. Constructor-pinned —
+    /// never re-inferred from the base URL at order time, so a mistyped
+    /// endpoint can only fail at the venue, not sign the wrong domain.
+    is_mainnet: bool,
     rate_limiter: AccountRequestCoordinator,
 }
 
@@ -211,6 +215,7 @@ impl HyperliquidAdapter {
         let base = base_url.unwrap_or_else(|| "https://api.hyperliquid.xyz".to_string());
         Self {
             venue_id: VenueId::new("hyperliquid"),
+            is_mainnet: true,
             client: Client::builder()
                 .timeout(std::time::Duration::from_secs(15))
                 .build()
@@ -221,6 +226,17 @@ impl HyperliquidAdapter {
             verified_signer: RwLock::new(None),
             rate_limiter: AccountRequestCoordinator::new("hyperliquid", 100, 2000, 500, 10000),
         }
+    }
+
+    /// Public testnet adapter — signs the testnet EIP-712 domain.
+    pub fn for_testnet(wallet_address: Option<String>, private_key: Option<String>) -> Self {
+        let mut adapter = Self::new(
+            Some("https://api.hyperliquid-testnet.xyz".to_string()),
+            wallet_address,
+            private_key,
+        );
+        adapter.is_mainnet = false;
+        adapter
     }
 
     /// Update live trading credentials dynamically (e.g. on vault unlock/lock).
@@ -319,11 +335,20 @@ impl HyperliquidAdapter {
     }
 
     async fn post_exchange(&self, body: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        self.rate_limiter.acquire_signed().await?;
         let url = format!("{}/exchange", self.base_url);
-        let resp = self.client.post(&url).json(&body).send().await?;
+        let resp = match self.client.post(&url).json(&body).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                self.rate_limiter.record_failure(false);
+                return Err(e.into());
+            }
+        };
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
+            self.rate_limiter
+                .record_failure(status == reqwest::StatusCode::TOO_MANY_REQUESTS);
             anyhow::bail!("Hyperliquid /exchange error HTTP {status}: {text}");
         }
         let json_val: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
@@ -608,7 +633,7 @@ fn parse_hl_order_response(
             filled_qty: total_sz,
             remaining_qty,
             avg_fill_price: Some(avg_px),
-            fee: dec!(0),
+            fee: None,
             fee_currency: "USDC".to_string(),
             raw_response: Some(resp_json.to_string()),
             timestamp: Utc::now(),
@@ -635,7 +660,7 @@ fn parse_hl_order_response(
             filled_qty: dec!(0),
             remaining_qty: order.quantity,
             avg_fill_price: None,
-            fee: dec!(0),
+            fee: None,
             fee_currency: "USDC".to_string(),
             raw_response: Some(resp_json.to_string()),
             timestamp: Utc::now(),
@@ -1066,12 +1091,21 @@ impl ExchangeAdapter for HyperliquidAdapter {
             );
         }
 
-        let tif = if order.post_only {
+        // Hyperliquid's wire supports only Gtc/Ioc/Alo — FOK has no
+        // representation and is refused rather than downgraded to a
+        // resting order.
+        let tif = if order.post_only
+            || order.order_type == OrderType::PostOnly
+            || order.time_in_force == TimeInForce::PostOnly
+        {
             "Alo"
         } else if order.time_in_force == TimeInForce::ImmediateOrCancel
             || order.order_type == OrderType::ImmediateOrCancel
+            || order.order_type == OrderType::Market
         {
             "Ioc"
+        } else if order.time_in_force == TimeInForce::FillOrKill {
+            anyhow::bail!("Hyperliquid has no FillOrKill — refusing instead of downgrading to GTC");
         } else {
             "Gtc"
         };
@@ -1112,9 +1146,13 @@ impl ExchangeAdapter for HyperliquidAdapter {
         );
 
         let nonce = Utc::now().timestamp_millis() as u64;
-        let is_mainnet = !self.base_url.contains("testnet");
-        let (r, s, v) =
-            sign_hyperliquid_l1_action(&action, nonce, None, is_mainnet, private_key.as_str())?;
+        let (r, s, v) = sign_hyperliquid_l1_action(
+            &action,
+            nonce,
+            None,
+            self.is_mainnet,
+            private_key.as_str(),
+        )?;
 
         let body = json!({
             "action": action,
@@ -1145,13 +1183,15 @@ impl ExchangeAdapter for HyperliquidAdapter {
     }
 
     async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()> {
+        // Same zeroizing copy discipline as place_order — key material
+        // must not linger in a plain String.
         let private_key = {
             let guard = self.private_key.read();
             guard
                 .as_deref()
                 .map(|k| k.trim())
                 .filter(|k| !k.is_empty())
-                .map(ToString::to_string)
+                .map(|k| Zeroizing::new(k.to_string()))
         }
         .ok_or_else(|| {
             anyhow::anyhow!("Hyperliquid live order cancellation requires a private key")
@@ -1173,8 +1213,8 @@ impl ExchangeAdapter for HyperliquidAdapter {
             }],
         };
         let nonce = Utc::now().timestamp_millis() as u64;
-        let is_mainnet = !self.base_url.contains("testnet");
-        let (r, s, v) = sign_hyperliquid_l1_action(&action, nonce, None, is_mainnet, &private_key)?;
+        let (r, s, v) =
+            sign_hyperliquid_l1_action(&action, nonce, None, self.is_mainnet, &private_key)?;
 
         let body = json!({
             "action": action,
@@ -1192,6 +1232,25 @@ impl ExchangeAdapter for HyperliquidAdapter {
                 "Hyperliquid cancel error: {}",
                 resp_json.get("response").unwrap_or(&resp_json)
             );
+        }
+        // Top-level "ok" is not a cancel confirmation — each cancel carries
+        // a per-order status ("success" or {"error": ...}). Anything other
+        // than success means the order may still rest.
+        let statuses = resp_json
+            .pointer("/response/data/statuses")
+            .and_then(|s| s.as_array())
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Hyperliquid cancel response missing per-order statuses: {resp_json}"
+                )
+            })?;
+        for entry in statuses {
+            match entry {
+                serde_json::Value::String(s) if s == "success" => {}
+                other => {
+                    anyhow::bail!("Hyperliquid cancel not confirmed for oid {oid}: {other}")
+                }
+            }
         }
         Ok(())
     }
@@ -1341,7 +1400,7 @@ impl ExchangeAdapter for HyperliquidAdapter {
             filled_qty,
             remaining_qty: remaining_sz,
             avg_fill_price: avg_px,
-            fee: ffee,
+            fee: Some(ffee),
             fee_currency: "USDC".to_string(),
             raw_response: Some(v.to_string()),
             timestamp: Utc::now(),

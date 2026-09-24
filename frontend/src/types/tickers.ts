@@ -48,7 +48,9 @@ export function formatSpreadPrice(spread: number): string {
   return `$${spread.toFixed(8)}`;
 }
 
-export function formatCurrencyPnl(pnl: number): string {
+export function formatCurrencyPnl(pnl: number | null | undefined): string {
+  // Unknown stays unknown — a null/NaN PnL must never read as "$0.00".
+  if (pnl === null || pnl === undefined || !Number.isFinite(pnl)) return "—";
   const rounded = Math.round(pnl * 100) / 100;
   if (rounded > 0) return `+$${rounded.toFixed(2)}`;
   if (rounded < 0) return `-$${Math.abs(rounded).toFixed(2)}`;

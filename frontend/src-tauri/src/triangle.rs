@@ -9,8 +9,10 @@ use crate::commands::{
     SimStepResultDto, TRIANGLE_STRATEGY_ID,
 };
 use crate::state::{AppEngineState, ExecutionLogEntry};
+use crate::state_store::SignalStatus;
 use arbitrageur_core::exchange::ExchangeAdapter;
 use arbitrageur_core::quote::OrderBook;
+use arbitrageur_core::symbol::{canonical_base, is_usd_family, symbol_quote};
 use arbitrageur_core::types::{dec, Decimal, Side, VenueId};
 use arbitrageur_math::triangular::{evaluate_triangular_cycle, TriLegSide};
 use arbitrageur_risk::margin_monitor::MarginHealthStatus;
@@ -67,6 +69,17 @@ pub struct TriangleExecutionParams {
     #[serde(default)]
     pub auto: bool,
 }
+
+/// IOC bound padding past the dispatch-book VWAP, in bps: wide enough to
+/// fill the evaluated depth despite book micro-drift, tight enough that a
+/// fill beyond it means the evaluated edge is gone anyway.
+const TRIANGLE_IOC_BOUND_BPS: i64 = 15;
+
+/// Bounded `fetch_order` window for a triangle leg whose submit ack is
+/// non-terminal — same fail-closed contract as the two-leg coordinator:
+/// settle on venue truth before deciding the leg's fate.
+const TRIANGLE_SETTLE_POLLS: u32 = 8;
+const TRIANGLE_SETTLE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(400);
 
 /// Paper-dust tolerance for the triangle entry guard: f64/Decimal ledger
 /// conversions can strand sub-1e-9 base-unit residue after a flatten.
@@ -464,38 +477,25 @@ pub async fn scan_triangular_opportunities_impl(
     Ok(opps)
 }
 
-/// Persist one filled triangle leg as a 1-leg `Imbalanced` signal so the leg
-/// symbol stays blocked and unwinds through the existing symbol-scoped
-/// flatten path. Only legs with a positive fill and price are recorded.
-///
-/// `qty_f64` must be the exact submitted quantity for full fills: the paper
-/// position holds `Decimal::from_f64_retain(qty_f64)`, so recording the same
-/// f64 source keeps the ledger residual bit-identical to the paper position.
-/// Re-converting the Decimal fill back to f64 would shed ~1e-19 of dust and
-/// leave the symbol blocked on economically meaningless residue.
+/// Persist a triangle leg's INTENT before its order is submitted — the
+/// durable `{cycle_tag}-leg{idx}` signal row (status `in_flight`) is what the
+/// reconciliation supervisor polls if the process dies mid-cycle. Submitting
+/// first and recording after the response would orphan a live order whose
+/// write never landed.
 #[allow(clippy::too_many_arguments)]
-fn record_triangle_leg_fill(
+fn record_triangle_leg_intent(
     state: &AppEngineState,
-    cycle_tag: &str,
-    leg_idx: usize,
+    signal_id: &str,
     venue_id: &str,
     symbol: &str,
     order_side: Side,
     qty_f64: f64,
-    fill_px: Decimal,
-    fee: Decimal,
-    order_id: &str,
     note: &str,
     expected_net_usd: Option<f64>,
 ) -> Result<(), String> {
-    use crate::state_store::{LegSide, NewSignalExecution, NewSignalLeg, SignalStatus};
+    use crate::state_store::{LegSide, NewSignalExecution, NewSignalLeg};
     if !qty_f64.is_finite() || qty_f64 <= 0.0 {
-        return Err("triangle fill quantity is not positive".into());
-    }
-    let px_f = dec_to_f64(fill_px, "triangle fill price")?;
-    let fee_f = dec_to_f64(fee, "triangle fill fee")?;
-    if px_f <= 0.0 || fee_f < 0.0 {
-        return Err("triangle fill is not recordable".into());
+        return Err("triangle leg quantity is not positive".into());
     }
     let side = match order_side {
         Side::Buy => LegSide::Long,
@@ -507,35 +507,109 @@ fn record_triangle_leg_fill(
         .ok()
         .flatten()
         .map(|a| a.id);
-    let signal_id = format!("{cycle_tag}-leg{leg_idx}");
     state
         .state_store
-        .record_signal_execution(&NewSignalExecution {
-            id: signal_id.clone(),
-            strategy_id: TRIANGLE_STRATEGY_ID.to_string(),
-            symbol: symbol.to_string(),
-            route_id: None,
-            expected_net_usd,
-            note: Some(note.to_string()),
-            legs: vec![NewSignalLeg {
-                account_id,
-                venue: venue_id.to_string(),
-                side,
-                symbol: None,
-                intended_qty: qty_f64,
-                intended_price: None,
-            }],
-        })
-        .map_err(|e| format!("Failed to persist triangle leg record: {e}"))?;
-    state
-        .state_store
-        .apply_leg_fill(&signal_id, side, qty_f64, px_f, fee_f, Some(order_id))
-        .map_err(|e| e.to_string())?;
-    state
-        .state_store
-        .update_signal_status(&signal_id, SignalStatus::Imbalanced, Some(note))
-        .map_err(|e| e.to_string())?;
+        .record_signal_execution(
+            &NewSignalExecution {
+                id: signal_id.to_string(),
+                strategy_id: TRIANGLE_STRATEGY_ID.to_string(),
+                symbol: symbol.to_string(),
+                route_id: None,
+                expected_net_usd,
+                note: Some(note.to_string()),
+                legs: vec![NewSignalLeg {
+                    account_id,
+                    venue: venue_id.to_string(),
+                    side,
+                    symbol: Some(symbol.to_string()),
+                    intended_qty: qty_f64,
+                    intended_price: None,
+                }],
+            },
+            state.env().as_str(),
+        )
+        .map_err(|e| format!("Failed to persist triangle leg intent: {e}"))?;
     Ok(())
+}
+
+/// Resolve a leg's bounded IOC price from the dispatch-time book: the
+/// execution VWAP for the exact wire quantity, padded by
+/// `TRIANGLE_IOC_BOUND_BPS` so the order fills the evaluated depth but can
+/// never sweep past it into unbounded slippage. `None` when the book cannot
+/// price the quantity — the cycle must abort, not dispatch blind.
+fn triangle_leg_bound_px(book: &OrderBook, side: Side, qty: Decimal) -> Option<Decimal> {
+    let bound = dec!(1) + Decimal::from(TRIANGLE_IOC_BOUND_BPS) / dec!(10_000);
+    let vwap = match side {
+        Side::Buy => book.buy_execution_vwap(qty).map(|(v, _, _)| v * bound),
+        Side::Sell => book.sell_execution_vwap(qty).map(|(v, _, _)| v / bound),
+    }?;
+    (vwap > dec!(0)).then_some(vwap)
+}
+
+/// Realized PnL of a completed triangle cycle, denominated in the cycle's
+/// settlement quote (`TRIANGLE_QUOTE`). Leg cashflows are denominated in
+/// different coins — a raw sum across them is meaningless — so each leg's
+/// proceeds are converted through the settlement-quoted legs' own fill
+/// prices (the ring always prices intermediate→settlement on its last leg).
+/// Legs or fees that cannot be converted are skipped rather than guessed;
+/// on a complete 3-leg cycle every leg is convertible by construction.
+fn triangle_settlement_pnl(
+    leg_symbols: &[String; 3],
+    order_sides: &[Side; 3],
+    fills: &[(usize, arbitrageur_core::order::OrderResponse)],
+) -> Decimal {
+    // base asset → settlement price, from each filled settlement-quoted leg.
+    let mut settle_px: HashMap<String, Decimal> = HashMap::new();
+    for (idx, r) in fills {
+        let sym = &leg_symbols[*idx];
+        if symbol_quote(sym).as_deref() == Some(TRIANGLE_QUOTE) {
+            if let Some(px) = r.avg_fill_price.filter(|p| *p > dec!(0)) {
+                settle_px.insert(canonical_base(sym), px);
+            }
+        }
+    }
+    let to_settle = |amount: Decimal, ccy: &str| -> Option<Decimal> {
+        if is_usd_family(ccy) {
+            Some(amount)
+        } else {
+            settle_px.get(&canonical_base(ccy)).map(|px| amount * px)
+        }
+    };
+    let mut pnl = Decimal::ZERO;
+    for (idx, r) in fills {
+        let sym = &leg_symbols[*idx];
+        let px = r.avg_fill_price.unwrap_or(dec!(0));
+        let quote = symbol_quote(sym).unwrap_or_default();
+        let cash = r.filled_qty * px;
+        if let Some(c) = to_settle(cash, &quote) {
+            match order_sides[*idx] {
+                Side::Sell => pnl += c,
+                Side::Buy => pnl -= c,
+            }
+        }
+        if let Some(fee) = r.fee.filter(|f| *f > dec!(0)) {
+            // Fee currency precedence: explicit venue field, else the leg's
+            // quote. A fee charged in the leg's base converts through the
+            // leg's own fill price into quote units first; any other coin
+            // resolves through the settlement-price map (missing → skipped).
+            let fee_ccy = if r.fee_currency.trim().is_empty() {
+                quote.as_str()
+            } else {
+                r.fee_currency.trim()
+            };
+            let settled = if is_usd_family(fee_ccy) {
+                Some(fee)
+            } else if fee_ccy.eq_ignore_ascii_case(&canonical_base(sym)) {
+                to_settle(fee * px, &quote)
+            } else {
+                to_settle(fee, fee_ccy)
+            };
+            if let Some(f) = settled {
+                pnl -= f;
+            }
+        }
+    }
+    pnl
 }
 
 pub async fn execute_triangle_arbitrage_impl(
@@ -651,11 +725,12 @@ pub async fn execute_triangle_arbitrage_impl(
     }
 
     // One-open-pair-per-symbol, extended to the cycle: any blocking ledger
-    // signal or any open position on a leg symbol refuses dispatch.
+    // signal, exits-only flag, or open position on a leg symbol refuses
+    // dispatch.
     for sym in &plan.leg_symbols {
         if let Some(blocker) = state
             .state_store
-            .blocking_signals(sym)
+            .blocking_signals(sym, Some(state.env().as_str()))
             .map_err(|e| e.to_string())?
             .into_iter()
             .next()
@@ -664,6 +739,15 @@ pub async fn execute_triangle_arbitrage_impl(
                 "Symbol {sym} is blocked by signal {} (status {}): awaiting leg reconciliation/delta-neutral confirmation",
                 blocker.id,
                 blocker.status.as_str()
+            ));
+        }
+        if state
+            .state_store
+            .ticker_reduce_only(sym, "triangle", state.env().as_str())
+            .map_err(|e| e.to_string())?
+        {
+            return Err(format!(
+                "Symbol {sym} is reduce-only for triangle — exits only, entry refused"
             ));
         }
     }
@@ -745,6 +829,7 @@ pub async fn execute_triangle_arbitrage_impl(
 
     let mut fills: Vec<(usize, arbitrageur_core::order::OrderResponse)> = Vec::new();
     let mut submitted_qty: Vec<f64> = Vec::new();
+    let mut leg_signal_ids: Vec<(usize, String, crate::state_store::LegSide)> = Vec::new();
     let mut leg_error: Option<String> = None;
     for (idx, ((sym, order_side), qty_f)) in plan
         .leg_symbols
@@ -788,62 +873,168 @@ pub async fn execute_triangle_arbitrage_impl(
                 break;
             }
         };
-        submitted_qty.push(qty.to_string().parse::<f64>().unwrap_or(0.0));
-        let order = arbitrageur_core::order::OrderRequest::new_market(
+        let qty_f64 = qty.to_string().parse::<f64>().unwrap_or(0.0);
+        submitted_qty.push(qty_f64);
+        let leg_side = match order_side {
+            Side::Buy => crate::state_store::LegSide::Long,
+            Side::Sell => crate::state_store::LegSide::Short,
+        };
+        let leg_signal_id = format!("{cycle_tag}-leg{idx}");
+        // Persist the leg's intent BEFORE the order leaves the process: a
+        // crash between submit and record would otherwise orphan live
+        // exposure with no reconcilable row. A persist failure refuses the
+        // dispatch — the cycle simply stops before this leg.
+        let intent_note = format!(
+            "triangle {} leg {}/3 {order_side:?} {qty} {sym}",
+            plan.path,
+            idx + 1
+        );
+        if let Err(e) = record_triangle_leg_intent(
+            state,
+            &leg_signal_id,
+            vid.as_str(),
+            sym,
+            *order_side,
+            qty_f64,
+            &intent_note,
+            // The cycle-level projection persists once — on leg 0 — so the
+            // family carries the eval's expectation without triple-counting.
+            (idx == 0).then_some(eval.profit_usd),
+        ) {
+            leg_error = Some(format!("leg {} intent persist failed: {e}", idx + 1));
+            break;
+        }
+        leg_signal_ids.push((idx, leg_signal_id.clone(), leg_side));
+        let mark_failed = |sid: &str, why: &str| {
+            let _ = state
+                .state_store
+                .update_signal_status(sid, SignalStatus::Failed, Some(why));
+        };
+        // Bounded IOC — never a naked market order. The bound is the
+        // dispatch book's execution VWAP for this wire quantity padded by
+        // TRIANGLE_IOC_BOUND_BPS: the leg fills the evaluated depth or
+        // dies unfilled (residuals handled below), but can never chase a
+        // moved book into unlimited slippage.
+        let Some(bound_px) = triangle_leg_bound_px(&books[idx], *order_side, qty) else {
+            let why = "dispatch book cannot bound the leg price — refusing unpriced dispatch";
+            mark_failed(&leg_signal_id, why);
+            leg_error = Some(format!("leg {} on {sym}: {why}", idx + 1));
+            break;
+        };
+        let order = arbitrageur_core::order::OrderRequest::new_ioc(
             adapter.venue_id(),
             sym,
             *order_side,
+            bound_px,
             qty,
         );
-        match adapter.place_order(order).await {
-            Ok(resp)
-                if resp.filled_qty == qty
-                    && resp.remaining_qty == dec!(0)
-                    && resp.avg_fill_price.filter(|p| *p > dec!(0)).is_some() =>
-            {
-                fills.push((idx, resp));
+        let client_oid = order.client_order_id.clone();
+        let mut resp = match adapter.place_order(order).await {
+            Ok(r) => r,
+            Err(e) => {
+                mark_failed(&leg_signal_id, &format!("submit rejected: {e}"));
+                leg_error = Some(format!("leg {} on {sym} failed: {e}", idx + 1));
+                break;
             }
-            Ok(resp) => {
+        };
+        // The venue's order identity lands BEFORE any fill bookkeeping —
+        // a zero-fill or working ack still owes the reconciler the handle.
+        if !resp.order_id.trim().is_empty() {
+            if let Err(e) = state.state_store.record_leg_order_id(
+                &leg_signal_id,
+                leg_side,
+                resp.order_id.trim(),
+                Some(&client_oid),
+            ) {
+                tracing::warn!("triangle leg {idx} order-id persist failed: {e}");
+            }
+        }
+        // Async-ack venues return New for an accepted IOC — settle the leg
+        // on venue truth before classifying it. A still-working leg is then
+        // cancelled and re-polled once; if the venue still cannot prove a
+        // terminal state the leg escalates unresolved rather than assuming.
+        if !resp.status.is_final() && !resp.order_id.trim().is_empty() {
+            for _ in 0..TRIANGLE_SETTLE_POLLS {
+                tokio::time::sleep(TRIANGLE_SETTLE_INTERVAL).await;
+                match adapter
+                    .fetch_order(sym, &resp.order_id, Some(&client_oid))
+                    .await
+                {
+                    Ok(polled) => {
+                        resp = polled;
+                        if resp.status.is_final() {
+                            break;
+                        }
+                    }
+                    Err(_) => continue,
+                }
+            }
+            if !resp.status.is_final() {
+                let _ = adapter
+                    .cancel_order(arbitrageur_core::order::CancelRequest {
+                        venue: adapter.venue_id(),
+                        symbol: sym.clone(),
+                        order_id: Some(resp.order_id.clone()),
+                        client_order_id: Some(client_oid.clone()),
+                    })
+                    .await;
+                tokio::time::sleep(TRIANGLE_SETTLE_INTERVAL).await;
+                if let Ok(polled) = adapter
+                    .fetch_order(sym, &resp.order_id, Some(&client_oid))
+                    .await
+                {
+                    resp = polled;
+                }
+            }
+        }
+        let px_ok = resp.avg_fill_price.is_some_and(|p| p > dec!(0));
+        if resp.status == arbitrageur_core::types::OrderStatus::Filled
+            && resp.filled_qty == qty
+            && resp.remaining_qty == dec!(0)
+            && px_ok
+        {
+            fills.push((idx, resp));
+            continue;
+        }
+        // Any non-complete outcome ends the cycle here.
+        match (resp.status.is_final(), resp.filled_qty > dec!(0)) {
+            (true, true) => {
+                // Terminal partial fill: record exactly what landed and stop
+                // — the residual is real exposure the reconciler owns.
+                fills.push((idx, resp));
+                leg_error = Some(format!(
+                    "leg {} on {sym} terminated partially filled",
+                    idx + 1
+                ));
+            }
+            (true, false) => {
+                mark_failed(&leg_signal_id, "terminated without a fill");
+                leg_error = Some(format!("leg {} on {sym} terminated unfilled", idx + 1));
+            }
+            (false, _) => {
+                // Still working after the settle window: keep the order id
+                // durable and mark the leg unresolved — never assume dead.
+                let _ = state.state_store.update_signal_status(
+                    &leg_signal_id,
+                    SignalStatus::Unresolved,
+                    Some("order still working past the settle window — reconciler owns it"),
+                );
                 if resp.filled_qty > dec!(0) {
                     fills.push((idx, resp));
                 }
                 leg_error = Some(format!(
-                    "leg {} on {sym} partially filled or rejected",
+                    "leg {} on {sym} still working past settle window",
                     idx + 1
                 ));
-                break;
-            }
-            Err(e) => {
-                leg_error = Some(format!("leg {} on {sym} failed: {e}", idx + 1));
-                break;
             }
         }
+        break;
     }
     let latency_us = started.elapsed().as_micros() as u64;
 
     refresh_equity_expectations_after_fills(state, &equity_before_by_venue).await;
-    // Realized cash delta of the fills: buys spend, sells receive, fees
-    // subtract. For a balanced triangle cycle this is the negative
-    // spread+fee cost; the opened position's value is unrealized on venue.
-    let attempt_pnl: Decimal = fills
-        .iter()
-        .map(|(idx, r)| {
-            let px = r.avg_fill_price.unwrap_or(dec!(0));
-            let signed = match plan.order_sides[*idx] {
-                Side::Sell => r.filled_qty * px,
-                Side::Buy => -r.filled_qty * px,
-            };
-            signed - r.fee
-        })
-        .sum();
-    let attempt_pnl_f = attempt_pnl.to_string().parse::<f64>().unwrap_or(0.0);
-    let total_f =
-        crate::execution::accumulate_realized_profit(state, state.is_live(), attempt_pnl_f);
 
-    let fee_total_f: f64 = fills
-        .iter()
-        .filter_map(|(_, r)| r.fee.to_string().parse::<f64>().ok())
-        .sum();
+    let cycle_complete = leg_error.is_none() && fills.len() == 3;
     let cycle_note = format!(
         "triangle {} legs {}/3 filled, net {:.1} BPS at scan",
         plan.path,
@@ -851,35 +1042,137 @@ pub async fn execute_triangle_arbitrage_impl(
         eval.net_bps
     );
     let mut record_errors = Vec::new();
+    // Record fills on their already-persisted leg signals, then settle each
+    // leg's status: a completed cycle closes all three (the position is
+    // flat — nothing to unwind); a partial cycle leaves filled legs
+    // Imbalanced so the residual stays blocked for flatten/reconciliation.
     for (idx, resp) in &fills {
         let fill_px = resp.avg_fill_price.unwrap_or(dec!(0));
         // Single f64 source per leg: full fills reuse the exact submitted
-        // quantity; a partial failed leg falls back to its actual fill (any
+        // quantity; a partial leg falls back to its actual fill (any
         // conversion dust is covered by the epsilon in the entry guard).
         let qty_f64 = if resp.filled_qty == resp.original_qty {
             submitted_qty[*idx]
         } else {
             resp.filled_qty.to_string().parse::<f64>().unwrap_or(0.0)
         };
-        if let Err(e) = record_triangle_leg_fill(
-            state,
-            &cycle_tag,
-            *idx,
-            vid.as_str(),
-            &resp.symbol,
-            plan.order_sides[*idx],
+        let Some((_, sid, side)) = leg_signal_ids.iter().find(|(i, _, _)| i == idx) else {
+            record_errors.push(format!("leg {} has no persisted signal", idx + 1));
+            continue;
+        };
+        let px_f = match dec_to_f64(fill_px, "triangle fill price") {
+            Ok(v) => v,
+            Err(e) => {
+                record_errors.push(e);
+                continue;
+            }
+        };
+        let fee_f = resp
+            .fee
+            .map(|f| dec_to_f64(f, "triangle fill fee").unwrap_or(0.0))
+            .unwrap_or(0.0);
+        if let Err(e) = state.state_store.apply_leg_fill(
+            sid,
+            *side,
             qty_f64,
-            fill_px,
-            resp.fee,
-            &resp.order_id,
-            &cycle_note,
-            // The cycle-level projection persists once — on leg 0 — so the
-            // family carries the eval's expectation without triple-counting.
-            (*idx == 0).then_some(eval.profit_usd),
+            px_f,
+            fee_f,
+            Some(resp.order_id.as_str()),
         ) {
-            record_errors.push(e);
+            record_errors.push(format!("leg {} fill persist failed: {e}", idx + 1));
         }
     }
+    // Venue truth decides what a completed cycle means. On a spot venue the
+    // legs net to balances — the cycle is genuinely flat → Closed. On a
+    // venue with a position model (perp legs), the three positions still
+    // exist and consume margin — mark Balanced so the flatten path keeps
+    // tracking them instead of orphaning live exposure under Closed.
+    // A verification failure stays Balanced — never pretend flat.
+    let mut cycle_flat = false;
+    if cycle_complete {
+        cycle_flat = match adapter.fetch_account().await {
+            Ok(acc) => {
+                let mut any_open = false;
+                let mut ambiguous = false;
+                for sym in &plan.leg_symbols {
+                    match adapter.account_position_for(&acc, sym) {
+                        Ok(Some(_)) => any_open = true,
+                        Ok(None) => {}
+                        Err(_) => ambiguous = true,
+                    }
+                }
+                !any_open && !ambiguous
+            }
+            Err(_) => false,
+        };
+    }
+    for (idx, sid, _) in &leg_signal_ids {
+        let filled = fills.iter().any(|(i, _)| i == idx);
+        // A leg already resolved at break time (Failed / Unresolved) keeps
+        // its status — only still-in-flight legs transition here.
+        let current = state
+            .state_store
+            .get_signal(sid)
+            .ok()
+            .flatten()
+            .map(|s| s.status);
+        if current != Some(SignalStatus::InFlight) {
+            continue;
+        }
+        if cycle_complete {
+            if cycle_flat {
+                let _ = state.state_store.update_signal_status(
+                    sid,
+                    SignalStatus::Closed,
+                    Some("triangle cycle completed — flat"),
+                );
+            } else {
+                let _ = state.state_store.update_signal_status(
+                    sid,
+                    SignalStatus::Balanced,
+                    Some("triangle cycle completed — legs remain open positions on venue"),
+                );
+            }
+        } else if filled {
+            let _ = state.state_store.update_signal_status(
+                sid,
+                SignalStatus::Imbalanced,
+                Some("triangle cycle partial — residual leg; flatten the symbol to unwind"),
+            );
+        } else {
+            // Persisted intent whose order never reached the venue (bound
+            // failure, upstream abort): nothing exists venue-side — Failed
+            // is honest and unblocks the symbol.
+            let _ = state.state_store.update_signal_status(
+                sid,
+                SignalStatus::Failed,
+                Some("cycle aborted before this leg dispatched"),
+            );
+        }
+    }
+
+    // Realized PnL in settlement currency only — leg cashflows are
+    // denominated in different coins (USDC, ETH); summing them raw is
+    // meaningless. Settlement-quoted legs count directly; an intermediate
+    // leg's proceeds convert through the settlement leg's own fill price.
+    // A partial cycle books only its fees — the residual is an open
+    // position, not realized PnL.
+    let attempt_pnl: Decimal = if cycle_complete {
+        triangle_settlement_pnl(&plan.leg_symbols, &plan.order_sides, &fills)
+    } else {
+        -fills
+            .iter()
+            .filter_map(|(_, r)| r.fee)
+            .fold(Decimal::ZERO, |a, f| a + f)
+    };
+    let attempt_pnl_f = attempt_pnl.to_string().parse::<f64>().unwrap_or(0.0);
+    let total_f =
+        crate::execution::accumulate_realized_profit(state, state.is_live(), attempt_pnl_f);
+
+    let fee_total_f: f64 = fills
+        .iter()
+        .filter_map(|(_, r)| r.fee.and_then(|v| v.to_string().parse::<f64>().ok()))
+        .sum();
 
     if let Some(err) = leg_error {
         record_execution_log(state, ExecutionLogEntry {
@@ -931,7 +1224,7 @@ pub async fn execute_triangle_arbitrage_impl(
         net_profit: attempt_pnl_f,
         latency_us,
         note: format!(
-            "Triangle cycle dispatched 3/3 legs ({cycle_note}); spread position open — unwind each leg symbol via flatten. Record errors: {}",
+            "Triangle cycle completed 3/3 legs ({cycle_note}); settlement flat, leg signals closed. Record errors: {}",
             record_errors.join("; ")
         ),
         direction: Some(plan.path.clone()),

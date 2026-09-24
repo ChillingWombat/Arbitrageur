@@ -185,7 +185,11 @@ fn ingest_book(state: &AppEngineState, book: &OrderBook, venue_id: &VenueId, sym
             best_ask: entry.best_ask * scale,
             ..entry
         };
-        let _ = state.state_store.record_spread_samples_mode(
+        // Throttled telemetry write — per-frame flood drops to one persisted
+        // row per (symbol, venue) per `SAMPLE_MIN_INTERVAL_MS` on a dedicated
+        // connection, so fsync-bound frames can never queue ahead of
+        // execution-ledger writes.
+        let _ = state.state_store.record_spread_samples_throttled(
             &store_key,
             state.usd_merge_quotes(),
             Utc::now().timestamp_millis(),

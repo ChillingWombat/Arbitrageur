@@ -12,7 +12,11 @@
 pub struct SpatialExitConfig {
     /// Exit as converged when the live edge falls to this level (bps).
     pub converge_exit_bps: f64,
-    /// Exit as stopped when the live edge drops this far below entry (bps).
+    /// Exit as stopped when the live edge widens this far BEYOND entry
+    /// (bps). A spatial pair profits as the spread converges toward zero;
+    /// the adverse excursion is the spread growing past the entry edge —
+    /// each extra bp of width is mark-to-market loss on the open pair.
+    /// Edge decay toward zero is handled by `converge_exit_bps`, not here.
     pub stop_drop_bps: f64,
     /// Exit as timed out this long after entry (seconds).
     pub max_hold_secs: i64,
@@ -111,12 +115,19 @@ pub fn evaluate_spatial_exit(
             ),
         };
     }
-    if live <= entry - cfg.stop_drop_bps {
+    // Adverse excursion is the edge WIDENING past entry in the entry's own
+    // direction — the pair is underwater mark-to-market. Decay toward zero
+    // is convergence profit, not a stop; the convergence check above owns
+    // that side. Sign-general so a negative-edge entry stops symmetrically.
+    let widened = entry != 0.0
+        && live.signum() == entry.signum()
+        && live.abs() >= entry.abs() + cfg.stop_drop_bps;
+    if widened {
         return SpatialExitVerdict::Exit {
             trigger: SpatialExitTrigger::Stopped,
             reason: format!(
-                "edge fell to {live:.1} bps, {d:.1} below entry {entry:.1}",
-                d = entry - live
+                "edge widened to {live:.1} bps, {d:.1} beyond entry {entry:.1}",
+                d = live.abs() - entry.abs()
             ),
         };
     }
@@ -160,8 +171,8 @@ mod tests {
 
     #[test]
     fn convergence_wins_over_stop_on_ties() {
-        // Entry 2, stop band at -3: live -4 is both converged (<=0) and
-        // past the stop; convergence must win.
+        // Entry 2, live -4: the edge decayed through zero — converged, and
+        // (with the widening stop) never simultaneously stopped.
         assert!(matches!(
             evaluate_spatial_exit(Some(2.0), Some(-4.0), 0, 1000, &cfg()),
             SpatialExitVerdict::Exit {
@@ -173,8 +184,10 @@ mod tests {
 
     #[test]
     fn stopped_on_adverse_excursion() {
+        // Adverse = the edge WIDENED past entry: the open pair is bleeding
+        // mark-to-market. A decaying edge converges (profit) — never a stop.
         assert!(matches!(
-            evaluate_spatial_exit(Some(8.0), Some(2.0), 0, 1000, &cfg()),
+            evaluate_spatial_exit(Some(8.0), Some(13.0), 0, 1000, &cfg()),
             SpatialExitVerdict::Exit {
                 trigger: SpatialExitTrigger::Stopped,
                 ..
@@ -182,16 +195,34 @@ mod tests {
         ));
         // The stop band is inclusive, matching convergence_auto semantics.
         assert!(matches!(
-            evaluate_spatial_exit(Some(8.0), Some(3.0), 0, 1000, &cfg()),
+            evaluate_spatial_exit(Some(8.0), Some(14.0), 0, 1000, &cfg()),
             SpatialExitVerdict::Exit {
                 trigger: SpatialExitTrigger::Stopped,
                 ..
             }
         ));
         assert_eq!(
-            evaluate_spatial_exit(Some(8.0), Some(3.1), 0, 1000, &cfg()),
+            evaluate_spatial_exit(Some(8.0), Some(12.9), 0, 1000, &cfg()),
             SpatialExitVerdict::Hold
         );
+        // Decay toward zero is convergence or hold — never a stop.
+        for live in [0.5, 2.0, 7.9] {
+            assert!(!matches!(
+                evaluate_spatial_exit(Some(8.0), Some(live), 0, 1000, &cfg()),
+                SpatialExitVerdict::Exit {
+                    trigger: SpatialExitTrigger::Stopped,
+                    ..
+                }
+            ));
+        }
+        // Deep inversion exits via convergence, not the stop.
+        assert!(matches!(
+            evaluate_spatial_exit(Some(8.0), Some(-15.0), 0, 1000, &cfg()),
+            SpatialExitVerdict::Exit {
+                trigger: SpatialExitTrigger::Converged,
+                ..
+            }
+        ));
     }
 
     #[test]

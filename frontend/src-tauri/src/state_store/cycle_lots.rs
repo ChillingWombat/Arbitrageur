@@ -40,15 +40,16 @@ impl StateStore {
         let conn = self.conn.lock();
         conn.execute(
             "INSERT OR REPLACE INTO cycle_lots \
-             (id, strategy_id, symbol, venue_long, venue_short, entry_time, \
+             (id, strategy_id, symbol, environment, venue_long, venue_short, entry_time, \
               entry_spread_bps, long_qty, long_entry_price, short_qty, \
               short_entry_price, fees_paid_usd, status, close_time, \
               close_spread_bps, realized_pnl_usd, realized_pnl_bps) \
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
             params![
                 lot.id,
                 lot.strategy_id,
                 lot.symbol,
+                lot.environment,
                 lot.venue_long,
                 lot.venue_short,
                 lot.entry_time.to_rfc3339(),
@@ -76,7 +77,7 @@ impl StateStore {
     ) -> anyhow::Result<std::collections::HashMap<String, ArbitrageCycleLot>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
-            "SELECT id, strategy_id, symbol, venue_long, venue_short, entry_time, \
+            "SELECT id, strategy_id, symbol, environment, venue_long, venue_short, entry_time, \
                     entry_spread_bps, long_qty, long_entry_price, short_qty, \
                     short_entry_price, fees_paid_usd, status, close_time, \
                     close_spread_bps, realized_pnl_usd, realized_pnl_bps \
@@ -90,17 +91,18 @@ impl StateStore {
                 r.get::<_, String>(3)?,
                 r.get::<_, String>(4)?,
                 r.get::<_, String>(5)?,
-                r.get::<_, f64>(6)?,
+                r.get::<_, String>(6)?,
                 r.get::<_, f64>(7)?,
                 r.get::<_, f64>(8)?,
                 r.get::<_, f64>(9)?,
                 r.get::<_, f64>(10)?,
                 r.get::<_, f64>(11)?,
-                r.get::<_, String>(12)?,
-                r.get::<_, Option<String>>(13)?,
-                r.get::<_, Option<f64>>(14)?,
+                r.get::<_, f64>(12)?,
+                r.get::<_, String>(13)?,
+                r.get::<_, Option<String>>(14)?,
                 r.get::<_, Option<f64>>(15)?,
                 r.get::<_, Option<f64>>(16)?,
+                r.get::<_, Option<f64>>(17)?,
             ))
         })?;
         let mut out = std::collections::HashMap::new();
@@ -109,6 +111,7 @@ impl StateStore {
                 id,
                 strategy_id,
                 symbol,
+                environment,
                 venue_long,
                 venue_short,
                 entry_time,
@@ -143,6 +146,7 @@ impl StateStore {
                     id,
                     strategy_id,
                     symbol,
+                    environment,
                     venue_long,
                     venue_short,
                     entry_time: entry,

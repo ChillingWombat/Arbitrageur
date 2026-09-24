@@ -87,9 +87,11 @@ impl StateStore {
 
     pub fn db_size_bytes(&self) -> anyhow::Result<u64> {
         let conn = self.conn.lock();
-        let page_count: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
-        let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
-        Ok((page_count.max(0) as u64) * (page_size.max(0) as u64))
+        let mut total = page_bytes(&conn, false)?;
+        if let Some(t) = &self.telemetry {
+            total += page_bytes(&t.lock(), false)?;
+        }
+        Ok(total)
     }
 
     /// Bytes actually holding data — excludes freelist pages. Deletes grow
@@ -97,10 +99,11 @@ impl StateStore {
     /// must be measured against this, not the allocated file size.
     pub fn db_used_bytes(&self) -> anyhow::Result<u64> {
         let conn = self.conn.lock();
-        let page_count: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
-        let freelist: i64 = conn.query_row("PRAGMA freelist_count", [], |r| r.get(0))?;
-        let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
-        Ok(((page_count - freelist).max(0) as u64) * (page_size.max(0) as u64))
+        let mut total = page_bytes(&conn, true)?;
+        if let Some(t) = &self.telemetry {
+            total += page_bytes(&t.lock(), true)?;
+        }
+        Ok(total)
     }
 
     /// Returns up to `max_pages` freelist pages to the OS, shrinking the
@@ -109,6 +112,22 @@ impl StateStore {
     pub fn incremental_vacuum(&self, max_pages: u32) -> anyhow::Result<()> {
         let conn = self.conn.lock();
         conn.execute_batch(&format!("PRAGMA incremental_vacuum({max_pages})"))?;
+        if let Some(t) = &self.telemetry {
+            t.lock()
+                .execute_batch(&format!("PRAGMA incremental_vacuum({max_pages})"))?;
+        }
         Ok(())
     }
+}
+
+/// `(page_count [- freelist]) * page_size` for one connection.
+fn page_bytes(conn: &Connection, subtract_freelist: bool) -> anyhow::Result<u64> {
+    let page_count: i64 = conn.query_row("PRAGMA page_count", [], |r| r.get(0))?;
+    let freelist: i64 = if subtract_freelist {
+        conn.query_row("PRAGMA freelist_count", [], |r| r.get(0))?
+    } else {
+        0
+    };
+    let page_size: i64 = conn.query_row("PRAGMA page_size", [], |r| r.get(0))?;
+    Ok(((page_count - freelist).max(0) as u64) * (page_size.max(0) as u64))
 }

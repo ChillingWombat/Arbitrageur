@@ -20,7 +20,6 @@ use arbitrageur_strategy::spatial_price_arb::SpatialPriceArbStrategy;
 use clap::{Parser, Subcommand};
 use std::sync::Arc;
 use std::time::Instant;
-use tracing::Level;
 use tracing_subscriber::FmtSubscriber;
 
 #[derive(Parser, Debug)]
@@ -65,8 +64,13 @@ enum Commands {
     },
     /// Scan prediction markets for synthetic outcome arbitrage (Polymarket vs Kalshi)
     Prediction {
-        #[arg(long, default_value = "FED-CHAIR-WARSH")]
-        market: String,
+        /// Polymarket YES-token id (venue asset id, discoverable via
+        /// `fetch_markets` / the CLOB sampling-markets endpoint)
+        #[arg(long)]
+        poly_token: String,
+        /// Kalshi market ticker (e.g. KXFEDCHAIRNOM-29)
+        #[arg(long)]
+        kalshi_ticker: String,
     },
     /// Benchmark quantitative calculations and latency
     Benchmark,
@@ -81,11 +85,17 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // RUST_LOG is the documented operator knob (ops/deploy env sample) —
+    // honor it via EnvFilter, defaulting to info when unset/unparsable.
     let subscriber = FmtSubscriber::builder()
-        .with_max_level(Level::INFO)
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
         .with_target(false)
         .finish();
     tracing::subscriber::set_global_default(subscriber).ok();
+    install_sigusr1_handler();
 
     let cli = Cli::parse();
 
@@ -115,8 +125,11 @@ async fn main() -> anyhow::Result<()> {
         Commands::StatArb { symbol_y, symbol_x } => {
             run_stat_arb(&symbol_y, &symbol_x).await?;
         }
-        Commands::Prediction { market } => {
-            run_prediction_arb(&market).await?;
+        Commands::Prediction {
+            poly_token,
+            kalshi_ticker,
+        } => {
+            run_prediction_arb(&poly_token, &kalshi_ticker).await?;
         }
         Commands::Benchmark => {
             run_benchmarks().await?;
@@ -418,10 +431,12 @@ async fn run_funding_scan(symbol: &str) -> anyhow::Result<()> {
     if let Some(opp1) = evaluate_funding_carry(&rate_hl, &rate_lighter, dec!(3.5), dec!(25000.0)) {
         println!("1. Short {} + Long {}:", opp1.short_venue, opp1.long_venue);
         println!(
-            "   Net 8h Rate: {:.4}%, APR: {:.2}%, APY: {:.2}%",
+            "   Net 8h Rate: {:.4}%, APR: {:.2}%, APY: {}",
             opp1.net_rate_8h * dec!(100),
             opp1.net_apr * dec!(100),
-            opp1.net_apy * dec!(100)
+            opp1.net_apy
+                .map(|a| format!("{:.2}%", a * dec!(100)))
+                .unwrap_or_else(|| "n/a".to_string())
         );
         println!(
             "   Break-even time: {:.1} hours | Est Daily Income: +${:.2} USD",
@@ -432,10 +447,12 @@ async fn run_funding_scan(symbol: &str) -> anyhow::Result<()> {
     if let Some(opp2) = evaluate_funding_carry(&rate_hl, &rate_vanta, dec!(4.0), dec!(25000.0)) {
         println!("2. Short {} + Long {}:", opp2.short_venue, opp2.long_venue);
         println!(
-            "   Net 8h Rate: {:.4}%, APR: {:.2}%, APY: {:.2}%",
+            "   Net 8h Rate: {:.4}%, APR: {:.2}%, APY: {}",
             opp2.net_rate_8h * dec!(100),
             opp2.net_apr * dec!(100),
-            opp2.net_apy * dec!(100)
+            opp2.net_apy
+                .map(|a| format!("{:.2}%", a * dec!(100)))
+                .unwrap_or_else(|| "n/a".to_string())
         );
         println!(
             "   Break-even time: {:.1} hours | Est Daily Income: +${:.2} USD",
@@ -515,18 +532,21 @@ fn prediction_quotes(
     Ok((poly_yes, poly_no, kalshi_yes, kalshi_no))
 }
 
-async fn run_prediction_arb(market: &str) -> anyhow::Result<()> {
-    println!(
-        "\n[PREDICTION MARKET ARBITRAGE] Scanning Synthetic Arbitrage for: {}",
-        market
-    );
-    println!("Connecting to Polymarket CLOB and Kalshi API...");
+async fn run_prediction_arb(poly_token: &str, kalshi_ticker: &str) -> anyhow::Result<()> {
+    println!("\n[PREDICTION MARKET ARBITRAGE] Scanning Synthetic Arbitrage");
+    println!("Polymarket YES token: {poly_token} | Kalshi ticker: {kalshi_ticker}");
+    println!("Fetching live books from Polymarket CLOB and Kalshi API...");
 
     let poly = Arc::new(PolymarketAdapter::new(None, None));
     let kalshi = Arc::new(KalshiAdapter::new(None, None));
 
-    let poly_book = poly.fetch_orderbook(market).await?;
-    let kalshi_book = kalshi.fetch_orderbook(market).await?;
+    // Polymarket: YES-token book. Kalshi: the NO-side book for the ticker
+    // (`{ticker}:NO`), which is what `prediction_quotes` expects below.
+    let poly_book = poly.fetch_orderbook(poly_token).await?;
+    let kalshi_book = kalshi
+        .fetch_orderbook(&format!("{kalshi_ticker}:NO"))
+        .await?;
+    let market = poly_token;
 
     let (poly_yes, poly_no, kalshi_yes, kalshi_no) =
         prediction_quotes(&poly_book, &kalshi_book, market)?;
@@ -620,7 +640,7 @@ async fn run_benchmarks() -> anyhow::Result<()> {
         sigma: 0.05,
         half_life: 4.62,
         stationary_std: 0.091,
-        r_squared: 0.88,
+        r_squared: None,
     };
     let start = Instant::now();
     let solve_count = 10_000;
@@ -643,6 +663,30 @@ async fn run_benchmarks() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+/// Older logrotate samples signalled SIGUSR1 to "reopen logs", but this
+/// daemon writes only to stdout/journald — there is no log file to
+/// reopen, and the default disposition for SIGUSR1 TERMINATES the
+/// process. Install a consume-and-ignore handler so a stale postrotate
+/// hook (or a manual `kill -USR1`) logs a line instead of killing the
+/// daemon. Deployments should use the `copytruncate` sample, which needs
+/// no signal at all.
+#[cfg(unix)]
+fn install_sigusr1_handler() {
+    use tokio::signal::unix::{signal, SignalKind};
+    if let Ok(mut stream) = signal(SignalKind::user_defined1()) {
+        tokio::spawn(async move {
+            while stream.recv().await.is_some() {
+                tracing::info!(
+                    "SIGUSR1 received — daemon logs to stdout/journald; nothing to reopen"
+                );
+            }
+        });
+    }
+}
+
+#[cfg(not(unix))]
+fn install_sigusr1_handler() {}
 
 fn daemon_health_response() -> &'static str {
     "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"status\":\"not_ready\",\"mode\":\"read_only_placeholder\",\"market_data_connected\":false,\"trading_enabled\":false}\n"

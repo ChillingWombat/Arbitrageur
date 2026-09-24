@@ -197,6 +197,7 @@ impl CoinbaseAdapter {
         path: &str,
         body: Option<String>,
     ) -> anyhow::Result<serde_json::Value> {
+        self.rate_limiter.acquire_signed().await?;
         let (api_key, api_secret, passphrase) = self.credentials()?;
         let ts = format!("{:.3}", Utc::now().timestamp_millis() as f64 / 1000.0);
         let body_str = body.clone().unwrap_or_default();
@@ -217,13 +218,15 @@ impl CoinbaseAdapter {
         if let Some(b) = body {
             req = req.body(b);
         }
-        let resp = req
-            .send()
-            .await
-            .map_err(|e| anyhow::anyhow!("Coinbase {method} {path} transport failure: {e}"))?;
+        let resp = req.send().await.map_err(|e| {
+            self.rate_limiter.record_failure(false);
+            anyhow::anyhow!("Coinbase {method} {path} transport failure: {e}")
+        })?;
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         if !status.is_success() {
+            self.rate_limiter
+                .record_failure(status == reqwest::StatusCode::TOO_MANY_REQUESTS);
             anyhow::bail!("Coinbase {method} {path} failed (HTTP {status}): {text}");
         }
         if text.trim().is_empty() {
@@ -434,7 +437,7 @@ impl CoinbaseAdapter {
             filled_qty,
             remaining_qty,
             avg_fill_price,
-            fee,
+            fee: Some(fee),
             fee_currency: "USD".to_string(),
             raw_response: Some(v.to_string()),
             timestamp: Utc::now(),
@@ -650,7 +653,8 @@ impl ExchangeAdapter for CoinbaseAdapter {
                 }
                 arbitrageur_core::types::Side::Buy => {
                     // Market buys are quote-funded: size the spend from the
-                    // live ask so the full base quantity fills.
+                    // live ask plus the same 5% collar other venues apply,
+                    // so book walk + taker fee don't leave the buy short.
                     let t = self
                         .get_json(&format!("/products/{product_id}/ticker"))
                         .await?;
@@ -660,7 +664,7 @@ impl ExchangeAdapter for CoinbaseAdapter {
                         .ok_or_else(|| {
                             anyhow::anyhow!("Coinbase market buy needs a live ask for {product_id}")
                         })?;
-                    let funds = (order.quantity * ask).normalize();
+                    let funds = (order.quantity * ask * dec!(1.05)).normalize();
                     req["funds"] = serde_json::Value::String(funds.to_string());
                 }
             }
@@ -671,12 +675,21 @@ impl ExchangeAdapter for CoinbaseAdapter {
             req["type"] = serde_json::Value::String("limit".to_string());
             req["price"] = serde_json::Value::String(px.normalize().to_string());
             req["size"] = serde_json::Value::String(order.quantity.normalize().to_string());
+            // order_type is the semantic — PostOnly/IOC requests must
+            // reach the wire even when the tif field contradicts them.
             if order.post_only
+                || order.order_type == arbitrageur_core::types::OrderType::PostOnly
                 || order.time_in_force == arbitrageur_core::types::TimeInForce::PostOnly
             {
                 req["post_only"] = serde_json::Value::Bool(true);
             }
-            match order.time_in_force {
+            let eff_tif =
+                if order.order_type == arbitrageur_core::types::OrderType::ImmediateOrCancel {
+                    arbitrageur_core::types::TimeInForce::ImmediateOrCancel
+                } else {
+                    order.time_in_force
+                };
+            match eff_tif {
                 arbitrageur_core::types::TimeInForce::ImmediateOrCancel => {
                     req["time_in_force"] = serde_json::Value::String("IOC".to_string())
                 }

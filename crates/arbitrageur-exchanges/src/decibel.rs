@@ -390,6 +390,9 @@ pub struct DecibelAdapter {
     /// Serialises sequence-number fetch → sign → submit so concurrent orders
     /// never reuse an account sequence number.
     order_lock: tokio::sync::Mutex<()>,
+    /// Environment pinned at construction — decides the Aptos config and
+    /// the on-chain package. Never re-inferred from the base URL mid-flight.
+    testnet: bool,
 }
 
 impl DecibelAdapter {
@@ -426,7 +429,20 @@ impl DecibelAdapter {
             resolved_owner: RwLock::new(None),
             rate_limiter: AccountRequestCoordinator::new("decibel", 100, 2000, 500, 10000),
             order_lock: tokio::sync::Mutex::new(()),
+            testnet: false,
         }
+    }
+
+    /// Public testnet adapter — calls the testnet deployment package on
+    /// the Aptos testnet.
+    pub fn for_testnet(api_key: Option<String>, api_secret: Option<String>) -> Self {
+        let mut adapter = Self::new(
+            Some("https://api.testnet.aptoslabs.com/decibel".to_string()),
+            api_key,
+            api_secret,
+        );
+        adapter.testnet = true;
+        adapter
     }
 
     pub fn update_credentials(
@@ -444,7 +460,7 @@ impl DecibelAdapter {
     }
 
     fn is_testnet(&self) -> bool {
-        self.base_url.to_lowercase().contains("testnet")
+        self.testnet
     }
 
     fn deployment_package(&self) -> &'static str {
@@ -778,6 +794,10 @@ impl DecibelAdapter {
         &self,
         payload: aptos_sdk::transaction::payload::TransactionPayload,
     ) -> anyhow::Result<serde_json::Value> {
+        // Venue-level backoff also pauses on-chain submits: when reads are
+        // rate-limited the venue is degraded — do not burn sequence numbers
+        // on transactions we cannot observe.
+        self.rate_limiter.acquire_signed().await?;
         let account = self.wallet_key()?;
         let sender = account.address();
         let client = FullnodeClient::new(self.aptos_config())
@@ -1472,12 +1492,23 @@ impl ExchangeAdapter for DecibelAdapter {
             anyhow::bail!("Decibel PostOnly orders require a limit price");
         }
         let is_buy = matches!(order.side, Side::Buy);
-        // Decibel entry TIF: 0 = GTC, 1 = PostOnly, 2 = IOC.
-        let tif: u8 = if order.post_only || order.time_in_force == TimeInForce::PostOnly {
+        // Decibel entry TIF: 0 = GTC, 1 = PostOnly, 2 = IOC. There is no
+        // FOK variant — refuse rather than silently downgrading it to IOC.
+        let tif: u8 = if order.order_type == OrderType::PostOnly
+            || order.post_only
+            || order.time_in_force == TimeInForce::PostOnly
+        {
             1
+        } else if order.order_type == OrderType::ImmediateOrCancel
+            || order.order_type == OrderType::Market
+            || order.time_in_force == TimeInForce::ImmediateOrCancel
+        {
+            2
         } else {
             match order.time_in_force {
-                TimeInForce::ImmediateOrCancel | TimeInForce::FillOrKill => 2,
+                TimeInForce::FillOrKill => anyhow::bail!(
+                    "Decibel has no FillOrKill order type — refusing instead of downgrading to IOC"
+                ),
                 _ => 0,
             }
         };
@@ -1644,7 +1675,7 @@ impl ExchangeAdapter for DecibelAdapter {
                 (qty - st.filled_qty).max(dec!(0))
             },
             avg_fill_price: st.avg_fill_price,
-            fee: st.fee_usd,
+            fee: Some(st.fee_usd),
             fee_currency: "USDC".to_string(),
             raw_response: Some(
                 serde_json::json!({
@@ -1700,7 +1731,7 @@ impl ExchangeAdapter for DecibelAdapter {
                 filled_qty: dec!(0),
                 remaining_qty: dec!(0),
                 avg_fill_price: None,
-                fee: dec!(0),
+                fee: None,
                 fee_currency: "USDC".to_string(),
                 raw_response: Some(tx.to_string()),
                 timestamp: Utc::now(),
@@ -1827,7 +1858,7 @@ impl ExchangeAdapter for DecibelAdapter {
             filled_qty: st.filled_qty,
             remaining_qty: st.remaining_qty,
             avg_fill_price: st.avg_fill_price,
-            fee: st.fee_usd,
+            fee: Some(st.fee_usd),
             fee_currency: "USDC".to_string(),
             raw_response: Some(tx.to_string()),
             timestamp: Utc::now(),

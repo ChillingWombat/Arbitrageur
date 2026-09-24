@@ -14,8 +14,10 @@ pub struct OuModelParams {
     pub half_life: f64,
     /// Stationary standard deviation = \sigma / \sqrt{2 \theta}
     pub stationary_std: f64,
-    /// R^2 goodness of fit
-    pub r_squared: f64,
+    /// R^2 goodness of fit — `Some` only when produced by `fit`; callers
+    /// constructing params directly (no regression was run) set `None`,
+    /// and quality gates treat `None` as unfit.
+    pub r_squared: Option<f64>,
 }
 
 impl OuModelParams {
@@ -84,10 +86,12 @@ impl OuModelParams {
             let d = *val - y_mean;
             tss += d * d;
         }
+        // R² is only meaningful when the series has variance to explain;
+        // a near-constant series yields None rather than a fake 0.0 score.
         let r_squared = if tss > 1e-15 {
-            (1.0 - rss / tss).max(0.0)
+            Some((1.0 - rss / tss).max(0.0))
         } else {
-            0.0
+            None
         };
 
         Some(OuModelParams {

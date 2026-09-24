@@ -20,8 +20,9 @@ regexes = [
   # Vanta/Orderly Ed25519 test vector: the standard libsodium/RFC8032
   # 32-byte seed used with a PyNaCl-generated expected signature.
   '''9d61b19deffd5a60ba844af492ec2cc4449c5697b326919703bac031cae7f109''',
-  # Lighter signer unit test: sequential-hex placeholder private key
-  '''0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef''',
+  # Sequential-hex placeholder private key used by signer/EIP-712 test
+  # vectors (Lighter, edgeX) — with or without the 0x prefix.
+  '''(0x)?0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef(0123456789abcdef)?''',
   # ExchangeAccounts.tsx input placeholder text — PEM header strings shown
   # as field hints, not real key material.
   '''-----BEGIN (RSA |EC )?PRIVATE KEY-----''',

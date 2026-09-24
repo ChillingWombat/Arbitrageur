@@ -15,6 +15,7 @@ import {
 } from "lucide-react";
 import { SpreadGapIcon } from "./icons";
 import { EmptyState } from "./EmptyState";
+import { ConfirmActionModal } from "./ConfirmActionModal";
 import { VenueLogo } from "./VenueLogo";
 import { ExchangeVenueGadget } from "./ExchangeVenueGadget";
 import { RebalanceEstimatorGadget } from "./RebalanceEstimatorGadget";
@@ -39,6 +40,8 @@ interface PortfolioMonitorProps {
   openPositions?: OpenPositionDto[];
   onResetCircuitBreaker: () => void;
   onTriggerKillswitch: () => void;
+  /** Command failures surface as toasts — never swallowed to console. */
+  onCommandError?: (message: string) => void;
 }
 
 interface AttentionItem {
@@ -48,7 +51,9 @@ interface AttentionItem {
 }
 
 const usd = (v: number, digits = 2) => {
-  if (!Number.isFinite(v) || Math.abs(v) < 0.005) return `$0.00`;
+  // Unknown stays unknown — a NaN mark must never read as "$0.00".
+  if (!Number.isFinite(v)) return "—";
+  if (Math.abs(v) < 0.005) return `$0.00`;
   return `${v >= 0 ? "+" : "-"}$${Math.abs(v).toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits })}`;
 };
 const usdPlain = (v: number, digits = 2) => {
@@ -91,7 +96,9 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
   openPositions = [],
   onResetCircuitBreaker,
   onTriggerKillswitch,
+  onCommandError,
 }) => {
+  const [showHaltConfirm, setShowHaltConfirm] = useState(false);
   const [metrics, setMetrics] = useState<StrategyMetrics[]>([]);
   const [strategyFilter, setStrategyFilter] = useState<string>("all");
   // Per-venue inputs for the exchange gadget. Null until the first
@@ -163,6 +170,10 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
     [execLogs, venueBalances, utilHistories],
   );
 
+  // Backend-unknown is NOT healthy: when neither the status snapshot nor a
+  // risk overview has arrived we cannot claim trading state — render
+  // "Unknown" instead of defaulting to a healthy/Halted binary.
+  const backendKnown = status != null || riskData != null;
   const isTripped = status?.circuit_breaker_tripped ?? riskData?.is_halted ?? false;
   const isPaused = status?.is_paused ?? false;
   const margin = riskData?.margin_health;
@@ -222,6 +233,12 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
   // --- Attention items: what needs the user right now ----------------------------
   const attention: AttentionItem[] = useMemo(() => {
     const items: AttentionItem[] = [];
+    if (!backendKnown)
+      items.push({
+        severity: "warn",
+        title: "Backend state unavailable",
+        detail: "No status or risk snapshot has loaded — trading state is unknown, not verified healthy.",
+      });
     if (isTripped)
       items.push({
         severity: "critical",
@@ -271,8 +288,11 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
 
   // Canonical trading-state wording: Halted = circuit breaker tripped
   // (is_halted and circuit_breaker_tripped are the same boolean). Paused =
-  // engine paused, positions preserved.
-  const verdict = isTripped
+  // engine paused, positions preserved. Unknown = no backend snapshot —
+  // claiming "Healthy" with no data is how halted engines get missed.
+  const verdict = !backendKnown
+    ? { label: "Unknown", cls: "bg-surface-hover text-slate-500 border-border" }
+    : isTripped
     ? { label: "Halted", cls: "bg-loss-dim text-loss border-loss-border" }
     : isPaused
       ? { label: "Paused", cls: "bg-warn-dim text-warn-strong border-warn-border" }
@@ -542,7 +562,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
                               Math.abs(delta.net_exposure_usd) > delta.delta_limit_usd ? "text-loss" : "text-slate-900"
                             }`}
                           >
-                            ${delta.net_exposure_usd.toFixed(2)}
+                            {Number.isFinite(delta.net_exposure_usd) ? `$${delta.net_exposure_usd.toFixed(2)}` : "—"}
                           </span>
                         </td>
                         <td className="py-2.5 px-3 text-slate-500">${delta.delta_limit_usd.toLocaleString("en-US")} max</td>
@@ -649,7 +669,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
               </button>
             ) : (
               <button
-                onClick={onTriggerKillswitch}
+                onClick={() => setShowHaltConfirm(true)}
                 className="btn-danger w-full px-2 py-2 text-xs font-mono font-bold flex items-center justify-center shadow-xs cursor-pointer"
                 title="Halt Trading — Trip the Circuit Breaker"
               >
@@ -734,8 +754,8 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
                   <div className="space-y-2 pt-1 text-xs font-mono tabular-nums">
                     <div className="flex justify-between">
                       <span className="text-slate-500">Realized PnL:</span>
-                      <span className={`font-bold ${m.total_pnl_usd >= 0 ? "text-profit" : "text-loss"}`}>
-                        {m.total_pnl_usd >= 0 ? `+$${m.total_pnl_usd.toFixed(2)}` : `-$${Math.abs(m.total_pnl_usd).toFixed(2)}`}
+                      <span className={`font-bold ${pnlTone(m.total_pnl_usd)}`}>
+                        {usd(m.total_pnl_usd)}
                       </span>
                     </div>
                     {open && open.count > 0 && (
@@ -775,6 +795,22 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
           Pure frontend estimate over researched fee rails (no IPC); kept at
           the bottom so core monitor flow stays first. */}
       <RebalanceEstimatorGadget venueBalances={venueBalances} />
+
+      <ConfirmActionModal
+        spec={
+          showHaltConfirm
+            ? {
+                title: "Halt Trading",
+                subtitle: "Trip the risk circuit breaker",
+                body: "This trips the circuit breaker and halts every new execution and coordination pass across all strategies. Open positions and resting venue orders are untouched — flatten explicitly if needed.",
+                confirmLabel: "Halt Trading",
+              }
+            : null
+        }
+        onConfirm={onTriggerKillswitch}
+        onCancel={() => setShowHaltConfirm(false)}
+        onError={(msg) => onCommandError?.(msg)}
+      />
     </div>
   );
 };

@@ -1,0 +1,29 @@
+#!/bin/sh
+# /etc/arbitrageur/alert.sh — invoked by arbitrageur-notify@<port>.service
+# when the trading daemon enters a failed state, and usable for any other
+# host-level escalation. Replace the channel below with yours (Slack,
+# Discord, ntfy.sh, Alertmanager, PagerDuty Events, ...).
+#
+# ARBITRAGEUR_ALERT_WEBHOOK is read from the unit's EnvironmentFile(s)
+# (/etc/arbitrageur/arbitrageur.env and arbitrageur-<port>.env), which the
+# notify unit already loads — keep secrets out of this file.
+#
+# $1 = instance name (the health-listener port, e.g. 8787).
+
+INSTANCE="${1:-unknown}"
+WEBHOOK="${ARBITRAGEUR_ALERT_WEBHOOK:-}"
+
+# Nothing configured: leave a journal breadcrumb and exit quietly —
+# OnFailure= must never itself fail-loop the unit tree.
+[ -n "$WEBHOOK" ] || exit 0
+
+STATUS=$(systemctl is-active "arbitrageur@${INSTANCE}.service" 2>/dev/null || echo unknown)
+RESULT=$(systemctl show "arbitrageur@${INSTANCE}.service" -p ExecMainStatus --value 2>/dev/null || echo '?')
+
+# Generic JSON body — most receivers render "text"/"detail".
+curl -fsS -m 10 -X POST "$WEBHOOK" \
+    -H 'Content-Type: application/json' \
+    -d "{\"source\":\"arbitrageur\",\"event\":\"service_failed\",\"instance\":\"${INSTANCE}\",\"state\":\"${STATUS}\",\"exit_code\":\"${RESULT}\",\"detail\":\"arbitrageur@${INSTANCE}.service failed (state=${STATUS}, exit=${RESULT})\"}" \
+    >/dev/null 2>&1 || true
+
+exit 0

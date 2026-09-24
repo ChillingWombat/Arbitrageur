@@ -1,7 +1,6 @@
 use arbitrageur_core::exchange::ExchangeAdapter;
 use arbitrageur_core::types::{dec, Decimal, Side};
 use arbitrageur_execution::coordinator::{ArbitrageExecutionResult, AtomicArbitrageCoordinator};
-use arbitrageur_math::rolling_stats::RollingWindowStats;
 use arbitrageur_math::spatial_spread::evaluate_spatial_spread;
 use std::sync::Arc;
 use tracing::debug;
@@ -35,8 +34,10 @@ pub struct SpatialPriceArbStrategy {
     pub order_qty: Decimal,
     pub fee_a_bps: Decimal,
     pub fee_b_bps: Decimal,
-    pub stats_a_to_b: RollingWindowStats,
-    pub stats_b_to_a: RollingWindowStats,
+    /// Successful book evaluations seen so far. Plain warmup counter — the
+    /// strategy does not use spread statistics, so it must not pretend to
+    /// keep a rolling distribution it never reads.
+    pub samples_seen: usize,
     pub min_samples: usize,
 }
 
@@ -51,7 +52,9 @@ impl SpatialPriceArbStrategy {
         order_qty: Decimal,
         fee_a_bps: Decimal,
         fee_b_bps: Decimal,
-        window_size: usize,
+        // Kept for API compatibility; the strategy no longer retains a
+        // rolling spread distribution it never read.
+        _window_size: usize,
         min_samples: usize,
     ) -> Self {
         Self {
@@ -63,8 +66,7 @@ impl SpatialPriceArbStrategy {
             order_qty,
             fee_a_bps,
             fee_b_bps,
-            stats_a_to_b: RollingWindowStats::new(window_size),
-            stats_b_to_a: RollingWindowStats::new(window_size),
+            samples_seen: 0,
             min_samples,
         }
     }
@@ -86,19 +88,13 @@ impl SpatialPriceArbStrategy {
         }
 
         // Direction 1: Buy A (ask_a), Sell B (bid_b) -> Spread = bid_b - ask_a
-        let spread_buy_a_sell_b = bid_b - ask_a;
         // Direction 2: Buy B (ask_b), Sell A (bid_a) -> Spread = bid_a - ask_b
-        let spread_buy_b_sell_a = bid_a - ask_b;
+        self.samples_seen += 1;
 
-        self.stats_a_to_b.push(spread_buy_a_sell_b);
-        self.stats_b_to_a.push(spread_buy_b_sell_a);
-
-        if !self.stats_a_to_b.is_warmed_up(self.min_samples) {
+        if self.samples_seen < self.min_samples {
             debug!(
-                "[{}] Warming up spatial window: {}/{} samples",
-                self.symbol,
-                self.stats_a_to_b.count(),
-                self.min_samples
+                "[{}] Warming up spatial samples: {}/{}",
+                self.symbol, self.samples_seen, self.min_samples
             );
             return Ok(None);
         }

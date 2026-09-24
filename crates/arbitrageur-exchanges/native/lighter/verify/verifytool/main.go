@@ -8,7 +8,7 @@
 // implements the same curve, field arithmetic, key derivation, and
 // transaction hashing as the pinned source.
 //
-// Usage: verifytool <txinfo.json> <privkey-hex> <chainId>
+// Usage: verifytool <txinfo.json> <privkey-hex> <chainId> [cancel|create]
 package main
 
 import (
@@ -23,9 +23,13 @@ import (
 )
 
 func main() {
-	if len(os.Args) != 4 {
-		fmt.Fprintln(os.Stderr, "usage: verifytool <txinfo.json> <privkey-hex> <chainId>")
+	if len(os.Args) != 4 && len(os.Args) != 5 {
+		fmt.Fprintln(os.Stderr, "usage: verifytool <txinfo.json> <privkey-hex> <chainId> [cancel|create]")
 		os.Exit(2)
+	}
+	kind := "cancel"
+	if len(os.Args) == 5 {
+		kind = os.Args[4]
 	}
 	var chainId uint32
 	if _, err := fmt.Sscanf(os.Args[3], "%d", &chainId); err != nil {
@@ -38,12 +42,30 @@ func main() {
 		fmt.Fprintln(os.Stderr, "read:", err)
 		os.Exit(2)
 	}
-	var tx txtypes.L2CancelOrderTxInfo
-	if err := json.Unmarshal(data, &tx); err != nil {
-		fmt.Fprintln(os.Stderr, "unmarshal:", err)
+
+	var msgHash []byte
+	var sig []byte
+	switch kind {
+	case "cancel":
+		var tx txtypes.L2CancelOrderTxInfo
+		if err := json.Unmarshal(data, &tx); err != nil {
+			fmt.Fprintln(os.Stderr, "unmarshal:", err)
+			os.Exit(2)
+		}
+		msgHash, err = tx.Hash(chainId)
+		sig = tx.Sig
+	case "create":
+		var tx txtypes.L2CreateOrderTxInfo
+		if err := json.Unmarshal(data, &tx); err != nil {
+			fmt.Fprintln(os.Stderr, "unmarshal:", err)
+			os.Exit(2)
+		}
+		msgHash, err = tx.Hash(chainId)
+		sig = tx.Sig
+	default:
+		fmt.Fprintln(os.Stderr, "unknown tx kind:", kind)
 		os.Exit(2)
 	}
-	msgHash, err := tx.Hash(chainId)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "hash:", err)
 		os.Exit(2)
@@ -59,7 +81,7 @@ func main() {
 		os.Exit(2)
 	}
 	pk := km.PubKeyBytes()
-	if err := schnorr.Validate(pk[:], msgHash, tx.Sig); err != nil {
+	if err := schnorr.Validate(pk[:], msgHash, sig); err != nil {
 		fmt.Println("VERIFY-FAIL:", err)
 		os.Exit(1)
 	}

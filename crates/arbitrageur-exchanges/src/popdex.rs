@@ -1033,8 +1033,20 @@ impl ExchangeAdapter for PopDexAdapter {
         Self::require_usd_quote(&order.symbol)?;
         let venue_symbol = Self::venue_symbol(&order.symbol);
         let symbol_id = self.symbol_id(&venue_symbol).await?;
+        if order.order_type == OrderType::Market && order.post_only {
+            anyhow::bail!("PopDEX post-only market orders are semantically impossible — refusing");
+        }
         let (is_market, tif_byte, price_wad) = match order.order_type {
-            OrderType::Market | OrderType::ImmediateOrCancel => (true, 2u8, U256::ZERO),
+            OrderType::Market => (true, 2u8, U256::ZERO),
+            OrderType::ImmediateOrCancel => {
+                // Bounded IOC: `price` is the caller's worst-price bound.
+                // Encoding it as a market order would strip that cap entirely
+                // (triangle sweeps and smart-routing caps rely on it).
+                let p = order
+                    .price
+                    .ok_or_else(|| anyhow::anyhow!("IOC order needs a price bound"))?;
+                (false, 2u8, dec_to_wad(p)?)
+            }
             OrderType::PostOnly => {
                 let p = order
                     .price
@@ -1055,15 +1067,17 @@ impl ExchangeAdapter for PopDexAdapter {
                 (false, tif, dec_to_wad(p)?)
             }
         };
-        let _ = is_market;
-        let limit = !is_market && !matches!(order.order_type, OrderType::ImmediateOrCancel);
+        let limit = !is_market;
+        // All TIF bits derive from the resolved tif_byte — packing the raw
+        // request flag here would silently downgrade OrderType::PostOnly
+        // (tif_byte 4) to GTC whenever order.post_only was unset.
         let params = pack_order_params(
             order.side,
             limit,
-            matches!(order.time_in_force, TimeInForce::GoodTilCancelled) && limit,
+            tif_byte == 1,
             tif_byte == 2,
             tif_byte == 3,
-            order.post_only,
+            tif_byte == 4,
             order.reduce_only,
         );
         let qty_wad = dec_to_wad(order.quantity)?;
@@ -1108,7 +1122,7 @@ impl ExchangeAdapter for PopDexAdapter {
             filled_qty: dec!(0.0),
             remaining_qty: order.quantity,
             avg_fill_price: None,
-            fee: dec!(0.0),
+            fee: None,
             fee_currency: "USDT".to_string(),
             raw_response: Some(receipt.hash.clone()),
             timestamp: Utc::now(),
@@ -1321,7 +1335,7 @@ impl ExchangeAdapter for PopDexAdapter {
             filled_qty: filled,
             remaining_qty: remaining.max(dec!(0)),
             avg_fill_price: avg,
-            fee,
+            fee: Some(fee),
             fee_currency: "USDT".to_string(),
             raw_response: Some(row.to_string()),
             timestamp: Utc::now(),
@@ -1508,6 +1522,10 @@ impl PopDexAdapter {
         to: &str,
         calldata: Vec<u8>,
     ) -> anyhow::Result<TxReceipt> {
+        // Venue-level backoff also pauses on-chain submits: when the REST
+        // indexer is rate-limiting us the venue is degraded — do not burn
+        // nonces on transactions we cannot observe.
+        self.rate_limiter.acquire_signed().await?;
         let signer: PrivateKeySigner = agent_key
             .trim()
             .parse()

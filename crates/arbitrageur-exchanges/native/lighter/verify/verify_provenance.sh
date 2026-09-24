@@ -53,8 +53,9 @@ echo "==> building signer from pinned source (c-shared, -trimpath)"
         -o "$WORK/rebuilt-signer.so" ./sharedlib
 )
 
-echo "==> compiling dlopen probe"
+echo "==> compiling dlopen probes"
 gcc -O1 -o "$WORK/dump_cancel" "$SCRIPT_DIR/dump_cancel.c" -ldl
+gcc -O1 -o "$WORK/dump_create_order" "$SCRIPT_DIR/dump_create_order.c" -ldl
 
 echo "==> signing fixed cancel-order tx with vendored binary"
 "$WORK/dump_cancel" "$VENDORED_SO" "$WORK/vendored_tx.json"
@@ -62,31 +63,40 @@ echo "==> signing fixed cancel-order tx with vendored binary"
 echo "==> signing fixed cancel-order tx with rebuilt binary"
 "$WORK/dump_cancel" "$WORK/rebuilt-signer.so" "$WORK/rebuilt_tx.json"
 
+echo "==> signing fixed create-order tx with vendored binary"
+"$WORK/dump_create_order" "$VENDORED_SO" "$WORK/vendored_create.json"
+
+echo "==> signing fixed create-order tx with rebuilt binary"
+"$WORK/dump_create_order" "$WORK/rebuilt-signer.so" "$WORK/rebuilt_create.json"
+
 echo "==> verifying signatures against pinned source (schnorr.Validate)"
 mkdir -p "$WORK/lighter-go/verifytool"
 cp "$SCRIPT_DIR/verifytool/main.go" "$WORK/lighter-go/verifytool/main.go"
 
-out_v=$(cd "$WORK/lighter-go" && go run ./verifytool "$WORK/vendored_tx.json" "$TEST_KEY" "$CHAIN_ID")
-echo "vendored: $out_v"
-out_r=$(cd "$WORK/lighter-go" && go run ./verifytool "$WORK/rebuilt_tx.json" "$TEST_KEY" "$CHAIN_ID")
-echo "rebuilt:  $out_r"
+check_sig() { # <label> <txinfo> <kind>
+    local out
+    out=$(cd "$WORK/lighter-go" && go run ./verifytool "$2" "$TEST_KEY" "$CHAIN_ID" "$3")
+    echo "$1: $out"
+    case "$out" in
+        *"VERIFY-OK pubkey=$EXPECTED_PUBKEY"*) ;;
+        *) echo "FAIL: $1 $3 signature did not verify under expected pubkey" >&2; exit 1 ;;
+    esac
+}
 
-case "$out_v" in
-    *"VERIFY-OK pubkey=$EXPECTED_PUBKEY"*) ;;
-    *) echo "FAIL: vendored signature did not verify under expected pubkey" >&2; exit 1 ;;
-esac
-case "$out_r" in
-    *"VERIFY-OK pubkey=$EXPECTED_PUBKEY"*) ;;
-    *) echo "FAIL: rebuilt signature did not verify under expected pubkey" >&2; exit 1 ;;
-esac
+check_sig vendored "$WORK/vendored_tx.json" cancel
+check_sig rebuilt  "$WORK/rebuilt_tx.json" cancel
+check_sig vendored "$WORK/vendored_create.json" create
+check_sig rebuilt  "$WORK/rebuilt_create.json" create
 
 # Structural equivalence: non-signature payload fields must be identical.
 norm() { sed -E 's/"ExpiredAt":[0-9]+//; s/"Sig":"[^"]*"//; s/,,/,/g; s/\{,/\{/g; s/,\}/\}/g' "$1"; }
-if ! diff <(norm "$WORK/vendored_tx.json") <(norm "$WORK/rebuilt_tx.json") >/dev/null; then
-    echo "FAIL: non-signature tx fields differ between vendored and rebuilt" >&2
-    diff <(norm "$WORK/vendored_tx.json") <(norm "$WORK/rebuilt_tx.json") >&2 || true
-    exit 1
-fi
+for kind in tx create; do
+    if ! diff <(norm "$WORK/vendored_$kind.json") <(norm "$WORK/rebuilt_$kind.json") >/dev/null; then
+        echo "FAIL: non-signature $kind fields differ between vendored and rebuilt" >&2
+        diff <(norm "$WORK/vendored_$kind.json") <(norm "$WORK/rebuilt_$kind.json") >&2 || true
+        exit 1
+    fi
+done
 
-echo "PASS: vendored signer is functionally equivalent to $LIGHTER_TAG@$LIGHTER_COMMIT"
+echo "PASS: vendored signer is functionally equivalent to $LIGHTER_TAG@$LIGHTER_COMMIT (cancel + create-order paths)"
 [ "${LIGHTER_VERIFY_WORK:-}" ] || rm -rf "$WORK"
