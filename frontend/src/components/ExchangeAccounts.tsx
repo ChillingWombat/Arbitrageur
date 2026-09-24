@@ -9,6 +9,8 @@ import {
   KeyRound,
   Plus,
   RefreshCw,
+  ShieldAlert,
+  ShieldCheck,
   Terminal,
   Copy,
   Trash2,
@@ -22,6 +24,7 @@ import type {
   ApproveTxDto,
   SignApproveDto,
   EngineSettingsDto,
+  EvmKeyCustodyDto,
   StrategyAccountRouteDto,
   VenueBalanceInfo,
   VenueLaneStatusDto,
@@ -227,6 +230,20 @@ export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
     { key: "walletAddress", label: "Wallet Address", placeholder: "0x... or base58" },
     { key: "privateKey", label: "Ed25519 Private Key", secret: true, placeholder: "base58 keypair/seed" },
   ],
+  // Vest Markets (vest.exchange → vestmarkets.com rebrand): delegate-signer
+  // model — the funded account is the "primary", orders are signed by a
+  // registered signing key, and every private call carries X-API-KEY +
+  // xrestservermm: restserver{accGroup}. Two ways to configure:
+  //  · Primary key stored → the adapter self-registers it as a 7-day
+  //    delegate signer via POST /v2/register (apiKey/accGroup auto-fetched).
+  //  · Delegate key stored → paste the apiKey + accGroup that an external
+  //    /register run returned for that signer.
+  vest: [
+    { key: "walletAddress", label: "Primary Account Address", placeholder: "0x...", hint: "The funded Vest account (holds USDC collateral on zkSync Era)." },
+    { key: "privateKey", label: "Signing Key (delegate or primary)", secret: true, placeholder: "0x...", evmSigner: true, hint: "Delegate signer registered via POST /register — or the primary key itself, which self-registers a ~7-day signer on first use." },
+    { key: "apiKey", label: "API Key", secret: true, optional: true, placeholder: "From POST /register", hint: "Required for delegate signers; auto-fetched when the primary key is stored." },
+    { key: "accountId", label: "Account Group", optional: true, numeric: true, placeholder: "0", hint: "accGroup from /register — routes requests to restserver{group}." },
+  ],
   // MARKET-DATA-ONLY VENUES — no credentials needed; an enabled account
   // admits the venue for markets/books/funding, and order paths stay
   // fail-closed regardless of what is stored here.
@@ -235,21 +252,99 @@ export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
   apex: [],
   astros: [],
   bulk: [],
-  dydx: [],
-  edgex: [],
-  evedex: [],
-  extended: [],
+  // dYdX Chain (Cosmos appchain): orders are signed `MsgPlaceOrder`
+  // transactions broadcast over validator gRPC. The credential is the
+  // account's 24-word BIP-39 mnemonic — the venue derives
+  // m/44'/118'/0'/0/0, so a raw hex private key cannot work. accountId is
+  // the dYdX subaccount number (default 0); walletAddress is optional and,
+  // when set, must equal the mnemonic-derived dydx1… address.
+  dydx: [
+    { key: "privateKey", label: "Account Mnemonic", secret: true, placeholder: "24-word BIP-39 phrase", hint: "The dYdX account's recovery phrase — Cosmos key derivation needs the full mnemonic." },
+    { key: "accountId", label: "Subaccount Number", optional: true, numeric: true, placeholder: "0" },
+    { key: "walletAddress", label: "Account Address", optional: true, placeholder: "dydx1…", hint: "Optional — verified against the derived account when set." },
+  ],
+  // edgeX Perp V2: HMAC api-key trio (key/passphrase/secret from the
+  // venue's API management) + the numeric accountId + the EIP-712
+  // "trading" private key that signs every order. The trading key is a
+  // separate credential from the wallet — it signs as its own derived
+  // address, which the venue binds to the account at API-key creation.
+  edgex: [
+    { key: "apiKey", label: "API Key", secret: true, placeholder: "edgeX API management" },
+    { key: "passphrase", label: "API Passphrase", secret: true, placeholder: "edgeX API management" },
+    { key: "apiSecret", label: "API Secret", secret: true, placeholder: "edgeX API management" },
+    { key: "accountId", label: "Account ID", numeric: true, placeholder: "e.g. 543429922991899150" },
+    { key: "privateKey", label: "Trading Private Key", secret: true, placeholder: "0x…", evmSigner: true, hint: "EIP-712 order signer issued with the API credentials — not necessarily the deposit wallet." },
+  ],
+  // EVEDEX (Arbitrum One): SIWE wallet sign-in → JWT session; every order is
+  // an EIP-712 signature from the same wallet. No API keys — the wallet both
+  // authenticates and signs.
+  evedex: [
+    { key: "walletAddress", label: "Wallet Address", placeholder: "0x… funded EVEDEX account" },
+    { key: "privateKey", label: "Wallet Private Key", secret: true, placeholder: "0x...", evmSigner: true, hint: "Signs the SIWE login and each EIP-712 order on Arbitrum One; must match the wallet address." },
+  ],
+  // Extended (StarkEx engine on Starknet): X-Api-Key auth + SNIP-12
+  // Poseidon order signatures from the account's Stark key pair. The
+  // Stark public key and private key are issued in the Extended UI under
+  // API management; the vault id is the account's L2 position id.
+  extended: [
+    { key: "apiKey", label: "API Key", secret: true, placeholder: "Extended API key" },
+    { key: "accountId", label: "Vault / Position ID", numeric: true, placeholder: "e.g. 123456" },
+    { key: "walletAddress", label: "Stark Public Key", placeholder: "0x…" },
+    { key: "privateKey", label: "Stark Private Key", secret: true, placeholder: "0x…", hint: "Stark-curve key that signs orders — must match the Stark public key above." },
+  ],
+  // Pendle Boros (Arbitrum): the agent wallet signs every order via
+  // EIP-712 `PendleSignTx`; the root account holds funds and approved the
+  // agent once in the Boros app (the agent itself can never withdraw).
+  // walletAddress is the ROOT account, privateKey the approved AGENT key —
+  // they are different keys by design. accountId is the Boros sub-account
+  // (0–255). Needs a gas balance in the account's Boros treasury.
+  boros: [
+    { key: "walletAddress", label: "Root Account Address", placeholder: "0x… funded Boros account" },
+    { key: "privateKey", label: "Agent Private Key", secret: true, placeholder: "0x…", evmSigner: true, hint: "The agent key approved for this root in the Boros app — signs orders; cannot withdraw funds." },
+    { key: "accountId", label: "Sub-Account ID", optional: true, numeric: true, placeholder: "0" },
+  ],
   gatedex: [],
   gmx: [],
-  helix: [],
+  // Helix / Injective chain: the account IS an EVM key — keccak address
+  // becomes the inj1… bech32 account and the bytes32 subaccount id
+  // (address || zeros || nonce). No API keys; orders are Cosmos txs
+  // signed keccak/secp256k1 and broadcast over the Injective LCD.
+  helix: [
+    { key: "privateKey", label: "Account Private Key", secret: true, placeholder: "0x… 32-byte secp256k1", evmSigner: true, hint: "The Injective account's own EVM key — signs exchange Cosmos transactions directly." },
+    { key: "walletAddress", label: "Account Address", optional: true, placeholder: "0x…", hint: "Optional — verified against the derived address when set." },
+    { key: "accountId", label: "Subaccount Nonce", optional: true, numeric: true, placeholder: "0" },
+  ],
   iotrader: [],
-  nado: [],
+  // Nado (Ink L2): EIP-712 wallet auth — no API keys. walletAddress is the
+  // funded main account; privateKey may be the account key itself or a
+  // linked signer already authorized for the subaccount (venue rejects an
+  // unauthorized signer at execute time). accountId optionally names a
+  // non-"default" subaccount (≤12 ASCII chars).
+  nado: [
+    { key: "walletAddress", label: "Account Address", placeholder: "0x… funded Nado account" },
+    { key: "privateKey", label: "Signing Key (main or linked signer)", secret: true, placeholder: "0x… 32-byte secp256k1" },
+    { key: "accountId", label: "Subaccount Name", optional: true, placeholder: "default" },
+  ],
   niza: [],
   ostium: [],
-  paradex: [],
-  qfex: [],
+  // Paradex (Starknet L2): the EVM wallet derives the venue's Stark L2
+  // signing key via the "STARK Key" EIP-712 derivation — the same wallet
+  // authenticates (JWT) and signs orders. The account must already be
+  // onboarded at paradex.trade for this wallet.
+  paradex: [
+    { key: "walletAddress", label: "Wallet Address", placeholder: "0x… Paradex-onboarded account" },
+    { key: "privateKey", label: "Wallet Private Key", secret: true, placeholder: "0x...", evmSigner: true, hint: "Derives the Stark L2 key and signs orders; must match the wallet address." },
+  ],
+  // QFEX: account-scoped API key pair (Developer Settings → Generate).
+  // Order entry rides an authenticated trade WebSocket; REST handles
+  // account reads. accountId selects a subaccount (UUID) — omit for
+  // the primary account. Key needs Execute orders + View permissions.
+  qfex: [
+    { key: "apiKey", label: "API Public Key", secret: true, placeholder: "qfex_pub_..." },
+    { key: "apiSecret", label: "API Secret Key", secret: true, placeholder: "qfex_secret_..." },
+    { key: "accountId", label: "Subaccount ID", optional: true, placeholder: "UUID — omit for primary account" },
+  ],
   sodex: [],
-  vest: [],
   /* ------------- EVM spot AMMs (EvmAmmAdapter — local-wallet swaps) ------- */
   // No per-venue schemas: all eleven share one signer — see the EVM_AMM_VENUES
   // table and EvmWalletSection below. The sidebar consolidates them under
@@ -323,6 +418,7 @@ export const ACCOUNT_VENUE_DISPLAY: Record<string, string> = {
   ibkr: "Interactive Brokers",
   ig: "IG Trading",
   binance: "Binance",
+  boros: "Pendle Boros",
   okx: "OKX",
   aster: "Aster",
   coinbase: "Coinbase",
@@ -1838,6 +1934,43 @@ export const VenueAccountsSection: React.FC<VenueAccountsSectionProps> = ({
  * The venues are live-only: in Testnet mode the section degrades to the
  * standard no-testnet banner.
  */
+/** Custody-state chip for the wallet card header: reports where the
+ *  shared EVM key actually lives. `stronghold`+loaded = guarded signing
+ *  (no key bytes in process memory); `stronghold`+unloaded = records
+ *  reference custody that cannot currently sign; `vault` = legacy
+ *  encrypted-record storage; `none`/null = nothing to report. */
+export const EvmCustodyChip: React.FC<{ custody: EvmKeyCustodyDto | null }> = ({ custody }) => {
+  if (!custody || custody.custody === "none") return null;
+  if (custody.custody === "stronghold" && custody.strongholdLoaded) {
+    return (
+      <span
+        className="inline-flex items-center gap-1 text-[10px] font-mono px-1.5 py-0.5 rounded-md bg-profit-dim/60 text-profit border border-profit-border"
+        title="The private key lives in an IOTA Stronghold snapshot — it never enters app memory; signing happens inside the guarded vault."
+      >
+        <ShieldCheck className="w-3 h-3" /> Stronghold custody
+      </span>
+    );
+  }
+  if (custody.custody === "stronghold") {
+    return (
+      <span
+        className="inline-flex items-center gap-1 text-[10px] font-mono px-1.5 py-0.5 rounded-md bg-warn-dim/60 text-warn-strong border border-warn-border"
+        title="Records reference Stronghold custody but no snapshot is loaded or the key record is missing — the wallet cannot sign until the vault is unlocked and the key is restored."
+      >
+        <ShieldAlert className="w-3 h-3" /> Stronghold key unavailable
+      </span>
+    );
+  }
+  return (
+    <span
+      className="inline-flex items-center gap-1 text-[10px] font-mono px-1.5 py-0.5 rounded-md bg-warn-dim/60 text-warn-strong border border-warn-border"
+      title="The private key is stored in the encrypted vault (legacy/fallback path). It will migrate into Stronghold on the next unlock once a snapshot is available."
+    >
+      <KeyRound className="w-3 h-3" /> Key in vault
+    </span>
+  );
+};
+
 export const EvmWalletSection: React.FC<{
   locked: boolean;
   environment?: "testnet" | "live";
@@ -1846,6 +1979,7 @@ export const EvmWalletSection: React.FC<{
 }> = ({ locked, environment = "live", refreshKey = 0, onChanged }) => {
   const [accounts, setAccounts] = useState<AccountDto[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const [custody, setCustody] = useState<EvmKeyCustodyDto | null>(null);
   const [drafts, setDrafts] = useState<Record<string, string>>({});
   const [showSecrets, setShowSecrets] = useState<Record<string, boolean>>({});
   const [rpcDrafts, setRpcDrafts] = useState<Record<string, string>>({});
@@ -1862,7 +1996,16 @@ export const EvmWalletSection: React.FC<{
     } catch (e) {
       setLoadError(e instanceof Error ? e.message : String(e));
     }
-  }, []);
+    if (locked) {
+      setCustody(null);
+      return;
+    }
+    try {
+      setCustody(await api.getEvmKeyCustody());
+    } catch {
+      setCustody(null); // locked/unknown — the chip simply stays hidden
+    }
+  }, [locked]);
 
   useEffect(() => {
     void reload();
@@ -1877,12 +2020,19 @@ export const EvmWalletSection: React.FC<{
 
   // Presence flags + stored-signer readout source: any keyed venue's
   // account represents the wallet (all keyed venues share it post-save).
+  // A credential-resolving default is preferred — only a default account's
+  // credentials are provisioned, so its venue's adapter reflects the live
+  // signer the wallet card compares against.
+  const keyedExec = (accounts ?? []).filter(
+    (a) =>
+      a.hasPrivateKey &&
+      EVM_AMM_VENUES.some((v) => v.id === a.venue && v.execution),
+  );
   const representative =
-    (accounts ?? []).find(
-      (a) =>
-        a.hasPrivateKey &&
-        EVM_AMM_VENUES.some((v) => v.id === a.venue && v.execution),
-    ) ?? (accounts ?? [])[0] ?? null;
+    keyedExec.find((a) => a.isDefault) ??
+    keyedExec[0] ??
+    (accounts ?? [])[0] ??
+    null;
 
   const enabledCount = (accounts ?? []).filter((a) => a.enabled).length;
 
@@ -1913,7 +2063,10 @@ export const EvmWalletSection: React.FC<{
         setDrafts({});
         setNotice(
           `Wallet saved — signs as ${res.signerAddress}. ` +
-            `${res.keyedVenues.length} swap venues received the key; ${res.addressOnlyVenues.length} market-data venues received the address only.` +
+            `${res.keyedVenues.length} swap venues received the key; ${res.addressOnlyVenues.length} market-data venues received the address only. ` +
+            (res.keyStorage === "stronghold"
+              ? "Key held in Stronghold guarded storage — records carry only a reference."
+              : "Key stored encrypted in the vault (Stronghold unavailable).") +
             (res.createdAccounts.length
               ? ` ${res.createdAccounts.length} venue account(s) created disabled — enable them below.`
               : ""),
@@ -2036,6 +2189,7 @@ export const EvmWalletSection: React.FC<{
             <span className="text-[10px] font-mono px-1.5 py-0.5 rounded-md bg-slate-100 text-slate-600 border border-surface-border">
               one signer → all EVM AMMs
             </span>
+            <EvmCustodyChip custody={custody} />
           </div>
           {representative?.hasPrivateKey && (
             <button

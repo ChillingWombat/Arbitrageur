@@ -175,10 +175,19 @@ const STATIC_SUBMIT_CAPABLE = new Set([
   "decibel",
   "aevo",
   "derive",
+  "dydx",
+  "edgex",
+  "evedex",
+  "extended",
   "grvt",
+  "helix",
+  "nado",
   "ondoperps",
   "pacifica",
+  "paradex",
+  "qfex",
   "standx",
+  "vest",
 ]);
 const isLiveRoute = (v1: string, v2: string, venueCaps?: VenueCaps): boolean => {
   const cap = (v: string) =>

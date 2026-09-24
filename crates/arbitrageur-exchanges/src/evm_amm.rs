@@ -48,10 +48,11 @@
 //!   this size"; an AMM has no L2 depth to report.
 
 use std::str::FromStr;
+use std::sync::Arc;
 use std::time::Duration;
 
-use alloy::network::TransactionBuilder;
-use alloy::primitives::{Address, Bytes, B256, U256};
+use alloy::network::{EthereumWallet, TransactionBuilder, TxSigner};
+use alloy::primitives::{Address, Bytes, Signature, B256, U256};
 use alloy::providers::{Provider, ProviderBuilder};
 use alloy::rpc::types::TransactionRequest;
 use alloy::signers::local::PrivateKeySigner;
@@ -835,6 +836,14 @@ fn is_stable_symbol(sym: &str) -> bool {
     )
 }
 
+/// Credential `private_key` values prefixed with this sentinel name key
+/// material that never enters process memory — the key lives in an
+/// isolated signer backend (e.g. an IOTA Stronghold snapshot managed by
+/// the desktop shell). The adapter holds a `TxSigner` handle, not bytes;
+/// the shell injects it via [`EvmAmmAdapter::provision_external_signer`]
+/// after `update_credentials` stores the sentinel.
+pub const EVM_EXTERNAL_SIGNER_PREFIX: &str = "stronghold:";
+
 /// Market-order slippage headroom in bps applied when no limit price exists.
 const DEFAULT_SLIPPAGE_BPS: u32 = 50;
 /// Swap deadline horizon in seconds — a mined-after-deadline tx reverts.
@@ -866,8 +875,19 @@ pub struct EvmAmmAdapter {
     /// Cleared whenever the active RPC changes so a swapped endpoint can
     /// never ride on a stale verification.
     verified_rpc_url: RwLock<Option<Zeroizing<String>>>,
-    /// Loaded signing key (agent/local wallet). Never leaves process memory.
-    signer: RwLock<Option<PrivateKeySigner>>,
+    /// Loaded transaction signer — either a locally parsed
+    /// `PrivateKeySigner` (vault-held hex key) or an externally
+    /// provisioned signer whose key material lives outside this process
+    /// (Stronghold snapshot, hardware wallet, KMS). Stored behind the
+    /// object-safe `TxSigner` abstraction so backends are swappable;
+    /// signing never exposes raw key bytes to the adapter.
+    signer: RwLock<Option<Arc<dyn TxSigner<Signature> + Send + Sync>>>,
+    /// Set when `update_credentials` received the external-signer sentinel
+    /// (`EVM_EXTERNAL_SIGNER_PREFIX…`): the account row is configured but
+    /// the signing capability must still be injected via
+    /// `provision_external_signer` — until then the adapter has no signer
+    /// and refuses live submissions (fail closed).
+    expects_external_signer: RwLock<bool>,
     /// Configured account address — when present it must equal the signer's
     /// address or credentials are refused (fail closed on key/wallet mismatch).
     account: RwLock<Option<Address>>,
@@ -890,6 +910,7 @@ impl EvmAmmAdapter {
             rpc_url: RwLock::new(Zeroizing::new(rpc)),
             verified_rpc_url: RwLock::new(None),
             signer: RwLock::new(None),
+            expects_external_signer: RwLock::new(false),
             account: RwLock::new(None),
             swap_lock: tokio::sync::Mutex::new(()),
         })
@@ -974,16 +995,33 @@ impl EvmAmmAdapter {
         let clear = || {
             *self.signer.write() = None;
             *self.account.write() = None;
+            *self.expects_external_signer.write() = false;
         };
         let signer = match private_key.as_deref() {
+            Some(k) if k.trim().starts_with(EVM_EXTERNAL_SIGNER_PREFIX) => {
+                // External-custody sentinel: the key lives outside this
+                // process (Stronghold snapshot). Clear any previously
+                // loaded signer so a stale local key can never sign under
+                // external-custody expectations; the shell then injects
+                // the signer via `provision_external_signer`.
+                *self.signer.write() = None;
+                *self.expects_external_signer.write() = true;
+                None
+            }
             Some(k) => match k.trim().parse::<PrivateKeySigner>() {
-                Ok(s) => Some(s),
+                Ok(s) => {
+                    *self.expects_external_signer.write() = false;
+                    Some(Arc::new(s) as Arc<dyn TxSigner<Signature> + Send + Sync>)
+                }
                 Err(e) => {
                     clear();
                     anyhow::bail!("{} invalid EVM private key: {e}", self.name);
                 }
             },
-            None => None,
+            None => {
+                *self.expects_external_signer.write() = false;
+                None
+            }
         };
         let acct = match wallet_address.as_deref() {
             Some(a) => match parse_addr(a) {
@@ -996,7 +1034,8 @@ impl EvmAmmAdapter {
             None => None,
         };
         // Key/wallet mismatch is a misconfiguration — refuse both rather
-        // than sign from an unexpected address.
+        // than sign from an unexpected address. External signers get the
+        // same check when they are provisioned.
         if let (Some(s), Some(a)) = (&signer, &acct) {
             if s.address() != *a {
                 clear();
@@ -1010,6 +1049,45 @@ impl EvmAmmAdapter {
         *self.signer.write() = signer;
         *self.account.write() = acct;
         Ok(())
+    }
+
+    /// Install an externally-custodied transaction signer — a Stronghold
+    /// snapshot signer, hardware wallet, or KMS backend, anything behind
+    /// alloy's object-safe `TxSigner` abstraction. Only accepted while the
+    /// credential record parked this adapter with the
+    /// `EVM_EXTERNAL_SIGNER_PREFIX` sentinel; the signer's address must
+    /// equal the configured wallet address — a mismatch refuses without
+    /// installing (fail closed). A successful install clears the pending
+    /// flag so a second provisioning attempt can't silently swap signers.
+    pub fn provision_external_signer(
+        &self,
+        signer: Arc<dyn TxSigner<Signature> + Send + Sync>,
+    ) -> anyhow::Result<()> {
+        if !*self.expects_external_signer.read() {
+            anyhow::bail!(
+                "{} is not configured for an external signer — refusing provisioning",
+                self.name
+            );
+        }
+        if let Some(acct) = *self.account.read() {
+            if signer.address() != acct {
+                anyhow::bail!(
+                    "{} external signer {} does not match configured wallet {acct} — refusing",
+                    self.name,
+                    signer.address()
+                );
+            }
+        }
+        *self.signer.write() = Some(signer);
+        *self.expects_external_signer.write() = false;
+        Ok(())
+    }
+
+    /// Whether the last `update_credentials` parked this adapter waiting
+    /// for an external signer injection (the credential record carries the
+    /// `EVM_EXTERNAL_SIGNER_PREFIX` sentinel rather than key bytes).
+    pub fn expects_external_signer(&self) -> bool {
+        *self.expects_external_signer.read()
     }
 
     pub fn wallet_address_hex(&self) -> Option<String> {
@@ -2195,13 +2273,13 @@ impl EvmAmmAdapter {
                 u256_to_dec(spend_needed, in_tok.decimals)
             );
         }
-        let signer: PrivateKeySigner = self
+        let signer: Arc<dyn TxSigner<Signature> + Send + Sync> = self
             .signer
             .read()
             .clone()
             .ok_or_else(|| anyhow::anyhow!("{} has no signing wallet", self.name))?;
         let provider = ProviderBuilder::new()
-            .wallet(signer)
+            .wallet(EthereumWallet::new(signer))
             .connect_http(self.rpc()?);
         self.ensure_allowance(&provider, in_tok, signer_addr, spend_needed)
             .await?;
@@ -2497,6 +2575,91 @@ mod tests {
             m.wallet_address_hex().unwrap().to_lowercase(),
             "0x70997970c51812dc3a010c7d01b50e0d17dc79c8"
         );
+    }
+
+    #[test]
+    fn external_signer_sentinel_gate() {
+        let a = adapter("uniswap");
+        // The sentinel parks the adapter: configured-but-signerless —
+        // fail closed until the shell injects a signer.
+        a.update_credentials(
+            None,
+            None,
+            None,
+            None,
+            Some("0x70997970C51812dc3A010C7d01b50e0d17dc79C8".into()),
+            Some("stronghold:evm-wallet".into()),
+        )
+        .unwrap();
+        assert!(a.expects_external_signer());
+        assert!(!a.has_live_credentials());
+        // Provisioning without the sentinel flag is refused outright.
+        let b = adapter("sushiswap");
+        let signer: Arc<dyn TxSigner<Signature> + Send + Sync> = Arc::new(
+            "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d"
+                .parse::<PrivateKeySigner>()
+                .unwrap(),
+        );
+        assert!(b.provision_external_signer(signer.clone()).is_err());
+        // A signer whose address ≠ the configured wallet is refused and
+        // leaves the adapter signerless.
+        let wrong: Arc<dyn TxSigner<Signature> + Send + Sync> =
+            Arc::new(PrivateKeySigner::random());
+        assert!(a.provision_external_signer(wrong).is_err());
+        assert!(!a.has_live_credentials());
+        assert!(
+            a.expects_external_signer(),
+            "refusal keeps the pending flag"
+        );
+        // Matching signer installs and clears the pending flag.
+        a.provision_external_signer(signer).unwrap();
+        assert!(a.has_live_credentials());
+        assert!(!a.expects_external_signer());
+        assert_eq!(
+            a.wallet_address_hex().unwrap().to_lowercase(),
+            "0x70997970c51812dc3a010c7d01b50e0d17dc79c8"
+        );
+    }
+
+    #[test]
+    fn sentinel_clears_stale_local_signer() {
+        // A record that switches from a raw key to external custody must
+        // drop the previously loaded signer immediately — a stale local
+        // key can never keep signing under external-custody expectations.
+        let a = adapter("uniswap");
+        a.update_credentials(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d".into()),
+        )
+        .unwrap();
+        assert!(a.has_live_credentials());
+        a.update_credentials(
+            None,
+            None,
+            None,
+            None,
+            Some("0x70997970C51812dc3A010C7d01b50e0d17dc79C8".into()),
+            Some("stronghold:evm-wallet".into()),
+        )
+        .unwrap();
+        assert!(a.expects_external_signer());
+        assert!(!a.has_live_credentials());
+        // …and a raw key following a sentinel replaces external custody.
+        a.update_credentials(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some("0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d".into()),
+        )
+        .unwrap();
+        assert!(!a.expects_external_signer());
+        assert!(a.has_live_credentials());
     }
 
     #[test]

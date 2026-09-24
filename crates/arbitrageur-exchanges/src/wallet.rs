@@ -93,6 +93,17 @@ impl EvmWalletSigner {
         self.address
     }
 
+    /// Compressed (SEC1) 33-byte secp256k1 public key — Cosmos-style
+    /// `secp256k1.PubKey` payloads use this form.
+    pub fn compressed_pubkey(&self) -> anyhow::Result<[u8; 33]> {
+        let key = self.signing_key()?;
+        let bytes = key.verifying_key().to_sec1_bytes();
+        bytes
+            .as_ref()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("secp256k1 pubkey is not the 33-byte compressed form"))
+    }
+
     /// Lowercase `0x` address string (suitable for API fields / RPC `from`).
     pub fn address_hex(&self) -> String {
         format!("0x{}", hex::encode(self.address))

@@ -1,6 +1,7 @@
 pub mod arcus;
 pub mod aster;
 pub mod binance;
+pub mod boros;
 pub mod coinbase;
 pub mod decibel;
 pub mod dex_perps;
@@ -22,6 +23,7 @@ pub mod ws;
 pub use arcus::*;
 pub use aster::*;
 pub use binance::*;
+pub use boros::*;
 pub use coinbase::*;
 pub use decibel::*;
 pub use dex_perps::*;

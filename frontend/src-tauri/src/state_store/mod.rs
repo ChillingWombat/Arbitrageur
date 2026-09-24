@@ -1684,6 +1684,9 @@ fn normalize_symbol(raw: &str) -> anyhow::Result<String> {
 // the same spelling rules can never drift). Re-exported here so existing
 // `crate::state_store::canonical_base` call sites stay unchanged.
 pub use arbitrageur_core::symbol::canonical_base;
+// Quote-policy-aware key sets — `separate` mode restricts reads to the
+// exact pair key, merged modes return the full USD-family alias set.
+pub(crate) use samples::sample_keys;
 
 /// Every storage key that may hold samples for one asset. Background paths
 /// (monitor lanes, WS feed) record under the canonical base ("BTC") while

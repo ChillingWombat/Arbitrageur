@@ -60,11 +60,12 @@ pub async fn get_monitor_signal_events(
     let lim = limit.unwrap_or(200).clamp(1, 10_000);
     state
         .state_store
-        .recent_monitor_signal_events(
+        .recent_monitor_signal_events_mode(
             clean(symbol).as_deref(),
             clean(buy_venue).as_deref(),
             clean(sell_venue).as_deref(),
             lim,
+            state.usd_merge_quotes(),
         )
         .map_err(|e| e.to_string())
 }
@@ -75,7 +76,12 @@ pub async fn set_ticker_exempted(
     exempt: bool,
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<(), String> {
-    let sym = crate::monitor::canonical_base(&symbol);
+    // Store the exemption under the active quote policy's key: merged
+    // modes canonicalize to the base (exempts every USD-family variant);
+    // `separate` keeps the exact pair so a user can exempt BTC-USDT
+    // without exempting BTC-USDC. Matching at refresh also honors a bare
+    // base stored row across all variants.
+    let sym = arbitrageur_core::symbol::pair_key(&symbol, state.usd_merge_quotes());
     if sym.is_empty() || sym.len() > 64 {
         return Err("invalid symbol".into());
     }
@@ -144,7 +150,10 @@ pub(crate) async fn execute_monitor_opportunity_impl(
     state: &AppEngineState,
 ) -> Result<SimStepResultDto, String> {
     let engine = monitor_engine(state)?;
-    let sym = crate::monitor::canonical_base(symbol);
+    // Watchlist key under the active quote policy: merged modes canonicalize
+    // to the base ("BTC"), `separate` keeps the pair key ("BTC-USDT") so the
+    // snapshot row lookup lands on the same key the monitor produced.
+    let sym = arbitrageur_core::symbol::pair_key(symbol, state.usd_merge_quotes());
     if !(size_usd.is_finite() && size_usd > 0.0) {
         return Err("invalid size".into());
     }
@@ -174,7 +183,17 @@ pub(crate) async fn execute_monitor_opportunity_impl(
         }
         reject_if_strategy_filtered(state, "radar", &sym, &scope).await?;
     }
-    // Convert USD size to base qty at the current buy-side ask.
+    // Depeg gate: books priced in a halted stablecoin are not tradeable.
+    // Stable-vs-USD books (base is itself USD-family) stay open — that
+    // spread is the depeg arbitrage.
+    let buy_quote = state.book_quote(buy_venue, &sym);
+    let sell_quote = state.book_quote(sell_venue, &sym);
+    state.stablecoin_gate(&sym, &buy_quote)?;
+    state.stablecoin_gate(&sym, &sell_quote)?;
+
+    // Convert USD size to base qty at the current buy-side ask, adjusted
+    // for the quote coin's USD rate (a USDT ask at 0.99 costs fewer real
+    // dollars per unit than its face value suggests).
     let book = state
         .market_data_hub
         .get_valid_orderbook(
@@ -189,7 +208,7 @@ pub(crate) async fn execute_monitor_opportunity_impl(
         .and_then(|l| l.price.to_string().parse::<f64>().ok())
         .filter(|p| *p > 0.0)
         .ok_or_else(|| "no ask on buy-side book".to_string())?;
-    let qty = size_usd / ask;
+    let qty = size_usd / (ask * state.fx_price_factor(Some(buy_venue), &buy_quote));
     // Calibration forecast for this entry: prefer the net-P&L win
     // probability (scored against realized net bps at close); fall back to
     // the reversion probability, which is logged for audit but never

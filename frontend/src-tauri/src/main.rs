@@ -16,10 +16,12 @@ mod num;
 mod performance;
 mod reconciliation;
 mod seasonality;
+mod stablecoin_fx;
 mod state;
 mod state_store;
 mod strategy_config;
 mod strategy_filters;
+mod stronghold;
 mod triangle;
 mod vault;
 mod ws_primary;
@@ -63,6 +65,21 @@ fn main() {
         *engine_state.monitor.lock() = Some(monitor.clone());
         let bg_state = engine_state.clone();
         tauri::async_runtime::spawn(async move { monitor.run(bg_state).await });
+    }
+
+    // Spawn the stablecoin-FX refresh: CoinGecko every ~60s, Uniswap
+    // QuoterV2 backoff when the global feed fails. Venue-local rates are
+    // collected inside the monitor's watchlist refresh. Between refreshes
+    // the last good rate stands; stale observations converge to parity.
+    {
+        let fx = engine_state.stablecoin_fx.clone();
+        tauri::async_runtime::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+            loop {
+                interval.tick().await;
+                fx.refresh_global().await;
+            }
+        });
     }
 
     // Install and spawn the autonomous convergence bot (opt-in, testnet,
@@ -186,6 +203,7 @@ fn main() {
             commands::get_active_signer_address,
             commands::save_evm_wallet,
             commands::clear_evm_wallet,
+            commands::get_evm_key_custody,
             commands::set_default_account,
             commands::list_strategy_routes,
             commands::upsert_strategy_route,
@@ -212,6 +230,7 @@ fn main() {
             commands::set_monitor_config,
             commands::get_monitor_signal_events,
             commands::get_session_profile,
+            commands::get_stablecoin_health,
             commands::set_ticker_exempted,
             commands::get_exempted_tickers,
             commands::reveal_all_tickers,

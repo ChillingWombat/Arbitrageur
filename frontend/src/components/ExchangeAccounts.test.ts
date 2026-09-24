@@ -2,7 +2,15 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { VenueBalancePanel, AccountCard } from "./ExchangeAccounts.tsx";
+import {
+  VenueBalancePanel,
+  AccountCard,
+  EvmWalletSection,
+  EvmCustodyChip,
+  EVM_AMM_VENUES,
+  EVM_AMM_VENUE_IDS,
+  ACCOUNT_CREDENTIAL_FIELDS,
+} from "./ExchangeAccounts.tsx";
 import type { VenueBalanceInfo, AccountDto } from "../types/index.ts";
 
 test("VenueBalancePanel renders Paper badge and description when is_live is false", () => {
@@ -129,6 +137,103 @@ test("AccountCard renders disabled banner when account.enabled is false", () => 
   // Ensure the live/paper balance panel numbers are not rendered when disabled
   assert.doesNotMatch(html, />Live</);
   assert.doesNotMatch(html, />Paper</);
+});
+
+/* ------------------------------------------------------------------ */
+/* Shared EVM wallet — venue table + section                            */
+/* ------------------------------------------------------------------ */
+
+test("EVM_AMM_VENUES covers exactly the 11 admitted venues, 6 swap-capable", () => {
+  assert.equal(EVM_AMM_VENUES.length, 11);
+  const expected = [
+    "uniswap", "uniswap_v2", "sushiswap",
+    "pancakeswap", "pancakeswap_v3", "quickswap",
+    "camelot", "ramses", "aerodrome", "velodrome", "pharaoh",
+  ];
+  for (const id of expected) assert.ok(EVM_AMM_VENUE_IDS.has(id), `missing ${id}`);
+  // Blackhole is specified upstream but never admitted.
+  assert.ok(!EVM_AMM_VENUE_IDS.has("blackhole"));
+  const exec = EVM_AMM_VENUES.filter((v) => v.execution).map((v) => v.id).sort();
+  assert.deepEqual(exec, [
+    "pancakeswap", "pancakeswap_v3", "quickswap", "sushiswap", "uniswap", "uniswap_v2",
+  ]);
+  // Every venue advertises its chain's public RPC as the default.
+  for (const v of EVM_AMM_VENUES) assert.match(v.defaultRpc, /^https:\/\//);
+});
+
+test("EVM AMM venues have no per-venue credential schemas — the shared wallet owns the key", () => {
+  for (const id of EVM_AMM_VENUE_IDS) {
+    assert.equal(ACCOUNT_CREDENTIAL_FIELDS[id], undefined, `${id} still has a per-venue schema`);
+  }
+});
+
+test("EvmWalletSection renders the no-testnet banner in testnet mode", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(EvmWalletSection, { locked: false, environment: "testnet" })
+  );
+  assert.match(html, /no public testnet/);
+  assert.doesNotMatch(html, /Venues reachable/);
+});
+
+test("EvmWalletSection renders the wallet card and all 11 venue rows", () => {
+  // SSR render: effects never run, so accounts stay empty — every row must
+  // still list its capability badge and enable toggle.
+  const html = renderToStaticMarkup(
+    React.createElement(EvmWalletSection, { locked: false, environment: "live" })
+  );
+  assert.match(html, /EVM Wallet/);
+  assert.match(html, /Wallet Private Key/);
+  assert.match(html, /Venues reachable with this wallet/);
+  for (const v of EVM_AMM_VENUES) {
+    assert.ok(html.includes(`>${v.chain}<`), `missing chain chip for ${v.id}`);
+  }
+  assert.equal((html.match(/Swaps \+ quotes/g) ?? []).length, 6);
+  assert.equal((html.match(/Market data/g) ?? []).length, 5);
+  assert.match(html, /full custody|Full custody/i);
+});
+
+test("EvmWalletSection locks inputs when the vault is locked", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(EvmWalletSection, { locked: true, environment: "live" })
+  );
+  assert.match(html, /Vault is locked/);
+  assert.ok(html.includes("disabled"), "expected disabled inputs while locked");
+});
+
+test("EvmCustodyChip renders each custody state honestly", () => {
+  // Stronghold-backed + loaded: guarded custody.
+  let html = renderToStaticMarkup(
+    React.createElement(EvmCustodyChip, {
+      custody: { custody: "stronghold", strongholdLoaded: true },
+    })
+  );
+  assert.match(html, /Stronghold custody/);
+
+  // Sentinel records but no usable snapshot — cannot sign, warn state.
+  html = renderToStaticMarkup(
+    React.createElement(EvmCustodyChip, {
+      custody: { custody: "stronghold", strongholdLoaded: false },
+    })
+  );
+  assert.match(html, /Stronghold key unavailable/);
+
+  // Legacy raw-key vault storage — must NOT claim guarded custody.
+  html = renderToStaticMarkup(
+    React.createElement(EvmCustodyChip, {
+      custody: { custody: "vault", strongholdLoaded: false },
+    })
+  );
+  assert.match(html, /Key in vault/);
+  assert.doesNotMatch(html, /Stronghold custody/);
+
+  // No key material anywhere, or custody unknown (locked) — no chip.
+  for (const custody of [
+    { custody: "none", strongholdLoaded: false },
+    null,
+  ]) {
+    html = renderToStaticMarkup(React.createElement(EvmCustodyChip, { custody }));
+    assert.doesNotMatch(html, /Stronghold|Key in vault/);
+  }
 });
 
 test("AccountCard renders VenueBalancePanel when account.enabled is true", () => {

@@ -159,8 +159,35 @@ fn ingest_book(state: &AppEngineState, book: &OrderBook, venue_id: &VenueId, sym
     }
     state.market_data_hub.update_orderbook_from_ws(book.clone());
     if let Some(entry) = top_sample(book, venue_id) {
-        let _ = state.state_store.record_spread_samples(
-            symbol,
+        // Normalize onto the USD basis and the mode's storage key: merged
+        // modes keep the canonical-base key; `separate` keys on the pair
+        // ("BTC-USDT") so quote variants stay independent series.
+        let quote = arbitrageur_core::symbol::symbol_quote(&book.symbol)
+            .or_else(|| {
+                state
+                    .monitor
+                    .lock()
+                    .as_ref()
+                    .and_then(|m| m.book_quote(&venue_id.0, symbol, state.usd_merge_quotes()))
+            })
+            .unwrap_or_else(|| "USD".into());
+        let scale = state.fx_price_factor(Some(&venue_id.0), &quote);
+        let base = canonical_base(symbol);
+        let store_key =
+            if state.usd_merge_quotes() || !arbitrageur_core::symbol::is_usd_family(&quote) {
+                base
+            } else {
+                format!("{base}-{quote}")
+            };
+        let entry = VenueSampleEntry {
+            mid: entry.mid * scale,
+            best_bid: entry.best_bid * scale,
+            best_ask: entry.best_ask * scale,
+            ..entry
+        };
+        let _ = state.state_store.record_spread_samples_mode(
+            &store_key,
+            state.usd_merge_quotes(),
             Utc::now().timestamp_millis(),
             &[entry],
         );

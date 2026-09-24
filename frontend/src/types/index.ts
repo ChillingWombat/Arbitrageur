@@ -469,7 +469,9 @@ export interface FundingOpportunityDto {
   optimal_size_usd?: number;
   /** Measured entry cross as a positive cost in bps; negative = unmeasured. */
   entry_spread_bps?: number;
-  /** Opportunity kind: "carry" (cross-exchange perp/perp) or "basis" (same-exchange spot/perp). Absent = carry (stale backends). */
+  /** Opportunity kind: "carry" (cross-exchange perp/perp), "basis" (same-exchange spot/perp),
+   *  or "fixed_yield" (perp pair + two Pendle Boros YU legs locking the rate to maturity).
+   *  Absent = carry (stale backends). */
   kind?: string;
   /** Signed live divergence (perp - spot) / spot * 10000 in bps. Only for basis opps. */
   basis_bps?: number;
@@ -539,6 +541,37 @@ export interface FundingOpportunityDto {
   /** Largest still-profitable size in USD — cumulative net breakeven
    * bound. Absent when no live book depth exists. */
   max_capacity_usd?: number;
+
+  // --- Fixed-yield (Boros YU hedge) fields — present when kind === "fixed_yield" ---
+  /** Locked net APR in percent (F_short − F_long), executable at the YU book top. */
+  fixed_apr_pct?: number;
+  /** The two Boros YU hedge legs converting floating funding into a locked rate. */
+  yu_legs?: YuLegDto[];
+  /** Extra entry cost vs the 2-leg variant, in bps of notional (YU taker fees + gas). */
+  yu_hedge_cost_bps?: number;
+  /** Estimated Boros collateral lock for the two YU legs, USD. */
+  boros_margin_usd?: number;
+  /** Estimated Arbitrum gas for the YU batch, USD. */
+  boros_gas_usd?: number;
+  /** Unix-ms timestamp of the shared YU maturity — the locked rate's end. */
+  lock_until_ms?: number;
+}
+
+/** One Boros Yield-Unit hedge leg of a fixed-yield opportunity. */
+export interface YuLegDto {
+  /** Canonical venue id whose funding this leg swaps (e.g. "binance"). */
+  venue_id: string;
+  yu_market_id: number;
+  /** Boros market symbol, e.g. "BINANCE-BTCUSDT-30OCT2026". */
+  yu_symbol: string;
+  /** "long" = pay fixed / receive floating; "short" = receive fixed / pay floating. */
+  yu_side: string;
+  /** Executable fixed APR in percent. */
+  fixed_apr_pct: number;
+  /** YU taker fee in bps of notional. */
+  fee_bps: number;
+  /** Unix seconds — the maturity this leg locks to. */
+  maturity_unix: number;
 }
 
 export interface FundingTrendPointDto {
@@ -693,6 +726,15 @@ export interface EngineSettingsDto {
   // each strategy enforces its own per-strategy max_slippage_bps gate)
   min_depth_ratio: number;
 
+  // USD-stablecoin quote policy: "separate" keeps BASE-QUOTE identity,
+  // "parity" merges USD-family quotes at 1:1, "fx_adjusted" merges and
+  // converts through the live stablecoin rate table (default).
+  usd_quote_mode?: string;
+  // Depeg thresholds, |deviation| from $1.00 in bps: warn displays an
+  // alert; past halt, pairs quoted in the coin are blocked.
+  stablecoin_warn_bps?: number;
+  stablecoin_halt_bps?: number;
+
   // Exchange Enablement Toggles
   hyperliquid_enabled?: boolean;
   lighter_enabled?: boolean;
@@ -821,6 +863,28 @@ export interface StorageStatsDto {
   sample_rows: number;
   oldest_sample_ts_ms: number | null;
   newest_sample_ts_ms: number | null;
+}
+
+/** One tracked USD-family quote's live health row (camelCase on the wire). */
+export interface StablecoinQuoteDto {
+  quote: string;
+  effectiveRate: number;
+  deviationBps: number;
+  /** "ok" | "warn" | "halted" | "unobserved" */
+  status: string;
+  lastUpdateMs: number | null;
+  source: string | null;
+  stale: boolean;
+}
+
+export interface StablecoinHealthDto {
+  mode: string;
+  quotes: StablecoinQuoteDto[];
+  /** Quotes past the halt threshold — pairs quoted in these are blocked. */
+  haltedQuotes: string[];
+  /** True while every external rate source is unreachable. */
+  feedStale: boolean;
+  generatedTsMs: number;
 }
 
 export interface VaultStatus {
@@ -1004,6 +1068,18 @@ export interface EvmWalletSaveDto {
   addressOnlyVenues: string[];
   /** `{venue}-default` account ids created by this save (start disabled). */
   createdAccounts: string[];
+  /** Where the key bytes landed: "stronghold" (guarded signer storage —
+   *  credential records carry only a sentinel) or "vault" (encrypted
+   *  credential record — legacy/fallback path). */
+  keyStorage: string;
+}
+
+/** Custody status of the shared EVM wallet key (`get_evm_key_custody`). */
+export interface EvmKeyCustodyDto {
+  /** "stronghold" | "vault" | "none" — where stored key material lives. */
+  custody: string;
+  /** A stronghold snapshot is open AND holds the key record. */
+  strongholdLoaded: boolean;
 }
 
 /** Strategy-level route: maps an enabled account on one exchange to an

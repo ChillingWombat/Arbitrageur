@@ -376,6 +376,20 @@ impl StateStore {
         sell_venue: Option<&str>,
         limit: i64,
     ) -> anyhow::Result<Vec<MonitorSignalEventRow>> {
+        self.recent_monitor_signal_events_mode(symbol, buy_venue, sell_venue, limit, true)
+    }
+
+    /// Mode-aware variant: under `separate` the symbol filter is
+    /// quote-strict — "BTC-USDT" events never surface for a "BTC-USDC"
+    /// query.
+    pub fn recent_monitor_signal_events_mode(
+        &self,
+        symbol: Option<&str>,
+        buy_venue: Option<&str>,
+        sell_venue: Option<&str>,
+        limit: i64,
+        merge_usd: bool,
+    ) -> anyhow::Result<Vec<MonitorSignalEventRow>> {
         if limit <= 0 {
             anyhow::bail!("event limit must be positive");
         }
@@ -390,7 +404,7 @@ impl StateStore {
             // Monitor rows key on the canonical base ("BTC"); callers pass
             // full UI symbols ("BTC-USDC"). Match the whole alias family so
             // either spelling returns the same events.
-            let aliases = crate::state_store::spread_symbol_aliases(s);
+            let aliases = crate::state_store::samples::sample_keys(s, merge_usd);
             if aliases.is_empty() {
                 anyhow::bail!("invalid symbol filter");
             }

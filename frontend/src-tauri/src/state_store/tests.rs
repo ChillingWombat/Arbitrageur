@@ -1518,6 +1518,195 @@ fn test_spread_samples_merge_background_and_ui_keys() {
 }
 
 #[test]
+fn test_spread_samples_separate_mode_isolates_quote_series() {
+    // `separate` USD-quote policy: "BTC-USDT" and "BTC-USDC" are distinct
+    // instruments — reads and write-anchors must never consult siblings.
+    let store = StateStore::open_in_memory().unwrap();
+    let now = 1_700_000_000_000i64;
+    store
+        .record_spread_samples_mode("BTC-USDT", false, now - 1_000, &[sample("binance", 100.0)])
+        .unwrap();
+    store
+        .record_spread_samples_mode("BTC-USDC", false, now - 2_000, &[sample("coinbase", 100.5)])
+        .unwrap();
+    store
+        .record_spread_samples_mode("BTC", false, now - 3_000, &[sample("lighter", 99.5)])
+        .unwrap();
+
+    // Strict reads: each quoted key sees only its own series.
+    let usdt = store
+        .spread_samples_mode("BTC-USDT", false, 0, i64::MAX)
+        .unwrap();
+    assert_eq!(usdt.len(), 1);
+    assert_eq!(usdt[0].symbol, "BTC-USDT");
+    assert_eq!(usdt[0].mid, 100.0);
+    let usdc = store
+        .spread_samples_mode("BTC-USDC", false, 0, i64::MAX)
+        .unwrap();
+    assert_eq!(usdc.len(), 1);
+    assert_eq!(usdc[0].mid, 100.5);
+    assert_eq!(
+        store
+            .earliest_spread_sample_ts_mode("BTC-USDT", false)
+            .unwrap(),
+        Some(now - 1_000)
+    );
+
+    // Merged mode still reads the family as one series.
+    let merged = store
+        .spread_samples_mode("BTC-USDT", true, 0, i64::MAX)
+        .unwrap();
+    assert_eq!(merged.len(), 3);
+}
+
+#[test]
+fn test_seasonality_separate_mode_isolates_quote_series() {
+    // `separate` USD-quote policy: derived seasonality state — rollup keys,
+    // session profiles, HAR anchors, promotion rows, volume series — keys
+    // on the pair. Sibling quotes must never share or overwrite it.
+    let store = StateStore::open_in_memory().unwrap();
+    let now = 1_700_000_000_000i64;
+
+    // Same asset, two quote variants, two venues each. The USDT series
+    // runs a ~10bps venue gap; USDC runs ~1.7bps so the session medians
+    // are distinguishable by an order of magnitude.
+    for i in 0..30i64 {
+        let ts = now - 3_600_000 + i * 60_000;
+        store
+            .record_spread_samples_mode(
+                "BTC-USDT",
+                false,
+                ts,
+                &[sample("binance", 100.0), sample("coinbase", 100.10)],
+            )
+            .unwrap();
+        store
+            .record_spread_samples_mode(
+                "BTC-USDC",
+                false,
+                ts,
+                &[sample("binance", 100.0), sample("coinbase", 100.017)],
+            )
+            .unwrap();
+    }
+
+    // The rollup driver must enumerate the stored pair keys — a collapsed
+    // base key would read an empty strict series and skip the rollup.
+    let syms = store.distinct_sample_symbols_mode(false).unwrap();
+    assert_eq!(
+        syms,
+        vec!["BTC-USDC".to_string(), "BTC-USDT".to_string()],
+        "separate mode keeps pair keys distinct"
+    );
+    assert_eq!(
+        store.distinct_sample_symbols_mode(true).unwrap(),
+        vec!["BTC".to_string()],
+        "merged mode still collapses to the base"
+    );
+
+    for key in ["BTC-USDT", "BTC-USDC"] {
+        let written = store
+            .rollup_session_profiles_mode(key, false, now - 86_400_000, now, now)
+            .unwrap();
+        assert!(written > 0, "rollup must emit rows for {key}");
+    }
+    let usdt = store.session_profiles_mode("BTC-USDT", false).unwrap();
+    let usdc = store.session_profiles_mode("BTC-USDC", false).unwrap();
+    assert!(usdt.iter().all(|r| r.symbol == "BTC-USDT"));
+    assert!(usdc.iter().all(|r| r.symbol == "BTC-USDC"));
+    let mut checked = false;
+    for (sess, med) in usdt
+        .iter()
+        .filter_map(|r| r.med_abs_spread_bps.map(|m| (r.session_id.as_str(), m)))
+    {
+        if let Some(other) = usdc
+            .iter()
+            .find(|r| r.session_id == sess)
+            .and_then(|r| r.med_abs_spread_bps)
+        {
+            assert!(
+                med > other * 3.0,
+                "USDT session {sess} median {med} must reflect its own ~10bps series, not USDC's {other}"
+            );
+            checked = true;
+        }
+    }
+    assert!(checked, "at least one session must carry data");
+
+    // HAR anchor and promotion rows key on the pair under `separate`.
+    store
+        .phase2_upsert_har_anchor_mode(
+            &HarAnchorRow {
+                symbol: "BTC-USDT".to_string(),
+                intercept: 0.1,
+                b_daily: 0.5,
+                b_weekly: 0.3,
+                b_monthly: 0.1,
+                r2: 0.9,
+                n_days: 60,
+                forecast_rv_bps: 12.0,
+                trailing_mean_rv_bps: 10.0,
+                updated_ts: now,
+            },
+            false,
+        )
+        .unwrap();
+    assert!(store
+        .phase2_har_anchor_mode("BTC-USDT", false)
+        .unwrap()
+        .is_some());
+    assert!(
+        store
+            .phase2_har_anchor_mode("BTC-USDC", false)
+            .unwrap()
+            .is_none(),
+        "sibling quote must not see the USDT anchor"
+    );
+    assert!(
+        store.phase2_har_anchor("BTC").unwrap().is_some(),
+        "merged read still resolves the family"
+    );
+    store
+        .phase2_upsert_promotion_state_mode(
+            &PromotionStateRow {
+                symbol: "BTC-USDT".to_string(),
+                status: "promoted".to_string(),
+                fit_delta_bps: 1.0,
+                val_delta_bps: 1.0,
+                reason: "test".to_string(),
+                updated_ts: now,
+            },
+            false,
+        )
+        .unwrap();
+    assert!(store
+        .phase2_promotion_state_mode("BTC-USDT", false)
+        .unwrap()
+        .is_some());
+    assert!(store
+        .phase2_promotion_state_mode("BTC-USDC", false)
+        .unwrap()
+        .is_none());
+
+    // Venue volume samples: strict under `separate`, merged otherwise.
+    let mut vols = HashMap::new();
+    vols.insert("BTC-USDT".to_string(), 1_000_000.0);
+    vols.insert("BTC-USDC".to_string(), 2_000_000.0);
+    store
+        .record_venue_volume_samples_mode("binance", now, &vols, false)
+        .unwrap();
+    let strict = store
+        .venue_volume_series_mode("BTC-USDT", "binance", 0, i64::MAX, false)
+        .unwrap();
+    assert_eq!(strict.len(), 1);
+    assert_eq!(strict[0].1, 1_000_000.0);
+    let merged = store
+        .venue_volume_series("BTC-USDT", "binance", 0, i64::MAX)
+        .unwrap();
+    assert_eq!(merged.len(), 2, "merged read sees both quote variants");
+}
+
+#[test]
 fn test_spread_samples_aliases_keep_symbols_isolated() {
     // Alias merging must never leak one asset's rows into another's.
     let store = StateStore::open_in_memory().unwrap();

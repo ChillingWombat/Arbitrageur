@@ -14,8 +14,9 @@ use crate::commands::{
 use crate::state::{AppEngineState, ExecutionLogEntry};
 use crate::triangle::triangle_dust_qty;
 use arbitrageur_core::exchange::ExchangeAdapter;
+use arbitrageur_core::order::{OrderRequest, OrderResponse};
 use arbitrageur_core::quote::OrderBook;
-use arbitrageur_core::types::{dec, Decimal, Side, VenueId};
+use arbitrageur_core::types::{dec, Decimal, OrderStatus, Side, VenueId};
 use arbitrageur_execution::coordinator::ArbitrageExecutionResult;
 use arbitrageur_math::book_gradient::entry_gradient;
 use arbitrageur_math::funding_carry::{
@@ -62,9 +63,11 @@ pub struct FundingOpportunityDto {
     /// Measured entry cross (long-ask vs short-bid VWAP) in bps, as a
     /// positive cost. -1.0 when unmeasured (no book data).
     pub entry_spread_bps: f64,
-    /// Opportunity kind: "carry" (cross-exchange perp/perp funding) or
-    /// "basis" (same-exchange long-spot / short-perp cash-and-carry).
-    /// Defaults to "carry" so stale backends/clients keep working.
+    /// Opportunity kind: "carry" (cross-exchange perp/perp funding),
+    /// "basis" (same-exchange long-spot / short-perp cash-and-carry), or
+    /// "fixed_yield" (the same perp pair plus two Pendle Boros YU hedge
+    /// legs locking the net rate to maturity). Defaults to "carry" so
+    /// stale backends/clients keep working.
     #[serde(default = "default_funding_opp_kind")]
     pub kind: String,
     /// Signed live divergence `(perp - spot) / spot * 10000` in bps.
@@ -181,6 +184,51 @@ pub struct FundingOpportunityDto {
     /// exists.
     #[serde(default)]
     pub max_capacity_usd: Option<f64>,
+    // --- Fixed-yield (Boros YU hedge) fields — `kind == "fixed_yield"` ---
+    /// Locked net APR in percent (`F_short − F_long`), executable at the
+    /// YU book's top: short leg receives the bid-side fixed rate, long
+    /// leg pays the ask-side fixed rate. `None` for carry/basis rows.
+    #[serde(default)]
+    pub fixed_apr_pct: Option<f64>,
+    /// The two Boros YU hedge legs that convert this carry's floating
+    /// funding into a locked rate. `None` for carry/basis rows.
+    #[serde(default)]
+    pub yu_legs: Option<Vec<YuLegDto>>,
+    /// Extra entry cost of the 4-leg variant vs the 2-leg carry, in bps
+    /// of notional: two YU taker fees plus amortized Arbitrum gas.
+    #[serde(default)]
+    pub yu_hedge_cost_bps: Option<f64>,
+    /// Estimated Boros collateral required for the two YU legs (USD) —
+    /// Boros max leverage is low (~1.5-3x), so this is a real capital
+    /// bound, not a rounding detail.
+    #[serde(default)]
+    pub boros_margin_usd: Option<f64>,
+    /// Estimated Arbitrum gas for the YU batch (USD).
+    #[serde(default)]
+    pub boros_gas_usd: Option<f64>,
+    /// Unix-ms timestamp of the shared YU maturity — the fixed rate is
+    /// locked until then. `None` for carry/basis rows.
+    #[serde(default)]
+    pub lock_until_ms: Option<i64>,
+}
+
+/// One Boros Yield-Unit hedge leg of a fixed-yield opportunity.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct YuLegDto {
+    /// Canonical venue id whose funding this leg swaps (e.g. "binance").
+    pub venue_id: String,
+    pub yu_market_id: u64,
+    /// Boros market symbol, e.g. `BINANCE-BTCUSDT-30OCT2026`.
+    pub yu_symbol: String,
+    /// "long" = pay fixed / receive floating (hedges the long perp leg);
+    /// "short" = receive fixed / pay floating (hedges the short perp leg).
+    pub yu_side: String,
+    /// Executable fixed APR in percent (bid for short, ask for long).
+    pub fixed_apr_pct: f64,
+    /// YU taker fee in bps of notional.
+    pub fee_bps: f64,
+    /// Unix seconds — the maturity this leg locks to.
+    pub maturity_unix: i64,
 }
 
 fn default_funding_opp_kind() -> String {
@@ -209,6 +257,254 @@ fn capacity_bounds(curve: &[crate::monitor::DepthCurvePointDto]) -> (Option<f64>
         .map(|p| p.cum_usd)
         .last();
     (optimal, maximum)
+}
+
+// ---------------------------------------------------------------------------
+// Pendle Boros fixed-yield variant (4-leg: perp pair + two YU hedge legs)
+// ---------------------------------------------------------------------------
+
+/// Minimum lock term for a fixed-yield row: sub-day locks almost never
+/// cover the extra leg costs, and emitting them would just be noise.
+const FIXED_MIN_LOCK_HOURS: f64 = 24.0;
+
+/// Fetch-or-reuse the Boros YU market snapshot. Public data — no
+/// credentials needed and identical in both environments (Boros has no
+/// testnet). Fail-open by design: `None` simply means no fixed-yield
+/// variants this scan, never a scan failure.
+async fn boros_yu_snapshot(
+    state: &AppEngineState,
+    allow_network_fetch: bool,
+) -> Option<(Arc<Vec<arbitrageur_exchanges::BorosYuMarket>>, f64)> {
+    use arbitrageur_exchanges::BOROS_API_BASE;
+    const TTL: std::time::Duration = std::time::Duration::from_secs(120);
+    let stale = {
+        let guard = state.boros_yu_cache.lock();
+        guard.as_ref().and_then(|c| {
+            if c.fetched_at.elapsed() < TTL {
+                Some((c.markets.clone(), c.gas_usd))
+            } else {
+                None
+            }
+        })
+    };
+    if stale.is_some() {
+        return stale;
+    }
+    if !allow_network_fetch {
+        // Serve whatever the cache holds — even expired data beats none,
+        // and callers treat rates as advisory until execution re-checks.
+        return state
+            .boros_yu_cache
+            .lock()
+            .as_ref()
+            .map(|c| (c.markets.clone(), c.gas_usd));
+    }
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .ok()?;
+    let markets = arbitrageur_exchanges::fetch_boros_yu_markets(&client, BOROS_API_BASE)
+        .await
+        .ok()?;
+    if markets.is_empty() {
+        return None;
+    }
+    // Gas for the YU batch: the API's per-order estimate covers one
+    // place-order tx; two legs plus one enter-markets buffer ≈ 3×.
+    let gas_usd = match client
+        .get(format!("{BOROS_API_BASE}/v1/gas-price/current"))
+        .send()
+        .await
+    {
+        Ok(r) => r
+            .json::<serde_json::Value>()
+            .await
+            .ok()
+            .and_then(|v| v.get("estimatedOrderGasCostUsd").and_then(|g| g.as_f64()))
+            .map(|g| g * 3.0)
+            .unwrap_or(0.15),
+        Err(_) => 0.15,
+    };
+    let arc = Arc::new(markets);
+    *state.boros_yu_cache.lock() = Some(crate::state::BorosYuCache {
+        fetched_at: std::time::Instant::now(),
+        markets: arc.clone(),
+        gas_usd,
+    });
+    Some((arc, gas_usd))
+}
+
+/// Build the `fixed_yield` row for a carry pair whose venues both host a
+/// Boros YU market on this asset at a shared maturity. Returns `None`
+/// (emit no row) when no YU market covers a leg, maturities never
+/// coincide, the locked spread is not positive after all four legs'
+/// costs, or the lock term is shorter than [`FIXED_MIN_LOCK_HOURS`].
+#[allow(clippy::too_many_arguments)]
+fn boros_fixed_yield_variant(
+    _state: &AppEngineState,
+    yu: &Option<(Arc<Vec<arbitrageur_exchanges::BorosYuMarket>>, f64)>,
+    symbol: &str,
+    long_name: &str,
+    short_name: &str,
+    long_vid: &str,
+    short_vid: &str,
+    trade_size_usd: f64,
+    perp_rt_fee_bps: f64,
+    entry_spread_bps: Option<f64>,
+    size_usd: f64,
+) -> Option<FundingOpportunityDto> {
+    use arbitrageur_exchanges::{boros_platform_venue_id, BorosYuMarket};
+    use arbitrageur_math::fixed_yield::{evaluate_fixed_yield_carry, YuHedgeLeg};
+    let (markets, gas_usd) = yu.as_ref()?;
+    // Canonical symbol base ("BTC-USDC" → "BTC") ↔ Boros `assetSymbol`.
+    let asset = symbol.split('-').next()?.trim().to_uppercase();
+    if asset.is_empty() {
+        return None;
+    }
+    let markets_of = |vid: &str| -> Vec<&BorosYuMarket> {
+        markets
+            .iter()
+            .filter(|m| {
+                boros_platform_venue_id(&m.platform) == Some(vid)
+                    && m.asset.eq_ignore_ascii_case(&asset)
+                    && m.best_bid_apr.is_some()
+                    && m.best_ask_apr.is_some()
+            })
+            .collect()
+    };
+    let long_mkts = markets_of(long_vid);
+    let short_mkts = markets_of(short_vid);
+    if long_mkts.is_empty() || short_mkts.is_empty() {
+        return None;
+    }
+    let now = Utc::now().timestamp();
+    let mut best: Option<arbitrageur_math::fixed_yield::FixedYieldOpportunity> = None;
+    for lm in &long_mkts {
+        for sm in &short_mkts {
+            if lm.maturity_unix != sm.maturity_unix {
+                continue; // the lock must share one maturity on both legs
+            }
+            // Long perp leg pays floating → LONG YU pays fixed (executes
+            // at the ask-side rate). Short perp leg receives floating →
+            // SHORT YU receives fixed (executes at the bid-side rate).
+            let yl = YuHedgeLeg {
+                venue_id: long_vid.to_string(),
+                yu_market_id: lm.market_id,
+                yu_symbol: lm.symbol.clone(),
+                yu_side: "long".into(),
+                fixed_apr: lm.best_ask_apr?,
+                taker_fee_rate: lm.taker_fee_rate,
+                max_leverage: lm.max_leverage,
+                maturity_unix: lm.maturity_unix,
+            };
+            let ys = YuHedgeLeg {
+                venue_id: short_vid.to_string(),
+                yu_market_id: sm.market_id,
+                yu_symbol: sm.symbol.clone(),
+                yu_side: "short".into(),
+                fixed_apr: sm.best_bid_apr?,
+                taker_fee_rate: sm.taker_fee_rate,
+                max_leverage: sm.max_leverage,
+                maturity_unix: sm.maturity_unix,
+            };
+            if let Some(ev) = evaluate_fixed_yield_carry(
+                yl,
+                ys,
+                size_usd,
+                perp_rt_fee_bps,
+                entry_spread_bps.unwrap_or(0.0),
+                *gas_usd,
+                now,
+                FIXED_MIN_LOCK_HOURS,
+            ) {
+                let better = best
+                    .as_ref()
+                    .map(|b| ev.expected_return_usd > b.expected_return_usd)
+                    .unwrap_or(true);
+                if better {
+                    best = Some(ev);
+                }
+            }
+        }
+    }
+    let ev = best?;
+    let mat_ms = ev.lock_until_unix.saturating_mul(1000);
+    let mat_date = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(mat_ms)
+        .map(|d| d.format("%d %b %Y").to_string())
+        .unwrap_or_default();
+    Some(FundingOpportunityDto {
+        id: format!("{symbol}-{long_name}-{short_name}-FIXED"),
+        symbol: symbol.to_string(),
+        long_venue: long_name.to_string(),
+        short_venue: short_name.to_string(),
+        long_venue_id: long_vid.to_string(),
+        short_venue_id: short_vid.to_string(),
+        long_symbol: symbol.to_string(),
+        short_symbol: symbol.to_string(),
+        long_market_type: "perpetual".to_string(),
+        short_market_type: "perpetual".to_string(),
+        net_rate_8h_pct: ev.fixed_apr * 8.0 / 8760.0 * 100.0,
+        net_apr_pct: ev.fixed_apr_pct,
+        net_apy_pct: ev.fixed_apr_pct,
+        round_trip_fee_bps: perp_rt_fee_bps + ev.yu_hedge_cost_bps,
+        break_even_hours: ev.break_even_hours,
+        estimated_daily_income_usd: ev.daily_income_usd,
+        trade_size_usd,
+        optimal_size_usd: size_usd,
+        entry_spread_bps: entry_spread_bps.unwrap_or(-1.0),
+        kind: "fixed_yield".to_string(),
+        basis_bps: None,
+        spot_price: None,
+        perp_price: None,
+        win_probability: None,
+        expected_hold_hours: Some(ev.lock_hours),
+        hold_reason: Some(format!("Locked via Boros YU to {mat_date}")),
+        hold_confidence: None,
+        expected_return_usd: Some(ev.expected_return_usd),
+        backtest_win_rate: None,
+        backtest_win_rate_lower: None,
+        backtest_win_rate_upper: None,
+        backtest_episodes: None,
+        weekday_win_rate: None,
+        weekend_win_rate: None,
+        persistence_probability: None,
+        persistence_probability_lower: None,
+        backtest_expected_usd: None,
+        backtest_expected_usd_se: None,
+        backtest_trials: None,
+        backtest_deciles_usd: None,
+        depth_slope_bps_per_1k: None,
+        long_rate_8h_pct: None,
+        short_rate_8h_pct: None,
+        depth_curve: Vec::new(),
+        optimal_capacity_usd: None,
+        max_capacity_usd: None,
+        fixed_apr_pct: Some(ev.fixed_apr_pct),
+        yu_legs: Some(vec![
+            YuLegDto {
+                venue_id: ev.long_leg.venue_id.clone(),
+                yu_market_id: ev.long_leg.yu_market_id,
+                yu_symbol: ev.long_leg.yu_symbol.clone(),
+                yu_side: ev.long_leg.yu_side.clone(),
+                fixed_apr_pct: ev.long_leg.fixed_apr * 100.0,
+                fee_bps: ev.long_leg.taker_fee_rate * 1e4,
+                maturity_unix: ev.long_leg.maturity_unix,
+            },
+            YuLegDto {
+                venue_id: ev.short_leg.venue_id.clone(),
+                yu_market_id: ev.short_leg.yu_market_id,
+                yu_symbol: ev.short_leg.yu_symbol.clone(),
+                yu_side: ev.short_leg.yu_side.clone(),
+                fixed_apr_pct: ev.short_leg.fixed_apr * 100.0,
+                fee_bps: ev.short_leg.taker_fee_rate * 1e4,
+                maturity_unix: ev.short_leg.maturity_unix,
+            },
+        ]),
+        yu_hedge_cost_bps: Some(ev.yu_hedge_cost_bps),
+        boros_margin_usd: Some(ev.boros_margin_usd),
+        boros_gas_usd: Some(*gas_usd),
+        lock_until_ms: Some(mat_ms),
+    })
 }
 
 /// Deterministic carry income per unit over the modelled hold, bps.
@@ -397,6 +693,11 @@ async fn scan_funding_opportunities_for_symbol(
     // Cross-exchange carry needs >= 2 funding prints; same-exchange basis
     // needs only one venue with funding + both books, so no early return here.
     let mut opps = Vec::new();
+
+    // Boros YU snapshot for fixed-yield variants — public data, fetched
+    // once per scan behind a 120s cache. `None` disables the variant
+    // silently (fixed-yield rows are additive, never blocking).
+    let yu_snapshot = boros_yu_snapshot(state, allow_network_fetch).await;
 
     // Perf: snapshot + parse each venue's perp book ONCE per scan. The pair
     // loop below used to hub-clone and re-parse both books per pair (O(V^2)
@@ -672,6 +973,25 @@ async fn scan_funding_opportunities_for_symbol(
                     _ => Vec::new(),
                 };
                 let (optimal_capacity_usd, max_capacity_usd) = capacity_bounds(&depth_curve);
+                // Fixed-yield variant: when both legs' venues have a
+                // live Boros YU market on this asset sharing one
+                // maturity, the floating carry can be locked to a fixed
+                // rate by two YU legs (long YU on the long venue, short
+                // YU on the short venue). Emitted as a SEPARATE row so
+                // the autobot can weigh 2-leg vs 4-leg economics.
+                let fixed_variant = boros_fixed_yield_variant(
+                    state,
+                    &yu_snapshot,
+                    symbol,
+                    &opp.long_venue,
+                    &opp.short_venue,
+                    long_vid,
+                    short_vid,
+                    trade_size_usd,
+                    fee_bps_f,
+                    spread_cost_f,
+                    depth.map(|(o, _)| o).unwrap_or(trade_size_usd),
+                );
                 opps.push(FundingOpportunityDto {
                     id: format!("{}-{}-{}", symbol, opp.long_venue, opp.short_venue),
                     symbol: symbol.to_string(),
@@ -746,7 +1066,16 @@ async fn scan_funding_opportunities_for_symbol(
                     backtest_expected_usd_se: bt.as_ref().and_then(|b| b.expected_usd_se),
                     backtest_trials: bt.as_ref().map(|b| b.trials),
                     backtest_deciles_usd: bt.as_ref().map(|b| b.deciles_usd.clone()),
+                    fixed_apr_pct: None,
+                    yu_legs: None,
+                    yu_hedge_cost_bps: None,
+                    boros_margin_usd: None,
+                    boros_gas_usd: None,
+                    lock_until_ms: None,
                 });
+                if let Some(fixed) = fixed_variant {
+                    opps.push(fixed);
+                }
             }
         }
     }
@@ -1104,6 +1433,12 @@ async fn scan_funding_opportunities_for_symbol(
                         backtest_expected_usd_se: bt.as_ref().and_then(|b| b.expected_usd_se),
                         backtest_trials: bt.as_ref().map(|b| b.trials),
                         backtest_deciles_usd: bt.as_ref().map(|b| b.deciles_usd.clone()),
+                        fixed_apr_pct: None,
+                        yu_legs: None,
+                        yu_hedge_cost_bps: None,
+                        boros_margin_usd: None,
+                        boros_gas_usd: None,
+                        lock_until_ms: None,
                     });
                 }
             }
@@ -1205,7 +1540,11 @@ pub async fn get_funding_trend_impl(
     // venue-neutral AND robust to a residual outlier surviving the store's
     // consistency filter (a mean lets one bad mid move the whole line).
     let mut buckets: HashMap<i64, Vec<f64>> = HashMap::new();
-    if let Ok(samples) = state.state_store.spread_samples(symbol, from_ms, now_ms) {
+    if let Ok(samples) =
+        state
+            .state_store
+            .spread_samples_mode(symbol, state.usd_merge_quotes(), from_ms, now_ms)
+    {
         for s in samples {
             if !s.mid.is_finite() || s.mid <= 0.0 || s.ts_ms < 0 {
                 continue;
@@ -1319,6 +1658,7 @@ pub async fn execute_funding_carry_impl(
     trade_size_usd: f64,
     state: &AppEngineState,
     auto: bool,
+    kind: Option<&str>,
 ) -> Result<SimStepResultDto, String> {
     // Autonomous entries stay testnet-only in live mode (same policy as
     // the radar bot's evaluate_entry_gates hard-block); operator-directed
@@ -1328,6 +1668,12 @@ pub async fn execute_funding_carry_impl(
             "autonomous funding entries are testnet-only — run a manual Execute for live carry"
                 .into(),
         );
+    }
+    // The 4-leg fixed-yield variant executes real Boros YU legs on
+    // Arbitrum mainnet — Boros runs no testnet, and mixing testnet perps
+    // with mainnet hedges is incoherent, so the whole kind is live-only.
+    if kind == Some("fixed_yield") && !state.is_live() {
+        return Err("fixed-yield entries are live-only — Pendle Boros has no testnet".into());
     }
     if let Err(reason) = state.circuit_breaker.is_trading_allowed() {
         return Err(format!(
@@ -1355,8 +1701,13 @@ pub async fn execute_funding_carry_impl(
         // Funding entries reuse the same two-leg coordinator + durable
         // signal reconciliation as the spatial path, under the same live
         // gate: unlocked vault + adapter submission/polling/entry
-        // eligibility + live credentials.
-        live_entry_gate(state, &[long_venue, short_venue])?;
+        // eligibility + live credentials. A fixed-yield entry adds Boros —
+        // the YU hedge is an order-bearing leg like any other.
+        if kind == Some("fixed_yield") {
+            live_entry_gate(state, &[long_venue, short_venue, "boros"])?;
+        } else {
+            live_entry_gate(state, &[long_venue, short_venue])?;
+        }
     }
 
     // The caller-supplied triple is never trusted — rescan and match it
@@ -1369,6 +1720,14 @@ pub async fn execute_funding_carry_impl(
             o.symbol == symbol
                 && o.long_venue == long_venue
                 && o.short_venue == short_venue
+                && match kind {
+                    // Explicit kind selects that exact row — a fixed_yield
+                    // request must never silently degrade to the 2-leg row.
+                    Some(k) => o.kind == k,
+                    // Legacy callers (no kind) must never pick up the 4-leg
+                    // row — its cost/risk profile is different.
+                    None => o.kind != "fixed_yield",
+                }
         })
         .ok_or_else(|| {
             "funding opportunity is no longer available (legs moved, books went stale, or hub is still warming)".to_string()
@@ -1386,6 +1745,49 @@ pub async fn execute_funding_carry_impl(
     // exact perp symbol. Basis: one canonical venue, long spot / short perp,
     // two distinct exact symbols. Anything else fails closed.
     let is_basis = opp.kind == "basis";
+    let is_fixed = opp.kind == "fixed_yield";
+    // Fixed-yield rows carry the two Boros YU legs inside the DTO —
+    // validate them hard before any order goes out. A malformed or stale
+    // hedge spec fails closed: the alternative is an unhedged carry the
+    // operator did not ask for.
+    let yu_legs: Vec<YuLegDto> = if is_fixed {
+        let legs = opp.yu_legs.clone().unwrap_or_default();
+        if legs.len() != 2 {
+            return Err(format!(
+                "fixed-yield opportunity carries {} YU legs, expected 2",
+                legs.len()
+            ));
+        }
+        let now = Utc::now().timestamp();
+        if legs[0].maturity_unix != legs[1].maturity_unix {
+            return Err("fixed-yield YU legs must share one maturity — refusing entry".into());
+        }
+        for leg in &legs {
+            if leg.yu_market_id == 0
+                || !leg.fixed_apr_pct.is_finite()
+                || leg.fixed_apr_pct <= 0.0
+                || leg.maturity_unix <= now
+            {
+                return Err(format!(
+                    "fixed-yield YU leg {} is malformed or matured — refusing entry",
+                    leg.yu_symbol
+                ));
+            }
+            let (want_venue, want_side) = if leg.yu_side == "long" {
+                (opp.long_venue_id.as_str(), "long")
+            } else {
+                (opp.short_venue_id.as_str(), "short")
+            };
+            if leg.venue_id != want_venue || (leg.yu_side != "long" && leg.yu_side != "short") {
+                return Err(format!(
+                    "fixed-yield YU leg {want_side} does not match its perp leg venue — refusing entry"
+                ));
+            }
+        }
+        legs
+    } else {
+        Vec::new()
+    };
     let (long_vid, short_vid) = (opp.long_venue_id.clone(), opp.short_venue_id.clone());
     let (long_sym, short_sym) = (opp.long_symbol.clone(), opp.short_symbol.clone());
     if long_vid.trim().is_empty() || short_vid.trim().is_empty() {
@@ -1427,6 +1829,17 @@ pub async fn execute_funding_carry_impl(
         .ok_or_else(|| format!("funding long leg venue '{long_vid}' is not admitted"))?;
     let short_canon = crate::state::canonical_venue_id(&short_vid)
         .ok_or_else(|| format!("funding short leg venue '{short_vid}' is not admitted"))?;
+    // Depeg gate per leg quote — a book priced in a halted stablecoin is
+    // untradeable; stable-vs-USD legs stay exempt (they ARE the depeg arb).
+    let long_quote = state.book_quote(long_canon, &long_sym);
+    let short_quote = state.book_quote(short_canon, &short_sym);
+    state
+        .stablecoin_gate(&long_sym, &long_quote)
+        .map_err(|e| format!("{long_canon}: {e}"))?;
+    state
+        .stablecoin_gate(&short_sym, &short_quote)
+        .map_err(|e| format!("{short_canon}: {e}"))?;
+
     // Root symbol for the persisted signal family: the requested perp the
     // caller scanned. Flatten scopes funding to this root and closes the
     // exact spot + perp legs beneath it.
@@ -1493,8 +1906,11 @@ pub async fn execute_funding_carry_impl(
         return Err("funding dispatch books are not priced".into());
     }
 
-    // Equal base quantity from the requested notional at the long ask.
-    let qty_f64 = trade_size_usd / long_ask_f;
+    // Equal base quantity from the requested USD notional at the long ask,
+    // converting through the quote coin's USD rate (fx_adjusted mode;
+    // parity/separate read the factor as 1.0).
+    let qty_f64 =
+        trade_size_usd / (long_ask_f * state.fx_price_factor(Some(long_canon), &long_quote));
     if !(qty_f64.is_finite() && qty_f64 > 0.0) {
         return Err("funding carry quantity is not positive".into());
     }
@@ -1694,7 +2110,13 @@ pub async fn execute_funding_carry_impl(
         Utc::now().timestamp_millis(),
         rand::random::<u32>()
     );
-    let kind_label = if is_basis { "basis" } else { "carry" };
+    let kind_label = if is_fixed {
+        "fixed-yield"
+    } else if is_basis {
+        "basis"
+    } else {
+        "carry"
+    };
     let path = format!("LONG {long_sym}@{long_canon} / SHORT {short_sym}@{short_canon}");
     let carry_note = format!(
         "funding {kind_label} {root_symbol} 2/2 legs filled, net {:.2}% APR at scan",
@@ -1779,7 +2201,9 @@ pub async fn execute_funding_carry_impl(
     // own-fill deltas against.
     let mut equity_before_by_venue = HashMap::new();
     for (vid, acc) in [(long_canon, &acc_long), (short_canon, &acc_short)] {
-        if let Ok(f) = acc.equity.to_string().parse::<f64>() {
+        let mut acc_usd = (*acc).clone();
+        state.normalize_account_usd(vid, &mut acc_usd);
+        if let Ok(f) = acc_usd.equity.to_string().parse::<f64>() {
             if f.is_finite() {
                 equity_before_by_venue.insert(format!("{env_str}-{vid}"), f);
             }
@@ -1926,6 +2350,315 @@ pub async fn execute_funding_carry_impl(
                 .update_signal_status(&signal_id, signal_status, None)
                 .map_err(|e| e.to_string())?;
 
+            // ---- Boros YU hedge legs (kind == "fixed_yield") ----
+            // The perp pair is verified open; now lock its funding via two
+            // YU legs. Failure policy: a YU leg that fills nothing means
+            // the requested lock does not exist — unwind the perp pair
+            // (emergency exits stay market) and exit any filled YU side,
+            // then fail. Partial YU fills keep the pair open with the
+            // residual floating share reported honestly.
+            let mut fixed_note = String::new();
+            if is_fixed {
+                let yu_signal_id = format!("{cycle_tag}-yu");
+                let boros_adapter: Arc<dyn ExchangeAdapter> = state.live_boros.clone();
+                // Resolve markets + sizes BEFORE persisting or dispatching —
+                // the signal ledger must carry real intended quantities,
+                // and an unresolvable market fails before any YU order.
+                let mut yu_plan: Vec<(&YuLegDto, Decimal, Decimal)> = Vec::new();
+                for leg in &yu_legs {
+                    let leg_px_f = if leg.venue_id == long_vid {
+                        long_px_f
+                    } else {
+                        short_px_f
+                    };
+                    let market = state
+                        .live_boros
+                        .market_by_id(leg.yu_market_id)
+                        .await
+                        .map_err(|e| format!("YU market {} unavailable: {e}", leg.yu_market_id))?;
+                    // YU size is denominated in the market's collateral
+                    // token — convert the perp leg's USD notional.
+                    let notional_usd = open_qty * leg_px_f;
+                    let size_yu = notional_usd / market.collateral_usd_price;
+                    let qty_dec = Decimal::from_str_exact(&size_yu.to_string())
+                        .ok()
+                        .filter(|q| *q > dec!(0))
+                        .ok_or_else(|| {
+                            format!("YU size {size_yu} for {} not positive", leg.yu_symbol)
+                        })?;
+                    // Rate bound: long YU pays fixed — cap ~2% above the
+                    // quoted ask; short YU receives fixed — floor ~2%
+                    // below the quoted bid. IOC so an unexecutable bound
+                    // never rests on the book.
+                    let rate = leg.fixed_apr_pct / 100.0;
+                    let bound = if leg.yu_side == "long" {
+                        rate * 1.02
+                    } else {
+                        rate * 0.98
+                    };
+                    let bound_dec = Decimal::from_f64_retain(bound)
+                        .ok_or_else(|| "YU rate bound not decimal-safe".to_string())?;
+                    yu_plan.push((leg, qty_dec, bound_dec));
+                }
+
+                // Sibling signal row: the pair-ledger schema is two-sided
+                // per signal, so the YU hedge persists as its own two-leg
+                // signal under the shared cycle tag (triangle precedent).
+                state
+                    .state_store
+                    .record_signal_execution(&NewSignalExecution {
+                        id: yu_signal_id.clone(),
+                        strategy_id: FUNDING_STRATEGY_ID.to_string(),
+                        symbol: root_symbol.clone(),
+                        route_id: None,
+                        expected_net_usd: opp.expected_return_usd.filter(|v| v.is_finite()),
+                        note: Some(format!(
+                            "boros YU hedge for {signal_id} (fixed yield to maturity)"
+                        )),
+                        legs: yu_plan
+                            .iter()
+                            .map(|(l, qty, bound)| NewSignalLeg {
+                                account_id: account_for("boros"),
+                                venue: "boros".to_string(),
+                                side: if l.yu_side == "long" {
+                                    LegSide::Long
+                                } else {
+                                    LegSide::Short
+                                },
+                                symbol: Some(l.yu_symbol.clone()),
+                                intended_qty: qty.to_string().parse::<f64>().unwrap_or(0.0),
+                                intended_price: Some(
+                                    bound.to_string().parse::<f64>().unwrap_or(0.0),
+                                ),
+                            })
+                            .collect(),
+                    })
+                    .map_err(|e| format!("Failed to persist YU hedge signal record: {e}"))?;
+
+                let mut yu_fills: Vec<(crate::state_store::LegSide, OrderResponse)> = Vec::new();
+                let mut yu_fatal: Option<String> = None;
+                for (leg, qty_dec, bound_dec) in &yu_plan {
+                    let side = if leg.yu_side == "long" {
+                        Side::Buy
+                    } else {
+                        Side::Sell
+                    };
+                    let req = OrderRequest::new_ioc(
+                        VenueId::from("boros"),
+                        format!("BOROS-{}", leg.yu_market_id),
+                        side,
+                        *bound_dec,
+                        *qty_dec,
+                    );
+                    let step = async {
+                        let mut resp = boros_adapter
+                            .place_order(req)
+                            .await
+                            .map_err(|e| format!("YU order on {} rejected: {e}", leg.yu_symbol))?;
+                        // Settle to terminal via venue truth — a submission
+                        // ack is never a fill.
+                        for _ in 0..8 {
+                            if resp.status.is_final() {
+                                break;
+                            }
+                            tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+                            match boros_adapter
+                                .fetch_order(
+                                    &format!("BOROS-{}", leg.yu_market_id),
+                                    &resp.order_id,
+                                    None,
+                                )
+                                .await
+                            {
+                                Ok(polled) => resp = polled,
+                                Err(_) => continue,
+                            }
+                        }
+                        Ok::<OrderResponse, String>(resp)
+                    }
+                    .await;
+                    match step {
+                        Ok(resp) => {
+                            let side = if leg.yu_side == "long" {
+                                crate::state_store::LegSide::Long
+                            } else {
+                                crate::state_store::LegSide::Short
+                            };
+                            if resp.filled_qty <= dec!(0) && resp.status.is_final() {
+                                yu_fatal = Some(format!(
+                                    "YU leg {} filled nothing ({:?})",
+                                    leg.yu_symbol, resp.status
+                                ));
+                                yu_fills.push((side, resp));
+                                break;
+                            }
+                            if !resp.status.is_final() && resp.filled_qty <= dec!(0) {
+                                // An order that never reached a terminal
+                                // state AND shows no fill is unverifiable —
+                                // stop rather than stack a second YU leg on
+                                // top. A PartiallyFilled order has proven
+                                // fills and proceeds (marked Imbalanced).
+                                yu_fatal = Some(format!(
+                                    "YU leg {} order {} never resolved ({:?}, zero fills) — refusing to stack the second leg",
+                                    leg.yu_symbol, resp.order_id, resp.status
+                                ));
+                                yu_fills.push((side, resp));
+                                break;
+                            }
+                            yu_fills.push((side, resp));
+                        }
+                        Err(e) => {
+                            yu_fatal = Some(e);
+                            break;
+                        }
+                    }
+                }
+
+                // Persist every accepted YU order id + fill on the sibling
+                // signal before deciding the outcome — reconciliation reads
+                // these rows on any path, including failure.
+                for (side, fill) in &yu_fills {
+                    if !fill.order_id.is_empty() {
+                        let _ = state.state_store.record_leg_order_id(
+                            &yu_signal_id,
+                            *side,
+                            fill.order_id.as_str(),
+                            None,
+                        );
+                    }
+                    let filled = fill.filled_qty.to_string().parse::<f64>().unwrap_or(0.0);
+                    let px = fill
+                        .avg_fill_price
+                        .and_then(|p| p.to_string().parse::<f64>().ok())
+                        .unwrap_or(0.0);
+                    if filled > 0.0 && px > 0.0 {
+                        let fee = fill.fee.to_string().parse::<f64>().unwrap_or(0.0);
+                        let _ = state.state_store.apply_leg_fill(
+                            &yu_signal_id,
+                            *side,
+                            filled,
+                            px,
+                            fee,
+                            Some(fill.order_id.as_str()),
+                        );
+                    }
+                }
+
+                if let Some(fatal) = yu_fatal {
+                    // The requested fixed lock cannot be assembled — return
+                    // to flat. Perp unwind is a market emergency exit per
+                    // leg; any filled YU side is exited the same way.
+                    let mut unwind_errors: Vec<String> = Vec::new();
+                    if let Err(e) =
+                        arbitrageur_execution::emergency_unwind::EmergencyUnwindHandler::unwind_leg(
+                            &long_adapter,
+                            &long_sym,
+                            Side::Buy,
+                            Decimal::from_str_exact(&open_qty.to_string()).unwrap_or(dec!(0)),
+                        )
+                        .await
+                    {
+                        unwind_errors.push(format!("long perp unwind: {e}"));
+                    }
+                    if let Err(e) =
+                        arbitrageur_execution::emergency_unwind::EmergencyUnwindHandler::unwind_leg(
+                            &short_adapter,
+                            &short_sym,
+                            Side::Sell,
+                            Decimal::from_str_exact(&open_qty.to_string()).unwrap_or(dec!(0)),
+                        )
+                        .await
+                    {
+                        unwind_errors.push(format!("short perp unwind: {e}"));
+                    }
+                    for (side, fill) in &yu_fills {
+                        if fill.filled_qty > dec!(0) {
+                            // Emergency exit: Boros has no market order —
+                            // IOC with a wide bound is the equivalent. A
+                            // long-YU exit sells (rate floor: 50% below
+                            // entry); a short-YU exit buys (cap: 50%
+                            // above entry). Never bound an unwind at the
+                            // entry rate — a moved market must still exit.
+                            let exit_side = if *side == crate::state_store::LegSide::Long {
+                                Side::Sell
+                            } else {
+                                Side::Buy
+                            };
+                            let entry_rate = fill.avg_fill_price.unwrap_or(dec!(0.05));
+                            let bound = if exit_side == Side::Sell {
+                                entry_rate * dec!(0.5)
+                            } else {
+                                entry_rate * dec!(1.5)
+                            };
+                            let req = OrderRequest::new_ioc(
+                                VenueId::from("boros"),
+                                fill.symbol.clone(),
+                                exit_side,
+                                bound,
+                                fill.filled_qty,
+                            );
+                            if let Err(e) = boros_adapter.place_order(req).await {
+                                unwind_errors.push(format!("YU exit {}: {e}", fill.symbol));
+                            }
+                        }
+                    }
+                    let _ = state.state_store.update_signal_status(
+                        &yu_signal_id,
+                        crate::state_store::SignalStatus::Failed,
+                        Some(&fatal),
+                    );
+                    let _ = state.state_store.update_signal_status(
+                        &signal_id,
+                        crate::state_store::SignalStatus::Failed,
+                        Some(&format!("fixed-yield hedge failed: {fatal}")),
+                    );
+                    if !unwind_errors.is_empty() {
+                        if !state.circuit_breaker.is_tripped() {
+                            state
+                                .circuit_breaker
+                                .trip("Unresolved exposure: fixed-yield unwind incomplete");
+                        }
+                        return Err(format!(
+                            "UNRESOLVED EXPOSURE — fixed-yield hedge failed ({fatal}) and unwind incomplete: {}",
+                            unwind_errors.join("; ")
+                        ));
+                    }
+                    return Err(format!(
+                        "fixed-yield hedge failed ({fatal}); perp pair unwound to flat"
+                    ));
+                }
+
+                // Both YU legs submitted; reconcile the sibling signal.
+                // Equal filled sizes → Balanced (fully locked). A partial
+                // side leaves an honest Imbalanced marker — the residual
+                // funding stays floating.
+                let yu_status = if yu_fills.len() == 2 {
+                    reconcile_signal_legs(
+                        state,
+                        &yu_signal_id,
+                        [
+                            (yu_fills[0].0, &yu_fills[0].1),
+                            (yu_fills[1].0, &yu_fills[1].1),
+                        ],
+                    )
+                    .unwrap_or(crate::state_store::SignalStatus::Imbalanced)
+                } else {
+                    crate::state_store::SignalStatus::Imbalanced
+                };
+                let _ = state
+                    .state_store
+                    .update_signal_status(&yu_signal_id, yu_status, None);
+                let partial = yu_fills
+                    .iter()
+                    .any(|(_, f)| f.remaining_qty > dec!(0) || f.status != OrderStatus::Filled);
+                fixed_note = if yu_status == crate::state_store::SignalStatus::Balanced && !partial
+                {
+                    " + Boros YU hedge locked (2/2 filled)".to_string()
+                } else {
+                    format!(" + Boros YU hedge PARTIAL ({yu_status:?}) — residual funding stays floating")
+                };
+            }
+
             // Open the attributed ledger lot so the eventual flatten can
             // realize PnL and resolve this signal's entry predictions —
             // without it close_flattened_spatial_lot finds no funding_rate
@@ -1970,7 +2703,7 @@ pub async fn execute_funding_carry_impl(
                 net_profit: attempt_pnl_f,
                 latency_us,
                 note: format!(
-                    "{trim_note}Funding {kind_label} opened {open_qty} {root_symbol}: {path} at {long_px_f}/{short_px_f}; {carry_note}"
+                    "{trim_note}Funding {kind_label} opened {open_qty} {root_symbol}: {path} at {long_px_f}/{short_px_f}; {carry_note}{fixed_note}"
                 ),
                 direction: Some(path.clone()),
                 trigger_spread_bps: Some(net_bps),
@@ -1995,7 +2728,7 @@ pub async fn execute_funding_carry_impl(
                 realized_profit_usd: attempt_pnl_f,
                 total_cumulative_pnl_usd: total_f,
                 message: format!(
-                    "{trim_note}Funding {kind_label} dispatched on {root_symbol} ({path}): 2/2 legs filled {open_qty} (LONG {long_sym} / SHORT {short_sym}), realized P&L ${attempt_pnl_f:.2}; carry position open — flatten {root_symbol} to unwind"
+                    "{trim_note}Funding {kind_label} dispatched on {root_symbol} ({path}): 2/2 legs filled {open_qty} (LONG {long_sym} / SHORT {short_sym}), realized P&L ${attempt_pnl_f:.2}; carry position open — flatten {root_symbol} to unwind{fixed_note}"
                 ),
             })
         }
@@ -2193,6 +2926,7 @@ pub async fn execute_funding_carry(
     short_venue: String,
     trade_size_usd: f64,
     auto: Option<bool>,
+    kind: Option<String>,
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<SimStepResultDto, String> {
     match execute_funding_carry_impl(
@@ -2202,6 +2936,7 @@ pub async fn execute_funding_carry(
         trade_size_usd,
         &state,
         auto.unwrap_or(false),
+        kind.as_deref(),
     )
     .await
     {
@@ -2218,5 +2953,180 @@ pub async fn execute_funding_carry(
             );
             Err(e)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arbitrageur_exchanges::BorosYuMarket;
+
+    fn yu_mkt(
+        market_id: u64,
+        platform: &str,
+        asset: &str,
+        maturity: i64,
+        bid: f64,
+        ask: f64,
+    ) -> BorosYuMarket {
+        BorosYuMarket {
+            market_id,
+            token_id: 3,
+            symbol: format!("{}-{}USDT-TEST", platform.to_uppercase(), asset),
+            platform: platform.to_string(),
+            asset: asset.to_string(),
+            maturity_unix: maturity,
+            tick_step: 2,
+            mid_apr: (bid + ask) / 2.0,
+            best_bid_apr: Some(bid),
+            best_ask_apr: Some(ask),
+            floating_apr: 0.05,
+            notional_oi_usd: 500_000.0,
+            taker_fee_rate: 0.0005,
+            payment_period_secs: 28800,
+            max_leverage: 3.0,
+            collateral_symbol: "USDT".to_string(),
+            collateral_usd_price: 1.0,
+        }
+    }
+
+    fn snap(markets: Vec<BorosYuMarket>) -> Option<(Arc<Vec<BorosYuMarket>>, f64)> {
+        Some((Arc::new(markets), 0.10))
+    }
+
+    /// A carry pair whose venues both host same-asset Boros markets at a
+    /// shared maturity emits one `fixed_yield` row carrying both YU legs.
+    #[test]
+    fn fixed_yield_variant_emits_when_markets_align() {
+        let state = AppEngineState::new();
+        let mat = Utc::now().timestamp() + 30 * 86_400;
+        // Long perp on Binance → LONG YU pays the Binance ask (3%);
+        // short perp on Hyperliquid → SHORT YU receives the HL bid (8%).
+        // Locked spread = 0.08 − 0.03 = 5% for 30 days: $50k × 5% ×
+        // 30/365 ≈ $205 gross vs ≈$100 all-in leg costs → profitable.
+        let yu = snap(vec![
+            yu_mkt(11, "Binance", "BTC", mat, 0.029, 0.030),
+            yu_mkt(22, "Hyperliquid", "BTC", mat, 0.080, 0.081),
+        ]);
+        let row = boros_fixed_yield_variant(
+            &state,
+            &yu,
+            "BTC-USDC",
+            "Binance",
+            "Hyperliquid",
+            "binance",
+            "hyperliquid",
+            50_000.0,
+            8.0,
+            Some(2.0),
+            50_000.0,
+        )
+        .expect("aligned markets emit a fixed-yield row");
+        assert_eq!(row.kind, "fixed_yield");
+        assert_eq!(row.id, "BTC-USDC-Binance-Hyperliquid-FIXED");
+        let legs = row.yu_legs.expect("two YU legs recorded");
+        assert_eq!(legs.len(), 2);
+        assert_eq!(legs[0].yu_side, "long");
+        assert_eq!(legs[0].yu_market_id, 11);
+        assert_eq!(legs[1].yu_side, "short");
+        assert_eq!(legs[1].yu_market_id, 22);
+        assert!(row.fixed_apr_pct.unwrap() > 0.0);
+        assert!(row.boros_margin_usd.unwrap() > 0.0);
+        assert_eq!(row.lock_until_ms, Some(mat * 1000));
+    }
+
+    /// Mismatched maturities leave a residual floating window — no row.
+    #[test]
+    fn fixed_yield_variant_rejects_maturity_mismatch() {
+        let state = AppEngineState::new();
+        let mat = Utc::now().timestamp() + 7 * 86_400;
+        let yu = snap(vec![
+            yu_mkt(11, "Binance", "BTC", mat, 0.029, 0.030),
+            yu_mkt(22, "Hyperliquid", "BTC", mat + 14 * 86_400, 0.080, 0.081),
+        ]);
+        assert!(boros_fixed_yield_variant(
+            &state,
+            &yu,
+            "BTC-USDC",
+            "Binance",
+            "Hyperliquid",
+            "binance",
+            "hyperliquid",
+            5_000.0,
+            8.0,
+            Some(2.0),
+            5_000.0,
+        )
+        .is_none());
+    }
+
+    /// A locked spread that cannot cover four legs' costs emits nothing.
+    #[test]
+    fn fixed_yield_variant_rejects_unprofitable_spread() {
+        let state = AppEngineState::new();
+        let mat = Utc::now().timestamp() + 2 * 86_400; // short lock too
+        let yu = snap(vec![
+            yu_mkt(11, "Binance", "BTC", mat, 0.029, 0.030),
+            yu_mkt(22, "Hyperliquid", "BTC", mat, 0.0305, 0.031), // ~5bps edge
+        ]);
+        assert!(boros_fixed_yield_variant(
+            &state,
+            &yu,
+            "BTC-USDC",
+            "Binance",
+            "Hyperliquid",
+            "binance",
+            "hyperliquid",
+            5_000.0,
+            8.0,
+            Some(2.0),
+            5_000.0,
+        )
+        .is_none());
+    }
+
+    /// A venue with no admitted Boros market (Gate) pairs fail closed.
+    #[test]
+    fn fixed_yield_variant_rejects_unmapped_platform() {
+        let state = AppEngineState::new();
+        let mat = Utc::now().timestamp() + 7 * 86_400;
+        let yu = snap(vec![
+            yu_mkt(11, "Gate", "BTC", mat, 0.029, 0.030),
+            yu_mkt(22, "Hyperliquid", "BTC", mat, 0.080, 0.081),
+        ]);
+        assert!(boros_fixed_yield_variant(
+            &state,
+            &yu,
+            "BTC-USDC",
+            "Gate",
+            "Hyperliquid",
+            "gate",
+            "hyperliquid",
+            5_000.0,
+            8.0,
+            Some(2.0),
+            5_000.0,
+        )
+        .is_none());
+    }
+
+    /// No Boros snapshot (public API down) → no rows, scan unaffected.
+    #[test]
+    fn fixed_yield_variant_fail_open_without_snapshot() {
+        let state = AppEngineState::new();
+        assert!(boros_fixed_yield_variant(
+            &state,
+            &None,
+            "BTC-USDC",
+            "Binance",
+            "Hyperliquid",
+            "binance",
+            "hyperliquid",
+            5_000.0,
+            8.0,
+            Some(2.0),
+            5_000.0,
+        )
+        .is_none());
     }
 }

@@ -25,10 +25,10 @@ test("WINDOW_SECONDS and getVenueFeeBps return expected configurations", () => {
   assert.equal(WINDOW_SECONDS["5m"], 300);
   assert.equal(WINDOW_SECONDS["15m"], 900);
 
-  assert.equal(getVenueFeeBps("hyperliquid"), 2.0);
+  assert.equal(getVenueFeeBps("hyperliquid"), 4.5);
   assert.equal(getVenueFeeBps("lighter"), 1.5);
-  assert.equal(getVenueFeeBps("vanta"), 3.0);
-  assert.equal(getVenueFeeBps("robinhood"), 2.5);
+  assert.equal(getVenueFeeBps("vanta"), 4.0);
+  assert.equal(getVenueFeeBps("robinhood"), 4.0);
 });
 
 test("RollingSpreadTracker tracks rolling observations and computes sliding window delta", () => {
@@ -129,8 +129,8 @@ test("buildCrossVenueMatrix produces real 2D matrix with deductions and sliding 
   // Gross spread BPS = (64230 - 64202) / 64202 * 10000 = 28 / 64202 * 10000 ≈ 4.36 BPS
   assert.ok(cell01.grossSpreadBps > 4.0);
 
-  // Roundtrip fees: (HL (2.0) + LGT (1.5)) * 2 = 7.0 BPS
-  assert.equal(cell01.feeBps, 7.0);
+  // Roundtrip fees: (HL (4.5) + LGT (1.5)) * 2 = 12.0 BPS
+  assert.equal(cell01.feeBps, 12.0);
 
   // Closing spread friction: buySpread (0.31) + sellSpread (0.31) = 0.62 BPS
   assert.ok(cell01.closingFrictionBps > 0.5);
@@ -371,10 +371,10 @@ test("buildCrossVenueMatrix incorporates target profit, nominal hurdle, and Doub
 
   const cell01 = resSingle.grid[0][1];
   assert.equal(cell01.targetProfitBps, 6.0);
-  // feeBps = 2 * (HL 2.0 + LGT 1.5) = 7.0
+  // feeBps = 2 * (HL 4.5 + LGT 1.5) = 12.0
   // closingFrictionBps ≈ 2.94 + 2.93 ≈ 5.87
-  // nominalHurdle = 7.0 + 5.87 + 6.0 = 18.87
-  assert.ok(cell01.nominalHurdleBps !== undefined && cell01.nominalHurdleBps > 18.0);
+  // nominalHurdle = 12.0 + 5.87 + 6.0 = 23.87
+  assert.ok(cell01.nominalHurdleBps !== undefined && cell01.nominalHurdleBps > 23.0);
 
   // Test 2: Double-Way Mode with open position (units = 1) and spread converged (tight books)
   const tightBooks: VenueOrderBookDto[] = [

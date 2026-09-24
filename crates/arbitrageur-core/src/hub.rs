@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::broadcast;
@@ -63,6 +63,17 @@ fn normalize_symbol_key(symbol: &str) -> String {
     crate::symbol::canonical_base(symbol)
 }
 
+/// Mode-aware hub key: under the `separate` USD-quote policy a quoted
+/// instrument keeps its quote in the slot key ("BTC-USDT" ≠ "BTC-USDC");
+/// merged modes collapse to the canonical base exactly as before.
+fn hub_key(symbol: &str, merge_usd: bool) -> String {
+    if merge_usd {
+        normalize_symbol_key(symbol)
+    } else {
+        crate::symbol::pair_key(symbol, false)
+    }
+}
+
 /// Centralized Market Data Hub (Ticker Plant).
 ///
 /// Implements the Single Ingestion -> Synchronized In-Memory Cache -> Pub/Sub Broadcast
@@ -75,9 +86,22 @@ pub struct MarketDataHub {
     sequence_counter: AtomicU64,
     broadcaster: broadcast::Sender<MarketUpdateEvent>,
     default_ttl: Duration,
+    /// USD-quote policy for slot keys: `false` (the `separate` mode) keeps
+    /// BASE-QUOTE identity per slot so quote variants never share a book.
+    merge_usd_quotes: AtomicBool,
 }
 
 impl MarketDataHub {
+    /// Switch the USD-quote slot policy. Called when the engine's
+    /// `usd_quote_mode` changes; slots written under the other policy stop
+    /// resolving (a miss is fail-closed — callers fall back to REST).
+    pub fn set_merge_usd_quotes(&self, merge: bool) {
+        self.merge_usd_quotes.store(merge, Ordering::SeqCst);
+    }
+
+    fn merge_usd(&self) -> bool {
+        self.merge_usd_quotes.load(Ordering::SeqCst)
+    }
     /// Initialize a new MarketDataHub with a given broadcast channel capacity and cache TTL.
     pub fn new(broadcast_capacity: usize, default_ttl_ms: u64) -> Arc<Self> {
         let (tx, _rx) = broadcast::channel(broadcast_capacity.max(256));
@@ -87,6 +111,7 @@ impl MarketDataHub {
             sequence_counter: AtomicU64::new(1),
             broadcaster: tx,
             default_ttl: Duration::from_millis(default_ttl_ms),
+            merge_usd_quotes: AtomicBool::new(true),
         })
     }
 
@@ -142,7 +167,7 @@ impl MarketDataHub {
         // normalized base so WS ("ETH") and REST ("ETH-USDC") spellings
         // share one slot.
         {
-            let key = (book.venue.clone(), normalize_symbol_key(&book.symbol));
+            let key = (book.venue.clone(), hub_key(&book.symbol, self.merge_usd()));
             let mut lock = self.orderbooks.write();
             lock.insert(
                 key,
@@ -170,7 +195,10 @@ impl MarketDataHub {
     /// Store a newly ingested funding rate.
     pub fn update_funding(&self, funding: FundingRate) {
         let now = Instant::now();
-        let key = (funding.venue.clone(), normalize_symbol_key(&funding.symbol));
+        let key = (
+            funding.venue.clone(),
+            hub_key(&funding.symbol, self.merge_usd()),
+        );
         let mut lock = self.funding_rates.write();
         lock.insert(
             key,
@@ -183,7 +211,7 @@ impl MarketDataHub {
 
     /// Retrieve the latest cached orderbook for a specific venue and symbol.
     pub fn get_orderbook(&self, venue: &VenueId, symbol: &str) -> Option<OrderBook> {
-        let key = (venue.clone(), normalize_symbol_key(symbol));
+        let key = (venue.clone(), hub_key(symbol, self.merge_usd()));
         let lock = self.orderbooks.read();
         lock.get(&key).map(|c| c.book.clone())
     }
@@ -196,7 +224,7 @@ impl MarketDataHub {
         max_age: Option<Duration>,
     ) -> Option<OrderBook> {
         let max_age = max_age.unwrap_or(self.default_ttl);
-        let key = (venue.clone(), normalize_symbol_key(symbol));
+        let key = (venue.clone(), hub_key(symbol, self.merge_usd()));
         let lock = self.orderbooks.read();
         if let Some(cached) = lock.get(&key) {
             if cached.received_at.elapsed() <= max_age {
@@ -225,7 +253,7 @@ impl MarketDataHub {
         max_age: Option<Duration>,
     ) -> Option<OrderBook> {
         let max_age = max_age.unwrap_or(self.default_ttl);
-        let key = (venue.clone(), normalize_symbol_key(symbol));
+        let key = (venue.clone(), hub_key(symbol, self.merge_usd()));
         let lock = self.orderbooks.read();
         if let Some(cached) = lock.get(&key) {
             if cached.source == BookSource::Ws && cached.received_at.elapsed() <= max_age {
@@ -242,7 +270,7 @@ impl MarketDataHub {
         max_age: Option<Duration>,
     ) -> Vec<(VenueId, OrderBook)> {
         let max_age = max_age.unwrap_or(self.default_ttl);
-        let wanted = normalize_symbol_key(symbol);
+        let wanted = hub_key(symbol, self.merge_usd());
         let lock = self.orderbooks.read();
         let mut results = Vec::new();
 
@@ -263,7 +291,7 @@ impl MarketDataHub {
         max_age: Option<Duration>,
     ) -> Option<FundingRate> {
         let max_age = max_age.unwrap_or(self.default_ttl * 10);
-        let key = (venue.clone(), normalize_symbol_key(symbol));
+        let key = (venue.clone(), hub_key(symbol, self.merge_usd()));
         let lock = self.funding_rates.read();
         if let Some(cached) = lock.get(&key) {
             if cached.received_at.elapsed() <= max_age {

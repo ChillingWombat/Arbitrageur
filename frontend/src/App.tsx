@@ -692,7 +692,7 @@ export const App: React.FC = () => {
       } catch {
         /* balance lookup failed — fall back to the configured trade size */
       }
-      await api.executeFundingCarry(opp.symbol, opp.long_venue, opp.short_venue, size, auto);
+      await api.executeFundingCarry(opp.symbol, opp.long_venue, opp.short_venue, size, auto, opp.kind);
       await refreshAllData();
     },
     [refreshAllData],

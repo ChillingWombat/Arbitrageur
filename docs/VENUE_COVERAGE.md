@@ -64,7 +64,7 @@ out of scope (this engine's strategy venues are DEX/hybrid first).
 | 34 | BloFin | CEX | cex | yes | excluded-cex |
 | 35 | BULK | perp DEX (early) | med | API docs thin; endpoint serves unrelated page | excluded-unverified |
 | 36 | Bitfinex | CEX | cex | yes | excluded-cex |
-| 37 | EVEDEX | perp DEX | med | `api.evedex.com` DNS-fails | excluded-dead |
+| 37 | EVEDEX | perp DEX | med | SIWE→JWT auth (`auth-api.evedex.com`) + EIP-712 order sigs on Arbitrum One (`exchange-api.evedex.com`) | added (`evedex`) — trading implemented |
 | 38 | KCEX | CEX | cex | yes | excluded-cex |
 | 39 | Hotcoin | CEX | cex | yes | excluded-cex |
 | 40 | Zoomex | CEX | cex | yes | excluded-cex |
@@ -73,37 +73,37 @@ out of scope (this engine's strategy venues are DEX/hybrid first).
 
 | CG rank | Venue | Custody | API / agent-wallet trading? | Verdict |
 | --- | --- | --- | --- | --- |
-| 41 | edgeX | med (StarkEx-style L2) | REST market data + HMAC auth; orders need Stark L2 sig; **depth is WS-only (REST returns empty)** | added (`edgex`) — markets live; book/funding + trading fail closed pending WS-depth & Stark signing |
+| 41 | edgeX | med (StarkEx-style L2) | Perp V2 REST on `edgex-prod-v2.edgex.exchange`: HMAC api-key auth + EIP-712 `LimitOrderParams` order sigs (secp256k1 — no Stark curve) | added (`edgex`) — trading implemented |
 | 43 | GRVT | low (ZKsync hyperchain, trustless orders) | REST + session cookie + EIP-712 order sig | added (`grvt`) — trading implemented |
 | 44 | Robinhood Chain Lighter | low | same rails as `lighter` | supported (`robinhood` = Lighter adapter) |
 | 45 | Antarctic | med | no verified public API | excluded-unverified |
-| 48 | QFEX | med (6-person team) | `/refdata` live; books auth-gated | added (`qfex`) — markets only, caution flag |
+| 48 | QFEX | med (6-person team) | API-key HMAC REST + authenticated trade WS order entry | added (`qfex`) — trading implemented |
 | 50 | GMX V2 (Solana) | low | contract calls only, no orderbook | excluded-no-orderbook (AMM pricing) |
-| 51 | Extended | low | REST + Stark signature orders | added (`extended`) — market data live; trading fail-closed pending Stark signing |
+| 51 | Extended | low | REST + SNIP-12 Poseidon `Order` signature + X-Api-Key | added (`extended`) — trading implemented (Stark-curve signing ported from the official X10 fast_stark_crypto spec, verified against its test vectors) |
 | 52 | Ostium | **high** — ~$18M oracle exploit, paused | onchain only | excluded-exploit |
 | 54 | ApeX Omni | low (zkLink settle) | REST + apiKey HMAC + zkLink L2 sig | added (`apex`) — market data live; trading fail-closed pending zkLink signing |
 | 55 | SoDEX | med | parked domain | excluded-dead |
 | 56 | Pacifica | med (ex-FTX team) | REST + ed25519-signed ops | added (`pacifica`) — trading implemented |
 | 58 | AlphaX | **high** (no PoR) | parked domain | excluded-dead |
 | 60 | Derive | low | REST + `X-Lyra*` auth + EIP-712 Action sig | added (`derive`) — trading implemented |
-| 61 | Nado | med | no public API found | excluded-no-api |
+| 61 | Nado | med | Ink L2 gateway (Vertex-style sequencer) + EIP-712 orders; linked signers supported | added (`nado`) — trading implemented |
 | 62 | Ondo Perps | med | full REST (SIWE→JWT→orders) | added (`ondoperps`) — trading implemented |
 | 63 | IO Trader | med | parked domain | excluded-dead |
 | 64 | Orderly (Derivatives) | low | same rails as `vanta` | supported (`vanta`) — dedup: one Orderly venue |
-| 65 | Vest Exchange | med | Cloudflare-530s | excluded-dead |
+| 65 | Vest Markets (prev. Vest Exchange) | med | rebranded → `server-prod.hz.vestmarkets.com/v2`; delegate-signer (agent wallet) + X-API-KEY | added (`vest`) — trading implemented |
 | 69 | StandX | med | REST + wallet-sig JWT + ed25519 body sig | added (`standx`) — trading implemented |
 | 70 | RISEx | med | no live mainnet | excluded-unverified |
-| 72 | dYdX Chain | low | indexer reads + cosmos-tx writes | added (`dydx`) — market data live; trading fail-closed pending cosmos signer |
+| 72 | dYdX Chain | low | indexer reads + cosmos-tx writes | added (`dydx`) — trading implemented (official `dydx` gRPC client, mnemonic credential) |
 | 73 | Niza.fun | med | no futures product found | excluded-dead |
 | 74 | Arcus | med | research venue | supported (`arcus`, scaffold) |
 | 75 | Flipster | CEX-hybrid | yes | excluded-cex |
 | 76 | GMX V2 (Arbitrum) | low | contract only, no orderbook | excluded-no-orderbook |
-| 77 | Paradex | low | REST + Stark SNIP-12 sig + JWT | added (`paradex`) — market data live; trading fail-closed pending Stark signing |
+| 77 | Paradex | low | REST + Stark SNIP-12 sig + JWT; L2 key derived from EVM key (paradex-rs crate) | added (`paradex`) — trading implemented |
 | 79 | Astros | low | DeepBook onchain, no REST | excluded-no-api |
 | 80 | Aevo | med | REST + AEVO-KEY/SECRET + EIP-712 order sig | added (`aevo`) — trading implemented |
 | 82 | Gate DEX | med | DNS/endpoint unverified | excluded-unverified |
 | 83 | Decibel | low | REST + Aptos-signed txs | supported (`decibel`) |
-| 85 | Helix (Injective) | low | chain LCD reads live; orders need injective-chain sig | added (`helix`) — markets/book live; funding + trading fail-closed |
+| 85 | Helix (Injective) | low | Cosmos txs (keccak SignDoc) via LCD broadcast + indexer gRPC truth | added (`helix`) — trading implemented |
 | 89 | Katana Perps | med | app shell only, no public API | excluded-unverified |
 | 90 | Synthetix | low | API root unresolvable; frontend-only | excluded-unverified |
 | 92 | SynFutures | low | contract calls + auth-gated REST | excluded-contract-only (EVM wallet path possible — tracked) |
@@ -118,14 +118,35 @@ out of scope (this engine's strategy venues are DEX/hybrid first).
 - **Already supported**: Hyperliquid, Lighter (+Robinhood deployment), Aster,
   Vanta/Orderly, PopDEX, Decibel, Arcus (scaffold).
 - **Added this pass** (`dex_perps.rs`, wired into `state.rs` via account
-  enablement): `pacifica`, `ondoperps`, `standx`, `derive`, `grvt`, `aevo`
-  (full REST trading implemented — credentials still required before
+  enablement): `pacifica`, `ondoperps`, `standx`, `derive`, `grvt`, `aevo`,
+  `vest` (delegate-signer + X-API-KEY on vestmarkets.com), `qfex`
+  (HMAC REST + authed trade WS), `nado` (EIP-712 orders on Ink L2 gateway),
+  `evedex` (SIWE→JWT + EIP-712 orders on Arbitrum One),
+  `paradex` (Stark L2 key derivation + SNIP-12 orders via paradex-rs),
+  `edgex` (HMAC api trio + EIP-712 `LimitOrderParams` orders on the
+  Perp V2 host),
+  `extended` (X-Api-Key + SNIP-12 Poseidon `Order` signatures on the
+  StarkEx engine — signing ported from the official X10 Rust crypto and
+  verified against its shipped test vectors),
+  `dydx` (Cosmos-chain `MsgPlaceOrder`/`MsgCancelOrder` signed and
+  broadcast via the official `dydx` gRPC client — credential is the
+  account's 24-word BIP-39 mnemonic; indexer `/v4/orders` is order truth),
+  `helix` (Injective v2 derivative msgs — `MsgCreateDerivative*Order`/
+  `MsgCancelDerivativeOrder` as Cosmos txs signed keccak/`ethsecp256k1`
+  over `SignDoc`, broadcast on the chain LCD; indexer gRPC `OrdersHistory`
+  is order truth; credential is the account's own EVM private key)
+  (full trading implemented — credentials still required before
   `has_live_credentials()` opens order paths);
-  `edgex`, `extended`, `paradex`, `apex`, `dydx`, `helix`, `gmx`,
-  `qfex`, `vest`, `antarctic`, `evedex`, `bulk`, `ostium`, `sodex`,
-  `alphax`, `nado`, `iotrader`, `niza`, `astros`, `gatedex`
+  `apex`, `gmx`,
+  `antarctic`, `bulk`, `ostium`, `sodex`,
+  `alphax`, `iotrader`, `niza`, `astros`, `gatedex`
   (market data live; order paths fail closed — see CAPABILITIES.md for the
   exact per-venue capability bits).
+- **Hedge venue**: `boros` (Pendle Boros, Arbitrum — YU fixed-rate swaps
+  over Binance/Hyperliquid/OKX/Lighter funding; agent-key EIP-712
+  `PendleSignTx` via calldata-builder + `/v1/send-txs/bulk-calls`; not a
+  perp venue — it powers the funding strategy's 4-leg `fixed_yield`
+  variant only. See EXCHANGES.md §13).
 - **Excluded**: every centralized futures venue (custody + out of scope),
   Variational (RFQ/no orderbook), KiloEx / SynFutures / SparkDEX
   (contract-only swap UX, no CLOB REST), Orderly-derivative listings

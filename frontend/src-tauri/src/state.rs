@@ -2,9 +2,9 @@ use crate::vault::ExchangeCredentials;
 use arbitrageur_core::hub::MarketDataHub;
 use arbitrageur_core::position::AccountSnapshot;
 use arbitrageur_core::types::{dec, Decimal};
-use arbitrageur_exchanges::arcus::ArcusAdapter;
 use arbitrageur_exchanges::aster::AsterAdapter;
 use arbitrageur_exchanges::binance::BinanceAdapter;
+use arbitrageur_exchanges::boros::{BorosAdapter, BorosYuMarket};
 use arbitrageur_exchanges::coinbase::CoinbaseAdapter;
 use arbitrageur_exchanges::decibel::DecibelAdapter;
 use arbitrageur_exchanges::dex_perps::{DexPerpAdapter, ADMITTED_DEX_PERP_VENUE_IDS};
@@ -16,7 +16,6 @@ use arbitrageur_exchanges::kraken::KrakenAdapter;
 use arbitrageur_exchanges::lighter::LighterAdapter;
 use arbitrageur_exchanges::okx::OkxAdapter;
 use arbitrageur_exchanges::popdex::PopDexAdapter;
-use arbitrageur_exchanges::prediction::{KalshiAdapter, PolymarketAdapter};
 use arbitrageur_exchanges::vanta::VantaAdapter;
 use arbitrageur_execution::coordinator::AtomicArbitrageCoordinator;
 use arbitrageur_execution::passive_unwind::PassiveUnwindConfig;
@@ -100,6 +99,9 @@ struct EnvCredentials {
     popdex_agent: Option<String>,
     dex_perp: std::collections::HashMap<&'static str, ExchangeCredentials>,
     evm_amm: std::collections::HashMap<&'static str, ExchangeCredentials>,
+    /// Pendle Boros agent credentials: private_key = agent key,
+    /// wallet_address = root account, account_id = sub-account.
+    boros: Option<ExchangeCredentials>,
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -371,6 +373,15 @@ fn default_funding_max_entry_spread() -> f64 {
 fn default_min_depth_ratio() -> f64 {
     3.0
 }
+fn default_usd_quote_mode() -> String {
+    crate::stablecoin_fx::USD_QUOTE_MODE_FX_ADJUSTED.into()
+}
+fn default_stablecoin_warn_bps() -> f64 {
+    50.0
+}
+fn default_stablecoin_halt_bps() -> f64 {
+    100.0
+}
 fn default_triangle_trade_size() -> f64 {
     10000.0
 }
@@ -558,6 +569,20 @@ pub struct EngineSettingsDto {
     pub trading_mode: String, // "testnet" or "live" (legacy "paper"/"real" migrate on load)
     #[serde(default = "default_paper_starting_balance")]
     pub paper_starting_balance_usd: f64,
+    /// USD-family quote handling (System Settings → Execution):
+    /// "separate" (BTC-USDT ≠ BTC-USDC, no merging), "parity" (merge,
+    /// assume 1:1), or "fx_adjusted" (merge + convert quotes to USD via
+    /// the live stablecoin rate table). Default fx_adjusted.
+    #[serde(default = "default_usd_quote_mode")]
+    pub usd_quote_mode: String,
+    /// Stablecoin depeg warning threshold, |deviation| from $1.00 in bps.
+    #[serde(default = "default_stablecoin_warn_bps")]
+    pub stablecoin_warn_bps: f64,
+    /// Stablecoin depeg halt threshold, bps — past this, pairs quoted in
+    /// the coin are blocked (stablecoin-vs-USD books stay tradeable; that
+    /// spread IS the depeg arbitrage).
+    #[serde(default = "default_stablecoin_halt_bps")]
+    pub stablecoin_halt_bps: f64,
     // Reserved — the warm-up cache reuse this describes is not implemented;
     // kept so saved settings stay schema-compatible.
     #[serde(default = "default_fast_warmup_enabled")]
@@ -770,6 +795,9 @@ impl Default for EngineSettingsDto {
             bind_address: default_bind_address(),
             trading_mode: default_trading_mode(),
             paper_starting_balance_usd: default_paper_starting_balance(),
+            usd_quote_mode: default_usd_quote_mode(),
+            stablecoin_warn_bps: default_stablecoin_warn_bps(),
+            stablecoin_halt_bps: default_stablecoin_halt_bps(),
             fast_warmup_enabled: default_fast_warmup_enabled(),
             cb_max_daily_drawdown_usd: default_cb_max_daily_drawdown_usd(),
             cb_max_daily_drawdown_pct: default_cb_max_daily_drawdown_pct(),
@@ -1127,12 +1155,21 @@ type VolumeCache = Mutex<
 >;
 
 #[allow(dead_code)]
+/// Cached Boros market-data snapshot (public REST, no credentials).
+#[derive(Clone)]
+pub struct BorosYuCache {
+    pub fetched_at: std::time::Instant,
+    pub markets: Arc<Vec<BorosYuMarket>>,
+    /// Estimated gas cost in USD for the two YU order transactions
+    /// (from `/v1/gas-price/current`, fallback ~$0.10).
+    pub gas_usd: f64,
+}
+
 pub struct AppEngineState {
     pub live_hl: Arc<HyperliquidAdapter>,
     pub live_lighter: Arc<LighterAdapter>,
     pub live_vanta: Arc<VantaAdapter>,
     pub live_robinhood: Arc<LighterAdapter>,
-    pub live_arcus: Arc<ArcusAdapter>,
     pub live_aster: Arc<AsterAdapter>,
     pub live_popdex: Arc<PopDexAdapter>,
     pub live_binance: Arc<BinanceAdapter>,
@@ -1146,8 +1183,9 @@ pub struct AppEngineState {
     /// Spec-driven like `live_dex_perps`; `EvmAmmAdapter::for_venue` takes a
     /// per-account RPC override via `set_base_url` during credential sync.
     pub live_evm_amms: Vec<Arc<EvmAmmAdapter>>,
-    pub live_polymarket: Arc<PolymarketAdapter>,
-    pub live_kalshi: Arc<KalshiAdapter>,
+    /// Pendle Boros (Arbitrum rate swaps) — the YU hedge venue for
+    /// fixed-yield carries. Live-only: Boros has no testnet.
+    pub live_boros: Arc<BorosAdapter>,
     /// Testnet adapter set — `None` entries mean the venue has no public
     /// testnet and is ineligible under `TradingEnvironment::Testnet`.
     /// Endpoint overrides (`endpoints.*`) apply to the live set only;
@@ -1160,8 +1198,11 @@ pub struct AppEngineState {
     pub tn_kraken: Arc<KrakenAdapter>,
     pub tn_decibel: Arc<DecibelAdapter>,
     pub tn_popdex: Arc<PopDexAdapter>,
-    pub tn_kalshi: Arc<KalshiAdapter>,
     pub market_data_hub: Arc<MarketDataHub>,
+    /// Cached Boros YU market snapshot for the fixed-yield scan:
+    /// (fetched_at, markets, est_gas_usd_per_leg_batch). Public data —
+    /// valid in both environments since Boros has no testnet split.
+    pub boros_yu_cache: Mutex<Option<BorosYuCache>>,
     pub circuit_breaker: Arc<CircuitBreaker>,
     pub delta_guard: RwLock<DeltaGuard>,
     pub coordinator: Arc<AtomicArbitrageCoordinator>,
@@ -1194,6 +1235,14 @@ pub struct AppEngineState {
     /// state, persisted under `ticker_config.{symbol}` kv keys.
     pub strategy_params: RwLock<std::collections::HashMap<String, StrategyParamsDto>>,
     pub vault: RwLock<crate::vault::SecureVault>,
+    /// Stronghold custody for the shared EVM wallet key — `Some` only
+    /// while the vault is unlocked and the snapshot opened. Provisioned
+    /// venue signers call into it for `secp256k1` signatures; the key
+    /// itself never enters this process's heap. Dropped on manual lock
+    /// (signers get wiped by the credential sync anyway); auto-lock keeps
+    /// it loaded so unattended trading keeps signing, matching the
+    /// "provisioned credentials survive auto-lock" contract.
+    pub evm_stronghold: RwLock<Option<crate::stronghold::EvmStronghold>>,
     pub state_store: Arc<crate::state_store::StateStore>,
     pub virtual_ledger: RwLock<arbitrageur_execution::virtual_ledger::VirtualStrategyLedger>,
     pub is_paused: RwLock<bool>,
@@ -1261,6 +1310,10 @@ pub struct AppEngineState {
     /// one REST call instead of each hammering e.g. Orderly's
     /// /v1/positions (429s at a few req/3s).
     pub account_fetch_locks: Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// USD-family stablecoin rate table + depeg monitor. Drives the
+    /// `fx_adjusted` quote mode: price conversion into USD, watchlist
+    /// pairing, sizing, and the halt gate on depegged quote currencies.
+    pub stablecoin_fx: Arc<crate::stablecoin_fx::StablecoinFx>,
 }
 
 /// Canonical venue resolution: only exact trimmed lowercase IDs, documented
@@ -1300,6 +1353,9 @@ pub(crate) fn canonical_venue_id(input: &str) -> Option<&'static str> {
         "x10" | "extended exchange" => Some("extended"),
         "dydx chain" | "dydx v4" => Some("dydx"),
         "helix (injective)" | "injective helix" => Some("helix"),
+        "boros" | "pendle boros" | "pendle" | "boros (pendle)" | "boros (arbitrum)" => {
+            Some("boros")
+        }
         "alpha x" => Some("alphax"),
         "antarctic exchange" => Some("antarctic"),
         "eve dex" => Some("evedex"),
@@ -1504,6 +1560,29 @@ impl AppEngineState {
                     initial_settings.auto_exit_max_hold_secs = v as u64;
                 }
             }
+            // USD-quote policy + depeg thresholds (Execution tab). Unknown
+            // mode spellings and inverted/degenerate thresholds fall back
+            // to code defaults rather than persist a corrupt policy.
+            if let Ok(Some(mode)) = state_store.kv_get("engine.usd_quote_mode") {
+                let m = mode.trim().to_ascii_lowercase();
+                if matches!(m.as_str(), "separate" | "parity" | "fx_adjusted") {
+                    initial_settings.usd_quote_mode = m;
+                }
+            }
+            if let Some(v) = get_f("risk.stablecoin_warn_bps") {
+                if v.is_finite() && v > 0.0 && v <= 10_000.0 {
+                    initial_settings.stablecoin_warn_bps = v;
+                }
+            }
+            if let Some(v) = get_f("risk.stablecoin_halt_bps") {
+                if v.is_finite() && v > 0.0 && v <= 10_000.0 {
+                    initial_settings.stablecoin_halt_bps = v;
+                }
+            }
+            if initial_settings.stablecoin_warn_bps >= initial_settings.stablecoin_halt_bps {
+                initial_settings.stablecoin_warn_bps = default_stablecoin_warn_bps();
+                initial_settings.stablecoin_halt_bps = default_stablecoin_halt_bps();
+            }
             for (key, slot) in [
                 (
                     "endpoints.hyperliquid_url",
@@ -1577,11 +1656,6 @@ impl AppEngineState {
             None,
             "robinhood",
         ));
-        let live_arcus = Arc::new(ArcusAdapter::new(
-            endpoint(&initial_settings.arcus_url),
-            None,
-            None,
-        ));
         let live_aster = Arc::new(AsterAdapter::new(None, None, None));
         let live_popdex = Arc::new(PopDexAdapter::new(endpoint(
             &initial_settings.popdex_network,
@@ -1610,14 +1684,7 @@ impl AppEngineState {
             .iter()
             .filter_map(|id| EvmAmmAdapter::for_venue(id, None).map(Arc::new))
             .collect();
-        let live_polymarket = Arc::new(PolymarketAdapter::new(
-            endpoint(&initial_settings.polymarket_url),
-            None,
-        ));
-        let live_kalshi = Arc::new(KalshiAdapter::new(
-            endpoint(&initial_settings.kalshi_url),
-            None,
-        ));
+        let live_boros = Arc::new(BorosAdapter::new(None));
 
         // Testnet adapter set — public testnet/demo endpoints only.
         // Venues absent here (Coinbase, Aster, Arcus, Robinhood, Polymarket,
@@ -1665,12 +1732,15 @@ impl AppEngineState {
             None,
         ));
         let tn_popdex = Arc::new(PopDexAdapter::new(Some("testnet".to_string())));
-        let tn_kalshi = Arc::new(KalshiAdapter::new(
-            Some("https://demo-api.kalshi.co/trade-api/v2".to_string()),
-            None,
-        ));
 
         let market_data_hub = MarketDataHub::new(1024, 400);
+        // The hub's slot key follows the persisted USD-quote policy: under
+        // `separate`, quote variants occupy distinct slots and never share
+        // a cached book.
+        market_data_hub.set_merge_usd_quotes(
+            crate::stablecoin_fx::normalize_usd_quote_mode(&initial_settings.usd_quote_mode)
+                != crate::stablecoin_fx::USD_QUOTE_MODE_SEPARATE,
+        );
 
         let cb_config = CircuitBreakerConfig {
             max_daily_drawdown_usd: Decimal::from_f64_retain(
@@ -1704,6 +1774,7 @@ impl AppEngineState {
         let initial_logs: Vec<ExecutionLogEntry> =
             state_store.load_execution_logs(500).unwrap_or_default();
         let vault = RwLock::new(crate::vault::SecureVault::new_with_path(vault_path));
+        let evm_stronghold = RwLock::new(None);
         // The virtual cycle ledger is durable (schema v30): hydrate all lots
         // so open lots resume close-matching/exposure accounting across a
         // restart and closed lots keep strategy metrics continuous. A store
@@ -1884,7 +1955,6 @@ impl AppEngineState {
             live_lighter,
             live_vanta,
             live_robinhood,
-            live_arcus,
             live_aster,
             live_popdex,
             live_binance,
@@ -1894,8 +1964,7 @@ impl AppEngineState {
             live_decibel,
             live_dex_perps,
             live_evm_amms,
-            live_polymarket,
-            live_kalshi,
+            live_boros,
             tn_hl,
             tn_lighter,
             tn_vanta,
@@ -1904,8 +1973,8 @@ impl AppEngineState {
             tn_kraken,
             tn_decibel,
             tn_popdex,
-            tn_kalshi,
             market_data_hub,
+            boros_yu_cache: Mutex::new(None),
             circuit_breaker: cb,
             delta_guard,
             coordinator,
@@ -1921,6 +1990,7 @@ impl AppEngineState {
             strategy_configs: RwLock::new(ticker_configs_map),
             strategy_params: RwLock::new(strategy_params_map),
             vault,
+            evm_stronghold,
             state_store,
             virtual_ledger,
             is_paused: RwLock::new(false),
@@ -1943,7 +2013,126 @@ impl AppEngineState {
             radar_bot: Mutex::new(None),
             orderbook_flights: Arc::new(crate::ws_primary::OrderbookSingleFlight::new()),
             account_fetch_locks: Mutex::new(std::collections::HashMap::new()),
+            stablecoin_fx: crate::stablecoin_fx::StablecoinFx::new(),
         }
+    }
+
+    /* ------------------------------------------------------------------ */
+    /* USD-stablecoin quote policy                                         */
+    /* ------------------------------------------------------------------ */
+
+    /// Whether USD-family quotes merge into one canonical base under the
+    /// active mode (parity/fx_adjusted). `separate` keeps BASE-QUOTE
+    /// identity end to end.
+    pub fn usd_merge_quotes(&self) -> bool {
+        crate::stablecoin_fx::normalize_usd_quote_mode(&self.settings.read().usd_quote_mode)
+            != crate::stablecoin_fx::USD_QUOTE_MODE_SEPARATE
+    }
+
+    /// Price→USD conversion factor for a book quoted in `quote` on `venue`.
+    /// 1.0 outside `fx_adjusted` mode; fx mode prefers the venue-local rate
+    /// and falls back to the global table → parity baseline.
+    pub fn fx_price_factor(&self, venue: Option<&str>, quote: &str) -> f64 {
+        let mode =
+            crate::stablecoin_fx::normalize_usd_quote_mode(&self.settings.read().usd_quote_mode);
+        if mode != crate::stablecoin_fx::USD_QUOTE_MODE_FX_ADJUSTED {
+            return 1.0;
+        }
+        self.stablecoin_fx
+            .fx_factor(venue, quote, chrono::Utc::now().timestamp_millis())
+    }
+
+    /// The quote currency a (venue, symbol) book is priced in: explicit
+    /// symbol suffix first, then the monitor's refreshed quote map, then
+    /// the USD baseline.
+    pub fn book_quote(&self, venue: &str, symbol: &str) -> String {
+        if let Some(q) = arbitrageur_core::symbol::symbol_quote(symbol) {
+            return q;
+        }
+        self.monitor
+            .lock()
+            .as_ref()
+            .and_then(|m| m.book_quote(venue, symbol, self.usd_merge_quotes()))
+            .unwrap_or_else(|| "USD".into())
+    }
+
+    /// The currency a venue reports account equity/margin in — the modal
+    /// quote across its listed markets, learned by the monitor. Falls back
+    /// to "USD" when no lane has refreshed yet.
+    pub fn venue_settlement_quote(&self, venue: &str) -> String {
+        self.monitor
+            .lock()
+            .as_ref()
+            .and_then(|m| m.settlement_quote(venue))
+            .unwrap_or_else(|| "USD".into())
+    }
+
+    /// Re-denominate an account snapshot into the USD basis under
+    /// `fx_adjusted` mode: equity/margin fields scale by the venue's
+    /// settlement-quote rate, position prices/PnL by each symbol's own
+    /// quote, and USD-family balance rows by that coin's rate. Identity
+    /// outside fx mode. Call at consume sites only — the
+    /// `last_good_accounts` cache stays in venue units.
+    pub fn normalize_account_usd(
+        &self,
+        venue: &str,
+        acc: &mut arbitrageur_core::position::AccountSnapshot,
+    ) {
+        use rust_decimal::Decimal;
+        let fx = |quote: &str| -> Decimal {
+            Decimal::from_f64_retain(self.fx_price_factor(Some(venue), quote))
+                .unwrap_or(Decimal::ONE)
+        };
+        let settle = self.venue_settlement_quote(venue);
+        let sf = fx(&settle);
+        acc.equity *= sf;
+        acc.free_margin *= sf;
+        acc.maintenance_margin *= sf;
+        for pos in acc.positions.iter_mut() {
+            let pq = arbitrageur_core::symbol::symbol_quote(&pos.symbol)
+                .unwrap_or_else(|| settle.clone());
+            let f = fx(&pq);
+            pos.entry_price *= f;
+            pos.mark_price *= f;
+            pos.unrealized_pnl *= f;
+            pos.realized_pnl *= f;
+            pos.initial_margin *= f;
+            pos.maintenance_margin *= f;
+            if let Some(liq) = pos.liquidation_price.as_mut() {
+                *liq *= f;
+            }
+        }
+        for bal in acc.balances.iter_mut() {
+            if arbitrageur_core::symbol::is_usd_family(&bal.currency) {
+                let f = fx(&bal.currency);
+                bal.total *= f;
+                bal.free *= f;
+                bal.locked *= f;
+            }
+        }
+    }
+
+    /// Depeg gate for execution paths: refuse books priced in a halted
+    /// stablecoin — except books whose base is itself USD-family, which
+    /// ARE the depeg arbitrage and must stay tradeable. Fail-open for
+    /// non-family/unknown quotes (they were never merged into USD pairs).
+    pub fn stablecoin_gate(&self, base: &str, quote: &str) -> Result<(), String> {
+        if !arbitrageur_core::symbol::is_usd_family(quote)
+            || arbitrageur_core::symbol::is_usd_family(&arbitrageur_core::symbol::canonical_base(
+                base,
+            ))
+        {
+            return Ok(());
+        }
+        let halt_bps = self.settings.read().stablecoin_halt_bps;
+        let now = chrono::Utc::now().timestamp_millis();
+        if self.stablecoin_fx.is_halted(quote, now, halt_bps) {
+            let dev = self.stablecoin_fx.deviation_bps(quote, now).unwrap_or(0.0);
+            return Err(format!(
+                "{quote} is depegged ({dev:.0}bps from USD, halt at {halt_bps:.0}bps) — trades quoted in it are blocked"
+            ));
+        }
+        Ok(())
     }
 
     /// Ensure market is loaded - live real market data is queried from active exchange APIs
@@ -1971,6 +2160,41 @@ impl AppEngineState {
             tracing::warn!("persist sim_step failed: {e}");
         }
         next
+    }
+
+    /// Open the Stronghold snapshot that holds the shared EVM wallet key.
+    /// The snapshot password derives from the vault session key, so this
+    /// only succeeds while the vault is unlocked; a failed open logs a
+    /// warning and leaves `None` — credential records then keep their
+    /// vault-held keys working (the sentinel path only engages when a
+    /// stronghold exists to provision signers from).
+    pub fn open_evm_stronghold(&self) {
+        let (key, path) = {
+            let mut vault = self.vault.write();
+            if !vault.is_unlocked() {
+                return;
+            }
+            let Some(key) = vault.stronghold_session_key() else {
+                return;
+            };
+            (key, vault.stronghold_snapshot_path())
+        };
+        match crate::stronghold::EvmStronghold::open(&path, &key) {
+            Ok(sh) => {
+                *self.evm_stronghold.write() = Some(sh);
+            }
+            Err(e) => {
+                tracing::warn!("EVM stronghold open failed ({e}) — shared wallet stays vault-held");
+                *self.evm_stronghold.write() = None;
+            }
+        }
+    }
+
+    /// Drop the stronghold — manual vault lock. Adapter signers are wiped
+    /// by the credential sync that follows a lock, so dropping first is
+    /// safe and immediate (the guarded key memory dies with it).
+    pub fn close_evm_stronghold(&self) {
+        *self.evm_stronghold.write() = None;
     }
 
     /// Synchronize credentials from the secure vault to exchange adapters in
@@ -2023,6 +2247,7 @@ impl AppEngineState {
             let _ = adapter.update_credentials(None, None, None, None, None, None);
             let _ = adapter.set_base_url(None);
         }
+        let _ = self.live_boros.update_credentials(None, None, None);
         self.tn_hl.update_credentials(None, None);
         self.tn_lighter.update_credentials(None, None);
         self.tn_lighter.set_api_key_index(None);
@@ -2202,6 +2427,9 @@ impl AppEngineState {
                 creds.evm_amm.insert(vid, cred.clone());
             }
         }
+        if let Some(cred) = get_active_cred(&["boros", "pendle", "pendle boros"]) {
+            creds.boros = Some(cred.clone());
+        }
         creds
     }
 
@@ -2289,6 +2517,19 @@ impl AppEngineState {
                 tracing::warn!("{vid} credential sync refused: {e}");
             }
         }
+        // Boros: agent key + root address + sub-account id. All three are
+        // required; a partial record fails the whole bind (fail closed).
+        {
+            let cred = c.boros.as_ref();
+            let nonopt = |o: &Option<String>| o.clone().filter(|s| !s.trim().is_empty());
+            if let Err(e) = self.live_boros.update_credentials(
+                cred.and_then(|c| nonopt(&c.private_key)),
+                cred.and_then(|c| nonopt(&c.wallet_address)),
+                cred.and_then(|c| nonopt(&c.account_id)),
+            ) {
+                tracing::warn!("Boros credential sync refused: {e}");
+            }
+        }
         // EVM AMMs: wallet_address + private_key carry the agent wallet;
         // the account `base_url` field doubles as the RPC override so a
         // private endpoint (Alchemy/Infura/self-hosted) replaces the
@@ -2340,6 +2581,30 @@ impl AppEngineState {
             );
             if let Err(e) = res {
                 tracing::warn!("{vid} credential sync refused: {e}");
+            }
+            // A sentinel `private_key` parked the adapter waiting for an
+            // externally-custodied signer — build one from the loaded
+            // stronghold and inject it. No stronghold (or a bad record)
+            // leaves the adapter signerless = fail closed.
+            if adapter.expects_external_signer() {
+                let provisioned = self
+                    .evm_stronghold
+                    .read()
+                    .as_ref()
+                    .map(|sh| sh.signer(Some(adapter.chain_id())));
+                match provisioned {
+                    Some(Ok(signer)) => {
+                        if let Err(e) = adapter.provision_external_signer(signer) {
+                            tracing::warn!("{vid} external signer refused: {e}");
+                        }
+                    }
+                    Some(Err(e)) => {
+                        tracing::warn!("{vid} external signer build failed: {e}");
+                    }
+                    None => tracing::warn!(
+                        "{vid} credential record references external key custody but no stronghold is loaded"
+                    ),
+                }
             }
         }
     }
@@ -2494,6 +2759,12 @@ impl AppEngineState {
                 if account_enabled(adapter.spec_id()) {
                     list.push((adapter.spec_id(), adapter.spec_name(), adapter.clone()));
                 }
+            }
+            // Pendle Boros joins only with an enabled account (agent key +
+            // root address + accountId) — market data for scanning is
+            // fetched separately and needs no credentials.
+            if account_enabled("boros") {
+                list.push(("boros", "Pendle Boros", self.live_boros.clone()));
             }
         } else {
             // Testnet environment — only venues with public demo endpoints.
@@ -2968,5 +3239,156 @@ mod tests {
         let mut s = EngineSettingsDto::default();
         load_exec_policy_settings(&store, &mut s);
         assert!(s.passive_unwind.enabled);
+    }
+
+    #[test]
+    fn usd_quote_policy_defaults_and_kv_roundtrip() {
+        // Fresh defaults: FX-adjusted mode, 50bps warn / 100bps halt.
+        let state = AppEngineState::new();
+        {
+            let s = state.settings.read();
+            assert_eq!(s.usd_quote_mode, "fx_adjusted");
+            assert_eq!(s.stablecoin_warn_bps, 50.0);
+            assert_eq!(s.stablecoin_halt_bps, 100.0);
+        }
+        assert!(state.usd_merge_quotes());
+
+        // Persisted overrides reload on the next boot over the same store.
+        let store = state.state_store.clone();
+        store.kv_set("engine.usd_quote_mode", "separate").unwrap();
+        store.kv_set("risk.stablecoin_warn_bps", "25").unwrap();
+        store.kv_set("risk.stablecoin_halt_bps", "75").unwrap();
+        let reloaded =
+            AppEngineState::new_inner(PathBuf::from("/nonexistent-vault"), store.clone());
+        {
+            let s = reloaded.settings.read();
+            assert_eq!(s.usd_quote_mode, "separate");
+            assert_eq!(s.stablecoin_warn_bps, 25.0);
+            assert_eq!(s.stablecoin_halt_bps, 75.0);
+        }
+        assert!(!reloaded.usd_merge_quotes());
+
+        // Corrupt/inverted values fall back to code defaults.
+        store.kv_set("engine.usd_quote_mode", "bogus").unwrap();
+        store.kv_set("risk.stablecoin_warn_bps", "500").unwrap();
+        store.kv_set("risk.stablecoin_halt_bps", "100").unwrap();
+        let reloaded =
+            AppEngineState::new_inner(PathBuf::from("/nonexistent-vault"), store.clone());
+        let s = reloaded.settings.read();
+        assert_eq!(s.usd_quote_mode, "fx_adjusted");
+        assert_eq!(s.stablecoin_warn_bps, 50.0);
+        assert_eq!(s.stablecoin_halt_bps, 100.0);
+    }
+
+    #[test]
+    fn stablecoin_gate_blocks_depeg_exempts_stable_arb() {
+        let state = AppEngineState::new();
+        let now = chrono::Utc::now().timestamp_millis();
+        // USDT at $0.98 — 200bps deviation, past the default 100bps halt.
+        state.stablecoin_fx.record_global("USDT", 0.98, "test", now);
+        // Ordinary books priced in the halted coin are refused.
+        assert!(state.stablecoin_gate("BTC", "USDT").is_err());
+        assert!(state.stablecoin_gate("BTC-USDT", "USDT").is_err());
+        // Stable-vs-stable / stable-vs-USD books ARE the depeg arbitrage —
+        // they stay tradeable.
+        assert!(state.stablecoin_gate("USDT", "USDC").is_ok());
+        assert!(state.stablecoin_gate("USDC-USDT", "USDT").is_ok());
+        // Non-family quotes are never gated (they never merged into USD).
+        assert!(state.stablecoin_gate("BTC", "EUR").is_ok());
+        // A fine quote doesn't gate either.
+        assert!(state.stablecoin_gate("BTC", "USDC").is_ok());
+        // Below the halt threshold the gate re-opens.
+        state
+            .stablecoin_fx
+            .record_global("USDT", 0.999, "test", now);
+        assert!(state.stablecoin_gate("BTC", "USDT").is_ok());
+    }
+
+    #[test]
+    fn normalize_account_usd_scales_settlement_and_positions() {
+        use arbitrageur_core::position::{AccountSnapshot, Balance, Position};
+        use arbitrageur_core::types::Side;
+
+        let state = AppEngineState::new();
+        // The monitor's settlement map is what venue_settlement_quote reads —
+        // inject a lane-less venue settling in USDT.
+        let engine = crate::monitor::SpreadMonitorEngine::new(&state);
+        engine.set_settlement_quote("binance", "USDT");
+        *state.monitor.lock() = Some(engine);
+        let now = chrono::Utc::now().timestamp_millis();
+        // Venue-local rate (single-venue truth): USDT = $0.98 on binance.
+        state
+            .stablecoin_fx
+            .record_venue("binance", "USDT", 0.98, now);
+
+        let mut acc = AccountSnapshot {
+            venue: "binance".into(),
+            equity: dec!(1000),
+            free_margin: dec!(500),
+            maintenance_margin: dec!(100),
+            margin_usage_pct: dec!(10),
+            balances: vec![
+                Balance {
+                    venue: "binance".into(),
+                    currency: "USDT".into(),
+                    total: dec!(1000),
+                    free: dec!(1000),
+                    locked: dec!(0),
+                },
+                // Non-USD balances stay in native units — converting them
+                // needs an asset price, not a stablecoin rate.
+                Balance {
+                    venue: "binance".into(),
+                    currency: "BTC".into(),
+                    total: dec!(2),
+                    free: dec!(2),
+                    locked: dec!(0),
+                },
+            ],
+            positions: vec![Position {
+                venue: "binance".into(),
+                symbol: "BTC-USDT".into(),
+                side: Side::Buy,
+                quantity: dec!(1),
+                entry_price: dec!(100),
+                mark_price: dec!(100),
+                unrealized_pnl: dec!(10),
+                realized_pnl: dec!(0),
+                liquidation_price: Some(dec!(50)),
+                leverage: dec!(1),
+                initial_margin: dec!(0),
+                maintenance_margin: dec!(0),
+                updated_at: chrono::Utc::now(),
+            }],
+            timestamp: chrono::Utc::now(),
+        };
+        state.normalize_account_usd("binance", &mut acc);
+        // The rate crosses f64 → Decimal: compare within a cent of a cent.
+        let close = |a: Decimal, b: f64| {
+            (a - Decimal::from_f64_retain(b).unwrap()).abs()
+                < Decimal::from_f64_retain(1e-6).unwrap()
+        };
+        assert!(close(acc.equity, 980.0), "equity {}", acc.equity);
+        assert!(close(acc.free_margin, 490.0));
+        assert!(close(acc.maintenance_margin, 98.0));
+        // Position prices scale by the symbol's own quote (USDT).
+        assert!(close(acc.positions[0].mark_price, 98.0));
+        assert!(close(acc.positions[0].unrealized_pnl, 9.8));
+        assert_eq!(
+            acc.positions[0].liquidation_price.map(|l| close(l, 49.0)),
+            Some(true)
+        );
+        assert!(close(acc.balances[0].total, 980.0));
+        assert_eq!(acc.balances[1].total, dec!(2));
+        // Unitless ratios stay untouched.
+        assert_eq!(acc.margin_usage_pct, dec!(10));
+
+        // Separate mode disables conversion entirely.
+        state.settings.write().usd_quote_mode = "separate".into();
+        let mut acc2 = acc.clone();
+        // reset to face values
+        acc2.equity = dec!(1000);
+        state.normalize_account_usd("binance", &mut acc2);
+        assert_eq!(acc2.equity, dec!(1000));
     }
 }

@@ -368,6 +368,15 @@ pub async fn scan_triangular_opportunities_impl(
             .unwrap_or(0.0)
             .max(0.0) as u64;
         let venue_id = adapter.venue_id();
+        // Single-venue path: the cycle runs in the venue's own USDC, so the
+        // honest USD conversion is the venue-local stablecoin rate (falls
+        // back to the global table, then parity). A halted USDC quote
+        // makes every cycle on this venue untradeable — skip it rather
+        // than display a depeg-polluted edge.
+        if state.stablecoin_gate("BTC", TRIANGLE_QUOTE).is_err() {
+            continue;
+        }
+        let usdc_rate = state.fx_price_factor(Some(vid), TRIANGLE_QUOTE);
         for base_a in TRIANGLE_BASES {
             for base_b in TRIANGLE_BASES {
                 if base_a == base_b {
@@ -389,9 +398,21 @@ pub async fn scan_triangular_opportunities_impl(
                     Some(b) => b,
                     None => continue,
                 };
-                let eval = match evaluate_triangle_books(&books, plan.leg_sides, fee, trade_size) {
+                // The evaluator's notional is leg-1 quote (USDC): the USD
+                // trade size converts in at the venue rate, and the
+                // USDC-denominated profit converts back out.
+                let eval = match evaluate_triangle_books(
+                    &books,
+                    plan.leg_sides,
+                    fee,
+                    trade_size / usdc_rate,
+                ) {
                     Some(e) => e,
                     None => continue,
+                };
+                let eval = TriangleEval {
+                    profit_usd: eval.profit_usd * usdc_rate,
+                    ..eval
                 };
                 let legs = [
                     TriangleLegDto {
@@ -596,15 +617,32 @@ pub async fn execute_triangle_arbitrage_impl(
         // submission/polling/entry eligibility + credentials.
         live_entry_gate(state, &[vid.as_str()])?;
     }
+    // Depeg gate on the cycle's settlement quote — a USDC-depeg makes the
+    // measured edge phantom. Stable-vs-USD legs stay exempt via the gate's
+    // base-family check (not reachable here: triangle bases are majors).
+    state
+        .stablecoin_gate("BTC", TRIANGLE_QUOTE)
+        .map_err(|e| format!("{vid}: {e}"))?;
     let books = resolve_triangle_books(state, &adapter, &vid, &plan.leg_symbols, true)
         .await
         .ok_or_else(|| "triangle legs went stale before dispatch".to_string())?;
     let fee = effective_venue_fee_bps(state, vid.as_str());
-    let eval = evaluate_triangle_books(&books, plan.leg_sides, fee, params.trade_size_usd)
-        .ok_or_else(|| {
-            "triangle route economics unavailable: the full quantity cannot be priced on all three legs"
-                .to_string()
-        })?;
+    // USD notional → venue USDC notional at the venue-local rate.
+    let usdc_rate = state.fx_price_factor(Some(vid.as_str()), TRIANGLE_QUOTE);
+    let eval = evaluate_triangle_books(
+        &books,
+        plan.leg_sides,
+        fee,
+        params.trade_size_usd / usdc_rate,
+    )
+    .map(|e| TriangleEval {
+        profit_usd: e.profit_usd * usdc_rate,
+        ..e
+    })
+    .ok_or_else(|| {
+        "triangle route economics unavailable: the full quantity cannot be priced on all three legs"
+            .to_string()
+    })?;
     if eval.net_bps < params.min_profit_bps {
         return Err(format!(
             "triangle net {:.1} BPS is below the {:.1} BPS hurdle — not executed",
@@ -656,7 +694,9 @@ pub async fn execute_triangle_arbitrage_impl(
         &params.venue,
         None,
     )?;
-    let size_dec = Decimal::from_f64_retain(params.trade_size_usd)
+    // Margin check runs in venue settlement units: the USD trade size is
+    // a USDC notional on the venue at the venue-local rate.
+    let size_dec = Decimal::from_f64_retain(params.trade_size_usd / usdc_rate)
         .ok_or_else(|| "Invalid trade size".to_string())?;
     // Conservative margin bound: three full-notional legs against free margin.
     let total_im = size_dec * dec!(3) / Decimal::from(target_leverage);
@@ -687,7 +727,9 @@ pub async fn execute_triangle_arbitrage_impl(
     // the baseline the post-fill attribution refresh measures against.
     let mut equity_before_by_venue = HashMap::new();
     let env_str = state.env().as_str();
-    if let Ok(f) = pre_acc.equity.to_string().parse::<f64>() {
+    let mut pre_acc_usd = pre_acc.clone();
+    state.normalize_account_usd(vid.as_str(), &mut pre_acc_usd);
+    if let Ok(f) = pre_acc_usd.equity.to_string().parse::<f64>() {
         if f.is_finite() {
             equity_before_by_venue.insert(format!("{env_str}-{vid}"), f);
         }

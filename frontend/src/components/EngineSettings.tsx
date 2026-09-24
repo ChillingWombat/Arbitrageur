@@ -24,18 +24,24 @@ import {
   retentionDaysToInput,
   retentionGbToInput,
 } from "../services/retention";
-import type { EngineSettingsDto, SystemStatusDto, VenueStatusDto, VaultStatus, VenueBalanceInfo, AccountDto, VenueLaneStatusDto, VenueCapabilityDto, PassiveUnwindDto, StorageStatsDto } from "../types";
+import type { EngineSettingsDto, SystemStatusDto, VenueStatusDto, VaultStatus, VenueBalanceInfo, AccountDto, VenueLaneStatusDto, VenueCapabilityDto, PassiveUnwindDto, StorageStatsDto, StablecoinHealthDto } from "../types";
 import { DEFAULT_PASSIVE_UNWIND } from "../types";
 import { VaultUnlockModal } from "./VaultUnlockModal";
 import { InfoTooltip } from "./InfoTooltip";
 import { SaveButton, useSaveButton } from "./SaveButton";
 import { ArbitrageurLogo } from "./ArbitrageurLogo";
 import { VenueLogo } from "./VenueLogo";
-import { VenueAccountsSection } from "./ExchangeAccounts";
+import {
+  VenueAccountsSection,
+  EvmWalletSection,
+  EVM_AMM_VENUE_IDS,
+} from "./ExchangeAccounts";
 
 
 export type SettingsTab = "execution" | "safety" | "exchanges" | "network" | "about";
 export type ExchangeId =
+  /** Pseudo-venue: the shared EVM wallet card + AMM coverage gadget. */
+  | "evm_wallet"
   | "arcus"
   | "aster"
   | "binance"
@@ -54,7 +60,7 @@ export type ExchangeId =
   | "vanta"
   // Long-tail perp venues (shared DexPerpAdapter; account-enabled only —
   // no engine-settings flags). Live-trading subset: aevo, derive, grvt,
-  // ondoperps, pacifica, standx — the rest are market-data only.
+  // nado, ondoperps, pacifica, qfex, standx, vest — the rest are market-data only.
   | "aevo"
   | "alphax"
   | "antarctic"
@@ -110,6 +116,8 @@ export interface ExchangeMetadata {
  *  perp list, then EVM AMMs grouped by chain (same-chain venues share the
  *  chain RPC endpoint configured via the account's baseUrl). */
 export const EXCHANGE_GROUP_ORDER = [
+  // The shared EVM wallet always pins first — one key drives every AMM venue.
+  "EVM Wallet",
   "Primary",
   "TradFi",
   "Perp DEX — Long Tail",
@@ -144,58 +152,62 @@ export function groupExchangesBySection(
 
 export const EXCHANGES_ALPHABETICAL: ExchangeMetadata[] = [
   { id: "aerodrome", name: "Aerodrome", type: "Spot AMM — Base (Market Data)", feeBps: 30.0 , group: "EVM AMM — Base" },
-  { id: "aevo", name: "Aevo", type: "Perp DEX (Live)", feeBps: 3.0 , group: "Perp DEX — Long Tail" },
-  { id: "alphax", name: "AlphaX", type: "Perp DEX (Market Data)", feeBps: 3.0 , group: "Perp DEX — Long Tail" },
-  { id: "antarctic", name: "Antarctic", type: "Perp DEX (Market Data)", feeBps: 3.0 , group: "Perp DEX — Long Tail" },
-  { id: "apex", name: "ApeX Omni", type: "Perp DEX (Market Data)", feeBps: 2.0 , group: "Perp DEX — Long Tail" },
-  { id: "arcus", name: "Arcus", type: "CLOB DEX", feeBps: 1.5 , group: "Primary" },
-  { id: "aster", name: "Aster", type: "Multi-Chain Perp DEX", feeBps: 3.5 , group: "Primary" },
-  { id: "astros", name: "Astros", type: "Perp DEX (Market Data)", feeBps: 3.0 , group: "Perp DEX — Long Tail" },
-  { id: "binance", name: "Binance", type: "CEX Spot & Perp", feeBps: 7.5 , group: "Primary" },
-  { id: "bulk", name: "BULK", type: "Perp DEX (Market Data)", feeBps: 3.0 , group: "Perp DEX — Long Tail" },
+  { id: "aevo", name: "Aevo", type: "Perp DEX (Live)", feeBps: 2.0 , group: "Perp DEX — Long Tail" },
+  { id: "alphax", name: "AlphaX", type: "Perp DEX (Market Data)", feeBps: 4.0 , group: "Perp DEX — Long Tail" },
+  { id: "antarctic", name: "Antarctic", type: "Perp DEX (Market Data)", feeBps: 4.0 , group: "Perp DEX — Long Tail" },
+  { id: "apex", name: "ApeX Omni", type: "Perp DEX (Market Data)", feeBps: 4.0 , group: "Perp DEX — Long Tail" },
+  { id: "arcus", name: "Arcus", type: "CLOB DEX", feeBps: 4.0 , group: "Primary" },
+  { id: "aster", name: "Aster", type: "Multi-Chain Perp DEX", feeBps: 4.0 , group: "Primary" },
+  { id: "astros", name: "Astros", type: "Perp DEX (Market Data)", feeBps: 4.0 , group: "Perp DEX — Long Tail" },
+  { id: "binance", name: "Binance", type: "CEX Spot & Perp", feeBps: 5.0 , group: "Primary" },
+  { id: "bulk", name: "BULK", type: "Perp DEX (Market Data)", feeBps: 4.0 , group: "Perp DEX — Long Tail" },
   { id: "camelot", name: "Camelot V2", type: "Spot AMM — Arbitrum (Market Data)", feeBps: 30.0 , group: "EVM AMM — Arbitrum" },
-  { id: "coinbase", name: "Coinbase", type: "CEX Spot & Perp", feeBps: 8.0 , group: "Primary" },
-  { id: "decibel", name: "Decibel", type: "Aptos Perp DEX", feeBps: 2.5 , group: "Primary" },
-  { id: "derive", name: "Derive", type: "Perp DEX (Live)", feeBps: 3.0 , group: "Perp DEX — Long Tail" },
-  { id: "dydx", name: "dYdX Chain", type: "Perp DEX (Market Data)", feeBps: 2.0 , group: "Perp DEX — Long Tail" },
-  { id: "edgex", name: "edgeX", type: "Perp DEX (Market Data)", feeBps: 3.8 , group: "Perp DEX — Long Tail" },
-  { id: "evedex", name: "EVEDEX", type: "Perp DEX (Market Data)", feeBps: 3.0 , group: "Perp DEX — Long Tail" },
-  { id: "extended", name: "Extended", type: "Perp DEX (Market Data)", feeBps: 2.0 , group: "Perp DEX — Long Tail" },
-  { id: "gatedex", name: "Gate DEX", type: "Perp DEX (Market Data)", feeBps: 3.0 , group: "Perp DEX — Long Tail" },
+  { id: "coinbase", name: "Coinbase", type: "CEX Spot & Perp", feeBps: 5.0 , group: "Primary" },
+  { id: "decibel", name: "Decibel", type: "Aptos Perp DEX", feeBps: 5.0 , group: "Primary" },
+  { id: "derive", name: "Derive", type: "Perp DEX (Live)", feeBps: 2.0 , group: "Perp DEX — Long Tail" },
+  { id: "dydx", name: "dYdX Chain", type: "Perp DEX (Live)", feeBps: 2.0 , group: "Perp DEX — Long Tail" },
+  { id: "edgex", name: "edgeX", type: "Perp DEX (Live)", feeBps: 4.5 , group: "Perp DEX — Long Tail" },
+  { id: "evedex", name: "EVEDEX", type: "Perp DEX (Live)", feeBps: 4.5 , group: "Perp DEX — Long Tail" },
+  // Pseudo-venue for the sidebar: one shared signer fanned out to every EVM
+  // AMM venue (the individual AMM entries stay in this list for fee/name
+  // lookups but are hidden from the selector — see visibleExchanges).
+  { id: "evm_wallet", name: "EVM Wallet", type: "Shared EVM Signer", feeBps: 0.0 , group: "EVM Wallet" },
+  { id: "extended", name: "Extended", type: "Perp DEX (Live)", feeBps: 2.0 , group: "Perp DEX — Long Tail" },
+  { id: "gatedex", name: "Gate DEX", type: "Perp DEX (Market Data)", feeBps: 4.0 , group: "Perp DEX — Long Tail" },
   { id: "gmx", name: "GMX V2", type: "Perp AMM (Market Data)", feeBps: 5.0 , group: "Perp DEX — Long Tail" },
   { id: "grvt", name: "GRVT", type: "Perp DEX (Live)", feeBps: 5.0 , group: "Perp DEX — Long Tail" },
-  { id: "helix", name: "Helix", type: "Perp DEX (Market Data)", feeBps: 0.01 , group: "Perp DEX — Long Tail" },
-  { id: "hyperliquid", name: "Hyperliquid", type: "L1 Perp DEX", feeBps: 2.0 , group: "Primary" },
+  { id: "helix", name: "Helix", type: "Perp DEX (Live)", feeBps: 0.01 , group: "Perp DEX — Long Tail" },
+  { id: "hyperliquid", name: "Hyperliquid", type: "L1 Perp DEX", feeBps: 4.5 , group: "Primary" },
   { id: "ibkr", name: "Interactive Brokers", type: "TradFi Broker", feeBps: 1.0 , group: "TradFi" },
   { id: "ig", name: "IG Trading", type: "TradFi Broker", feeBps: 5.0 , group: "TradFi" },
-  { id: "iotrader", name: "IO Trader", type: "Perp DEX (Market Data)", feeBps: 3.0 , group: "Perp DEX — Long Tail" },
+  { id: "iotrader", name: "IO Trader", type: "Perp DEX (Market Data)", feeBps: 4.0 , group: "Perp DEX — Long Tail" },
   { id: "kalshi", name: "Kalshi", type: "CFTC Regulated", feeBps: 10.0 , group: "Primary" },
-  { id: "kraken", name: "Kraken", type: "CEX Spot & Perp", feeBps: 16.0 , group: "Primary" },
+  { id: "kraken", name: "Kraken", type: "CEX Spot & Perp", feeBps: 5.0 , group: "Primary" },
   { id: "lighter", name: "Lighter", type: "zkDEX Rollup", feeBps: 1.5 , group: "Primary" },
-  { id: "nado", name: "Nado", type: "Perp DEX (Market Data)", feeBps: 3.0 , group: "Perp DEX — Long Tail" },
-  { id: "niza", name: "Niza", type: "Perp DEX (Market Data)", feeBps: 3.0 , group: "Perp DEX — Long Tail" },
-  { id: "okx", name: "OKX", type: "CEX Spot & Perp", feeBps: 8.0 , group: "Primary" },
-  { id: "ondoperps", name: "Ondo Perps", type: "Perp DEX (Live)", feeBps: 2.5 , group: "Perp DEX — Long Tail" },
-  { id: "ostium", name: "Ostium", type: "Perp DEX (Market Data)", feeBps: 3.0 , group: "Perp DEX — Long Tail" },
+  { id: "nado", name: "Nado", type: "Perp DEX (Live)", feeBps: 3.5 , group: "Perp DEX — Long Tail" },
+  { id: "niza", name: "Niza", type: "Perp DEX (Market Data)", feeBps: 4.0 , group: "Perp DEX — Long Tail" },
+  { id: "okx", name: "OKX", type: "CEX Spot & Perp", feeBps: 5.0 , group: "Primary" },
+  { id: "ondoperps", name: "Ondo Perps", type: "Perp DEX (Live)", feeBps: 3.0 , group: "Perp DEX — Long Tail" },
+  { id: "ostium", name: "Ostium", type: "Perp DEX (Market Data)", feeBps: 4.0 , group: "Perp DEX — Long Tail" },
   { id: "pacifica", name: "Pacifica", type: "Perp DEX (Live)", feeBps: 2.0 , group: "Perp DEX — Long Tail" },
   { id: "pancakeswap", name: "PancakeSwap V2", type: "Spot AMM — BSC (Live)", feeBps: 25.0 , group: "EVM AMM — BSC" },
   { id: "pancakeswap_v3", name: "PancakeSwap V3", type: "Spot AMM — BSC (Live)", feeBps: 25.0 , group: "EVM AMM — BSC" },
-  { id: "paradex", name: "Paradex", type: "Perp DEX (Market Data)", feeBps: 2.0 , group: "Perp DEX — Long Tail" },
+  { id: "paradex", name: "Paradex", type: "Perp DEX (Live)", feeBps: 2.0 , group: "Perp DEX — Long Tail" },
   { id: "pharaoh", name: "Pharaoh", type: "Spot AMM — Avalanche (Market Data)", feeBps: 30.0 , group: "EVM AMM — Avalanche" },
   { id: "polymarket", name: "Polymarket", type: "CTF Binary Market", feeBps: 0.0 , group: "Primary" },
   { id: "popdex", name: "PopDEX", type: "EVM Perp DEX", feeBps: 10.0 , group: "Primary" },
-  { id: "qfex", name: "QFEX", type: "Perp DEX (Market Data)", feeBps: 4.0 , group: "Perp DEX — Long Tail" },
+  { id: "qfex", name: "QFEX", type: "Perp DEX (Live)", feeBps: 4.0 , group: "Perp DEX — Long Tail" },
   { id: "quickswap", name: "QuickSwap", type: "Spot AMM — Polygon (Live)", feeBps: 30.0 , group: "EVM AMM — Polygon" },
   { id: "ramses", name: "Ramses", type: "Spot AMM — Arbitrum (Market Data)", feeBps: 30.0 , group: "EVM AMM — Arbitrum" },
-  { id: "robinhood", name: "Robinhood Lighter", type: "EVM DEX Aggregator", feeBps: 2.5 , group: "Primary" },
-  { id: "sodex", name: "SoDEX", type: "Perp DEX (Market Data)", feeBps: 3.0 , group: "Perp DEX — Long Tail" },
-  { id: "standx", name: "StandX", type: "Perp DEX (Live)", feeBps: 4.0 , group: "Perp DEX — Long Tail" },
+  { id: "robinhood", name: "Robinhood Lighter", type: "EVM DEX Aggregator", feeBps: 4.0 , group: "Primary" },
+  { id: "sodex", name: "SoDEX", type: "Perp DEX (Market Data)", feeBps: 4.0 , group: "Perp DEX — Long Tail" },
+  { id: "standx", name: "StandX", type: "Perp DEX (Live)", feeBps: 2.0 , group: "Perp DEX — Long Tail" },
   { id: "sushiswap", name: "SushiSwap", type: "Spot AMM — Ethereum (Live)", feeBps: 30.0 , group: "EVM AMM — Ethereum" },
-  { id: "uniswap", name: "Uniswap V3", type: "Spot AMM — Ethereum (Live)", feeBps: 5.0 , group: "EVM AMM — Ethereum" },
+  { id: "uniswap", name: "Uniswap V3", type: "Spot AMM — Ethereum (Live)", feeBps: 30.0 , group: "EVM AMM — Ethereum" },
   { id: "uniswap_v2", name: "Uniswap V2", type: "Spot AMM — Ethereum (Live)", feeBps: 30.0 , group: "EVM AMM — Ethereum" },
-  { id: "vanta", name: "Vanta", type: "Omnichain Perps", feeBps: 3.0 , group: "Primary" },
+  { id: "vanta", name: "Vanta", type: "Omnichain Perps", feeBps: 4.0 , group: "Primary" },
   { id: "velodrome", name: "Velodrome", type: "Spot AMM — Optimism (Market Data)", feeBps: 30.0 , group: "EVM AMM — Optimism" },
-  { id: "vest", name: "Vest", type: "Perp DEX (Market Data)", feeBps: 3.0 , group: "Perp DEX — Long Tail" },
+  { id: "vest", name: "Vest", type: "Perp DEX (Live)", feeBps: 1.0 , group: "Perp DEX — Long Tail" },
 ];
 
 interface EngineSettingsProps {
@@ -247,6 +259,11 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   // Guardrails & Execution Modes (slippage is per-strategy now: each bot
   // configurator carries its own max_slippage_bps gate)
   const [minDepthRatio, setMinDepthRatio] = useState(3.0);
+  // USD-stablecoin quote policy + depeg thresholds (bps from $1.00)
+  const [usdQuoteMode, setUsdQuoteMode] = useState<"separate" | "parity" | "fx_adjusted">("fx_adjusted");
+  const [stableWarnBps, setStableWarnBps] = useState(50);
+  const [stableHaltBps, setStableHaltBps] = useState(100);
+  const [stablecoinHealth, setStablecoinHealth] = useState<StablecoinHealthDto | null>(null);
   // Global Auto Position Exit policy — strategies on "inherit" use this;
   // the Portfolio Monitor's Auto Limit exit runs it too.
   const [passiveUnwind, setPassiveUnwind] = useState<PassiveUnwindDto>({ ...DEFAULT_PASSIVE_UNWIND });
@@ -375,8 +392,15 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
       }
       return next;
     });
+  // Individual EVM AMM venues leave the sidebar — the pinned "EVM Wallet"
+  // entry manages their shared signer. The wallet is a credential store,
+  // not a venue, so it stays visible even under the favorites filter.
   const visibleExchanges = EXCHANGES_ALPHABETICAL.filter(
-    (ex) => exchangeFilter === "all" || favoriteExchanges.includes(ex.id),
+    (ex) =>
+      !EVM_AMM_VENUE_IDS.has(ex.id) &&
+      (ex.id === "evm_wallet" ||
+        exchangeFilter === "all" ||
+        favoriteExchanges.includes(ex.id)),
   );
   // Keep the selection visible: if the active tab is filtered out, fall back
   // to the first visible exchange (or keep it when the filter empties).
@@ -461,10 +485,13 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
     }
   };
 
-  // Kraken's two account zones are separate venues upstream of the sidebar id.
+  // Kraken's two account zones are separate venues upstream of the sidebar
+  // id; the shared wallet aggregates every EVM AMM venue's accounts.
   const accountsForVenue = (id: string): AccountDto[] =>
     id === "kraken"
       ? accounts.filter((a) => a.venue === "kraken" || a.venue === "kraken_spot" || a.venue === "kraken_futures")
+      : id === "evm_wallet"
+      ? accounts.filter((a) => EVM_AMM_VENUE_IDS.has(a.venue))
       : accounts.filter((a) => a.venue === id);
 
   // Same admission rule as the backend: venue flag OR any enabled account.
@@ -498,6 +525,16 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   // READ_ONLY (admitted, streaming market data) or UNSUPPORTED (enabled but
   // no market-data adapter; contributes nothing to ticker availability).
   const getVenueStatus = (id: string): string | null => {
+    // The shared wallet reports its member venues' best admission state —
+    // READ_ONLY if any AMM streams, else the most informative member status.
+    if (id === "evm_wallet") {
+      const member = liveVenues.filter((v) => EVM_AMM_VENUE_IDS.has(v.id));
+      if (member.length === 0) return null;
+      for (const s of ["READ_ONLY", "LOCKED", "UNSUPPORTED", "OFFLINE"]) {
+        if (member.some((v) => v.status === s)) return s;
+      }
+      return member[0].status;
+    }
     return (
       liveVenues.find((v) => v.id.toLowerCase() === id.toLowerCase())?.status ?? null
     );
@@ -534,6 +571,10 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         setHsmUrl(s.hsm_url || "http://127.0.0.1:8787/sign");
         setHmacToken(s.hmac_token || "");
         setMinDepthRatio(s.min_depth_ratio ?? 3.0);
+        const mode = (s.usd_quote_mode || "fx_adjusted").toLowerCase();
+        setUsdQuoteMode(mode === "separate" || mode === "parity" ? mode : "fx_adjusted");
+        setStableWarnBps(s.stablecoin_warn_bps ?? 50);
+        setStableHaltBps(s.stablecoin_halt_bps ?? 100);
         setPassiveUnwind({
           enabled: s.passive_unwind?.enabled === true,
           spreadPercentile: s.passive_unwind?.spreadPercentile ?? DEFAULT_PASSIVE_UNWIND.spreadPercentile,
@@ -697,6 +738,20 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
     api.getVenueExecutionCapabilities().then(setVenueCapabilities).catch(console.error);
   }, [vaultStatus]);
 
+  // Live stablecoin-rate table for the Execution tab — polls while the tab
+  // is open so the depeg status the backend enforces is visible here.
+  useEffect(() => {
+    if (activeTab !== "execution" || !api.isTauri) return;
+    let cancelled = false;
+    const pull = () =>
+      api.getStablecoinHealth()
+        .then((h) => { if (!cancelled) setStablecoinHealth(h); })
+        .catch(() => {});
+    pull();
+    const t = setInterval(pull, 15_000);
+    return () => { cancelled = true; clearInterval(t); };
+  }, [activeTab]);
+
   const submissionReadyVenues = venueCapabilities.filter((c) => c.submissionReady);
   const canSwitchToLive = (vaultStatus?.is_unlocked ?? false) && submissionReadyVenues.length >= 2;
 
@@ -709,6 +764,9 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
           hsm_url: hsmUrl,
           hmac_token: hmacToken,
           min_depth_ratio: minDepthRatio,
+          usd_quote_mode: usdQuoteMode,
+          stablecoin_warn_bps: Number(stableWarnBps) || 0,
+          stablecoin_halt_bps: Number(stableHaltBps) || 0,
           engine_rpc_port: 8787, // reserved — no desktop listener consumes it
           engine_ws_port: 8789, // reserved — no desktop listener consumes it
           bind_address: "127.0.0.1", // reserved — no desktop listener consumes it
@@ -942,6 +1000,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   };
 
   const configuredCount = [
+    isVenueConfigured("evm_wallet"),
     isVenueConfigured("hyperliquid"),
     isVenueConfigured("lighter"),
     isVenueConfigured("vanta"),
@@ -1095,7 +1154,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               <div className="w-56 sm:w-64 shrink-0 border-r border-surface-border bg-slate-50/50 flex flex-col min-h-0">
                 <div className="p-3 border-b border-surface-border bg-slate-100/60 flex items-center justify-between shrink-0">
                   <span className="text-xs font-mono font-bold text-slate-700 tracking-wider">
-                    Exchanges ({configuredCount}/{EXCHANGES_ALPHABETICAL.length})
+                    Exchanges ({configuredCount}/{visibleExchanges.length})
                   </span>
                   <div className="flex items-center gap-1.5">
                     <div
@@ -1395,7 +1454,17 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               </div>
             )}
 
-            {selectedExchange !== "kraken" && (
+            {/* Shared EVM wallet — one key fanned out to every AMM venue */}
+            {selectedExchange === "evm_wallet" && (
+              <EvmWalletSection
+                locked={isVaultLocked}
+                environment={tradingMode}
+                refreshKey={accountsEpoch}
+                onChanged={handleAccountsChanged}
+              />
+            )}
+
+            {selectedExchange !== "kraken" && selectedExchange !== "evm_wallet" && (
               <VenueAccountsSection
                 venue={selectedExchange}
                 locked={isVaultLocked}
@@ -1514,6 +1583,95 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   Testnet uses each venue's own demo balance — fund accounts on the venue's testnet faucet, not here. Balances, positions, and order flow are real venue state, not simulation.
                 </p>
               </div>
+            </div>
+
+            {/* USD-stablecoin quote policy */}
+            <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs space-y-3">
+              <div className="space-y-1 min-w-0">
+                <label className="text-slate-800 font-bold text-xs flex items-center">
+                  USD &amp; Stablecoin Quotes
+                  <InfoTooltip
+                    position="bottom"
+                    text={"How USD, USDT, USDC, USDG and other USD-family quote currencies are treated when the same asset is priced in different ones across venues.\n\nSeparate tickers: BTC-USDT and BTC-USDC stay distinct instruments — no merging, no conversion.\n\nSame ticker (1:1): USD-family quotes merge into one pair at face value — fast, but a depegged coin quietly pollutes the spread.\n\nSame ticker (FX-adjusted): quotes merge and every price is converted to USD through the live stablecoin rate table — the honest comparison. Rates come from CoinGecko (cross-venue), each venue's own stable/stable markets (intra-venue), and Uniswap as fallback; a disconnected feed keeps its last rate and drifts slowly back toward 1:1.\n\nDepeg control: past the halt threshold, pairs quoted in that coin are blocked — except stablecoin-vs-USD books, which ARE the depeg arbitrage."}
+                  />
+                </label>
+                <p className="text-xs text-slate-500">
+                  Applies to pairing, spread history, sizing, and equity — including equity/index instruments quoted in USD-family coins.
+                </p>
+              </div>
+              <div className="space-y-2 pt-1">
+                {([
+                  { v: "separate", label: "Separate tickers", desc: "BTC-USDT ≠ BTC-USDC — each quote is its own instrument." },
+                  { v: "parity", label: "Same ticker, 1:1", desc: "Merge USD-family quotes at face value (no conversion)." },
+                  { v: "fx_adjusted", label: "Same ticker, FX-adjusted", desc: "Merge and convert each quote to USD at live rates." },
+                ] as const).map((o) => (
+                  <label key={o.v} className="flex items-start space-x-2 cursor-pointer">
+                    <input
+                      type="radio"
+                      name="usd_quote_mode"
+                      checked={usdQuoteMode === o.v}
+                      onChange={() => setUsdQuoteMode(o.v)}
+                      disabled={loading}
+                      className="mt-0.5 text-accent-strong focus:ring-accent"
+                    />
+                    <span className="min-w-0">
+                      <span className="font-semibold text-slate-800">{o.label}</span>
+                      <span className="block text-slate-500">{o.desc}</span>
+                    </span>
+                  </label>
+                ))}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 border-t border-surface-border/60 pt-3">
+                <div className="flex items-center justify-between gap-3">
+                  <label className="text-slate-600 block text-xs" title="Deviation from $1.00 that raises a warning (bps)">
+                    Depeg warning (bps)
+                  </label>
+                  <input type="number" min="1" step="any" disabled={loading} value={stableWarnBps}
+                    onChange={(e) => setStableWarnBps(parseFloat(e.target.value) || 0)}
+                    className="w-24 shrink-0 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent" />
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <label className="text-slate-600 block text-xs" title="Deviation from $1.00 that blocks pairs quoted in the coin (bps) — applies in every quote mode">
+                    Depeg halt (bps)
+                  </label>
+                  <input type="number" min="1" step="any" disabled={loading} value={stableHaltBps}
+                    onChange={(e) => setStableHaltBps(parseFloat(e.target.value) || 0)}
+                    className="w-24 shrink-0 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent" />
+                </div>
+              </div>
+
+              {stablecoinHealth && (
+                <div className="border-t border-surface-border/60 pt-3 space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-slate-600 text-xs font-semibold">Live rates</span>
+                    {stablecoinHealth.feedStale && (
+                      <span className="text-[10px] text-warn-strong">rate feed unreachable — converging to 1:1</span>
+                    )}
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-1.5">
+                    {stablecoinHealth.quotes.map((q) => (
+                      <div key={q.quote} className={`px-2 py-1.5 rounded border text-[10px] ${
+                        q.status === "halted" ? "border-loss-border bg-loss-dim text-loss" :
+                        q.status === "warn" ? "border-warn-border bg-warn-dim text-warn-strong" :
+                        "border-surface-border bg-surface-raised text-slate-700"
+                      }`}>
+                        <div className="font-bold">{q.quote}</div>
+                        <div>${q.effectiveRate.toFixed(4)}</div>
+                        <div className="opacity-75">
+                          {q.status === "unobserved" ? "no feed" :
+                            `${q.deviationBps >= 0 ? "+" : ""}${q.deviationBps.toFixed(1)}bps${q.stale ? " · stale" : ""}`}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                  {stablecoinHealth.haltedQuotes.length > 0 && (
+                    <p className="text-[10px] text-loss font-semibold">
+                      Halted: {stablecoinHealth.haltedQuotes.join(", ")} — pairs quoted in these coins are blocked.
+                    </p>
+                  )}
+                </div>
+              )}
             </div>
 
             {/* Global Auto Position Exit — single limit-exit policy */}

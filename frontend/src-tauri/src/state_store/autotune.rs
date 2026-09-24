@@ -13,7 +13,21 @@ impl StateStore {
         detail_json: &str,
         ts_ms: i64,
     ) -> anyhow::Result<i64> {
-        let symbol = normalize_symbol(symbol)?;
+        self.record_autotune_apply_event_mode(symbol, applied_json, detail_json, ts_ms, true)
+    }
+
+    /// Mode-aware variant: the audit row keys on the active policy's pair
+    /// key so reads under `separate` stay quote-strict.
+    pub fn record_autotune_apply_event_mode(
+        &self,
+        symbol: &str,
+        applied_json: &str,
+        detail_json: &str,
+        ts_ms: i64,
+        merge_usd: bool,
+    ) -> anyhow::Result<i64> {
+        let symbol = arbitrageur_core::symbol::pair_key(symbol, merge_usd);
+        let symbol = normalize_symbol(&symbol)?;
         if ts_ms < 0 {
             anyhow::bail!("negative autotune apply timestamp");
         }
@@ -39,12 +53,23 @@ impl StateStore {
         symbol: &str,
         limit: i64,
     ) -> anyhow::Result<Vec<AutotuneApplyEventRow>> {
+        self.recent_autotune_apply_events_mode(symbol, limit, true)
+    }
+
+    /// Mode-aware variant: under `separate` the audit trail is quote-strict
+    /// — a BTC-USDT apply event never surfaces for a BTC-USDC query.
+    pub fn recent_autotune_apply_events_mode(
+        &self,
+        symbol: &str,
+        limit: i64,
+        merge_usd: bool,
+    ) -> anyhow::Result<Vec<AutotuneApplyEventRow>> {
         let symbol = normalize_symbol(symbol)?;
         if limit <= 0 {
             anyhow::bail!("event limit must be positive");
         }
         let limit = limit.min(1000);
-        let keys = spread_symbol_aliases(&symbol);
+        let keys = crate::state_store::samples::sample_keys(&symbol, merge_usd);
         let placeholders = keys.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
             "SELECT id, symbol, applied_json, detail_json, ts_ms
