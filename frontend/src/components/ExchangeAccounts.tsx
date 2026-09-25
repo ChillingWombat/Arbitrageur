@@ -264,6 +264,9 @@ export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
   apex: [],
   astros: [],
   bulk: [],
+  // Variational Omni: the public API is a single stats document — no keys
+  // exist yet (trading API not yet public per docs.variational.io).
+  variational: [],
   // dYdX Chain (Cosmos appchain): orders are signed `MsgPlaceOrder`
   // transactions broadcast over validator gRPC. The credential is the
   // account's 24-word BIP-39 mnemonic — the venue derives
@@ -426,6 +429,7 @@ export const ACCOUNT_VENUE_DISPLAY: Record<string, string> = {
   popdex: "PopDEX",
   robinhood: "Robinhood Lighter",
   vanta: "Vanta",
+  variational: "Variational",
   decibel: "Decibel",
   ibkr: "Interactive Brokers",
   ig: "IG Trading",

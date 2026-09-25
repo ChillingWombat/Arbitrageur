@@ -104,6 +104,7 @@ export const VENUE_ID_TO_CODE: Record<string, string> = {
   alpaca: "ALP",
   decibel: "DCB",
   deribit: "DBT",
+  variational: "VAR",
 };
 
 export const VENUE_CODE_TO_ID: Record<string, string> = {
@@ -121,6 +122,7 @@ export const VENUE_CODE_TO_ID: Record<string, string> = {
   ALP: "alpaca",
   DCB: "decibel",
   DBT: "deribit",
+  VAR: "variational",
 };
 
 /**

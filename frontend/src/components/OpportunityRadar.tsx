@@ -118,6 +118,7 @@ const VENUE_NAME: Record<string, string> = {
   coinbase: "Coinbase",
   alpaca: "Alpaca",
   decibel: "Decibel",
+  variational: "Variational",
   ibkr: "IBKR",
   ig: "IG",
 };
@@ -138,6 +139,7 @@ const VENUE_LABEL: Record<string, string> = {
   coinbase: "CB",
   alpaca: "ALP",
   decibel: "DCB",
+  variational: "VAR",
   ibkr: "IBKR",
   ig: "IG",
   okx: "OKX",
