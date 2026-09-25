@@ -5,6 +5,7 @@ import type {
   VenueVolumesDto,
   SignalSeriesDto,
   MatrixBaselineSnapshotDto,
+  SpreadAnalyticsDto,
   AutotuneRecommendationDto,
   AutotuneReadinessDto,
   TickerAutotuneModeDto,
@@ -158,6 +159,7 @@ const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   "get_venue_fees",
   "get_signal_series",
   "get_matrix_baselines",
+  "get_spread_analytics",
   "scan_spatial_opportunities",
   "scan_triangle_opportunities",
   "execute_triangle_arbitrage",
@@ -607,6 +609,21 @@ export const api = {
       mode,
       manualWindowSecs,
       percentile,
+    });
+  },
+
+  /** Per-ticker dislocation analytics: band distribution (how often the
+   *  spread reaches hurdle size) + per-pair stats and half-lives over the
+   *  window. Empty fields stay null on thin data — never fabricated. */
+  async getSpreadAnalytics(
+    symbol: string,
+    windowSecs?: number,
+    hurdleBps?: number,
+  ): Promise<SpreadAnalyticsDto> {
+    return invokeDesktop<SpreadAnalyticsDto>("get_spread_analytics", {
+      symbol,
+      windowSecs,
+      hurdleBps,
     });
   },
 

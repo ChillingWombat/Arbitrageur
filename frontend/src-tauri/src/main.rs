@@ -171,6 +171,7 @@ fn main() {
             commands::get_venue_fees,
             commands::get_signal_series,
             commands::get_matrix_baselines,
+            commands::get_spread_analytics,
             commands::scan_spatial_opportunities,
             commands::scan_triangle_opportunities,
             commands::execute_triangle_arbitrage,
