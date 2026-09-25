@@ -383,6 +383,45 @@ test("applyMarketUniverse keeps exact stablecoin quotes distinct", () => {
   assert.deepStrictEqual(out[0].venues, ["AST", "BNB", "OKX"]);
 });
 
+test("applyMarketUniverse merge mode collapses quote variants into one base instrument", () => {
+  // Mirrors the engine's pair_key under parity/fx_adjusted: AAVE-USDT on
+  // Binance + AAVE-USDC on Lighter are ONE instrument ("AAVE") spanning
+  // both venues — that pairing is exactly what merge mode enables.
+  const catalog: PerpTicker[] = [
+    { symbol: "AAVE-USDC", base: "AAVE", quote: "USDC", name: "Aave", venues: ["LGT"], basePrice: 100 },
+  ];
+  const out = applyMarketUniverse(catalog, [
+    { venue_id: "binance", symbols: ["AAVE-USDT"], base_prices: { "AAVE-USDT": 101 } },
+    { venue_id: "lighter", symbols: ["AAVE-USDC"], base_prices: { "AAVE-USDC": 101.5 } },
+  ], true);
+
+  assert.strictEqual(out.length, 1);
+  assert.strictEqual(out[0].symbol, "AAVE");
+  assert.strictEqual(out[0].base, "AAVE");
+  assert.strictEqual(out[0].quote, "USD");
+  assert.strictEqual(out[0].name, "Aave");
+  assert.deepStrictEqual(out[0].venues, ["BNB", "LGT"]);
+  assert.strictEqual(out[0].basePrice, 101.25); // median of pooled quotes
+});
+
+test("applyMarketUniverse merge mode still requires two distinct venues", () => {
+  // Two quote variants on ONE venue do not satisfy the cross-venue minimum —
+  // the venue set union is what counts, not the listing count.
+  const out = applyMarketUniverse([], [
+    { venue_id: "binance", symbols: ["AAVE-USDT", "AAVE-USDC"] },
+  ], true);
+  assert.strictEqual(out.length, 0);
+});
+
+test("applyMarketUniverse merge mode merges non-USD quote variants too (pair_key parity)", () => {
+  const out = applyMarketUniverse([], [
+    { venue_id: "kraken", symbols: ["BTC-EUR"] },
+    { venue_id: "binance", symbols: ["BTC-USDT"] },
+  ], true);
+  assert.deepStrictEqual(out.map((t) => t.symbol), ["BTC"]);
+  assert.deepStrictEqual(out[0].venues, ["BNB", "KRK"]);
+});
+
 test("applyMarketUniverse admits a ticker listed by two real venues", () => {
   const catalog: PerpTicker[] = [
     { symbol: "ETH-USDC", base: "ETH", quote: "USDC", name: "Ethereum", venues: ["HL", "LGT"], basePrice: 3000 },
