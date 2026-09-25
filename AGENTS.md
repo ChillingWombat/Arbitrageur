@@ -14,6 +14,13 @@
   adapters (`tn_*`) use venue demo endpoints; Live adapters (`live_*`) use
   mainnet. `rest_base_url()` exposes an adapter's configured endpoint —
   feed lanes derive WS URLs from it so env never crosses.
+- Persisted venue/monitor data is env-scoped (schema v38): every write
+  stamps `environment`, every read filters it, and pre-v38 rows stay
+  `'unknown'` — never guessed into either env. `'unknown'` open-position
+  trackers list under both envs (fail-closed rewatch); `'unknown'`
+  scheduled exits never dispatch. State-store accessors take an
+  `environment: &str` (or a row struct carrying it) — reject anything
+  outside `testnet|live` via `normalize_environment`.
 - Testnet availability per venue is uneven (Binance/Hyperliquid/Lighter/
   Robinhood-Lighter/OKX demo-mode/Vanta-Orderly/Decibel/PopDEX/Deribit/
   Arcus/Alpaca-paper have public testnets; Coinbase, Aster, the DexPerp

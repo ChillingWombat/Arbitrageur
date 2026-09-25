@@ -8,14 +8,17 @@ use super::*;
 impl StateStore {
     /// Record one poll's per-venue top-of-book observations in a single
     /// transaction. Rows with non-positive/non-finite mids are dropped rather
-    /// than persisted as plausible-looking numbers.
+    /// than persisted as plausible-looking numbers. `environment` is the
+    /// producing environment's tag — a testnet print must never land in
+    /// the live series (and vice versa).
     pub fn record_spread_samples(
         &self,
         symbol: &str,
         ts_ms: i64,
         entries: &[VenueSampleEntry],
+        environment: &str,
     ) -> anyhow::Result<()> {
-        self.record_spread_samples_mode(symbol, true, ts_ms, entries)
+        self.record_spread_samples_mode(symbol, true, ts_ms, entries, environment)
     }
 
     /// Mode-aware variant of [`Self::record_spread_samples`]: under the
@@ -28,8 +31,10 @@ impl StateStore {
         merge_usd: bool,
         ts_ms: i64,
         entries: &[VenueSampleEntry],
+        environment: &str,
     ) -> anyhow::Result<()> {
         let symbol = normalize_symbol(symbol)?;
+        let environment = normalize_environment(environment)?;
         if entries.is_empty() || ts_ms < 0 {
             return Ok(());
         }
@@ -37,14 +42,16 @@ impl StateStore {
         // Same-instrument gate: once a key has an established scale, rows
         // irreconcilable with it are a symbol collision at the source —
         // refuse to persist them at all. A fresh key has no incumbent yet,
-        // so its first cells still bind the instrument freely.
-        let anchor = incumbent_anchor(&conn, &sample_keys(&symbol, merge_usd))?;
+        // so its first cells still bind the instrument freely. The anchor
+        // is environment-scoped: a testnet scale must not arbitrate live
+        // rows (and pre-v38 'unknown' rows arbitrate nothing).
+        let anchor = incumbent_anchor(&conn, &sample_keys(&symbol, merge_usd), &environment)?;
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         {
             let mut stmt = tx.prepare(
                 "INSERT INTO spread_samples
-                    (symbol, venue_id, ts_ms, mid, best_bid, best_ask, bid_depth, ask_depth)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                    (symbol, venue_id, ts_ms, mid, best_bid, best_ask, bid_depth, ask_depth, environment)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             )?;
             for e in entries {
                 let venue_id = normalize_venue(&e.venue_id)?;
@@ -75,6 +82,7 @@ impl StateStore {
                     e.best_ask,
                     e.bid_depth.filter(|d| d.is_finite() && *d > 0.0),
                     e.ask_depth.filter(|d| d.is_finite() && *d > 0.0),
+                    environment,
                 ])?;
             }
         }
@@ -89,7 +97,7 @@ impl StateStore {
     pub const SAMPLE_MIN_INTERVAL_MS: i64 = 500;
 
     /// Frame-rate variant of [`Self::record_spread_samples_mode`]: entries
-    /// whose (symbol, venue) pair was persisted within
+    /// whose (symbol, venue, environment) tuple was persisted within
     /// [`SAMPLE_MIN_INTERVAL_MS`](Self::SAMPLE_MIN_INTERVAL_MS) are dropped
     /// before the write is even attempted.
     pub fn record_spread_samples_throttled(
@@ -98,13 +106,18 @@ impl StateStore {
         merge_usd: bool,
         ts_ms: i64,
         entries: &[VenueSampleEntry],
+        environment: &str,
     ) -> anyhow::Result<()> {
         let kept: Vec<VenueSampleEntry> = {
             let mut wm = self.sample_watermarks.lock();
             entries
                 .iter()
                 .filter(|e| {
-                    let key = (symbol.to_string(), e.venue_id.clone());
+                    let key = (
+                        symbol.to_string(),
+                        e.venue_id.clone(),
+                        environment.to_string(),
+                    );
                     if wm.get(&key).is_some_and(|last| {
                         ts_ms.saturating_sub(*last) < Self::SAMPLE_MIN_INTERVAL_MS
                     }) {
@@ -116,7 +129,7 @@ impl StateStore {
                 .cloned()
                 .collect()
         };
-        self.record_spread_samples_mode(symbol, merge_usd, ts_ms, &kept)
+        self.record_spread_samples_mode(symbol, merge_usd, ts_ms, &kept, environment)
     }
 
     /// Samples for a symbol in `[from_ts_ms, to_ts_ms]`, ordered by time then venue.
@@ -128,13 +141,16 @@ impl StateStore {
     /// with the cross-venue consensus (ticker collisions like an index perp
     /// vs a same-named memecoin, or a corrupted feed) are dropped here —
     /// once, for every chart, baseline, and pair evaluation downstream.
+    /// Reads are environment-strict: 'unknown' provenance rows (pre-v38)
+    /// and the other environment's rows never mix into this series.
     pub fn spread_samples(
         &self,
         symbol: &str,
         from_ts_ms: i64,
         to_ts_ms: i64,
+        environment: &str,
     ) -> anyhow::Result<Vec<SpreadSample>> {
-        self.spread_samples_mode(symbol, true, from_ts_ms, to_ts_ms)
+        self.spread_samples_mode(symbol, true, from_ts_ms, to_ts_ms, environment)
     }
 
     /// Mode-aware variant of [`Self::spread_samples`]: `merge_usd = false`
@@ -146,14 +162,17 @@ impl StateStore {
         merge_usd: bool,
         from_ts_ms: i64,
         to_ts_ms: i64,
+        environment: &str,
     ) -> anyhow::Result<Vec<SpreadSample>> {
         let symbol = normalize_symbol(symbol)?;
+        let environment = normalize_environment(environment)?;
         let keys = sample_keys(&symbol, merge_usd);
         let placeholders = keys.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
             "SELECT symbol, venue_id, ts_ms, mid, best_bid, best_ask, bid_depth, ask_depth
              FROM spread_samples
              WHERE symbol IN ({placeholders}) AND ts_ms >= ? AND ts_ms <= ?
+               AND environment = ?
              ORDER BY ts_ms ASC, venue_id ASC"
         );
         let conn = self.telemetry().lock();
@@ -162,6 +181,7 @@ impl StateStore {
             keys.iter().map(|k| k as &dyn rusqlite::ToSql).collect();
         params.push(&from_ts_ms);
         params.push(&to_ts_ms);
+        params.push(&environment);
         let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
             Ok(SpreadSample {
                 symbol: r.get(0)?,
@@ -176,17 +196,21 @@ impl StateStore {
         })?;
         let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
         // One anchor source for every read: the scale the canonical key was
-        // first bound to. A window of pure intruder data reads self-
-        // consistent at the wrong scale, so the incumbent must arbitrate
-        // even when nothing inside the window looks split.
-        let anchor = incumbent_anchor(&conn, &keys)?;
+        // first bound to *in this environment*. A window of pure intruder
+        // data reads self-consistent at the wrong scale, so the incumbent
+        // must arbitrate even when nothing inside the window looks split.
+        let anchor = incumbent_anchor(&conn, &keys, &environment)?;
         Ok(filter_symbol_consistency(rows, anchor))
     }
 
     /// Earliest recorded sample timestamp for a symbol (history depth indicator).
     /// Alias-aware, matching [`Self::spread_samples`].
-    pub fn earliest_spread_sample_ts(&self, symbol: &str) -> anyhow::Result<Option<i64>> {
-        self.earliest_spread_sample_ts_mode(symbol, true)
+    pub fn earliest_spread_sample_ts(
+        &self,
+        symbol: &str,
+        environment: &str,
+    ) -> anyhow::Result<Option<i64>> {
+        self.earliest_spread_sample_ts_mode(symbol, true, environment)
     }
 
     /// Mode-aware variant matching [`Self::spread_samples_mode`].
@@ -194,15 +218,21 @@ impl StateStore {
         &self,
         symbol: &str,
         merge_usd: bool,
+        environment: &str,
     ) -> anyhow::Result<Option<i64>> {
         let symbol = normalize_symbol(symbol)?;
+        let environment = normalize_environment(environment)?;
         let keys = sample_keys(&symbol, merge_usd);
         let placeholders = keys.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-        let sql = format!("SELECT MIN(ts_ms) FROM spread_samples WHERE symbol IN ({placeholders})");
+        let sql = format!(
+            "SELECT MIN(ts_ms) FROM spread_samples
+             WHERE symbol IN ({placeholders}) AND environment = ?"
+        );
         let conn = self.telemetry().lock();
         let mut stmt = conn.prepare(&sql)?;
-        let params: Vec<&dyn rusqlite::ToSql> =
+        let mut params: Vec<&dyn rusqlite::ToSql> =
             keys.iter().map(|k| k as &dyn rusqlite::ToSql).collect();
+        params.push(&environment);
         Ok(stmt.query_row(rusqlite::params_from_iter(params), |r| r.get(0))?)
     }
 
@@ -243,17 +273,19 @@ impl StateStore {
     /* Session seasonality (Phase 1): volume sampler + profiles + rollup    */
     /* ------------------------------------------------------------------ */
 
-    /// Persist one volume-refresh poll per venue. Symbols are stored under
-    /// the canonical base so reads stay alias-normalized through
-    /// `spread_symbol_aliases`. Best-effort shape: bad rows are skipped,
-    /// never persisted as plausible numbers.
+    /// Persist one volume-refresh poll per venue, stamped with the
+    /// producing environment. Symbols are stored under the canonical base
+    /// so reads stay alias-normalized through `spread_symbol_aliases`.
+    /// Best-effort shape: bad rows are skipped, never persisted as
+    /// plausible numbers.
     pub fn record_venue_volume_samples(
         &self,
         venue: &str,
         ts_ms: i64,
         volumes: &HashMap<String, f64>,
+        environment: &str,
     ) -> anyhow::Result<()> {
-        self.record_venue_volume_samples_mode(venue, ts_ms, volumes, true)
+        self.record_venue_volume_samples_mode(venue, ts_ms, volumes, true, environment)
     }
 
     /// Mode-aware variant: under `separate` volume rows keep their pair key
@@ -264,8 +296,10 @@ impl StateStore {
         ts_ms: i64,
         volumes: &HashMap<String, f64>,
         merge_usd: bool,
+        environment: &str,
     ) -> anyhow::Result<()> {
         let venue = normalize_venue(venue)?;
+        let environment = normalize_environment(environment)?;
         if volumes.is_empty() || ts_ms < 0 {
             return Ok(());
         }
@@ -273,8 +307,9 @@ impl StateStore {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         {
             let mut stmt = tx.prepare(
-                "INSERT OR REPLACE INTO venue_volume_samples (venue_id, symbol, ts_ms, vol_usd)
-                 VALUES (?1, ?2, ?3, ?4)",
+                "INSERT OR REPLACE INTO venue_volume_samples
+                     (venue_id, symbol, ts_ms, vol_usd, environment)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
             )?;
             for (asset, vol) in volumes {
                 if !vol.is_finite() || *vol <= 0.0 {
@@ -284,23 +319,24 @@ impl StateStore {
                 if symbol.is_empty() {
                     continue;
                 }
-                stmt.execute(params![venue, symbol, ts_ms, vol])?;
+                stmt.execute(params![venue, symbol, ts_ms, vol, environment])?;
             }
         }
         tx.commit()?;
         Ok(())
     }
 
-    /// Raw volume series for one symbol/venue window. Alias-aware like
-    /// `spread_samples`.
+    /// Raw volume series for one symbol/venue window in one environment.
+    /// Alias-aware like `spread_samples`.
     pub fn venue_volume_series(
         &self,
         symbol: &str,
         venue: &str,
         from_ts_ms: i64,
         to_ts_ms: i64,
+        environment: &str,
     ) -> anyhow::Result<Vec<(i64, f64)>> {
-        self.venue_volume_series_mode(symbol, venue, from_ts_ms, to_ts_ms, true)
+        self.venue_volume_series_mode(symbol, venue, from_ts_ms, to_ts_ms, true, environment)
     }
 
     /// Mode-aware variant: under `separate` the pair key is the series —
@@ -312,26 +348,29 @@ impl StateStore {
         from_ts_ms: i64,
         to_ts_ms: i64,
         merge_usd: bool,
+        environment: &str,
     ) -> anyhow::Result<Vec<(i64, f64)>> {
         let symbol = normalize_symbol(symbol)?;
         let venue = normalize_venue(venue)?;
+        let environment = normalize_environment(environment)?;
         let keys = sample_keys(&symbol, merge_usd);
         let placeholders = keys.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
             "SELECT ts_ms, vol_usd FROM venue_volume_samples
              WHERE venue_id = ? AND symbol IN ({placeholders})
-               AND ts_ms >= ? AND ts_ms <= ?
+               AND ts_ms >= ? AND ts_ms <= ? AND environment = ?
              ORDER BY ts_ms ASC"
         );
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(&sql)?;
-        let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(keys.len() + 3);
+        let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(keys.len() + 4);
         params.push(&venue);
         for k in &keys {
             params.push(k);
         }
         params.push(&from_ts_ms);
         params.push(&to_ts_ms);
+        params.push(&environment);
         let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
             Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?))
         })?;
@@ -361,18 +400,26 @@ impl StateStore {
         Ok(())
     }
 
-    /// Distinct canonical symbols present in the spread log (rollup driver).
-    pub fn distinct_sample_symbols(&self) -> anyhow::Result<Vec<String>> {
-        self.distinct_sample_symbols_mode(true)
+    /// Distinct canonical symbols present in the spread log for one
+    /// environment (rollup driver — testnet symbols never seed live
+    /// profiles and vice versa).
+    pub fn distinct_sample_symbols(&self, environment: &str) -> anyhow::Result<Vec<String>> {
+        self.distinct_sample_symbols_mode(true, environment)
     }
 
     /// Mode-aware variant: under `separate` the stored keys ARE the series
     /// identity — collapsing "BTC-USDT"/"BTC-USDC" to "BTC" would make the
     /// rollup driver read a key with no samples and merge sibling series.
-    pub fn distinct_sample_symbols_mode(&self, merge_usd: bool) -> anyhow::Result<Vec<String>> {
+    pub fn distinct_sample_symbols_mode(
+        &self,
+        merge_usd: bool,
+        environment: &str,
+    ) -> anyhow::Result<Vec<String>> {
+        let environment = normalize_environment(environment)?;
         let conn = self.telemetry().lock();
-        let mut stmt = conn.prepare("SELECT DISTINCT symbol FROM spread_samples")?;
-        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut stmt =
+            conn.prepare("SELECT DISTINCT symbol FROM spread_samples WHERE environment = ?1")?;
+        let rows = stmt.query_map([environment], |r| r.get::<_, String>(0))?;
         let mut out: Vec<String> = Vec::new();
         for raw in rows.collect::<rusqlite::Result<Vec<_>>>()? {
             let key = if merge_usd {
@@ -396,16 +443,20 @@ impl StateStore {
         )?)
     }
 
-    /// Record funding-rate prints observed by a scan. `samples` carries
-    /// `(venue_id, symbol, rate_8h_normalized, interval_hours)`; timestamps
-    /// are bucketed to the minute so repeat scans within a minute REPLACE
-    /// rather than duplicate (PK covers venue/symbol/minute). Fail-soft on
-    /// bad rows: they are skipped, never aborting the batch.
+    /// Record funding-rate prints observed by a scan under `environment`.
+    /// `samples` carries `(venue_id, symbol, rate_8h_normalized,
+    /// interval_hours)`; timestamps are bucketed to the minute so repeat
+    /// scans within a minute REPLACE rather than duplicate (PK covers
+    /// venue/symbol/minute/environment — a same-minute write from the
+    /// other environment is a distinct row, never an overwrite). Fail-soft
+    /// on bad rows: they are skipped, never aborting the batch.
     pub fn record_funding_rate_samples(
         &self,
         ts_ms: i64,
         samples: &[(&str, &str, f64, i64)],
+        environment: &str,
     ) -> anyhow::Result<()> {
+        let environment = normalize_environment(environment)?;
         if ts_ms < 0 || samples.is_empty() {
             return Ok(());
         }
@@ -413,8 +464,8 @@ impl StateStore {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
             "INSERT OR REPLACE INTO funding_rate_samples
-                 (venue_id, symbol, ts_ms, rate_8h, interval_hours)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+                 (venue_id, symbol, ts_ms, rate_8h, interval_hours, environment)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         )?;
         for (venue_raw, symbol_raw, rate_8h, interval_hours) in samples {
             let Ok(venue) = normalize_venue(venue_raw) else {
@@ -431,33 +482,36 @@ impl StateStore {
                 symbol,
                 bucketed,
                 rate_8h,
-                interval_hours
+                interval_hours,
+                environment
             ])?;
         }
         Ok(())
     }
 
     /// Ordered `(ts_ms, rate_8h, interval_hours)` history for one
-    /// venue+symbol window. Training substrate for funding-persistence /
-    /// half-life modeling; no modeling happens here.
+    /// venue+symbol window in one environment. Training substrate for
+    /// funding-persistence / half-life modeling; no modeling happens here.
     pub fn funding_rate_series(
         &self,
         venue: &str,
         symbol: &str,
         from_ts_ms: i64,
         to_ts_ms: i64,
+        environment: &str,
     ) -> anyhow::Result<Vec<(i64, f64, i64)>> {
         let venue = normalize_venue(venue)?;
         let symbol = normalize_symbol(symbol)?;
+        let environment = normalize_environment(environment)?;
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
             "SELECT ts_ms, rate_8h, interval_hours FROM funding_rate_samples
              WHERE venue_id = ?1 AND symbol = ?2
-               AND ts_ms >= ?3 AND ts_ms <= ?4
+               AND ts_ms >= ?3 AND ts_ms <= ?4 AND environment = ?5
              ORDER BY ts_ms ASC",
         )?;
         let rows = stmt.query_map(
-            rusqlite::params![venue, symbol, from_ts_ms, to_ts_ms],
+            rusqlite::params![venue, symbol, from_ts_ms, to_ts_ms, environment],
             |r| {
                 Ok((
                     r.get::<_, i64>(0)?,
@@ -613,16 +667,23 @@ fn consensus_anchor(cells: &[(f64, usize)]) -> Option<f64> {
 const INCUMBENT_CELL_CAP: usize = 6;
 const INCUMBENT_ROW_CAP: i64 = 16_384;
 
-fn incumbent_anchor(conn: &Connection, keys: &[String]) -> rusqlite::Result<Option<f64>> {
+fn incumbent_anchor(
+    conn: &Connection,
+    keys: &[String],
+    environment: &str,
+) -> rusqlite::Result<Option<f64>> {
     let placeholders = keys.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    // Environment-strict: a testnet incumbent must not arbitrate live rows
+    // (identical key spaces, unrelated scales).
     let sql = format!(
         "SELECT venue_id, ts_ms, mid FROM spread_samples
-         WHERE symbol IN ({placeholders})
+         WHERE symbol IN ({placeholders}) AND environment = ?
          ORDER BY ts_ms ASC, venue_id ASC LIMIT {INCUMBENT_ROW_CAP}"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let params: Vec<&dyn rusqlite::ToSql> =
+    let mut params: Vec<&dyn rusqlite::ToSql> =
         keys.iter().map(|k| k as &dyn rusqlite::ToSql).collect();
+    params.push(&environment);
     let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
         Ok((
             r.get::<_, String>(0)?,

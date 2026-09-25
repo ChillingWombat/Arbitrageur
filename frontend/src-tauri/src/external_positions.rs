@@ -1138,6 +1138,7 @@ pub async fn schedule_external_exit_impl(
         note: None,
         created_at: now.clone(),
         updated_at: now,
+        environment: state.env().as_str().to_string(),
     };
     state
         .state_store
@@ -1153,7 +1154,10 @@ pub async fn schedule_external_exit_impl(
 /// order, reconciliation record.
 pub async fn run_due_scheduled_exits(state: &AppEngineState) {
     let now_ms = Utc::now().timestamp_millis();
-    let due = match state.state_store.due_scheduled_exits(now_ms) {
+    let due = match state
+        .state_store
+        .due_scheduled_exits(now_ms, state.env().as_str())
+    {
         Ok(d) => d,
         Err(e) => {
             tracing::warn!("scheduled-exit scan failed: {e}");
@@ -1292,7 +1296,7 @@ pub async fn list_scheduled_exits(
 ) -> Result<Vec<crate::state_store::ScheduledExit>, String> {
     state
         .state_store
-        .list_scheduled_exits(None)
+        .list_scheduled_exits(None, state.env().as_str())
         .map_err(|e| e.to_string())
 }
 
@@ -1617,7 +1621,12 @@ mod tests {
         state
     }
 
-    fn due_exit(id: &str, venue: &str, symbol: &str) -> crate::state_store::ScheduledExit {
+    fn due_exit(
+        id: &str,
+        venue: &str,
+        symbol: &str,
+        environment: &str,
+    ) -> crate::state_store::ScheduledExit {
         let now = Utc::now().to_rfc3339();
         crate::state_store::ScheduledExit {
             id: id.into(),
@@ -1633,6 +1642,7 @@ mod tests {
             note: None,
             created_at: now.clone(),
             updated_at: now,
+            environment: environment.to_string(),
         }
     }
 
@@ -1715,11 +1725,19 @@ mod tests {
         state.vault.write().force_timer_expiry();
         state
             .state_store
-            .insert_scheduled_exit(&due_exit("sched-auto", "lighter", "ETH-USDC"))
+            .insert_scheduled_exit(&due_exit(
+                "sched-auto",
+                "lighter",
+                "ETH-USDC",
+                state.env().as_str(),
+            ))
             .unwrap();
         run_due_scheduled_exits(&state).await;
         assert_eq!(venue.placed.lock().unwrap().len(), 1);
-        let rows = state.state_store.list_scheduled_exits(None).unwrap();
+        let rows = state
+            .state_store
+            .list_scheduled_exits(None, state.env().as_str())
+            .unwrap();
         assert_eq!(rows[0].status, "fired", "auto-locked exit must dispatch");
 
         // Manual lock: the next due row reschedules (bounded attempts),
@@ -1740,7 +1758,12 @@ mod tests {
         state.vault.write().lock();
         state
             .state_store
-            .insert_scheduled_exit(&due_exit("sched-manual", "lighter", "ETH-USDC"))
+            .insert_scheduled_exit(&due_exit(
+                "sched-manual",
+                "lighter",
+                "ETH-USDC",
+                state.env().as_str(),
+            ))
             .unwrap();
         run_due_scheduled_exits(&state).await;
         assert_eq!(
@@ -1748,7 +1771,10 @@ mod tests {
             0,
             "manual lock must not dispatch closes"
         );
-        let rows = state.state_store.list_scheduled_exits(None).unwrap();
+        let rows = state
+            .state_store
+            .list_scheduled_exits(None, state.env().as_str())
+            .unwrap();
         assert_eq!(
             rows[0].status, "pending",
             "pre-dispatch vault gate failure is retryable"
@@ -1764,10 +1790,18 @@ mod tests {
         let state = close_test_state();
         state
             .state_store
-            .insert_scheduled_exit(&due_exit("sched-bad", "nosuchvenue", "ETH-USDC"))
+            .insert_scheduled_exit(&due_exit(
+                "sched-bad",
+                "nosuchvenue",
+                "ETH-USDC",
+                state.env().as_str(),
+            ))
             .unwrap();
         run_due_scheduled_exits(&state).await;
-        let rows = state.state_store.list_scheduled_exits(None).unwrap();
+        let rows = state
+            .state_store
+            .list_scheduled_exits(None, state.env().as_str())
+            .unwrap();
         assert_eq!(rows[0].status, "failed");
 
         // An error AFTER possible venue submission is never retried — a
@@ -1788,10 +1822,18 @@ mod tests {
             .insert("lighter".into(), venue.clone());
         state
             .state_store
-            .insert_scheduled_exit(&due_exit("sched-err", "lighter", "ETH-USDC"))
+            .insert_scheduled_exit(&due_exit(
+                "sched-err",
+                "lighter",
+                "ETH-USDC",
+                state.env().as_str(),
+            ))
             .unwrap();
         run_due_scheduled_exits(&state).await;
-        let rows = state.state_store.list_scheduled_exits(None).unwrap();
+        let rows = state
+            .state_store
+            .list_scheduled_exits(None, state.env().as_str())
+            .unwrap();
         assert_eq!(
             rows[0].status, "failed",
             "post-dispatch error must not reschedule: {:?}",

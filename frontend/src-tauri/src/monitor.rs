@@ -617,10 +617,11 @@ fn session_context(
         session_rv: None,
         win_rate: None,
     };
-    let profiles = match state
-        .state_store
-        .session_profiles_mode(symbol, state.usd_merge_quotes())
-    {
+    let profiles = match state.state_store.session_profiles_mode(
+        symbol,
+        state.usd_merge_quotes(),
+        state.env().as_str(),
+    ) {
         Ok(p) => p,
         Err(_) => return neutral,
     };
@@ -1387,6 +1388,11 @@ pub struct SpreadMonitorEngine {
     /// a settings flip forces an immediate rebuild so pair keys, fetch
     /// symbols, and quote maps never straddle two policies.
     watchlist_mode: Mutex<String>,
+    /// The trading environment the current lanes/pair state were built
+    /// under. An env flip forces an immediate rebuild: lanes bind
+    /// `Arc<dyn ExchangeAdapter>` at construction, so without this a
+    /// testnet adapter keeps polling — and writing — under a live env.
+    watchlist_env: Mutex<Option<crate::state::TradingEnvironment>>,
     /// Venue → settlement currency (the modal quote across its listed
     /// markets), learned at watchlist refresh. Drives account-equity
     /// normalization: a venue settling in USDT reports USDT equity.
@@ -1437,6 +1443,7 @@ impl SpreadMonitorEngine {
             pairs: Mutex::new(HashMap::new()),
             funding_ema: Mutex::new(HashMap::new()),
             watchlist_mode: Mutex::new(String::new()),
+            watchlist_env: Mutex::new(None),
             settlement_quotes: Mutex::new(HashMap::new()),
             watchlist: Mutex::new(Vec::new()),
             venue_symbols: Mutex::new(HashMap::new()),
@@ -1460,7 +1467,7 @@ impl SpreadMonitorEngine {
         // `pairs`, and prune keeps every `pairs` key. Skipped rows are not in
         // `pairs`, so the next universe prune deletes them cleanly.
         let now_ms = Utc::now().timestamp_millis();
-        if let Ok(rows) = state.state_store.monitor_signals() {
+        if let Ok(rows) = state.state_store.monitor_signals(state.env().as_str()) {
             let mut pairs = engine.pairs.lock();
             let mut skipped = 0usize;
             for r in rows {
@@ -1704,7 +1711,21 @@ impl SpreadMonitorEngine {
             crate::stablecoin_fx::normalize_usd_quote_mode(&state.settings.read().usd_quote_mode);
         let merge_usd = mode != crate::stablecoin_fx::USD_QUOTE_MODE_SEPARATE;
         let mode_changed = *self.watchlist_mode.lock() != mode;
-        let due = due || mode_changed;
+        // An environment flip rebuilds too: lanes hold `Arc<dyn
+        // ExchangeAdapter>` bound at construction, so a testnet adapter
+        // would otherwise keep serving books — and stamping persisted
+        // samples — under the new env for up to a full refresh interval.
+        let env_changed = *self.watchlist_env.lock() != Some(state.env());
+        let due = due || mode_changed || env_changed;
+        if env_changed {
+            // Every cached pair/vol/funding state was learned from the old
+            // env's books — none of it may leak into the new env's gating.
+            self.pairs.lock().clear();
+            self.persisted.lock().clear();
+            self.fast_vol.lock().clear();
+            self.vol_halt.lock().clear();
+            self.funding_ema.lock().clear();
+        }
         if !due {
             // Cheap path: still pick up newly-admitted venues between full
             // refreshes without re-calling fetch_markets.
@@ -1960,11 +1981,14 @@ impl SpreadMonitorEngine {
         *self.watchlist.lock() = watch;
         *self.lanes.lock() = new_lanes;
         *self.watchlist_mode.lock() = mode.to_string();
+        *self.watchlist_env.lock() = Some(state.env());
         *self.last_watchlist_at.lock() = Some(Instant::now());
 
         // Drop persisted signals for pairs that left the universe.
         let keep: Vec<(String, String, String)> = self.pairs.lock().keys().cloned().collect();
-        let _ = state.state_store.prune_monitor_signals(&keep);
+        let _ = state
+            .state_store
+            .prune_monitor_signals(&keep, state.env().as_str());
     }
 
     /// Hourly session-rollup pass: rebuild every sampled symbol's session
@@ -1983,7 +2007,11 @@ impl SpreadMonitorEngine {
         let now_ms = Utc::now().timestamp_millis();
         let from_ms = now_ms - 7 * 86_400_000;
         let merge_usd = state.usd_merge_quotes();
-        let symbols = match state.state_store.distinct_sample_symbols_mode(merge_usd) {
+        let env = state.env().as_str();
+        let symbols = match state
+            .state_store
+            .distinct_sample_symbols_mode(merge_usd, env)
+        {
             Ok(s) => s,
             Err(e) => {
                 tracing::warn!("session rollup: symbol scan failed: {e}");
@@ -1993,7 +2021,7 @@ impl SpreadMonitorEngine {
         for symbol in symbols.iter().take(500) {
             if let Err(e) = state
                 .state_store
-                .rollup_session_profiles_mode(symbol, merge_usd, from_ms, now_ms, now_ms)
+                .rollup_session_profiles_mode(symbol, merge_usd, from_ms, now_ms, now_ms, env)
             {
                 tracing::warn!("session rollup failed for {symbol}: {e}");
             }
@@ -2084,6 +2112,10 @@ impl SpreadMonitorEngine {
         let mut jobs: Vec<Job> = Vec::new();
         let mut ws_hits: Vec<(String, String, OrderBook)> = Vec::new();
         let merge_usd = state.usd_merge_quotes();
+        // Environment at dispatch: fetches resolve asynchronously, and a
+        // book returned by a pre-switch adapter must never be stamped with
+        // — or written into the hub of — the new environment.
+        let dispatch_env = state.env();
         {
             let cfg = self.cfg.lock().clone();
             let mut lanes = self.lanes.lock();
@@ -2152,6 +2184,7 @@ impl SpreadMonitorEngine {
             }
         }
         let now_ms = Utc::now().timestamp_millis();
+        let env = state.env().as_str();
         for (venue, symbol, book) in ws_hits {
             if let Some(entry) = self.fx_sample(state, &venue, &symbol, &book) {
                 let _ = state.state_store.record_spread_samples_mode(
@@ -2159,6 +2192,7 @@ impl SpreadMonitorEngine {
                     merge_usd,
                     now_ms,
                     &[entry],
+                    env,
                 );
             }
         }
@@ -2197,6 +2231,12 @@ impl SpreadMonitorEngine {
             };
             match res {
                 Ok(book) => {
+                    if state.env() != dispatch_env {
+                        // In-flight fetch from the previous environment —
+                        // its book is not executable truth here. Drop it;
+                        // the rebuilt lanes re-fetch under the new env.
+                        continue;
+                    }
                     if let Some(lane) = self.lanes.lock().iter_mut().find(|l| l.venue == venue) {
                         lane.note_success();
                     }
@@ -2208,6 +2248,7 @@ impl SpreadMonitorEngine {
                             merge_usd,
                             now_ms,
                             &[e],
+                            dispatch_env.as_str(),
                         );
                     }
                 }
@@ -2226,6 +2267,7 @@ impl SpreadMonitorEngine {
     async fn poll_funding(&self, state: &AppEngineState) {
         let now = Instant::now();
         let merge_usd = state.usd_merge_quotes();
+        let dispatch_env = state.env();
         let mut work: Vec<(String, Arc<dyn ExchangeAdapter>)> = Vec::new();
         {
             let mut lanes = self.lanes.lock();
@@ -2240,6 +2282,12 @@ impl SpreadMonitorEngine {
         for (venue, adapter) in work {
             match adapter.fetch_funding_rates().await {
                 Ok(rates) => {
+                    if state.env() != dispatch_env {
+                        // Rates fetched by a pre-switch adapter carry the
+                        // old venue's funding truth — drop, don't persist
+                        // or publish under the new environment.
+                        continue;
+                    }
                     if let Some(lane) = self.lanes.lock().iter_mut().find(|l| l.venue == venue) {
                         lane.note_success();
                     }
@@ -2439,14 +2487,16 @@ impl SpreadMonitorEngine {
             // feeds the baseline regardless of which path produced it.
             // Under `separate` mode the read is quote-strict instead:
             // "BTC-USDT" must never see "BTC-USDC" rows.
-            let samples =
-                match state
-                    .state_store
-                    .spread_samples_mode(symbol, merge_usd, history_from, now_ms)
-                {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                };
+            let samples = match state.state_store.spread_samples_mode(
+                symbol,
+                merge_usd,
+                history_from,
+                now_ms,
+                state.env().as_str(),
+            ) {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
             let mut mids_by_venue: HashMap<String, Vec<(i64, f64)>> = HashMap::new();
             for s in &samples {
                 if s.mid.is_finite() && s.mid > 0.0 {
@@ -2472,6 +2522,7 @@ impl SpreadMonitorEngine {
                     depth_from_ms,
                     now_ms,
                     merge_usd,
+                    state.env().as_str(),
                 ) {
                     let vols: Vec<f64> = series.iter().map(|(_, v)| *v).collect();
                     if let (Some((_, cur)), Some(med)) = (series.last(), winsorized_median(&vols)) {
@@ -2534,7 +2585,17 @@ impl SpreadMonitorEngine {
                 if changed
                     && state
                         .state_store
-                        .upsert_monitor_signal(&sym, &bv, &sv, status.as_str(), fs, ls, edge, dev)
+                        .upsert_monitor_signal(
+                            &sym,
+                            &bv,
+                            &sv,
+                            status.as_str(),
+                            fs,
+                            ls,
+                            edge,
+                            dev,
+                            state.env().as_str(),
+                        )
                         .is_ok()
                 {
                     persisted.insert(key, (status, fs, ls));
@@ -2560,6 +2621,7 @@ impl SpreadMonitorEngine {
                 ev.p_win,
                 Some(ev.economics_json.as_str()),
                 ev.trigger,
+                state.env().as_str(),
             );
         }
 
@@ -4438,13 +4500,14 @@ mod tests {
                             ask_depth: None,
                         },
                     ],
+                    state.env().as_str(),
                 )
                 .unwrap();
         }
         let to = base + 16 * 24 * 3_600_000;
         state
             .state_store
-            .rollup_session_profiles("BTC", base - 1_000, to + 1_000, to)
+            .rollup_session_profiles("BTC", base - 1_000, to + 1_000, to, state.env().as_str())
             .unwrap();
         let overlap_ts = chrono::Utc
             .with_ymd_and_hms(2026, 1, 20, 14, 0, 0)
@@ -4513,6 +4576,7 @@ mod tests {
                             ask_depth: None,
                         },
                     ],
+                    state.env().as_str(),
                 )
                 .unwrap();
         }
@@ -4983,7 +5047,7 @@ mod tests {
         assert_eq!(second, 2, "same-minute re-poll must not duplicate events");
         let evs = state
             .state_store
-            .recent_monitor_signal_events(None, None, None, 10)
+            .recent_monitor_signal_events(None, None, None, 10, state.env().as_str())
             .unwrap();
         assert_eq!(evs.len(), 2);
         for ev in &evs {
@@ -5241,6 +5305,7 @@ mod tests {
                 now - 60_000,
                 Some(8.0),
                 Some(3.0),
+                state.env().as_str(),
             )
             .unwrap();
         store
@@ -5253,6 +5318,7 @@ mod tests {
                 now - 90_000_000,
                 Some(147_000_000.0),
                 None,
+                state.env().as_str(),
             )
             .unwrap();
         let engine = SpreadMonitorEngine::new(&state);

@@ -437,6 +437,9 @@ pub struct SessionProfileRow {
     pub mean_hold_s: Option<f64>,
     pub provisional: bool,
     pub updated_ts: i64,
+    /// Owning trading environment — v38+. 'unknown' = pre-migration row.
+    #[serde(default)]
+    pub environment: String,
 }
 
 /// One 24h hour-bin modulator inside a session's row family. Decisions
@@ -452,6 +455,9 @@ pub struct SessionHourBinRow {
     pub modulator: f64,
     pub provisional: bool,
     pub updated_ts: i64,
+    /// Owning trading environment — v38+. 'unknown' = pre-migration row.
+    #[serde(default)]
+    pub environment: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -467,6 +473,9 @@ pub struct HarAnchorRow {
     pub forecast_rv_bps: f64,
     pub trailing_mean_rv_bps: f64,
     pub updated_ts: i64,
+    /// Owning trading environment — v38+. 'unknown' = pre-migration row.
+    #[serde(default)]
+    pub environment: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -478,6 +487,9 @@ pub struct PromotionStateRow {
     pub val_delta_bps: f64,
     pub reason: String,
     pub updated_ts: i64,
+    /// Owning trading environment — v38+. 'unknown' = pre-migration row.
+    #[serde(default)]
+    pub environment: String,
 }
 
 /// One durable margin-utilisation observation for a paper venue: equity and
@@ -494,6 +506,9 @@ pub struct MarginSnapshot {
     pub equity: f64,
     pub used_margin: f64,
     pub rate_pct: f64,
+    /// Owning trading environment — v38+. 'unknown' = pre-migration row.
+    #[serde(default)]
+    pub environment: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -504,6 +519,8 @@ pub struct AutotuneApplyEventRow {
     pub applied_json: String,
     pub detail_json: String,
     pub ts_ms: i64,
+    /// Owning trading environment — v38+. 'unknown' = pre-migration row.
+    pub environment: String,
 }
 
 /// One venue's signed net filled quantity inside an aggregated open position.
@@ -721,6 +738,8 @@ pub struct MonitorSignalRow {
     pub last_seen_ms: i64,
     pub last_edge_bps: Option<f64>,
     pub last_dev_bps: Option<f64>,
+    /// Owning trading environment — v38+. 'unknown' = pre-migration row.
+    pub environment: String,
 }
 
 /// One persisted pair-signal lifecycle event (monitor_signal_events table).
@@ -745,6 +764,9 @@ pub struct MonitorSignalEventRow {
     pub p_win: Option<f64>,
     pub economics_json: Option<String>,
     pub trigger: String,
+    /// Owning trading environment — v38+. 'unknown' = pre-migration row.
+    #[serde(default)]
+    pub environment: String,
 }
 
 /// One open convergence-bot position (radar_bot_positions table): the entry
@@ -762,6 +784,10 @@ pub struct BotPositionRow {
     pub deadline_ms: i64,
     pub unwatched_since_ms: Option<i64>,
     pub last_seen_ms: i64,
+    /// Owning trading environment — v38+. 'unknown' rows stay visible to
+    /// both environments (fail-closed: an unattributed position tracker
+    /// must never go unrewatched).
+    pub environment: String,
 }
 
 /// One Single-Spread entry baseline (spatial_entry_baseline table, v13): the
@@ -801,6 +827,12 @@ pub struct ScheduledExit {
     pub note: Option<String>,
     pub created_at: String,
     pub updated_at: String,
+    /// Owning trading environment — v38+. 'unknown' rows are listed for
+    /// operator review but `due_scheduled_exits` never fires them: an
+    /// exit whose environment cannot be attributed must not dispatch a
+    /// real close under the wrong env's adapters.
+    #[serde(default)]
+    pub environment: String,
 }
 
 /// Separate row cap for the signal-event audit log. Retention shares the
@@ -975,9 +1007,12 @@ CREATE TABLE IF NOT EXISTS spread_samples (
     best_bid REAL NOT NULL,
     best_ask REAL NOT NULL,
     bid_depth REAL,
-    ask_depth REAL
+    ask_depth REAL,
+    environment TEXT NOT NULL DEFAULT 'unknown'
+        CHECK(environment IN ('unknown','testnet','live'))
 );
-CREATE INDEX IF NOT EXISTS ix_spread_samples_symbol_ts ON spread_samples(symbol, ts_ms);";
+CREATE INDEX IF NOT EXISTS ix_spread_samples_symbol_ts ON spread_samples(symbol, ts_ms);
+CREATE INDEX IF NOT EXISTS ix_spread_samples_env_ts ON spread_samples(environment, ts_ms);";
 
 /// v3 adds the durable venue mid-price sample log feeding the dislocation
 /// signal series. One row per venue per observed poll; timestamps are epoch
@@ -1690,6 +1725,193 @@ CREATE TABLE fixed_yield_maturities (
 PRAGMA user_version = 37;
 COMMIT;";
 
+/// v38 environment-scopes every venue-data table: live and testnet write
+/// the same (venue_id, symbol) key space, so without an environment
+/// column a testnet sample/signal/position row is indistinguishable from
+/// a mainnet one — charts, baselines, seasonality, funding history, and
+/// bot exit watchers would silently mix demo data into live decisions.
+///
+/// Tables whose PK can collide across environments are rebuilt with
+/// `environment` inside the primary key (v19/v36 pattern); append-only
+/// and id-keyed tables get a plain column. Copied rows are stamped
+/// 'unknown': pre-migration data cannot be attributed to an environment,
+/// so environment-filtered reads exclude it rather than guessing.
+/// `radar_bot_positions` is the deliberate exception — an unattributed
+/// open-position tracker stays visible to BOTH environments (fail-closed,
+/// mirroring v32 signal semantics): an unwatched real position is worse
+/// than a watched ambiguous one.
+const MIGRATION_V38_SQL: &str = "\
+PRAGMA foreign_keys = OFF;
+BEGIN IMMEDIATE;
+CREATE TABLE monitor_signals_v38 (
+    symbol TEXT NOT NULL COLLATE NOCASE,
+    buy_venue TEXT NOT NULL COLLATE NOCASE,
+    sell_venue TEXT NOT NULL COLLATE NOCASE,
+    status TEXT NOT NULL CHECK(status IN ('preparing','tracking','triggered','ready','no-data')),
+    first_seen_ms INTEGER NOT NULL CHECK(first_seen_ms >= 0),
+    last_seen_ms INTEGER NOT NULL CHECK(last_seen_ms >= 0),
+    last_edge_bps REAL,
+    last_dev_bps REAL,
+    updated_at TEXT NOT NULL,
+    environment TEXT NOT NULL DEFAULT 'unknown'
+        CHECK(environment IN ('unknown','testnet','live')),
+    PRIMARY KEY (symbol, buy_venue, sell_venue, environment)
+);
+INSERT INTO monitor_signals_v38
+    (symbol, buy_venue, sell_venue, status, first_seen_ms, last_seen_ms,
+     last_edge_bps, last_dev_bps, updated_at)
+    SELECT symbol, buy_venue, sell_venue, status, first_seen_ms, last_seen_ms,
+           last_edge_bps, last_dev_bps, updated_at FROM monitor_signals;
+DROP TABLE monitor_signals;
+ALTER TABLE monitor_signals_v38 RENAME TO monitor_signals;
+ALTER TABLE monitor_signal_events ADD COLUMN environment
+    TEXT NOT NULL DEFAULT 'unknown' CHECK(environment IN ('unknown','testnet','live'));
+CREATE TABLE radar_bot_positions_v38 (
+    symbol TEXT NOT NULL COLLATE NOCASE CHECK(length(symbol) BETWEEN 1 AND 64),
+    buy_venue TEXT NOT NULL COLLATE NOCASE CHECK(length(buy_venue) BETWEEN 1 AND 64),
+    sell_venue TEXT NOT NULL COLLATE NOCASE CHECK(length(sell_venue) BETWEEN 1 AND 64),
+    entry_ts_ms INTEGER NOT NULL CHECK(entry_ts_ms >= 0),
+    entry_dev_bps REAL NOT NULL,
+    baseline_bps REAL,
+    friction_band_bps REAL NOT NULL CHECK(friction_band_bps >= 0),
+    size_usd REAL NOT NULL CHECK(size_usd > 0),
+    deadline_ms INTEGER NOT NULL,
+    unwatched_since_ms INTEGER,
+    last_seen_ms INTEGER NOT NULL,
+    environment TEXT NOT NULL DEFAULT 'unknown'
+        CHECK(environment IN ('unknown','testnet','live')),
+    PRIMARY KEY (symbol, buy_venue, sell_venue, environment)
+);
+INSERT INTO radar_bot_positions_v38
+    (symbol, buy_venue, sell_venue, entry_ts_ms, entry_dev_bps, baseline_bps,
+     friction_band_bps, size_usd, deadline_ms, unwatched_since_ms, last_seen_ms)
+    SELECT symbol, buy_venue, sell_venue, entry_ts_ms, entry_dev_bps,
+           baseline_bps, friction_band_bps, size_usd, deadline_ms,
+           unwatched_since_ms, last_seen_ms FROM radar_bot_positions;
+DROP TABLE radar_bot_positions;
+ALTER TABLE radar_bot_positions_v38 RENAME TO radar_bot_positions;
+ALTER TABLE scheduled_exits ADD COLUMN environment
+    TEXT NOT NULL DEFAULT 'unknown' CHECK(environment IN ('unknown','testnet','live'));
+CREATE TABLE venue_volume_samples_v38 (
+    venue_id TEXT NOT NULL COLLATE NOCASE CHECK(length(venue_id) BETWEEN 1 AND 64),
+    symbol TEXT NOT NULL COLLATE NOCASE CHECK(length(symbol) BETWEEN 1 AND 64),
+    ts_ms INTEGER NOT NULL CHECK(ts_ms >= 0),
+    vol_usd REAL NOT NULL CHECK(vol_usd > 0),
+    environment TEXT NOT NULL DEFAULT 'unknown'
+        CHECK(environment IN ('unknown','testnet','live')),
+    PRIMARY KEY (venue_id, symbol, ts_ms, environment)
+);
+INSERT INTO venue_volume_samples_v38 (venue_id, symbol, ts_ms, vol_usd)
+    SELECT venue_id, symbol, ts_ms, vol_usd FROM venue_volume_samples;
+DROP TABLE venue_volume_samples;
+ALTER TABLE venue_volume_samples_v38 RENAME TO venue_volume_samples;
+CREATE INDEX ix_venue_volume_samples_symbol_ts ON venue_volume_samples(symbol, ts_ms);
+CREATE TABLE funding_rate_samples_v38 (
+    venue_id TEXT NOT NULL COLLATE NOCASE CHECK(length(venue_id) BETWEEN 1 AND 64),
+    symbol TEXT NOT NULL COLLATE NOCASE CHECK(length(symbol) BETWEEN 1 AND 64),
+    ts_ms INTEGER NOT NULL CHECK(ts_ms >= 0),
+    rate_8h REAL NOT NULL CHECK(rate_8h IS NOT NULL),
+    interval_hours INTEGER NOT NULL CHECK(interval_hours >= 1),
+    environment TEXT NOT NULL DEFAULT 'unknown'
+        CHECK(environment IN ('unknown','testnet','live')),
+    PRIMARY KEY (venue_id, symbol, ts_ms, environment)
+);
+INSERT INTO funding_rate_samples_v38 (venue_id, symbol, ts_ms, rate_8h, interval_hours)
+    SELECT venue_id, symbol, ts_ms, rate_8h, interval_hours FROM funding_rate_samples;
+DROP TABLE funding_rate_samples;
+ALTER TABLE funding_rate_samples_v38 RENAME TO funding_rate_samples;
+CREATE INDEX ix_funding_rate_samples_symbol_ts ON funding_rate_samples(symbol, ts_ms);
+CREATE INDEX ix_funding_rate_samples_venue_symbol_ts ON funding_rate_samples(venue_id, symbol, ts_ms);
+CREATE TABLE session_profiles_v38 (
+    symbol TEXT NOT NULL COLLATE NOCASE CHECK(length(symbol) BETWEEN 1 AND 64),
+    session_id TEXT NOT NULL CHECK(session_id IN ('asia','europe','overlap','us_late','dead')),
+    n_episodes INTEGER NOT NULL CHECK(n_episodes >= 0),
+    med_abs_spread_bps REAL,
+    p90_spread_bps REAL,
+    rv_bps REAL,
+    win_rate REAL,
+    mean_hold_s REAL,
+    provisional INTEGER NOT NULL CHECK(provisional IN (0, 1)),
+    updated_ts INTEGER NOT NULL CHECK(updated_ts >= 0),
+    environment TEXT NOT NULL DEFAULT 'unknown'
+        CHECK(environment IN ('unknown','testnet','live')),
+    PRIMARY KEY (symbol, session_id, environment)
+);
+INSERT INTO session_profiles_v38
+    (symbol, session_id, n_episodes, med_abs_spread_bps, p90_spread_bps,
+     rv_bps, win_rate, mean_hold_s, provisional, updated_ts)
+    SELECT symbol, session_id, n_episodes, med_abs_spread_bps, p90_spread_bps,
+           rv_bps, win_rate, mean_hold_s, provisional, updated_ts FROM session_profiles;
+DROP TABLE session_profiles;
+ALTER TABLE session_profiles_v38 RENAME TO session_profiles;
+CREATE TABLE session_hour_bins_v38 (
+    symbol TEXT NOT NULL COLLATE NOCASE CHECK(length(symbol) BETWEEN 1 AND 64),
+    hour INTEGER NOT NULL CHECK(hour BETWEEN 0 AND 23),
+    n_obs INTEGER NOT NULL CHECK(n_obs >= 0),
+    med_spread_bps REAL,
+    modulator REAL NOT NULL,
+    provisional INTEGER NOT NULL CHECK(provisional IN (0, 1)),
+    updated_ts INTEGER NOT NULL CHECK(updated_ts >= 0),
+    environment TEXT NOT NULL DEFAULT 'unknown'
+        CHECK(environment IN ('unknown','testnet','live')),
+    PRIMARY KEY (symbol, hour, environment)
+);
+INSERT INTO session_hour_bins_v38
+    (symbol, hour, n_obs, med_spread_bps, modulator, provisional, updated_ts)
+    SELECT symbol, hour, n_obs, med_spread_bps, modulator, provisional, updated_ts
+    FROM session_hour_bins;
+DROP TABLE session_hour_bins;
+ALTER TABLE session_hour_bins_v38 RENAME TO session_hour_bins;
+CREATE TABLE har_anchors_v38 (
+    symbol TEXT NOT NULL COLLATE NOCASE CHECK(length(symbol) BETWEEN 1 AND 64),
+    intercept REAL NOT NULL,
+    b_daily REAL NOT NULL,
+    b_weekly REAL NOT NULL,
+    b_monthly REAL NOT NULL,
+    r2 REAL NOT NULL CHECK(r2 >= 0.0 AND r2 <= 1.0),
+    n_days INTEGER NOT NULL CHECK(n_days >= 0),
+    forecast_rv_bps REAL NOT NULL CHECK(forecast_rv_bps > 0),
+    trailing_mean_rv_bps REAL NOT NULL CHECK(trailing_mean_rv_bps > 0),
+    updated_ts INTEGER NOT NULL CHECK(updated_ts >= 0),
+    environment TEXT NOT NULL DEFAULT 'unknown'
+        CHECK(environment IN ('unknown','testnet','live')),
+    PRIMARY KEY (symbol, environment)
+);
+INSERT INTO har_anchors_v38
+    (symbol, intercept, b_daily, b_weekly, b_monthly, r2, n_days,
+     forecast_rv_bps, trailing_mean_rv_bps, updated_ts)
+    SELECT symbol, intercept, b_daily, b_weekly, b_monthly, r2, n_days,
+           forecast_rv_bps, trailing_mean_rv_bps, updated_ts FROM har_anchors;
+DROP TABLE har_anchors;
+ALTER TABLE har_anchors_v38 RENAME TO har_anchors;
+CREATE TABLE promotion_state_v38 (
+    symbol TEXT NOT NULL COLLATE NOCASE CHECK(length(symbol) BETWEEN 1 AND 64),
+    status TEXT NOT NULL CHECK(status IN ('promoted','held','demoted')),
+    fit_delta_bps REAL NOT NULL,
+    val_delta_bps REAL NOT NULL,
+    reason TEXT NOT NULL CHECK(length(reason) BETWEEN 1 AND 512),
+    updated_ts INTEGER NOT NULL CHECK(updated_ts >= 0),
+    environment TEXT NOT NULL DEFAULT 'unknown'
+        CHECK(environment IN ('unknown','testnet','live')),
+    PRIMARY KEY (symbol, environment)
+);
+INSERT INTO promotion_state_v38
+    (symbol, status, fit_delta_bps, val_delta_bps, reason, updated_ts)
+    SELECT symbol, status, fit_delta_bps, val_delta_bps, reason, updated_ts
+    FROM promotion_state;
+DROP TABLE promotion_state;
+ALTER TABLE promotion_state_v38 RENAME TO promotion_state;
+ALTER TABLE autotune_apply_events ADD COLUMN environment
+    TEXT NOT NULL DEFAULT 'unknown' CHECK(environment IN ('unknown','testnet','live'));
+ALTER TABLE margin_snapshots ADD COLUMN environment
+    TEXT NOT NULL DEFAULT 'unknown' CHECK(environment IN ('unknown','testnet','live'));
+ALTER TABLE spread_samples ADD COLUMN environment
+    TEXT NOT NULL DEFAULT 'unknown' CHECK(environment IN ('unknown','testnet','live'));
+CREATE INDEX ix_spread_samples_env_ts ON spread_samples(environment, ts_ms);
+PRAGMA user_version = 38;
+COMMIT;
+PRAGMA foreign_keys = ON;";
+
 const MIGRATION_V17_SQL: &str = "\
 BEGIN IMMEDIATE;
 CREATE TABLE strategy_params_v17 (
@@ -1836,7 +2058,10 @@ pub struct StateStore {
     telemetry: Option<Mutex<Connection>>,
     /// Last persisted (symbol, venue) timestamp for the telemetry throttle —
     /// excess frames drop here instead of queueing on the telemetry writer.
-    sample_watermarks: Mutex<HashMap<(String, String), i64>>,
+    /// Throttle watermarks keyed (symbol, venue, environment) — an env
+    /// switch must not let the old env's last-write suppress the new
+    /// env's first frame.
+    sample_watermarks: Mutex<HashMap<(String, String, String), i64>>,
 }
 
 fn normalize_id(raw: &str) -> anyhow::Result<String> {
@@ -1903,6 +2128,18 @@ fn normalize_symbol(raw: &str) -> anyhow::Result<String> {
 // the same spelling rules can never drift). Re-exported here so existing
 // `crate::state_store::canonical_base` call sites stay unchanged.
 pub use arbitrageur_core::symbol::canonical_base;
+
+/// Validate + normalize an environment tag for venue-data rows. Only the
+/// two real environments may be written — 'unknown' exists solely as the
+/// pre-v38 backfill marker and is never a valid write target (a writer
+/// that cannot name its environment must not persist the sample).
+pub(crate) fn normalize_environment(raw: &str) -> anyhow::Result<String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "testnet" => Ok("testnet".to_string()),
+        "live" => Ok("live".to_string()),
+        other => anyhow::bail!("invalid environment '{other}' — expected testnet|live"),
+    }
+}
 // Quote-policy-aware key sets — `separate` mode restricts reads to the
 // exact pair key, merged modes return the full USD-family alias set.
 pub(crate) use samples::sample_keys;
@@ -2065,6 +2302,7 @@ fn scheduled_exit_from_row(row: &Row<'_>) -> rusqlite::Result<ScheduledExit> {
         note: row.get(9)?,
         created_at: row.get(10)?,
         updated_at: row.get(11)?,
+        environment: row.get(13).unwrap_or_else(|_| "unknown".to_string()),
     })
 }
 
@@ -2196,6 +2434,24 @@ impl StateStore {
              PRAGMA auto_vacuum = INCREMENTAL;",
         )?;
         tconn.execute_batch(TELEMETRY_SCHEMA_SQL)?;
+        // Telemetry files predate v38's environment column: add it
+        // idempotently (no version chain exists on this sidecar db).
+        // Pre-existing rows stay 'unknown' — env-filtered reads exclude
+        // them rather than attribute provenance that was never recorded.
+        let has_env: bool = tconn
+            .prepare(
+                "SELECT 1 FROM pragma_table_info('spread_samples') WHERE name = 'environment'",
+            )?
+            .exists([])?;
+        if !has_env {
+            tconn.execute_batch(
+                "ALTER TABLE spread_samples ADD COLUMN environment
+                     TEXT NOT NULL DEFAULT 'unknown'
+                     CHECK(environment IN ('unknown','testnet','live'));
+                 CREATE INDEX IF NOT EXISTS ix_spread_samples_env_ts
+                     ON spread_samples(environment, ts_ms);",
+            )?;
+        }
         if let Err(e) = Self::drain_legacy_samples(&tconn, main_path) {
             tracing::warn!("state_store: legacy spread_samples drain failed ({e}); leftover rows stay in the main db");
         }
@@ -2252,7 +2508,7 @@ impl StateStore {
 
     fn migrate(conn: &Connection) -> anyhow::Result<()> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 37 {
+        if version > 38 {
             anyhow::bail!("unsupported state store schema version: {version}");
         }
         if version == 0 {
@@ -2473,6 +2729,12 @@ impl StateStore {
         }
         if version <= 36 {
             if let Err(err) = conn.execute_batch(MIGRATION_V37_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 37 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V38_SQL) {
                 let _ = conn.execute_batch("ROLLBACK;");
                 return Err(err.into());
             }

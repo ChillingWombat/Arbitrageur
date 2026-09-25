@@ -463,6 +463,7 @@ pub fn record_preset_applied_impl(
             &applied_json,
             &detail_json,
             Utc::now().timestamp_millis(),
+            state.env().as_str(),
         )
         .map_err(|e| format!("preset audit write failed: {e}"))
 }
@@ -566,7 +567,7 @@ mod preset_tests {
         assert!(id > 0);
         let rows = state
             .state_store
-            .recent_autotune_apply_events("BTC-USD", 10)
+            .recent_autotune_apply_events("BTC-USD", 10, state.env().as_str())
             .expect("events query");
         let row = rows.iter().find(|r| r.id == id).expect("row readable");
         let detail: serde_json::Value = serde_json::from_str(&row.detail_json).unwrap();

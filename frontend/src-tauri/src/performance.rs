@@ -268,7 +268,7 @@ pub fn get_utilisation_history_impl(
     let since_ms = now_ms.saturating_sub(window_ms);
     let rows = state
         .state_store
-        .list_margin_snapshots(venue, since_ms)
+        .list_margin_snapshots(venue, since_ms, state.env().as_str())
         .map_err(|e| e.to_string())?;
     let points: Vec<(i64, f64)> = rows.iter().map(|r| (r.ts_ms, r.rate_pct)).collect();
     let point_count = points.len();
@@ -301,7 +301,13 @@ pub async fn run_wfo_calibration_impl(
     let now_ms = chrono::Utc::now().timestamp_millis();
     let samples = state
         .state_store
-        .spread_samples_mode(symbol.trim(), state.usd_merge_quotes(), 0, now_ms)
+        .spread_samples_mode(
+            symbol.trim(),
+            state.usd_merge_quotes(),
+            0,
+            now_ms,
+            state.env().as_str(),
+        )
         .map_err(|e| e.to_string())?;
 
     let mut groups: std::collections::BTreeMap<i64, Vec<&crate::state_store::SpreadSample>> =

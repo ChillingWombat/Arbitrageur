@@ -9,14 +9,16 @@ impl StateStore {
     pub fn count_bot_decisions_since(
         &self,
         since_ts_ms: i64,
+        environment: &str,
     ) -> anyhow::Result<Vec<(String, i64)>> {
+        let environment = normalize_environment(environment)?;
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
             "SELECT new_status, COUNT(*) FROM monitor_signal_events
-             WHERE trigger = 'bot_decision' AND ts_ms >= ?1
+             WHERE trigger = 'bot_decision' AND ts_ms >= ?1 AND environment = ?2
              GROUP BY new_status",
         )?;
-        let rows = stmt.query_map([since_ts_ms], |r| {
+        let rows = stmt.query_map(params![since_ts_ms, environment], |r| {
             Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -27,6 +29,7 @@ impl StateStore {
         let symbol = normalize_symbol(&row.symbol)?;
         let buy_venue = normalize_venue(&row.buy_venue)?;
         let sell_venue = normalize_venue(&row.sell_venue)?;
+        let environment = normalize_environment(&row.environment)?;
         if row.entry_ts_ms < 0 || row.deadline_ms < 0 || row.last_seen_ms < 0 {
             anyhow::bail!("negative bot position timestamp");
         }
@@ -57,9 +60,9 @@ impl StateStore {
             "INSERT INTO radar_bot_positions
                  (symbol, buy_venue, sell_venue, entry_ts_ms, entry_dev_bps,
                   baseline_bps, friction_band_bps, size_usd, deadline_ms,
-                  unwatched_since_ms, last_seen_ms)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-             ON CONFLICT(symbol, buy_venue, sell_venue) DO UPDATE SET
+                  unwatched_since_ms, last_seen_ms, environment)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(symbol, buy_venue, sell_venue, environment) DO UPDATE SET
                  entry_ts_ms = ?4, entry_dev_bps = ?5, baseline_bps = ?6,
                  friction_band_bps = ?7, size_usd = ?8, deadline_ms = ?9,
                  unwatched_since_ms = ?10, last_seen_ms = ?11",
@@ -74,38 +77,52 @@ impl StateStore {
                 row.size_usd,
                 row.deadline_ms,
                 row.unwatched_since_ms,
-                row.last_seen_ms
+                row.last_seen_ms,
+                environment
             ],
         )?;
         Ok(())
     }
 
+    /// Delete the pair's row in `environment` — plus any 'unknown'
+    /// pre-v38 row (unattributed trackers are reaped by whichever env's
+    /// watcher resolves them; the other env's live row is untouched).
     pub fn delete_bot_position(
         &self,
         symbol: &str,
         buy_venue: &str,
         sell_venue: &str,
+        environment: &str,
     ) -> anyhow::Result<()> {
         let symbol = normalize_symbol(symbol)?;
         let buy_venue = normalize_venue(buy_venue)?;
         let sell_venue = normalize_venue(sell_venue)?;
+        let environment = normalize_environment(environment)?;
         let conn = self.conn.lock();
         conn.execute(
-            "DELETE FROM radar_bot_positions WHERE symbol = ?1 AND buy_venue = ?2 AND sell_venue = ?3",
-            params![symbol, buy_venue, sell_venue],
+            "DELETE FROM radar_bot_positions
+             WHERE symbol = ?1 AND buy_venue = ?2 AND sell_venue = ?3
+               AND environment IN (?4, 'unknown')",
+            params![symbol, buy_venue, sell_venue, environment],
         )?;
         Ok(())
     }
 
-    pub fn list_bot_positions(&self) -> anyhow::Result<Vec<BotPositionRow>> {
+    /// Positions watched under `environment`. 'unknown' pre-v38 rows stay
+    /// visible to every environment — fail-closed, mirroring v32's signal
+    /// rule: an unattributed open-position tracker must never strand.
+    pub fn list_bot_positions(&self, environment: &str) -> anyhow::Result<Vec<BotPositionRow>> {
+        let environment = normalize_environment(environment)?;
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
             "SELECT symbol, buy_venue, sell_venue, entry_ts_ms, entry_dev_bps,
                     baseline_bps, friction_band_bps, size_usd, deadline_ms,
-                    unwatched_since_ms, last_seen_ms
-             FROM radar_bot_positions ORDER BY entry_ts_ms, symbol",
+                    unwatched_since_ms, last_seen_ms, environment
+             FROM radar_bot_positions
+             WHERE environment IN (?1, 'unknown')
+             ORDER BY entry_ts_ms, symbol",
         )?;
-        let rows = stmt.query_map([], |r| {
+        let rows = stmt.query_map([environment], |r| {
             Ok(BotPositionRow {
                 symbol: r.get(0)?,
                 buy_venue: r.get(1)?,
@@ -118,6 +135,7 @@ impl StateStore {
                 deadline_ms: r.get(8)?,
                 unwatched_since_ms: r.get(9)?,
                 last_seen_ms: r.get(10)?,
+                environment: r.get(11)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -188,7 +206,9 @@ impl StateStore {
         .map_err(anyhow::Error::from)
     }
 
-    /// Upsert one pair signal's lifecycle state.
+    /// Upsert one pair signal's lifecycle state under `environment` —
+    /// identical (symbol, venues) pairs tracked in both environments are
+    /// distinct rows, never shared.
     #[allow(clippy::too_many_arguments)]
     pub fn upsert_monitor_signal(
         &self,
@@ -200,10 +220,12 @@ impl StateStore {
         last_seen_ms: i64,
         last_edge_bps: Option<f64>,
         last_dev_bps: Option<f64>,
+        environment: &str,
     ) -> anyhow::Result<()> {
         let symbol = normalize_symbol(symbol)?;
         let buy_venue = normalize_venue(buy_venue)?;
         let sell_venue = normalize_venue(sell_venue)?;
+        let environment = normalize_environment(environment)?;
         match status {
             "preparing" | "tracking" | "triggered" | "ready" | "no-data" => {}
             other => anyhow::bail!("invalid monitor signal status '{other}'"),
@@ -215,9 +237,9 @@ impl StateStore {
         conn.execute(
             "INSERT INTO monitor_signals
                  (symbol, buy_venue, sell_venue, status, first_seen_ms, last_seen_ms,
-                  last_edge_bps, last_dev_bps, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-             ON CONFLICT(symbol, buy_venue, sell_venue) DO UPDATE SET
+                  last_edge_bps, last_dev_bps, updated_at, environment)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+             ON CONFLICT(symbol, buy_venue, sell_venue, environment) DO UPDATE SET
                  status = ?4, first_seen_ms = ?5, last_seen_ms = ?6,
                  last_edge_bps = ?7, last_dev_bps = ?8, updated_at = ?9",
             params![
@@ -229,21 +251,25 @@ impl StateStore {
                 last_seen_ms,
                 last_edge_bps,
                 last_dev_bps,
-                Utc::now().to_rfc3339()
+                Utc::now().to_rfc3339(),
+                environment
             ],
         )?;
         Ok(())
     }
 
-    /// Load every persisted pair signal's lifecycle state.
-    pub fn monitor_signals(&self) -> anyhow::Result<Vec<MonitorSignalRow>> {
+    /// Load persisted pair-signal lifecycle state for one environment.
+    /// 'unknown' pre-v38 rows are excluded — an unattributed opportunity
+    /// row must not drive display or entry logic in either environment.
+    pub fn monitor_signals(&self, environment: &str) -> anyhow::Result<Vec<MonitorSignalRow>> {
+        let environment = normalize_environment(environment)?;
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
             "SELECT symbol, buy_venue, sell_venue, status, first_seen_ms, last_seen_ms,
-                    last_edge_bps, last_dev_bps
-             FROM monitor_signals",
+                    last_edge_bps, last_dev_bps, environment
+             FROM monitor_signals WHERE environment = ?1",
         )?;
-        let rows = stmt.query_map([], |r| {
+        let rows = stmt.query_map([environment], |r| {
             Ok(MonitorSignalRow {
                 symbol: r.get(0)?,
                 buy_venue: r.get(1)?,
@@ -253,6 +279,7 @@ impl StateStore {
                 last_seen_ms: r.get(5)?,
                 last_edge_bps: r.get(6)?,
                 last_dev_bps: r.get(7)?,
+                environment: r.get(8)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
@@ -260,13 +287,23 @@ impl StateStore {
 
     /// Drop signal rows whose pair is no longer tracked (venue or symbol
     /// left the watchlist) so stale lifecycle state can't resurface.
-    pub fn prune_monitor_signals(&self, keep: &[(String, String, String)]) -> anyhow::Result<()> {
+    /// Scoped to `environment` (plus 'unknown' orphans — untracked
+    /// unattributed rows are safe to reap); the other environment's rows
+    /// are never touched.
+    pub fn prune_monitor_signals(
+        &self,
+        keep: &[(String, String, String)],
+        environment: &str,
+    ) -> anyhow::Result<()> {
+        let environment = normalize_environment(environment)?;
         let conn = self.conn.lock();
         let mut all: Vec<(String, String, String)> = {
-            let mut s =
-                conn.prepare("SELECT symbol, buy_venue, sell_venue FROM monitor_signals")?;
+            let mut s = conn.prepare(
+                "SELECT symbol, buy_venue, sell_venue FROM monitor_signals
+                 WHERE environment IN (?1, 'unknown')",
+            )?;
             let rows = s
-                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .query_map([&environment], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
                 .collect::<rusqlite::Result<Vec<_>>>()?;
             rows
         };
@@ -276,10 +313,12 @@ impl StateStore {
                 .any(|(s, b, sv)| s == &k.0 && b == &k.1 && sv == &k.2)
         });
         let mut del = conn.prepare(
-            "DELETE FROM monitor_signals WHERE symbol = ?1 AND buy_venue = ?2 AND sell_venue = ?3",
+            "DELETE FROM monitor_signals
+             WHERE symbol = ?1 AND buy_venue = ?2 AND sell_venue = ?3
+               AND environment IN (?4, 'unknown')",
         )?;
         for k in all {
-            del.execute(params![k.0, k.1, k.2])?;
+            del.execute(params![k.0, k.1, k.2, environment])?;
         }
         Ok(())
     }
@@ -303,10 +342,12 @@ impl StateStore {
         p_win: Option<f64>,
         economics_json: Option<&str>,
         trigger: &str,
+        environment: &str,
     ) -> anyhow::Result<()> {
         let symbol = normalize_symbol(symbol)?;
         let buy_venue = normalize_venue(buy_venue)?;
         let sell_venue = normalize_venue(sell_venue)?;
+        let environment = normalize_environment(environment)?;
         if ts_ms < 0 {
             anyhow::bail!("negative signal event timestamp");
         }
@@ -347,8 +388,8 @@ impl StateStore {
         conn.execute(
             "INSERT INTO monitor_signal_events
                  (symbol, buy_venue, sell_venue, ts_ms, old_status, new_status,
-                  edge_bps, dev_bps, p_win, economics_json, trigger)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+                  edge_bps, dev_bps, p_win, economics_json, trigger, environment)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 symbol,
                 buy_venue,
@@ -360,7 +401,8 @@ impl StateStore {
                 dev_bps,
                 p_win,
                 economics_json,
-                trigger
+                trigger,
+                environment
             ],
         )?;
         Ok(())
@@ -368,15 +410,24 @@ impl StateStore {
 
     /// Recent audit events for one pair (or every pair when the key is
     /// `None`), newest first, bounded by `limit`. Fail-closed read path for
-    /// the future bot + debugging IPC.
+    /// the future bot + debugging IPC. Environment-strict — the other
+    /// environment's audit trail never interleaves.
     pub fn recent_monitor_signal_events(
         &self,
         symbol: Option<&str>,
         buy_venue: Option<&str>,
         sell_venue: Option<&str>,
         limit: i64,
+        environment: &str,
     ) -> anyhow::Result<Vec<MonitorSignalEventRow>> {
-        self.recent_monitor_signal_events_mode(symbol, buy_venue, sell_venue, limit, true)
+        self.recent_monitor_signal_events_mode(
+            symbol,
+            buy_venue,
+            sell_venue,
+            limit,
+            true,
+            environment,
+        )
     }
 
     /// Mode-aware variant: under `separate` the symbol filter is
@@ -389,17 +440,19 @@ impl StateStore {
         sell_venue: Option<&str>,
         limit: i64,
         merge_usd: bool,
+        environment: &str,
     ) -> anyhow::Result<Vec<MonitorSignalEventRow>> {
+        let environment = normalize_environment(environment)?;
         if limit <= 0 {
             anyhow::bail!("event limit must be positive");
         }
         let limit = limit.min(10_000);
         let mut sql = String::from(
             "SELECT id, symbol, buy_venue, sell_venue, ts_ms, old_status, new_status,
-                    edge_bps, dev_bps, p_win, economics_json, trigger
-             FROM monitor_signal_events WHERE 1=1",
+                    edge_bps, dev_bps, p_win, economics_json, trigger, environment
+             FROM monitor_signal_events WHERE environment = ?",
         );
-        let mut binds: Vec<String> = Vec::new();
+        let mut binds: Vec<String> = vec![environment];
         if let Some(s) = symbol {
             // Monitor rows key on the canonical base ("BTC"); callers pass
             // full UI symbols ("BTC-USDC"). Match the whole alias family so
@@ -445,6 +498,7 @@ impl StateStore {
                 p_win: r.get(9)?,
                 economics_json: r.get(10)?,
                 trigger: r.get(11)?,
+                environment: r.get(12)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)

@@ -51,7 +51,7 @@ fn test_file_store_config_and_permissions() {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 37);
+        assert_eq!(version, 38);
         let mode: String = conn
             .query_row("PRAGMA journal_mode", [], |r| r.get(0))
             .unwrap();
@@ -113,17 +113,29 @@ fn test_funding_rate_samples_roundtrip_and_minute_bucket() {
     let store = StateStore::open_in_memory().unwrap();
     // Two writes inside the same minute collapse to one row (REPLACE).
     store
-        .record_funding_rate_samples(1_700_000_000_012, &[("lighter", "BTC-USDC", 0.0008, 8)])
+        .record_funding_rate_samples(
+            1_700_000_000_012,
+            &[("lighter", "BTC-USDC", 0.0008, 8)],
+            "live",
+        )
         .unwrap();
     store
-        .record_funding_rate_samples(1_700_000_000_045, &[("lighter", "BTC-USDC", 0.0009, 8)])
+        .record_funding_rate_samples(
+            1_700_000_000_045,
+            &[("lighter", "BTC-USDC", 0.0009, 8)],
+            "live",
+        )
         .unwrap();
     // A later minute appends.
     store
-        .record_funding_rate_samples(1_700_000_060_000, &[("lighter", "BTC-USDC", 0.001, 8)])
+        .record_funding_rate_samples(
+            1_700_000_060_000,
+            &[("lighter", "BTC-USDC", 0.001, 8)],
+            "live",
+        )
         .unwrap();
     let series = store
-        .funding_rate_series("lighter", "BTC-USDC", 0, i64::MAX)
+        .funding_rate_series("lighter", "BTC-USDC", 0, i64::MAX, "live")
         .unwrap();
     assert_eq!(series.len(), 2, "got {series:?}");
     assert_eq!(series[0].0, 1_700_000_000_012 / 60_000 * 60_000);
@@ -137,17 +149,18 @@ fn test_funding_rate_samples_roundtrip_and_minute_bucket() {
                 ("!!", "BTC-USDC", 0.001, 8),
                 ("lighter", "BTC-USDC", f64::NAN, 8),
             ],
+            "live",
         )
         .unwrap();
     let after = store
-        .funding_rate_series("lighter", "BTC-USDC", 0, i64::MAX)
+        .funding_rate_series("lighter", "BTC-USDC", 0, i64::MAX, "live")
         .unwrap();
     assert_eq!(after.len(), 2);
     // Retention prune keeps only the fresh minute bucket (1_700_000_040_000).
     let removed = store.prune_funding_rate_samples(1_700_000_040_000).unwrap();
     assert_eq!(removed, 1);
     let kept = store
-        .funding_rate_series("lighter", "BTC-USDC", 0, i64::MAX)
+        .funding_rate_series("lighter", "BTC-USDC", 0, i64::MAX, "live")
         .unwrap();
     assert_eq!(kept.len(), 1);
 }
@@ -732,7 +745,7 @@ fn test_leg_symbol_none_resolves_to_root_and_some_is_exact() {
         .lock()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 37);
+    assert_eq!(version, 38);
     store
         .record_signal_execution(
             &NewSignalExecution {
@@ -1172,7 +1185,7 @@ fn test_migration_v27_intended_price_defaults_null() {
     let v: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 37);
+    assert_eq!(v, 38);
     let ip: Option<f64> = conn
         .query_row(
             "SELECT intended_price FROM signal_legs WHERE id = 'leg-pre'",
@@ -1445,32 +1458,40 @@ fn test_spread_samples_record_order_and_filter() {
             "BTC-USDC",
             1_000,
             &[sample("hyperliquid", 100.0), sample("lighter", 101.0)],
+            "live",
         )
         .unwrap();
     store
-        .record_spread_samples("BTC-USDC", 2_000, &[sample("hyperliquid", 100.5)])
+        .record_spread_samples("BTC-USDC", 2_000, &[sample("hyperliquid", 100.5)], "live")
         .unwrap();
     // Other symbol is isolated by the query.
     store
-        .record_spread_samples("ETH-USDC", 1_500, &[sample("lighter", 50.0)])
+        .record_spread_samples("ETH-USDC", 1_500, &[sample("lighter", 50.0)], "live")
         .unwrap();
 
-    let all = store.spread_samples("BTC-USDC", 0, i64::MAX).unwrap();
+    let all = store
+        .spread_samples("BTC-USDC", 0, i64::MAX, "live")
+        .unwrap();
     assert_eq!(all.len(), 3);
     assert_eq!(all[0].ts_ms, 1_000);
     assert_eq!(all[0].venue_id, "hyperliquid");
     assert_eq!(all[1].venue_id, "lighter");
     assert_eq!(all[2].ts_ms, 2_000);
 
-    let windowed = store.spread_samples("BTC-USDC", 1_500, 2_500).unwrap();
+    let windowed = store
+        .spread_samples("BTC-USDC", 1_500, 2_500, "live")
+        .unwrap();
     assert_eq!(windowed.len(), 1);
     assert_eq!(windowed[0].mid, 100.5);
 
     assert_eq!(
-        store.earliest_spread_sample_ts("BTC-USDC").unwrap(),
+        store.earliest_spread_sample_ts("BTC-USDC", "live").unwrap(),
         Some(1_000)
     );
-    assert_eq!(store.earliest_spread_sample_ts("SOL-USDC").unwrap(), None);
+    assert_eq!(
+        store.earliest_spread_sample_ts("SOL-USDC", "live").unwrap(),
+        None
+    );
 }
 
 #[test]
@@ -1500,9 +1521,10 @@ fn test_v28_spread_samples_depth_roundtrip() {
                     ask_depth: None,
                 },
             ],
+            "live",
         )
         .unwrap();
-    let rows = store.spread_samples("BTC-USDC", 0, 2_000).unwrap();
+    let rows = store.spread_samples("BTC-USDC", 0, 2_000, "live").unwrap();
     assert_eq!(rows.len(), 2);
     let aaa = rows.iter().find(|r| r.venue_id == "aaa").unwrap();
     assert_eq!(aaa.bid_depth, Some(5.0));
@@ -1523,9 +1545,12 @@ fn test_v28_spread_samples_depth_roundtrip() {
                 bid_depth: Some(0.0),
                 ask_depth: Some(f64::NAN),
             }],
+            "live",
         )
         .unwrap();
-    let rows = store.spread_samples("BTC-USDC", 1_500, 2_500).unwrap();
+    let rows = store
+        .spread_samples("BTC-USDC", 1_500, 2_500, "live")
+        .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].bid_depth, None);
     assert_eq!(rows[0].ask_depth, None);
@@ -1544,18 +1569,26 @@ fn test_spread_samples_drop_invalid_and_normalize() {
                 sample("lighter", -5.0),
                 sample("lighter", 101.0),
             ],
+            "live",
         )
         .unwrap();
-    let rows = store.spread_samples("BTC-USDC", 0, i64::MAX).unwrap();
+    let rows = store
+        .spread_samples("BTC-USDC", 0, i64::MAX, "live")
+        .unwrap();
     assert_eq!(rows.len(), 2, "non-finite/non-positive mids are dropped");
     assert_eq!(rows[0].venue_id, "hyperliquid", "venue ids normalize");
     // Empty batches and negative timestamps are no-ops.
-    store.record_spread_samples("BTC-USDC", 5_000, &[]).unwrap();
     store
-        .record_spread_samples("BTC-USDC", -1, &[sample("lighter", 1.0)])
+        .record_spread_samples("BTC-USDC", 5_000, &[], "live")
+        .unwrap();
+    store
+        .record_spread_samples("BTC-USDC", -1, &[sample("lighter", 1.0)], "live")
         .unwrap();
     assert_eq!(
-        store.spread_samples("BTC-USDC", 0, i64::MAX).unwrap().len(),
+        store
+            .spread_samples("BTC-USDC", 0, i64::MAX, "live")
+            .unwrap()
+            .len(),
         2
     );
 }
@@ -1569,30 +1602,39 @@ fn test_spread_samples_merge_background_and_ui_keys() {
     let store = StateStore::open_in_memory().unwrap();
     let now = 1_700_000_000_000i64;
     store
-        .record_spread_samples("BTC", now - 1_000, &[sample("hyperliquid", 100.0)])
+        .record_spread_samples("BTC", now - 1_000, &[sample("hyperliquid", 100.0)], "live")
         .unwrap();
     store
-        .record_spread_samples("BTC-USDC", now - 60_000, &[sample("lighter", 101.0)])
+        .record_spread_samples(
+            "BTC-USDC",
+            now - 60_000,
+            &[sample("lighter", 101.0)],
+            "live",
+        )
         .unwrap();
 
-    let via_ui = store.spread_samples("BTC-USDC", 0, i64::MAX).unwrap();
+    let via_ui = store
+        .spread_samples("BTC-USDC", 0, i64::MAX, "live")
+        .unwrap();
     assert_eq!(
         via_ui.len(),
         2,
         "UI key must see background base-keyed rows"
     );
-    let via_base = store.spread_samples("BTC", 0, i64::MAX).unwrap();
+    let via_base = store.spread_samples("BTC", 0, i64::MAX, "live").unwrap();
     assert_eq!(via_base.len(), 2, "base key must see UI full-symbol rows");
     // Trailing-window slice sees the fresh background row.
-    let windowed = store.spread_samples("BTC-USDC", now - 5_000, now).unwrap();
+    let windowed = store
+        .spread_samples("BTC-USDC", now - 5_000, now, "live")
+        .unwrap();
     assert_eq!(windowed.len(), 1);
     assert_eq!(windowed[0].venue_id, "hyperliquid");
     assert_eq!(
-        store.earliest_spread_sample_ts("BTC-USDC").unwrap(),
+        store.earliest_spread_sample_ts("BTC-USDC", "live").unwrap(),
         Some(now - 60_000)
     );
     assert_eq!(
-        store.earliest_spread_sample_ts("BTC").unwrap(),
+        store.earliest_spread_sample_ts("BTC", "live").unwrap(),
         Some(now - 60_000)
     );
 }
@@ -1604,37 +1646,55 @@ fn test_spread_samples_separate_mode_isolates_quote_series() {
     let store = StateStore::open_in_memory().unwrap();
     let now = 1_700_000_000_000i64;
     store
-        .record_spread_samples_mode("BTC-USDT", false, now - 1_000, &[sample("binance", 100.0)])
+        .record_spread_samples_mode(
+            "BTC-USDT",
+            false,
+            now - 1_000,
+            &[sample("binance", 100.0)],
+            "live",
+        )
         .unwrap();
     store
-        .record_spread_samples_mode("BTC-USDC", false, now - 2_000, &[sample("coinbase", 100.5)])
+        .record_spread_samples_mode(
+            "BTC-USDC",
+            false,
+            now - 2_000,
+            &[sample("coinbase", 100.5)],
+            "live",
+        )
         .unwrap();
     store
-        .record_spread_samples_mode("BTC", false, now - 3_000, &[sample("lighter", 99.5)])
+        .record_spread_samples_mode(
+            "BTC",
+            false,
+            now - 3_000,
+            &[sample("lighter", 99.5)],
+            "live",
+        )
         .unwrap();
 
     // Strict reads: each quoted key sees only its own series.
     let usdt = store
-        .spread_samples_mode("BTC-USDT", false, 0, i64::MAX)
+        .spread_samples_mode("BTC-USDT", false, 0, i64::MAX, "live")
         .unwrap();
     assert_eq!(usdt.len(), 1);
     assert_eq!(usdt[0].symbol, "BTC-USDT");
     assert_eq!(usdt[0].mid, 100.0);
     let usdc = store
-        .spread_samples_mode("BTC-USDC", false, 0, i64::MAX)
+        .spread_samples_mode("BTC-USDC", false, 0, i64::MAX, "live")
         .unwrap();
     assert_eq!(usdc.len(), 1);
     assert_eq!(usdc[0].mid, 100.5);
     assert_eq!(
         store
-            .earliest_spread_sample_ts_mode("BTC-USDT", false)
+            .earliest_spread_sample_ts_mode("BTC-USDT", false, "live")
             .unwrap(),
         Some(now - 1_000)
     );
 
     // Merged mode still reads the family as one series.
     let merged = store
-        .spread_samples_mode("BTC-USDT", true, 0, i64::MAX)
+        .spread_samples_mode("BTC-USDT", true, 0, i64::MAX, "live")
         .unwrap();
     assert_eq!(merged.len(), 3);
 }
@@ -1658,6 +1718,7 @@ fn test_seasonality_separate_mode_isolates_quote_series() {
                 false,
                 ts,
                 &[sample("binance", 100.0), sample("coinbase", 100.10)],
+                "live",
             )
             .unwrap();
         store
@@ -1666,32 +1727,37 @@ fn test_seasonality_separate_mode_isolates_quote_series() {
                 false,
                 ts,
                 &[sample("binance", 100.0), sample("coinbase", 100.017)],
+                "live",
             )
             .unwrap();
     }
 
     // The rollup driver must enumerate the stored pair keys — a collapsed
     // base key would read an empty strict series and skip the rollup.
-    let syms = store.distinct_sample_symbols_mode(false).unwrap();
+    let syms = store.distinct_sample_symbols_mode(false, "live").unwrap();
     assert_eq!(
         syms,
         vec!["BTC-USDC".to_string(), "BTC-USDT".to_string()],
         "separate mode keeps pair keys distinct"
     );
     assert_eq!(
-        store.distinct_sample_symbols_mode(true).unwrap(),
+        store.distinct_sample_symbols_mode(true, "live").unwrap(),
         vec!["BTC".to_string()],
         "merged mode still collapses to the base"
     );
 
     for key in ["BTC-USDT", "BTC-USDC"] {
         let written = store
-            .rollup_session_profiles_mode(key, false, now - 86_400_000, now, now)
+            .rollup_session_profiles_mode(key, false, now - 86_400_000, now, now, "live")
             .unwrap();
         assert!(written > 0, "rollup must emit rows for {key}");
     }
-    let usdt = store.session_profiles_mode("BTC-USDT", false).unwrap();
-    let usdc = store.session_profiles_mode("BTC-USDC", false).unwrap();
+    let usdt = store
+        .session_profiles_mode("BTC-USDT", false, "live")
+        .unwrap();
+    let usdc = store
+        .session_profiles_mode("BTC-USDC", false, "live")
+        .unwrap();
     assert!(usdt.iter().all(|r| r.symbol == "BTC-USDT"));
     assert!(usdc.iter().all(|r| r.symbol == "BTC-USDC"));
     let mut checked = false;
@@ -1717,6 +1783,7 @@ fn test_seasonality_separate_mode_isolates_quote_series() {
     store
         .phase2_upsert_har_anchor_mode(
             &HarAnchorRow {
+                environment: "live".to_string(),
                 symbol: "BTC-USDT".to_string(),
                 intercept: 0.1,
                 b_daily: 0.5,
@@ -1732,23 +1799,24 @@ fn test_seasonality_separate_mode_isolates_quote_series() {
         )
         .unwrap();
     assert!(store
-        .phase2_har_anchor_mode("BTC-USDT", false)
+        .phase2_har_anchor_mode("BTC-USDT", false, "live")
         .unwrap()
         .is_some());
     assert!(
         store
-            .phase2_har_anchor_mode("BTC-USDC", false)
+            .phase2_har_anchor_mode("BTC-USDC", false, "live")
             .unwrap()
             .is_none(),
         "sibling quote must not see the USDT anchor"
     );
     assert!(
-        store.phase2_har_anchor("BTC").unwrap().is_some(),
+        store.phase2_har_anchor("BTC", "live").unwrap().is_some(),
         "merged read still resolves the family"
     );
     store
         .phase2_upsert_promotion_state_mode(
             &PromotionStateRow {
+                environment: "live".to_string(),
                 symbol: "BTC-USDT".to_string(),
                 status: "promoted".to_string(),
                 fit_delta_bps: 1.0,
@@ -1760,11 +1828,11 @@ fn test_seasonality_separate_mode_isolates_quote_series() {
         )
         .unwrap();
     assert!(store
-        .phase2_promotion_state_mode("BTC-USDT", false)
+        .phase2_promotion_state_mode("BTC-USDT", false, "live")
         .unwrap()
         .is_some());
     assert!(store
-        .phase2_promotion_state_mode("BTC-USDC", false)
+        .phase2_promotion_state_mode("BTC-USDC", false, "live")
         .unwrap()
         .is_none());
 
@@ -1773,15 +1841,15 @@ fn test_seasonality_separate_mode_isolates_quote_series() {
     vols.insert("BTC-USDT".to_string(), 1_000_000.0);
     vols.insert("BTC-USDC".to_string(), 2_000_000.0);
     store
-        .record_venue_volume_samples_mode("binance", now, &vols, false)
+        .record_venue_volume_samples_mode("binance", now, &vols, false, "live")
         .unwrap();
     let strict = store
-        .venue_volume_series_mode("BTC-USDT", "binance", 0, i64::MAX, false)
+        .venue_volume_series_mode("BTC-USDT", "binance", 0, i64::MAX, false, "live")
         .unwrap();
     assert_eq!(strict.len(), 1);
     assert_eq!(strict[0].1, 1_000_000.0);
     let merged = store
-        .venue_volume_series("BTC-USDT", "binance", 0, i64::MAX)
+        .venue_volume_series("BTC-USDT", "binance", 0, i64::MAX, "live")
         .unwrap();
     assert_eq!(merged.len(), 2, "merged read sees both quote variants");
 }
@@ -1791,19 +1859,21 @@ fn test_spread_samples_aliases_keep_symbols_isolated() {
     // Alias merging must never leak one asset's rows into another's.
     let store = StateStore::open_in_memory().unwrap();
     store
-        .record_spread_samples("ETH", 1_000, &[sample("lighter", 50.0)])
+        .record_spread_samples("ETH", 1_000, &[sample("lighter", 50.0)], "live")
         .unwrap();
     store
-        .record_spread_samples("ETH-USDC", 2_000, &[sample("lighter", 51.0)])
+        .record_spread_samples("ETH-USDC", 2_000, &[sample("lighter", 51.0)], "live")
         .unwrap();
     store
-        .record_spread_samples("BTC", 1_500, &[sample("lighter", 100.0)])
+        .record_spread_samples("BTC", 1_500, &[sample("lighter", 100.0)], "live")
         .unwrap();
-    let rows = store.spread_samples("BTC-USDC", 0, i64::MAX).unwrap();
+    let rows = store
+        .spread_samples("BTC-USDC", 0, i64::MAX, "live")
+        .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].mid, 100.0);
     assert_eq!(
-        store.earliest_spread_sample_ts("BTC-USDC").unwrap(),
+        store.earliest_spread_sample_ts("BTC-USDC", "live").unwrap(),
         Some(1_500)
     );
 }
@@ -1855,7 +1925,7 @@ fn test_kv_survives_reopen() {
             .lock()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 37);
+        assert_eq!(version, 38);
     }
     let _ = fs::remove_dir_all(dir);
 }
@@ -1925,12 +1995,15 @@ fn test_retention_time_cutoff_deletes_oldest_first() {
                 "BTC-USDC",
                 i * 1_000,
                 &[sample("hyperliquid", 100.0 + i as f64)],
+                "live",
             )
             .unwrap();
     }
     let removed = store.delete_spread_samples_before(5_000).unwrap();
     assert_eq!(removed, 5);
-    let rows = store.spread_samples("BTC-USDC", 0, i64::MAX).unwrap();
+    let rows = store
+        .spread_samples("BTC-USDC", 0, i64::MAX, "live")
+        .unwrap();
     assert_eq!(rows.len(), 5);
     assert_eq!(rows[0].ts_ms, 5_000);
 }
@@ -1941,20 +2014,22 @@ fn test_retention_cutoff_keeps_fresh_rows_across_alias_keys() {
     // ("BTC-USDC") rows must both survive a cutoff that drops old rows.
     let store = StateStore::open_in_memory().unwrap();
     store
-        .record_spread_samples("BTC", 1_000, &[sample("hyperliquid", 100.0)])
+        .record_spread_samples("BTC", 1_000, &[sample("hyperliquid", 100.0)], "live")
         .unwrap();
     store
-        .record_spread_samples("BTC-USDC", 2_000, &[sample("lighter", 101.0)])
+        .record_spread_samples("BTC-USDC", 2_000, &[sample("lighter", 101.0)], "live")
         .unwrap();
     store
-        .record_spread_samples("BTC", 9_000, &[sample("hyperliquid", 102.0)])
+        .record_spread_samples("BTC", 9_000, &[sample("hyperliquid", 102.0)], "live")
         .unwrap();
     store
-        .record_spread_samples("BTC-USDC", 10_000, &[sample("lighter", 103.0)])
+        .record_spread_samples("BTC-USDC", 10_000, &[sample("lighter", 103.0)], "live")
         .unwrap();
     let removed = store.delete_spread_samples_before(5_000).unwrap();
     assert_eq!(removed, 2);
-    let rows = store.spread_samples("BTC-USDC", 0, i64::MAX).unwrap();
+    let rows = store
+        .spread_samples("BTC-USDC", 0, i64::MAX, "live")
+        .unwrap();
     assert_eq!(rows.len(), 2);
     assert!(rows.iter().all(|r| r.ts_ms >= 5_000));
 }
@@ -1968,12 +2043,15 @@ fn test_retention_oldest_first_batch_delete() {
                 "BTC-USDC",
                 i * 1_000,
                 &[sample("hyperliquid", 100.0 + i as f64)],
+                "live",
             )
             .unwrap();
     }
     let removed = store.delete_oldest_spread_samples(3).unwrap();
     assert_eq!(removed, 3);
-    let rows = store.spread_samples("BTC-USDC", 0, i64::MAX).unwrap();
+    let rows = store
+        .spread_samples("BTC-USDC", 0, i64::MAX, "live")
+        .unwrap();
     assert_eq!(rows.len(), 7);
     assert_eq!(rows[0].ts_ms, 3_000);
     assert_eq!(store.spread_sample_count().unwrap(), 7);
@@ -1989,17 +2067,22 @@ fn test_spread_samples_prune_retention_and_cap() {
                 "BTC-USDC",
                 i * 1_000,
                 &[sample("hyperliquid", 100.0 + i as f64)],
+                "live",
             )
             .unwrap();
     }
     // Retention: drop everything before ts 5_000.
     store.prune_spread_samples(5_000, 1_000_000).unwrap();
-    let rows = store.spread_samples("BTC-USDC", 0, i64::MAX).unwrap();
+    let rows = store
+        .spread_samples("BTC-USDC", 0, i64::MAX, "live")
+        .unwrap();
     assert_eq!(rows.len(), 5);
     assert_eq!(rows[0].ts_ms, 5_000);
     // Cap: keep only the newest 2 rows.
     store.prune_spread_samples(0, 2).unwrap();
-    let rows = store.spread_samples("BTC-USDC", 0, i64::MAX).unwrap();
+    let rows = store
+        .spread_samples("BTC-USDC", 0, i64::MAX, "live")
+        .unwrap();
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].ts_ms, 8_000);
     assert_eq!(rows[1].ts_ms, 9_000);
@@ -2016,8 +2099,8 @@ fn raw_sample(store: &StateStore, symbol: &str, venue: &str, ts_ms: i64, mid: f6
         .lock()
         .execute(
             "INSERT INTO spread_samples
-                (symbol, venue_id, ts_ms, mid, best_bid, best_ask)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                (symbol, venue_id, ts_ms, mid, best_bid, best_ask, environment)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, 'live')",
             rusqlite::params![symbol, venue, ts_ms, mid, mid - 0.01, mid + 0.01],
         )
         .unwrap();
@@ -2043,7 +2126,7 @@ fn test_spread_samples_incumbent_survives_late_intruder() {
         raw_sample(&store, "SPX500", "hyperliquid", i * b, 0.5);
         raw_sample(&store, "SPX500", "lighter", i * b, 0.5);
     }
-    let rows = store.spread_samples("SPX500", 0, i64::MAX).unwrap();
+    let rows = store.spread_samples("SPX500", 0, i64::MAX, "live").unwrap();
     assert!(!rows.is_empty(), "incumbent rows must survive");
     assert!(
         rows.iter().all(|r| r.mid > 1_000.0),
@@ -2051,7 +2134,9 @@ fn test_spread_samples_incumbent_survives_late_intruder() {
     );
     // A window containing ONLY intruder data is an honest gap, not a
     // coherent-but-wrong memecoin series.
-    let intruder_only = store.spread_samples("SPX500", 10 * b, 20 * b).unwrap();
+    let intruder_only = store
+        .spread_samples("SPX500", 10 * b, 20 * b, "live")
+        .unwrap();
     assert!(
         intruder_only.is_empty(),
         "window of pure off-scale data collapses to a gap"
@@ -2075,7 +2160,7 @@ fn test_spread_samples_majority_of_peers_beats_hot_venue() {
             raw_sample(&store, "SPX500", "hyperliquid", i * b + k, 0.5);
         }
     }
-    let rows = store.spread_samples("SPX500", 0, i64::MAX).unwrap();
+    let rows = store.spread_samples("SPX500", 0, i64::MAX, "live").unwrap();
     assert_eq!(rows.len(), 12, "only the three index venues survive");
     assert!(rows.iter().all(|r| r.mid > 1_000.0));
     assert!(rows.iter().all(|r| r.venue_id != "hyperliquid"));
@@ -2089,20 +2174,26 @@ fn test_spread_samples_write_gate_rejects_off_scale() {
     let b = 600_000i64;
     for i in 0..3 {
         store
-            .record_spread_samples("IDX", i * b, &[sample("vanta", 7_600.0)])
+            .record_spread_samples("IDX", i * b, &[sample("vanta", 7_600.0)], "live")
             .unwrap();
     }
     store
-        .record_spread_samples("IDX", 3 * b, &[sample("binance", 0.5)])
+        .record_spread_samples("IDX", 3 * b, &[sample("binance", 0.5)], "live")
         .unwrap();
-    let rows = store.spread_samples("IDX", 0, i64::MAX).unwrap();
+    let rows = store.spread_samples("IDX", 0, i64::MAX, "live").unwrap();
     assert_eq!(rows.len(), 3, "off-scale write was rejected");
     assert!(rows.iter().all(|r| r.mid > 1_000.0));
     // On-scale writes still land.
     store
-        .record_spread_samples("IDX", 4 * b, &[sample("binance", 7_610.0)])
+        .record_spread_samples("IDX", 4 * b, &[sample("binance", 7_610.0)], "live")
         .unwrap();
-    assert_eq!(store.spread_samples("IDX", 0, i64::MAX).unwrap().len(), 4);
+    assert_eq!(
+        store
+            .spread_samples("IDX", 0, i64::MAX, "live")
+            .unwrap()
+            .len(),
+        4
+    );
 }
 
 #[test]
@@ -2114,7 +2205,7 @@ fn test_spread_samples_single_venue_mixed_splits_per_bucket() {
     let b = 600_000i64;
     for i in 0..4 {
         store
-            .record_spread_samples("IDX2", i * b, &[sample("vanta", 7_600.0)])
+            .record_spread_samples("IDX2", i * b, &[sample("vanta", 7_600.0)], "live")
             .unwrap();
     }
     // Same venue flips to memecoin scale for two buckets, then back
@@ -2124,10 +2215,10 @@ fn test_spread_samples_single_venue_mixed_splits_per_bucket() {
     }
     for i in 6..8 {
         store
-            .record_spread_samples("IDX2", i * b, &[sample("vanta", 7_605.0)])
+            .record_spread_samples("IDX2", i * b, &[sample("vanta", 7_605.0)], "live")
             .unwrap();
     }
-    let rows = store.spread_samples("IDX2", 0, i64::MAX).unwrap();
+    let rows = store.spread_samples("IDX2", 0, i64::MAX, "live").unwrap();
     assert_eq!(rows.len(), 6);
     assert!(rows.iter().all(|r| r.mid > 1_000.0));
     assert!(rows.iter().all(|r| r.ts_ms / b != 4 && r.ts_ms / b != 5));
@@ -2141,17 +2232,27 @@ fn test_spread_samples_repriced_together_is_not_corruption() {
     let b = 600_000i64;
     for i in 0..3 {
         store
-            .record_spread_samples("VOL", i * b, &[sample("aaa", 100.0), sample("bbb", 100.5)])
+            .record_spread_samples(
+                "VOL",
+                i * b,
+                &[sample("aaa", 100.0), sample("bbb", 100.5)],
+                "live",
+            )
             .unwrap();
     }
     // Hmm — a genuine 2x reprice inside the incumbent window: cells at
     // 100 and 200 are within 3x of each other, so both corroborate.
     for i in 3..6 {
         store
-            .record_spread_samples("VOL", i * b, &[sample("aaa", 210.0), sample("bbb", 209.0)])
+            .record_spread_samples(
+                "VOL",
+                i * b,
+                &[sample("aaa", 210.0), sample("bbb", 209.0)],
+                "live",
+            )
             .unwrap();
     }
-    let rows = store.spread_samples("VOL", 0, i64::MAX).unwrap();
+    let rows = store.spread_samples("VOL", 0, i64::MAX, "live").unwrap();
     assert_eq!(rows.len(), 12, "mutual reprice within 3x is kept");
 }
 
@@ -2173,6 +2274,7 @@ fn test_signal_events_append_readback_and_validation() {
             Some(0.9),
             Some(r#"{"friction_bps":5.0}"#),
             "transition",
+            "live",
         )
         .unwrap();
     store
@@ -2188,6 +2290,7 @@ fn test_signal_events_append_readback_and_validation() {
             None,
             None,
             "transition",
+            "live",
         )
         .unwrap();
     store
@@ -2203,12 +2306,19 @@ fn test_signal_events_append_readback_and_validation() {
             None,
             Some("{}"),
             "transition",
+            "live",
         )
         .unwrap();
 
     // Pair-filtered readback, newest first; venue ids normalize.
     let rows = store
-        .recent_monitor_signal_events(Some("BTC"), Some("hyperliquid"), Some("lighter"), 10)
+        .recent_monitor_signal_events(
+            Some("BTC"),
+            Some("hyperliquid"),
+            Some("lighter"),
+            10,
+            "live",
+        )
         .unwrap();
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].ts_ms, 120_000);
@@ -2223,21 +2333,21 @@ fn test_signal_events_append_readback_and_validation() {
     // Full UI symbols resolve to the canonical-base storage key: the monitor
     // records under "BTC" while pages query "BTC-USDC" — both must match.
     let alias_rows = store
-        .recent_monitor_signal_events(Some("BTC-USDC"), None, None, 10)
+        .recent_monitor_signal_events(Some("BTC-USDC"), None, None, 10, "live")
         .unwrap();
     assert_eq!(alias_rows.len(), 3);
 
     // Unfiltered sees all three; limit bounds the read.
     assert_eq!(
         store
-            .recent_monitor_signal_events(None, None, None, 10)
+            .recent_monitor_signal_events(None, None, None, 10, "live")
             .unwrap()
             .len(),
         3
     );
     assert_eq!(
         store
-            .recent_monitor_signal_events(None, None, None, 2)
+            .recent_monitor_signal_events(None, None, None, 2, "live")
             .unwrap()
             .len(),
         2
@@ -2258,6 +2368,7 @@ fn test_signal_events_append_readback_and_validation() {
             None,
             None,
             "transition",
+            "live"
         )
         .is_err());
     assert!(store
@@ -2273,6 +2384,7 @@ fn test_signal_events_append_readback_and_validation() {
             None,
             None,
             "transition",
+            "live"
         )
         .is_err());
     assert!(store
@@ -2288,6 +2400,7 @@ fn test_signal_events_append_readback_and_validation() {
             None,
             None,
             "transition",
+            "live"
         )
         .is_err());
     assert!(store
@@ -2303,6 +2416,7 @@ fn test_signal_events_append_readback_and_validation() {
             None,
             None,
             "pulse",
+            "live"
         )
         .is_err());
     assert!(store
@@ -2318,6 +2432,7 @@ fn test_signal_events_append_readback_and_validation() {
             None,
             None,
             "transition",
+            "live"
         )
         .is_err());
     assert!(store
@@ -2333,6 +2448,7 @@ fn test_signal_events_append_readback_and_validation() {
             Some(1.5),
             None,
             "transition",
+            "live"
         )
         .is_err());
     assert!(store
@@ -2348,11 +2464,12 @@ fn test_signal_events_append_readback_and_validation() {
             None,
             Some("{nope"),
             "transition",
+            "live"
         )
         .is_err());
     assert_eq!(store.monitor_signal_event_count().unwrap(), 3);
     assert!(store
-        .recent_monitor_signal_events(None, None, None, 0)
+        .recent_monitor_signal_events(None, None, None, 0, "live")
         .is_err());
 }
 
@@ -2373,6 +2490,7 @@ fn test_signal_events_prune_retention_and_cap() {
                 None,
                 None,
                 "transition",
+                "live",
             )
             .unwrap();
     }
@@ -2381,14 +2499,14 @@ fn test_signal_events_prune_retention_and_cap() {
         .prune_monitor_signal_events(3_000, MONITOR_SIGNAL_EVENTS_MAX_ROWS)
         .unwrap();
     let rows = store
-        .recent_monitor_signal_events(None, None, None, 100)
+        .recent_monitor_signal_events(None, None, None, 100, "live")
         .unwrap();
     assert_eq!(rows.len(), 3);
     assert!(rows.iter().all(|r| r.ts_ms >= 3_000));
     // Separate cap keeps only the newest rows.
     store.prune_monitor_signal_events(0, 2).unwrap();
     let rows = store
-        .recent_monitor_signal_events(None, None, None, 100)
+        .recent_monitor_signal_events(None, None, None, 100, "live")
         .unwrap();
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].ts_ms, 5_000);
@@ -2439,7 +2557,7 @@ fn test_migration_v20_rescales_lighter_funding_history() {
     let v: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 37);
+    assert_eq!(v, 38);
 
     let mut stmt = conn
             .prepare("SELECT venue_id, rate_8h, interval_hours FROM funding_rate_samples ORDER BY venue_id, ts_ms")
@@ -2559,7 +2677,7 @@ fn test_migration_v7_to_v8_preserves_data() {
     let v10: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v10, 37);
+    assert_eq!(v10, 38);
     // v19 remaps the renamed lifecycle statuses on the way through.
     let remapped: String = conn
         .query_row(
@@ -2613,15 +2731,15 @@ fn test_volume_sampler_roundtrip_and_alias() {
     vols.insert("JUNK".to_string(), f64::NAN);
     vols.insert("ZERO".to_string(), 0.0);
     store
-        .record_venue_volume_samples("hyperliquid", 60_000, &vols)
+        .record_venue_volume_samples("hyperliquid", 60_000, &vols, "live")
         .unwrap();
     // Canonical-base storage reads back through quoted aliases.
     let btc = store
-        .venue_volume_series("BTC-USDC", "hyperliquid", 0, i64::MAX)
+        .venue_volume_series("BTC-USDC", "hyperliquid", 0, i64::MAX, "live")
         .unwrap();
     assert_eq!(btc, vec![(60_000, 1_000_000.0)]);
     let eth = store
-        .venue_volume_series("eth", "hyperliquid", 0, i64::MAX)
+        .venue_volume_series("eth", "hyperliquid", 0, i64::MAX, "live")
         .unwrap();
     assert_eq!(eth.len(), 1);
     // Non-finite / non-positive rows are never persisted.
@@ -2684,6 +2802,7 @@ fn seed_session_history(store: &StateStore, days: i64) -> (i64, i64) {
                     sample("hyperliquid", 100.0),
                     sample("lighter", 100.0 * (1.0 + spread_bps / 10_000.0)),
                 ],
+                "live",
             )
             .unwrap();
     }
@@ -2695,10 +2814,10 @@ fn test_rollup_seeded_multi_day_history() {
     let store = StateStore::open_in_memory().unwrap();
     let (from, to) = seed_session_history(&store, 16);
     let written = store
-        .rollup_session_profiles("BTC-USDC", from - 1_000, to + 1_000, to)
+        .rollup_session_profiles("BTC-USDC", from - 1_000, to + 1_000, to, "live")
         .unwrap();
     assert_eq!(written, 5, "one row per session");
-    let profiles = store.session_profiles("BTC").unwrap();
+    let profiles = store.session_profiles("BTC", "live").unwrap();
     assert_eq!(profiles.len(), 5);
     let by_session: std::collections::HashMap<&str, &SessionProfileRow> = profiles
         .iter()
@@ -2725,7 +2844,7 @@ fn test_rollup_seeded_multi_day_history() {
     assert!(dead.n_episodes < 30);
     assert!(dead.provisional);
     // Hour bins: 24 rows, modulators inside +/-25%, provisional reads 1.0.
-    let bins = store.session_hour_bins("BTC-USDC").unwrap();
+    let bins = store.session_hour_bins("BTC-USDC", "live").unwrap();
     assert_eq!(bins.len(), 24);
     for b in &bins {
         assert!(
@@ -2757,13 +2876,14 @@ fn test_rollup_thin_data_stays_provisional() {
             "BTC",
             ts,
             &[sample("hyperliquid", 100.0), sample("lighter", 100.5)],
+            "live",
         )
         .unwrap();
     let written = store
-        .rollup_session_profiles("BTC", ts - 1_000, ts + 1_000, ts)
+        .rollup_session_profiles("BTC", ts - 1_000, ts + 1_000, ts, "live")
         .unwrap();
     assert_eq!(written, 5);
-    for row in store.session_profiles("BTC").unwrap() {
+    for row in store.session_profiles("BTC", "live").unwrap() {
         assert!(
             row.provisional,
             "single-tick history must stay provisional: {:?}",
@@ -2777,16 +2897,16 @@ fn test_prune_keeps_session_profiles() {
     let store = StateStore::open_in_memory().unwrap();
     let (from, to) = seed_session_history(&store, 16);
     store
-        .rollup_session_profiles("BTC", from - 1_000, to + 1_000, to)
+        .rollup_session_profiles("BTC", from - 1_000, to + 1_000, to, "live")
         .unwrap();
-    assert_eq!(store.session_profiles("BTC").unwrap().len(), 5);
+    assert_eq!(store.session_profiles("BTC", "live").unwrap().len(), 5);
     // Nuke the entire raw log: time cutoff plus zero-row cap.
     store.prune_spread_samples(i64::MAX, 0).unwrap();
     assert_eq!(store.spread_sample_count().unwrap(), 0);
     assert_eq!(store.delete_spread_samples_before(i64::MAX).unwrap_or(0), 0);
     // Derived state survives every raw-sample prune path.
-    assert_eq!(store.session_profiles("BTC").unwrap().len(), 5);
-    assert_eq!(store.session_hour_bins("BTC").unwrap().len(), 24);
+    assert_eq!(store.session_profiles("BTC", "live").unwrap().len(), 5);
+    assert_eq!(store.session_hour_bins("BTC", "live").unwrap().len(), 24);
 }
 
 /* ------------------ open-position aggregation ------------------ */
@@ -3049,6 +3169,7 @@ fn test_aggregate_open_positions_single_leg_flatten_child_merges() {
 
 fn har_row() -> HarAnchorRow {
     HarAnchorRow {
+        environment: "live".to_string(),
         symbol: "BTC-USDC".to_string(),
         intercept: 0.2,
         b_daily: 0.5,
@@ -3065,9 +3186,12 @@ fn har_row() -> HarAnchorRow {
 #[test]
 fn test_phase2_har_anchor_roundtrip_and_validation() {
     let store = StateStore::open_in_memory().unwrap();
-    assert_eq!(store.phase2_har_anchor("BTC-USDC").unwrap(), None);
+    assert_eq!(store.phase2_har_anchor("BTC-USDC", "live").unwrap(), None);
     store.phase2_upsert_har_anchor(&har_row()).unwrap();
-    let got = store.phase2_har_anchor("BTC").unwrap().expect("alias read");
+    let got = store
+        .phase2_har_anchor("BTC", "live")
+        .unwrap()
+        .expect("alias read");
     assert!((got.forecast_rv_bps - 11.0).abs() < 1e-12);
     let mut bad = har_row();
     bad.r2 = 1.5;
@@ -3083,9 +3207,13 @@ fn test_phase2_har_anchor_roundtrip_and_validation() {
 #[test]
 fn test_phase2_promotion_state_roundtrip_and_validation() {
     let store = StateStore::open_in_memory().unwrap();
-    assert_eq!(store.phase2_promotion_state("ETH-USDC").unwrap(), None);
+    assert_eq!(
+        store.phase2_promotion_state("ETH-USDC", "live").unwrap(),
+        None
+    );
     store
         .phase2_upsert_promotion_state(&PromotionStateRow {
+            environment: "live".to_string(),
             symbol: "ETH-USDC".to_string(),
             status: "promoted".to_string(),
             fit_delta_bps: 2.0,
@@ -3095,12 +3223,13 @@ fn test_phase2_promotion_state_roundtrip_and_validation() {
         })
         .unwrap();
     let got = store
-        .phase2_promotion_state("ETH")
+        .phase2_promotion_state("ETH", "live")
         .unwrap()
         .expect("alias read");
     assert_eq!(got.status, "promoted");
     assert!(store
         .phase2_upsert_promotion_state(&PromotionStateRow {
+            environment: "live".to_string(),
             symbol: "ETH-USDC".to_string(),
             status: "live".to_string(),
             fit_delta_bps: 2.0,
@@ -3115,7 +3244,7 @@ fn test_phase2_promotion_state_roundtrip_and_validation() {
 fn test_autotune_apply_events_audit_roundtrip() {
     let store = StateStore::open_in_memory().unwrap();
     assert!(store
-        .recent_autotune_apply_events("BTC-USDC", 10)
+        .recent_autotune_apply_events("BTC-USDC", 10, "live")
         .unwrap()
         .is_empty());
     let id = store
@@ -3124,16 +3253,21 @@ fn test_autotune_apply_events_audit_roundtrip() {
             r#"{"targetProfitBps": 8.5}"#,
             r#"{"span": [1, 2], "fit": "ok"}"#,
             12_000,
+            "live",
         )
         .unwrap();
     assert!(id > 0);
-    let rows = store.recent_autotune_apply_events("BTC", 10).unwrap();
+    let rows = store
+        .recent_autotune_apply_events("BTC", 10, "live")
+        .unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].applied_json, r#"{"targetProfitBps": 8.5}"#);
     assert!(store
-        .record_autotune_apply_event("BTC-USDC", "not json", "{}", 1)
+        .record_autotune_apply_event("BTC-USDC", "not json", "{}", 1, "live")
         .is_err());
-    assert!(store.recent_autotune_apply_events("BTC-USDC", 0).is_err());
+    assert!(store
+        .recent_autotune_apply_events("BTC-USDC", 0, "live")
+        .is_err());
 }
 
 #[test]
@@ -3345,32 +3479,61 @@ fn test_equity_events_ipc_listing_filters_and_limits() {
 fn test_margin_snapshots_record_list_prune() {
     let store = StateStore::open_in_memory().unwrap();
     store
-        .record_margin_snapshot("hyperliquid", "hyperliquid", 1_000, 10_000.0, 2_000.0, 20.0)
+        .record_margin_snapshot(
+            "hyperliquid",
+            "hyperliquid",
+            1_000,
+            10_000.0,
+            2_000.0,
+            20.0,
+            "live",
+        )
         .unwrap();
     store
-        .record_margin_snapshot("hyperliquid", "hyperliquid", 2_000, 10_000.0, 3_000.0, 30.0)
+        .record_margin_snapshot(
+            "hyperliquid",
+            "hyperliquid",
+            2_000,
+            10_000.0,
+            3_000.0,
+            30.0,
+            "live",
+        )
         .unwrap();
     store
-        .record_margin_snapshot("lighter", "lighter", 2_000, 5_000.0, 500.0, 10.0)
+        .record_margin_snapshot("lighter", "lighter", 2_000, 5_000.0, 500.0, 10.0, "live")
         .unwrap();
-    let rows = store.list_margin_snapshots("hyperliquid", 0).unwrap();
+    let rows = store
+        .list_margin_snapshots("hyperliquid", 0, "live")
+        .unwrap();
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[0].ts_ms, 1_000);
     assert_eq!(rows[1].rate_pct, 30.0);
     assert!(rows[0].ts_ms <= rows[1].ts_ms, "oldest first");
-    let windowed = store.list_margin_snapshots("hyperliquid", 2_000).unwrap();
+    let windowed = store
+        .list_margin_snapshots("hyperliquid", 2_000, "live")
+        .unwrap();
     assert_eq!(windowed.len(), 1);
     let removed = store.prune_margin_snapshots(2_000).unwrap();
     assert_eq!(removed, 1);
     assert_eq!(
-        store.list_margin_snapshots("hyperliquid", 0).unwrap().len(),
+        store
+            .list_margin_snapshots("hyperliquid", 0, "live")
+            .unwrap()
+            .len(),
         1
     );
-    assert_eq!(store.list_margin_snapshots("lighter", 0).unwrap().len(), 1);
+    assert_eq!(
+        store
+            .list_margin_snapshots("lighter", 0, "live")
+            .unwrap()
+            .len(),
+        1
+    );
     let removed_all = store.prune_margin_snapshots(3_000).unwrap();
     assert_eq!(removed_all, 2);
     assert!(store
-        .list_margin_snapshots("lighter", 0)
+        .list_margin_snapshots("lighter", 0, "live")
         .unwrap()
         .is_empty());
 }
@@ -3379,18 +3542,20 @@ fn test_margin_snapshots_record_list_prune() {
 fn test_margin_snapshots_reject_bad_rows() {
     let store = StateStore::open_in_memory().unwrap();
     assert!(store
-        .record_margin_snapshot("", "a", 1_000, 10_000.0, 1_000.0, 10.0)
+        .record_margin_snapshot("", "a", 1_000, 10_000.0, 1_000.0, 10.0, "live")
         .is_err());
     assert!(store
-        .record_margin_snapshot("hyperliquid", "a", -1, 10_000.0, 1_000.0, 10.0)
+        .record_margin_snapshot("hyperliquid", "a", -1, 10_000.0, 1_000.0, 10.0, "live")
         .is_err());
     assert!(store
-        .record_margin_snapshot("hyperliquid", "a", 1_000, f64::NAN, 1_000.0, 10.0)
+        .record_margin_snapshot("hyperliquid", "a", 1_000, f64::NAN, 1_000.0, 10.0, "live")
         .is_err());
     assert!(store
-        .record_margin_snapshot("hyperliquid", "a", 1_000, 10_000.0, -5.0, 10.0)
+        .record_margin_snapshot("hyperliquid", "a", 1_000, 10_000.0, -5.0, 10.0, "live")
         .is_err());
-    assert!(store.list_margin_snapshots("hyperliquid", -1).is_err());
+    assert!(store
+        .list_margin_snapshots("hyperliquid", -1, "live")
+        .is_err());
     assert!(store.prune_margin_snapshots(-1).is_err());
 }
 
@@ -3462,7 +3627,7 @@ fn test_migration_v24_admits_external_and_preserves_rows() {
     let v: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 37);
+    assert_eq!(v, 38);
     let kept: String = conn
         .query_row(
             "SELECT strategy_id FROM signal_executions WHERE id = 'sig-keep'",
@@ -3558,6 +3723,7 @@ fn test_scheduled_exits_crud_and_claim() {
     let store = StateStore::open_in_memory().unwrap();
     let now = "2026-09-21T00:00:00Z".to_string();
     let row = ScheduledExit {
+        environment: "live".to_string(),
         id: "sched-exit-1".into(),
         venue: "lighter".into(),
         symbol: "ETH-USDC".into(),
@@ -3576,10 +3742,12 @@ fn test_scheduled_exits_crud_and_claim() {
 
     // Due-scan sees it only when execute_at has passed.
     assert!(store
-        .due_scheduled_exits(1_799_999_999_999)
+        .due_scheduled_exits(1_799_999_999_999, "live")
         .unwrap()
         .is_empty());
-    let due = store.due_scheduled_exits(1_800_000_000_000).unwrap();
+    let due = store
+        .due_scheduled_exits(1_800_000_000_000, "live")
+        .unwrap();
     assert_eq!(due.len(), 1);
     assert_eq!(due[0].id, "sched-exit-1");
 
@@ -3595,12 +3763,15 @@ fn test_scheduled_exits_crud_and_claim() {
     store
         .set_scheduled_exit_status("sched-exit-1", "pending", Some("reopen?"))
         .unwrap();
-    let listed = store.list_scheduled_exits(None).unwrap();
+    let listed = store.list_scheduled_exits(None, "live").unwrap();
     assert_eq!(listed[0].status, "fired");
     assert_eq!(listed[0].note.as_deref(), Some("filled"));
 
     // Terminal rows are invisible to the due scan and unclaimable.
-    assert!(store.due_scheduled_exits(i64::MAX).unwrap().is_empty());
+    assert!(store
+        .due_scheduled_exits(i64::MAX, "live")
+        .unwrap()
+        .is_empty());
     assert!(!store.claim_scheduled_exit("sched-exit-1").unwrap());
 }
 
@@ -3609,6 +3780,7 @@ fn test_scheduled_exits_reject_bad_rows() {
     let store = StateStore::open_in_memory().unwrap();
     let now = "2026-09-21T00:00:00Z".to_string();
     let base = ScheduledExit {
+        environment: "live".to_string(),
         id: "x".into(),
         venue: "lighter".into(),
         symbol: "ETH-USDC".into(),
@@ -3856,6 +4028,7 @@ fn test_v34_enables_incremental_auto_vacuum_and_retention_shrinks_db() {
                 "BTC-USDC",
                 1_000 + i,
                 &[sample("hyperliquid", 100.0 + (i % 50) as f64)],
+                "live",
             )
             .unwrap();
     }
@@ -3913,9 +4086,27 @@ fn telemetry_samples_offload_to_dedicated_db() {
         file.with_extension("telemetry.db").exists(),
         "telemetry db file must exist"
     );
-    let rows = store.spread_samples("BTC", 0, 2000).unwrap();
-    assert_eq!(rows.len(), 1, "drained rows remain readable");
-    assert_eq!(rows[0].ts_ms, 1000);
+    // The drained row has no attributable provenance: it persists on the
+    // telemetry connection stamped 'unknown' and is excluded from both
+    // environment-filtered reads — never guessed into live or testnet.
+    let drained: (i64, String) = store
+        .telemetry()
+        .lock()
+        .query_row(
+            "SELECT ts_ms, environment FROM spread_samples WHERE symbol = 'BTC'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(drained, (1000, "unknown".to_string()));
+    assert!(store
+        .spread_samples("BTC", 0, 2000, "live")
+        .unwrap()
+        .is_empty());
+    assert!(store
+        .spread_samples("BTC", 0, 2000, "testnet")
+        .unwrap()
+        .is_empty());
 
     // Frame flood collapses to one row per (symbol, venue) interval.
     let entry = |mid: f64| VenueSampleEntry {
@@ -3928,7 +4119,13 @@ fn telemetry_samples_offload_to_dedicated_db() {
     };
     for i in 0..50 {
         store
-            .record_spread_samples_throttled("BTC", true, 10_000 + i * 10, &[entry(50000.0)])
+            .record_spread_samples_throttled(
+                "BTC",
+                true,
+                10_000 + i * 10,
+                &[entry(50000.0)],
+                "live",
+            )
             .unwrap();
     }
     store
@@ -3937,9 +4134,10 @@ fn telemetry_samples_offload_to_dedicated_db() {
             true,
             10_000 + StateStore::SAMPLE_MIN_INTERVAL_MS + 1,
             &[entry(50100.0)],
+            "live",
         )
         .unwrap();
-    let rows = store.spread_samples("BTC", 10_000, 11_000).unwrap();
+    let rows = store.spread_samples("BTC", 10_000, 11_000, "live").unwrap();
     assert_eq!(
         rows.len(),
         2,
@@ -3949,7 +4147,13 @@ fn telemetry_samples_offload_to_dedicated_db() {
     // Ledger writes never queue behind the frame flood: a signal execution
     // record lands and roundtrips while telemetry writes interleave.
     for i in 0..200 {
-        let _ = store.record_spread_samples_throttled("BTC", true, 20_000 + i, &[entry(50000.0)]);
+        let _ = store.record_spread_samples_throttled(
+            "BTC",
+            true,
+            20_000 + i,
+            &[entry(50000.0)],
+            "live",
+        );
     }
     let sig = two_leg_signal("flood-ledger-1", "BTC", None, None);
     store.record_signal_execution(&sig, "testnet").unwrap();
@@ -4028,4 +4232,477 @@ fn ticker_reduce_only_is_scoped_by_environment_and_strategy() {
         .list_reduce_only_tickers("testnet")
         .unwrap()
         .is_empty());
+}
+
+/* --------- v38: environment isolation (testnet/live never mix) -------- */
+
+#[test]
+fn test_environment_isolation_across_venue_data_tables() {
+    // Regression for the v38 migration: every venue-data table now keys
+    // rows by trading environment. A write under one environment must be
+    // invisible to reads under the other, and same-key rows must coexist
+    // rather than overwrite.
+    let store = StateStore::open_in_memory().unwrap();
+    let entry = |mid: f64| VenueSampleEntry {
+        venue_id: "lighter".into(),
+        mid,
+        best_bid: mid - 1.0,
+        best_ask: mid + 1.0,
+        bid_depth: None,
+        ask_depth: None,
+    };
+
+    // --- spread_samples: same (symbol, venue, ts) in both envs ---
+    store
+        .record_spread_samples("BTC", 1_000, &[entry(50_000.0)], "live")
+        .unwrap();
+    store
+        .record_spread_samples("BTC", 1_000, &[entry(49_000.0)], "testnet")
+        .unwrap();
+    let live = store.spread_samples("BTC", 0, 2_000, "live").unwrap();
+    let testnet = store.spread_samples("BTC", 0, 2_000, "testnet").unwrap();
+    assert_eq!(live.len(), 1);
+    assert_eq!(testnet.len(), 1);
+    assert_eq!(live[0].mid, 50_000.0);
+    assert_eq!(testnet[0].mid, 49_000.0);
+    assert!(store
+        .distinct_sample_symbols("live")
+        .unwrap()
+        .contains(&"BTC".to_string()));
+    assert!(store
+        .distinct_sample_symbols("testnet")
+        .unwrap()
+        .contains(&"BTC".to_string()));
+    store
+        .record_spread_samples("ETH", 1_000, &[entry(3_000.0)], "testnet")
+        .unwrap();
+    assert!(!store
+        .distinct_sample_symbols("live")
+        .unwrap()
+        .contains(&"ETH".to_string()));
+
+    // --- venue_volume_samples ---
+    let mut vols = HashMap::new();
+    vols.insert("BTC".to_string(), 111.0);
+    store
+        .record_venue_volume_samples("binance", 1_000, &vols, "live")
+        .unwrap();
+    vols.insert("BTC".to_string(), 222.0);
+    store
+        .record_venue_volume_samples("binance", 1_000, &vols, "testnet")
+        .unwrap();
+    let lv = store
+        .venue_volume_series("BTC", "binance", 0, 2_000, "live")
+        .unwrap();
+    let tv = store
+        .venue_volume_series("BTC", "binance", 0, 2_000, "testnet")
+        .unwrap();
+    assert_eq!(lv, vec![(1_000, 111.0)]);
+    assert_eq!(tv, vec![(1_000, 222.0)]);
+
+    // --- funding_rate_samples: same key, different rates, no collision ---
+    store
+        .record_funding_rate_samples(60_000, &[("binance", "BTC", 10.0, 8)], "live")
+        .unwrap();
+    store
+        .record_funding_rate_samples(60_000, &[("binance", "BTC", 99.0, 8)], "testnet")
+        .unwrap();
+    let lf = store
+        .funding_rate_series("binance", "BTC", 0, 120_000, "live")
+        .unwrap();
+    let tf = store
+        .funding_rate_series("binance", "BTC", 0, 120_000, "testnet")
+        .unwrap();
+    assert_eq!(lf.len(), 1);
+    assert_eq!(tf.len(), 1);
+    assert_eq!(lf[0].1, 10.0);
+    assert_eq!(tf[0].1, 99.0);
+
+    // --- monitor_signals: same pair key, different status per env ---
+    store
+        .upsert_monitor_signal(
+            "BTC",
+            "binance",
+            "lighter",
+            "tracking",
+            100,
+            200,
+            Some(5.0),
+            None,
+            "live",
+        )
+        .unwrap();
+    store
+        .upsert_monitor_signal(
+            "BTC",
+            "binance",
+            "lighter",
+            "ready",
+            300,
+            400,
+            Some(9.0),
+            None,
+            "testnet",
+        )
+        .unwrap();
+    let ls = store.monitor_signals("live").unwrap();
+    let ts = store.monitor_signals("testnet").unwrap();
+    assert_eq!(ls.len(), 1);
+    assert_eq!(ts.len(), 1);
+    assert_eq!(ls[0].status, "tracking");
+    assert_eq!(ls[0].environment, "live");
+    assert_eq!(ts[0].status, "ready");
+    assert_eq!(ts[0].environment, "testnet");
+    // Overwrite within an env doesn't touch the other's row.
+    store
+        .upsert_monitor_signal(
+            "BTC", "binance", "lighter", "no-data", 500, 600, None, None, "live",
+        )
+        .unwrap();
+    assert_eq!(store.monitor_signals("testnet").unwrap()[0].status, "ready");
+    // Prune under live reaps live rows (and unknown orphans) only.
+    store.prune_monitor_signals(&[], "live").unwrap();
+    assert!(store.monitor_signals("live").unwrap().is_empty());
+    assert_eq!(store.monitor_signals("testnet").unwrap().len(), 1);
+
+    // --- monitor_signal_events ---
+    store
+        .record_monitor_signal_event(
+            "BTC",
+            "binance",
+            "lighter",
+            1_000,
+            None,
+            "tracking",
+            Some(5.0),
+            None,
+            None,
+            None,
+            "transition",
+            "live",
+        )
+        .unwrap();
+    store
+        .record_monitor_signal_event(
+            "BTC",
+            "binance",
+            "lighter",
+            1_000,
+            None,
+            "tracking",
+            Some(50.0),
+            None,
+            None,
+            None,
+            "transition",
+            "testnet",
+        )
+        .unwrap();
+    let le = store
+        .recent_monitor_signal_events(None, None, None, 10, "live")
+        .unwrap();
+    let te = store
+        .recent_monitor_signal_events(None, None, None, 10, "testnet")
+        .unwrap();
+    assert_eq!(le.len(), 1);
+    assert_eq!(te.len(), 1);
+    assert_eq!(le[0].edge_bps, Some(5.0));
+    assert_eq!(te[0].edge_bps, Some(50.0));
+
+    // --- radar_bot_positions: same pair tracked under both envs ---
+    let bot_row = |env: &str, dev: f64| BotPositionRow {
+        symbol: "BTC".into(),
+        buy_venue: "binance".into(),
+        sell_venue: "lighter".into(),
+        entry_ts_ms: 1_000,
+        entry_dev_bps: dev,
+        baseline_bps: None,
+        friction_band_bps: 5.0,
+        size_usd: 1_000.0,
+        deadline_ms: 60_000,
+        unwatched_since_ms: None,
+        last_seen_ms: 2_000,
+        environment: env.into(),
+    };
+    store.upsert_bot_position(&bot_row("live", 12.0)).unwrap();
+    store
+        .upsert_bot_position(&bot_row("testnet", 34.0))
+        .unwrap();
+    let lb = store.list_bot_positions("live").unwrap();
+    let tb = store.list_bot_positions("testnet").unwrap();
+    assert_eq!(lb.len(), 1);
+    assert_eq!(tb.len(), 1);
+    assert_eq!(lb[0].entry_dev_bps, 12.0);
+    assert_eq!(tb[0].entry_dev_bps, 34.0);
+    // Delete under live removes the live row (and any unknown orphan) but
+    // never the testnet row.
+    store
+        .delete_bot_position("BTC", "binance", "lighter", "live")
+        .unwrap();
+    assert!(store.list_bot_positions("live").unwrap().is_empty());
+    assert_eq!(store.list_bot_positions("testnet").unwrap().len(), 1);
+
+    // --- scheduled_exits: due dispatch is env-strict ---
+    let sched = |id: &str, env: &str| ScheduledExit {
+        id: id.into(),
+        venue: "lighter".into(),
+        symbol: "BTC".into(),
+        side: "sell".into(),
+        close_pct: 100.0,
+        mode: "market".into(),
+        limit_price: None,
+        execute_at_ms: 5_000,
+        status: "pending".into(),
+        attempts: 0,
+        note: None,
+        created_at: "2024-01-01T00:00:00Z".into(),
+        updated_at: "2024-01-01T00:00:00Z".into(),
+        environment: env.into(),
+    };
+    store
+        .insert_scheduled_exit(&sched("se-live", "live"))
+        .unwrap();
+    store
+        .insert_scheduled_exit(&sched("se-testnet", "testnet"))
+        .unwrap();
+    // A pre-v38 row: the writer rejects 'unknown', so seed it raw —
+    // exactly how migrated rows arrive.
+    store
+        .conn
+        .lock()
+        .execute(
+            "INSERT INTO scheduled_exits
+                (id, venue, symbol, side, close_pct, mode, execute_at_ms,
+                 status, attempts, created_at, updated_at, environment)
+             VALUES ('se-unknown', 'lighter', 'BTC', 'sell', 100.0,
+                     'market', 5000, 'pending', 0, '2024-01-01T00:00:00Z',
+                     '2024-01-01T00:00:00Z', 'unknown')",
+            [],
+        )
+        .unwrap();
+    let due_live = store.due_scheduled_exits(10_000, "live").unwrap();
+    let due_tn = store.due_scheduled_exits(10_000, "testnet").unwrap();
+    assert_eq!(due_live.len(), 1);
+    assert_eq!(due_live[0].id, "se-live");
+    assert_eq!(due_tn.len(), 1);
+    assert_eq!(due_tn[0].id, "se-testnet");
+    // 'unknown' never dispatches; it stays listed for operator review.
+    assert!(due_live.iter().all(|e| e.id != "se-unknown"));
+    assert!(due_tn.iter().all(|e| e.id != "se-unknown"));
+    assert!(store
+        .list_scheduled_exits(None, "live")
+        .unwrap()
+        .iter()
+        .any(|e| e.id == "se-unknown"));
+
+    // --- margin_snapshots ---
+    store
+        .record_margin_snapshot("alpaca", "acct-1", 1_000, 10_000.0, 2_000.0, 20.0, "live")
+        .unwrap();
+    store
+        .record_margin_snapshot("alpaca", "acct-1", 1_000, 5_000.0, 500.0, 10.0, "testnet")
+        .unwrap();
+    let lm = store.list_margin_snapshots("alpaca", 0, "live").unwrap();
+    let tm = store.list_margin_snapshots("alpaca", 0, "testnet").unwrap();
+    assert_eq!(lm.len(), 1);
+    assert_eq!(tm.len(), 1);
+    assert_eq!(lm[0].equity, 10_000.0);
+    assert_eq!(tm[0].equity, 5_000.0);
+
+    // --- autotune_apply_events ---
+    store
+        .record_autotune_apply_event("BTC", "{}", "{}", 1_000, "live")
+        .unwrap();
+    store
+        .record_autotune_apply_event("BTC", "{}", "{}", 1_000, "testnet")
+        .unwrap();
+    assert_eq!(
+        store
+            .recent_autotune_apply_events("BTC", 10, "live")
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .recent_autotune_apply_events("BTC", 10, "testnet")
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // --- har_anchors / promotion_state: same symbol, separate rows ---
+    let anchor = |env: &str, intercept: f64| HarAnchorRow {
+        symbol: "BTC".into(),
+        intercept,
+        b_daily: 0.5,
+        b_weekly: 0.3,
+        b_monthly: 0.1,
+        r2: 0.8,
+        n_days: 30,
+        forecast_rv_bps: 100.0,
+        trailing_mean_rv_bps: 90.0,
+        updated_ts: 1_000,
+        environment: env.into(),
+    };
+    store
+        .phase2_upsert_har_anchor(&anchor("live", 1.0))
+        .unwrap();
+    store
+        .phase2_upsert_har_anchor(&anchor("testnet", 2.0))
+        .unwrap();
+    assert_eq!(
+        store
+            .phase2_har_anchor("BTC", "live")
+            .unwrap()
+            .unwrap()
+            .intercept,
+        1.0
+    );
+    assert_eq!(
+        store
+            .phase2_har_anchor("BTC", "testnet")
+            .unwrap()
+            .unwrap()
+            .intercept,
+        2.0
+    );
+
+    let promo = |env: &str, status: &str| PromotionStateRow {
+        symbol: "BTC".into(),
+        status: status.into(),
+        fit_delta_bps: 1.0,
+        val_delta_bps: 2.0,
+        reason: "test".into(),
+        updated_ts: 1_000,
+        environment: env.into(),
+    };
+    store
+        .phase2_upsert_promotion_state(&promo("live", "promoted"))
+        .unwrap();
+    store
+        .phase2_upsert_promotion_state(&promo("testnet", "held"))
+        .unwrap();
+    assert_eq!(
+        store
+            .phase2_promotion_state("BTC", "live")
+            .unwrap()
+            .unwrap()
+            .status,
+        "promoted"
+    );
+    assert_eq!(
+        store
+            .phase2_promotion_state("BTC", "testnet")
+            .unwrap()
+            .unwrap()
+            .status,
+        "held"
+    );
+
+    // --- invalid environment values are rejected everywhere ---
+    assert!(store.spread_samples("BTC", 0, 1, "sandbox").is_err());
+    assert!(store.monitor_signals("sandbox").is_err());
+    assert!(store.due_scheduled_exits(0, "sandbox").is_err());
+    assert!(store
+        .record_spread_samples("BTC", 0, &[entry(1.0)], "sandbox")
+        .is_err());
+    // A rejected env string can never be smuggled in via a row struct.
+    let mut bad = sched("se-bad", "sandbox");
+    bad.status = "pending".into();
+    assert!(store.insert_scheduled_exit(&bad).is_err());
+}
+
+#[test]
+fn test_environment_isolation_unknown_rows_fail_closed() {
+    // Pre-v38 rows migrate as 'unknown': monitor signals must not feed
+    // either env, scheduled exits must never dispatch, but open-position
+    // trackers stay visible to BOTH envs so a real position is never
+    // stranded without a watcher.
+    let store = StateStore::open_in_memory().unwrap();
+
+    store
+        .conn
+        .lock()
+        .execute(
+            "INSERT INTO monitor_signals
+                (symbol, buy_venue, sell_venue, status, first_seen_ms,
+                 last_seen_ms, updated_at, environment)
+             VALUES ('BTC', 'binance', 'lighter', 'ready', 1, 2,
+                     '2024-01-01T00:00:00Z', 'unknown')",
+            [],
+        )
+        .unwrap();
+    assert!(store.monitor_signals("live").unwrap().is_empty());
+    assert!(store.monitor_signals("testnet").unwrap().is_empty());
+    // Prune under either env may reap the unknown orphan.
+    store.prune_monitor_signals(&[], "live").unwrap();
+
+    // An unknown bot-position tracker lists under both envs.
+    store
+        .conn
+        .lock()
+        .execute(
+            "INSERT INTO radar_bot_positions
+                (symbol, buy_venue, sell_venue, entry_ts_ms, entry_dev_bps,
+                 friction_band_bps, size_usd, deadline_ms, last_seen_ms,
+                 environment)
+             VALUES ('BTC', 'binance', 'lighter', 1000, 10.0, 5.0, 500.0,
+                     60000, 2000, 'unknown')",
+            [],
+        )
+        .unwrap();
+    assert_eq!(store.list_bot_positions("live").unwrap().len(), 1);
+    assert_eq!(store.list_bot_positions("testnet").unwrap().len(), 1);
+    // Whichever env resolves it first reaps the orphan.
+    store
+        .delete_bot_position("BTC", "binance", "lighter", "testnet")
+        .unwrap();
+    assert!(store.list_bot_positions("live").unwrap().is_empty());
+
+    // Session rollup under live never reads testnet samples and writes
+    // live-stamped profiles only.
+    let entry = |mid: f64| VenueSampleEntry {
+        venue_id: "binance".into(),
+        mid,
+        best_bid: mid - 1.0,
+        best_ask: mid + 1.0,
+        bid_depth: None,
+        ask_depth: None,
+    };
+    for i in 0..40 {
+        store
+            .record_spread_samples(
+                "SOL",
+                86_400_000 + i * 30_000,
+                &[entry(100.0 + i as f64)],
+                "testnet",
+            )
+            .unwrap();
+    }
+    // Two venues are required for pair observations — seed both under
+    // testnet only.
+    let entry2 = |mid: f64| VenueSampleEntry {
+        venue_id: "lighter".into(),
+        mid,
+        best_bid: mid - 1.0,
+        best_ask: mid + 1.0,
+        bid_depth: None,
+        ask_depth: None,
+    };
+    for i in 0..40 {
+        store
+            .record_spread_samples(
+                "SOL",
+                86_400_000 + i * 30_000,
+                &[entry2(100.5 + i as f64)],
+                "testnet",
+            )
+            .unwrap();
+    }
+    let wrote = store
+        .rollup_session_profiles("SOL", 0, 200_000_000, 200_000_000, "live")
+        .unwrap();
+    assert_eq!(wrote, 0, "live rollup sees no testnet samples");
+    assert!(store.session_profiles("SOL", "live").unwrap().is_empty());
 }

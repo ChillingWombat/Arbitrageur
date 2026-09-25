@@ -67,6 +67,7 @@ pub async fn get_monitor_signal_events(
             clean(sell_venue).as_deref(),
             lim,
             state.usd_merge_quotes(),
+            state.env().as_str(),
         )
         .map_err(|e| e.to_string())
 }

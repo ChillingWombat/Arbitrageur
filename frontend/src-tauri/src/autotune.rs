@@ -210,6 +210,7 @@ pub async fn get_autotune_recommendation_impl(
     let since_ms = now_ms - BASELINE_RETENTION_MS;
     let store = state.state_store.clone();
     let sym_owned = symbol.to_string();
+    let env = state.env().as_str();
     struct Evidence {
         best_pair: Option<(
             String,
@@ -224,7 +225,7 @@ pub async fn get_autotune_recommendation_impl(
     let evidence = tokio::task::spawn_blocking(move || {
         let mut all = Vec::new();
         for k in &keys {
-            if let Ok(mut rows) = store.spread_samples_mode(k, merge_usd, since_ms, now_ms) {
+            if let Ok(mut rows) = store.spread_samples_mode(k, merge_usd, since_ms, now_ms, env) {
                 all.append(&mut rows);
             }
         }
@@ -708,6 +709,7 @@ pub async fn apply_autotune_rows_inner(
         &detail_json,
         now_ms,
         state.usd_merge_quotes(),
+        state.env().as_str(),
     ) {
         Ok(audit_id) => Ok(AutotuneApplyResultDto {
             symbol: symbol.to_string(),

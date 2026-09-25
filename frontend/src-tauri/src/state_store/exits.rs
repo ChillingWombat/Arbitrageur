@@ -6,15 +6,17 @@
 use super::*;
 
 impl StateStore {
-    /// Insert a pending scheduled exit. Ids are caller-minted
-    /// (`sched-exit-*`); inserting an existing id fails on the PK.
+    /// Insert a pending scheduled exit, stamped with the scheduling
+    /// environment. Ids are caller-minted (`sched-exit-*`); inserting an
+    /// existing id fails on the PK.
     pub fn insert_scheduled_exit(&self, exit: &ScheduledExit) -> anyhow::Result<()> {
+        let environment = normalize_environment(&exit.environment)?;
         let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO scheduled_exits
                 (id, venue, symbol, side, close_pct, mode, limit_price,
-                 execute_at_ms, status, note, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+                 execute_at_ms, status, note, created_at, updated_at, environment)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             rusqlite::params![
                 exit.id,
                 exit.venue,
@@ -28,33 +30,44 @@ impl StateStore {
                 exit.note,
                 exit.created_at,
                 exit.updated_at,
+                environment,
             ],
         )?;
         Ok(())
     }
 
-    /// List scheduled exits, newest first. `status` filters (e.g.
-    /// "pending" for the scheduler, None for the full audit view).
-    pub fn list_scheduled_exits(&self, status: Option<&str>) -> anyhow::Result<Vec<ScheduledExit>> {
+    /// List scheduled exits for `environment`, newest first. `status`
+    /// filters (e.g. "pending" for the scheduler, None for the full audit
+    /// view). 'unknown' pre-v38 rows stay visible for operator review —
+    /// listing never dispatches.
+    pub fn list_scheduled_exits(
+        &self,
+        status: Option<&str>,
+        environment: &str,
+    ) -> anyhow::Result<Vec<ScheduledExit>> {
+        let environment = normalize_environment(environment)?;
         let conn = self.conn.lock();
         let sql = "SELECT id, venue, symbol, side, close_pct, mode, limit_price,
-                          execute_at_ms, status, note, created_at, updated_at, attempts
+                          execute_at_ms, status, note, created_at, updated_at, attempts, environment
                    FROM scheduled_exits";
         let rows = match status {
             Some(s) => {
                 let mut stmt = conn.prepare(&format!(
-                    "{sql} WHERE status = ?1 ORDER BY execute_at_ms ASC"
+                    "{sql} WHERE status = ?1 AND environment IN (?2, 'unknown')
+                     ORDER BY execute_at_ms ASC"
                 ))?;
                 let r = stmt
-                    .query_map([s], scheduled_exit_from_row)?
+                    .query_map(rusqlite::params![s, environment], scheduled_exit_from_row)?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
                 drop(stmt);
                 r
             }
             None => {
-                let mut stmt = conn.prepare(&format!("{sql} ORDER BY created_at DESC"))?;
+                let mut stmt = conn.prepare(&format!(
+                    "{sql} WHERE environment IN (?1, 'unknown') ORDER BY created_at DESC"
+                ))?;
                 let r = stmt
-                    .query_map([], scheduled_exit_from_row)?
+                    .query_map([environment], scheduled_exit_from_row)?
                     .collect::<rusqlite::Result<Vec<_>>>()?;
                 drop(stmt);
                 r
@@ -63,18 +76,29 @@ impl StateStore {
         Ok(rows)
     }
 
-    /// Pending exits due at or before `now_ms`, due-time ascending.
-    pub fn due_scheduled_exits(&self, now_ms: i64) -> anyhow::Result<Vec<ScheduledExit>> {
+    /// Pending exits due at or before `now_ms` under `environment`,
+    /// due-time ascending. Environment-strict: 'unknown' and the other
+    /// env's rows never fire — an unattributed exit dispatching under the
+    /// wrong env's adapters could close a real position it never targeted.
+    pub fn due_scheduled_exits(
+        &self,
+        now_ms: i64,
+        environment: &str,
+    ) -> anyhow::Result<Vec<ScheduledExit>> {
+        let environment = normalize_environment(environment)?;
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
             "SELECT id, venue, symbol, side, close_pct, mode, limit_price,
-                    execute_at_ms, status, note, created_at, updated_at, attempts
+                    execute_at_ms, status, note, created_at, updated_at, attempts, environment
              FROM scheduled_exits
-             WHERE status = 'pending' AND execute_at_ms <= ?1
+             WHERE status = 'pending' AND execute_at_ms <= ?1 AND environment = ?2
              ORDER BY execute_at_ms ASC",
         )?;
         let rows = stmt
-            .query_map([now_ms], scheduled_exit_from_row)?
+            .query_map(
+                rusqlite::params![now_ms, environment],
+                scheduled_exit_from_row,
+            )?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         Ok(rows)
     }
