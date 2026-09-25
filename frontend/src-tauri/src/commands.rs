@@ -424,7 +424,8 @@ const VENUE_TAKER_FEE_BPS: &[(&str, f64)] = &[
     ("lighter", 1.5),
     ("vanta", 4.0),
     ("robinhood", 4.0),
-    ("arcus", 4.0),
+    // Verified base tier via GET /v1/feetiers (level 0: 450ppm taker).
+    ("arcus", 4.5),
     ("aster", 4.0),
     ("binance", 5.0),
     ("okx", 5.0),
@@ -3012,7 +3013,7 @@ pub fn save_engine_settings_impl(
     }
     let submitted = settings.submitted_credentials();
     // Legacy flat credential fields can name venues with no constructed
-    // adapter (arcus/polymarket/kalshi). Storing their secrets would
+    // adapter (polymarket/kalshi). Storing their secrets would
     // warehouse material nothing can consume — skip the write and report
     // it in the returned message rather than silently dropping or
     // silently keeping.
@@ -5549,7 +5550,7 @@ mod tests {
         // venues (nothing enabled, no credentials).
         assert_eq!(status.active_venues.len(), 56);
         for v in &status.active_venues {
-            // Adapter-less venues (arcus/polymarket/kalshi) report
+            // Adapter-less venues (polymarket/kalshi/ibkr) report
             // UNSUPPORTED unconditionally — enablement can never admit
             // them, so OFFLINE would falsely imply a working switch.
             let expected = if crate::state::venue_has_adapter(&v.id) {
@@ -5566,8 +5567,9 @@ mod tests {
     #[tokio::test]
     async fn test_system_status_reflects_account_level_enablement() {
         let (state, dir) = test_state_with_vault("status-acct");
-        // Live environment: robinhood/ibkr have no testnet endpoints, so
-        // account-level enablement for them is only visible under Live.
+        // Live environment: ibkr has no adapter at all and several venues
+        // lack public testnets, so account-level enablement for them is
+        // only visible under Live.
         state.set_environment(crate::state::TradingEnvironment::Live);
 
         // No flags, no accounts: everything OFFLINE except the adapter-less
@@ -5692,10 +5694,10 @@ mod tests {
             .expect("ibkr row");
         assert_eq!(ibkr.status, "UNSUPPORTED");
 
-        // Arcus/polymarket/kalshi have account rows and engine flags but no
+        // Polymarket/kalshi have account rows and engine flags but no
         // constructed adapter — UNSUPPORTED must hold even before the flag
         // or account enables them (OFFLINE would imply a working switch).
-        for dead in ["arcus", "polymarket", "kalshi"] {
+        for dead in ["polymarket", "kalshi"] {
             let row = status
                 .active_venues
                 .iter()
@@ -5784,15 +5786,15 @@ mod tests {
         let (state, dir) = test_state_with_vault("unadapted-creds");
         initialize_vault_impl("test password", &state).expect("init vault");
 
-        // Credential-bearing create on arcus → refused, no row persisted.
+        // Credential-bearing create on polymarket → refused, no row persisted.
         let err = upsert_account_impl(
             AccountUpsertInput {
                 environment: None,
                 account_tier: None,
                 max_leverage: None,
                 id: None,
-                venue: "arcus".into(),
-                label: "arc".into(),
+                venue: "polymarket".into(),
+                label: "poly".into(),
                 enabled: false,
                 make_default: false,
                 credentials: Some(AccountCredentialInput {
@@ -5804,13 +5806,16 @@ mod tests {
             &state,
         )
         .expect_err("credentials on an adapter-less venue must be refused");
-        assert!(err.contains("no arcus adapter"), "unexpected error: {err}");
+        assert!(
+            err.contains("no polymarket adapter"),
+            "unexpected error: {err}"
+        );
         assert!(state
             .state_store
             .list_accounts(None)
             .unwrap_or_default()
             .iter()
-            .all(|a| a.venue != "arcus"));
+            .all(|a| a.venue != "polymarket"));
 
         // The same venue without credential material saves fine — the row
         // is honest metadata; only the secrets are refused.
@@ -13112,9 +13117,9 @@ mod tests {
     async fn test_venue_balances_report_paper_account() {
         let state = setup_test_state_with_venues();
         let balances = get_venue_balances_impl(&state).await.expect("balances");
-        // Testnet-admitted venues: hyperliquid, lighter, vanta (robinhood
-        // and arcus have no public demo endpoint → live-only).
-        assert_eq!(balances.len(), 3);
+        // Testnet-admitted venues: hyperliquid, lighter, robinhood (testnet
+        // Lighter), vanta, arcus (testnet /v1 API).
+        assert_eq!(balances.len(), 5);
         assert!(balances.iter().any(|b| b.venue == "vanta"));
         for b in &balances {
             assert!(b.available_margin_usd > 0.0);
@@ -13536,10 +13541,11 @@ mod tests {
         seed_test_book(&state, "lighter", "BTC-USDC", dec!(64360.0), dec!(64365.0));
 
         let before = get_risk_overview_impl(&state).await.expect("risk before");
-        // Three testnet-admitted venues (hl/lighter/vanta sims @ 100k each);
-        // robinhood/arcus sims are live-only venues, unadmitted here.
-        assert_eq!(before.total_portfolio_value_usd, 300000.0);
-        assert_eq!(before.margin_health.margin_balance_usd, 300000.0);
+        // Five testnet-admitted venues (hl/lighter/robinhood/vanta/arcus
+        // sims @ 100k each) — robinhood and arcus both run real public
+        // testnets, so their sims admit here too.
+        assert_eq!(before.total_portfolio_value_usd, 500000.0);
+        assert_eq!(before.margin_health.margin_balance_usd, 500000.0);
         assert_eq!(before.margin_health.status, "FLAT");
 
         execute_spatial_arbitrage_impl(
@@ -14220,8 +14226,8 @@ mod tests {
         seed_test_funding(&state, "lighter", "BTC-USDC");
         seed_test_funding(&state, "vanta", "BTC-USDC");
 
-        // Testnet admits hl/lighter/vanta — robinhood/arcus sims installed
-        // by the fixture are live-only venues and stay unadmitted here.
+        // Testnet admits hl/lighter/robinhood/vanta/arcus — the robinhood
+        // and arcus sims have no BTC-USDC books seeded, so they skip.
         let books = fetch_orderbooks_impl("BTC-USDC", &state)
             .await
             .expect("books");
@@ -14364,9 +14370,9 @@ mod tests {
         *state.last_risk_live_universe.write() = Some(state.is_live());
 
         let risk = get_risk_overview_impl(&state).await.expect("risk");
-        // Equity universe = 3 testnet venues @ 100k → 300k vs 1M baseline.
-        assert_eq!(risk.current_drawdown_usd, 700000.0);
-        assert_eq!(risk.drawdown_pct, 70.0);
+        // Equity universe = 5 testnet venues @ 100k → 500k vs 1M baseline.
+        assert_eq!(risk.current_drawdown_usd, 500000.0);
+        assert_eq!(risk.drawdown_pct, 50.0);
 
         state.circuit_breaker.update_equity(dec!(0.0));
         state.circuit_breaker.reset();

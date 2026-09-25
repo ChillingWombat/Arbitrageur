@@ -169,10 +169,10 @@ export interface VenueSettingsFilter {
 /**
  * Venue codes with public testnet/demo endpoints — the only venues the
  * engine admits in the Testnet environment. Mirrors the `tn_*` adapter set
- * in venues_for_env; venues without a demo endpoint (Robinhood, Aster,
- * Coinbase, long-tail perps, EVM AMMs) are live-only.
+ * in venues_for_env; venues without a demo endpoint (Aster, Coinbase,
+ * long-tail perps, EVM AMMs, IBKR) are live-only.
  */
-const TESTNET_CAPABLE_CODES = new Set(["HL", "LGT", "VNT", "POP", "BNB", "OKX", "KRK", "ALP", "DCB", "DBT"]);
+const TESTNET_CAPABLE_CODES = new Set(["HL", "LGT", "RH", "VNT", "ARC", "POP", "BNB", "OKX", "KRK", "ALP", "DCB", "DBT"]);
 
 /**
  * Venue IDs with public testnet/demo endpoints — mirrors the backend `tn_*`
@@ -183,7 +183,9 @@ const TESTNET_CAPABLE_CODES = new Set(["HL", "LGT", "VNT", "POP", "BNB", "OKX", 
 export const TESTNET_CAPABLE_VENUE_IDS = new Set([
   "hyperliquid",
   "lighter",
+  "robinhood",
   "vanta",
+  "arcus",
   "popdex",
   "binance",
   "okx",

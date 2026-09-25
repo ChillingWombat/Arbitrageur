@@ -3,6 +3,7 @@ use arbitrageur_core::hub::MarketDataHub;
 use arbitrageur_core::position::AccountSnapshot;
 use arbitrageur_core::types::{dec, Decimal};
 use arbitrageur_exchanges::alpaca::AlpacaAdapter;
+use arbitrageur_exchanges::arcus::ArcusAdapter;
 use arbitrageur_exchanges::aster::AsterAdapter;
 use arbitrageur_exchanges::binance::BinanceAdapter;
 use arbitrageur_exchanges::boros::{BorosAdapter, BorosYuMarket};
@@ -83,6 +84,8 @@ struct EnvCredentials {
     vanta_acc: Option<String>,
     vanta_key: Option<String>,
     vanta_sec: Option<String>,
+    arcus_key: Option<String>,
+    arcus_sec: Option<String>,
     binance_key: Option<String>,
     binance_sec: Option<String>,
     okx_key: Option<String>,
@@ -581,7 +584,7 @@ fn default_popdex_network() -> String {
 }
 
 fn default_arcus_url() -> String {
-    "https://api.arcus.exchange".into()
+    "https://api.arcus.xyz".into()
 }
 
 #[derive(Clone, Serialize, Deserialize, Debug)]
@@ -1315,6 +1318,11 @@ pub struct AppEngineState {
     /// its public API is a stats document; the trading API is not yet
     /// public. Live-only — no demo environment exists.
     pub live_variational: Arc<VariationalAdapter>,
+    /// Arcus perp CLOB — market data only (public `/v1` reads; order
+    /// routing needs Ed25519 signing the adapter does not yet implement,
+    /// so order paths fail closed). Both environments use the same API
+    /// surface on their own hosts.
+    pub live_arcus: Arc<ArcusAdapter>,
     /// Testnet adapter set — `None` entries mean the venue has no public
     /// testnet and is ineligible under `TradingEnvironment::Testnet`.
     /// Endpoint overrides (`endpoints.*`) apply to the live set only;
@@ -1331,6 +1339,12 @@ pub struct AppEngineState {
     pub tn_deribit: Arc<DeribitAdapter>,
     pub tn_decibel: Arc<DecibelAdapter>,
     pub tn_popdex: Arc<PopDexAdapter>,
+    /// Robinhood Chain's testnet Lighter deployment — a real demo venue
+    /// (api.rh-testnet.lighter.xyz, signing chain id 300 shared with
+    /// Lighter's own testnet).
+    pub tn_robinhood: Arc<LighterAdapter>,
+    /// Arcus testnet — same public `/v1` surface on the demo host.
+    pub tn_arcus: Arc<ArcusAdapter>,
     pub market_data_hub: Arc<MarketDataHub>,
     /// Cached Boros YU market snapshot for the fixed-yield scan:
     /// (fetched_at, markets, est_gas_usd_per_leg_batch). Public data —
@@ -1574,6 +1588,7 @@ pub(crate) fn venue_has_adapter(venue_id: &str) -> bool {
             | "lighter"
             | "robinhood"
             | "vanta"
+            | "arcus"
             | "aster"
             | "popdex"
             | "binance"
@@ -1909,13 +1924,20 @@ impl AppEngineState {
             .collect();
         let live_boros = Arc::new(BorosAdapter::new(None));
         let live_variational = Arc::new(VariationalAdapter::new(None));
+        // Arcus public reads are unauthenticated — credentials arrive via
+        // `update_credentials` for the (not yet implemented) signed paths.
+        let live_arcus = Arc::new(ArcusAdapter::new(
+            endpoint(&initial_settings.arcus_url),
+            None,
+            None,
+        ));
 
         // Testnet adapter set — public testnet/demo endpoints only.
-        // Venues absent here (Coinbase, Aster, Arcus, Robinhood, Polymarket,
-        // the DexPerp long-tail, and the EVM AMMs) have no usable public
-        // testnet and stay ineligible under Testnet mode rather than being
-        // simulated. Endpoint overrides are live-only; a testnet adapter
-        // always uses the venue's canonical demo host.
+        // Venues absent here (Coinbase, Aster, Polymarket, the DexPerp
+        // long-tail, and the EVM AMMs) have no usable public testnet and
+        // stay ineligible under Testnet mode rather than being simulated.
+        // Endpoint overrides are live-only; a testnet adapter always uses
+        // the venue's canonical demo host.
         let tn_hl = Arc::new(HyperliquidAdapter::for_testnet(None, None));
         let tn_lighter = Arc::new(LighterAdapter::for_testnet(None, None));
         let tn_vanta = Arc::new(VantaAdapter::new(
@@ -1945,6 +1967,22 @@ impl AppEngineState {
         let tn_decibel = Arc::new(DecibelAdapter::for_testnet(None, None));
         let tn_popdex = Arc::new(PopDexAdapter::new(Some("testnet".to_string())));
         let tn_deribit = Arc::new(DeribitAdapter::for_testnet(None, None));
+        // Robinhood Chain runs a real testnet Lighter deployment —
+        // api.rh-testnet.lighter.xyz (verified live), signing chain id 300
+        // shared with Lighter's own testnet per the official SDK.
+        let tn_robinhood = Arc::new(LighterAdapter::new_with_venue(
+            Some("https://api.rh-testnet.lighter.xyz".to_string()),
+            None,
+            None,
+            "robinhood",
+        ));
+        // Arcus testnet exposes the identical public /v1 surface on the
+        // demo host (verified: /v1/markets, /v1/l2OrderBook, /v1/mids).
+        let tn_arcus = Arc::new(ArcusAdapter::new(
+            Some("https://api.testnet.arcus.xyz".to_string()),
+            None,
+            None,
+        ));
 
         let market_data_hub = MarketDataHub::new(1024, 400);
         // The hub's slot key follows the persisted USD-quote policy: under
@@ -2226,6 +2264,7 @@ impl AppEngineState {
             live_evm_amms,
             live_boros,
             live_variational,
+            live_arcus,
             tn_hl,
             tn_lighter,
             tn_vanta,
@@ -2235,6 +2274,8 @@ impl AppEngineState {
             tn_deribit,
             tn_decibel,
             tn_popdex,
+            tn_robinhood,
+            tn_arcus,
             market_data_hub,
             boros_yu_cache: Mutex::new(None),
             circuit_breaker: cb,
@@ -2519,6 +2560,7 @@ impl AppEngineState {
             let _ = adapter.set_base_url(None);
         }
         let _ = self.live_boros.update_credentials(None, None, None);
+        self.live_arcus.update_credentials(None, None);
         self.tn_hl.update_credentials(None, None);
         self.tn_lighter.update_credentials(None, None);
         self.tn_lighter.set_api_key_index(None);
@@ -2531,6 +2573,9 @@ impl AppEngineState {
         self.tn_deribit.update_credentials(None, None);
         self.tn_decibel.update_credentials(None, None, None, None);
         let _ = self.tn_popdex.update_credentials(None, None, None);
+        self.tn_robinhood.update_credentials(None, None);
+        self.tn_robinhood.set_api_key_index(None);
+        self.tn_arcus.update_credentials(None, None);
         // Kalshi's adapter is a prediction stub — no credential setter exists
         // to clear; its demo endpoint carries no secrets.
     }
@@ -2644,6 +2689,12 @@ impl AppEngineState {
                 creds.binance_sec = Some(cred.api_secret.clone());
             }
         }
+        if let Some(cred) = get_active_cred(&["arcus"]) {
+            if !cred.api_key.trim().is_empty() && !cred.api_secret.trim().is_empty() {
+                creds.arcus_key = Some(cred.api_key.clone());
+                creds.arcus_sec = Some(cred.api_secret.clone());
+            }
+        }
         if let Some(cred) = get_active_cred(&["okx"]) {
             // Regional-domain override applies to public endpoints too —
             // an app.okx.com account's instrument set differs from the
@@ -2754,6 +2805,8 @@ impl AppEngineState {
             c.vanta_key.clone(),
             c.vanta_sec.clone(),
         );
+        self.live_arcus
+            .update_credentials(c.arcus_key.clone(), c.arcus_sec.clone());
         self.live_binance
             .update_credentials(c.binance_key.clone(), c.binance_sec.clone());
         // Endpoint identity precedes credentials: a regional-entity key
@@ -2913,6 +2966,13 @@ impl AppEngineState {
             c.vanta_key.clone(),
             c.vanta_sec.clone(),
         );
+        // Robinhood testnet uses the same Lighter api-key tuple as live —
+        // env-scoped account rows keep the namespaces separate.
+        self.tn_robinhood
+            .update_credentials(c.rh_idx, c.rh_key.clone());
+        self.tn_robinhood.set_api_key_index(c.rh_key_idx);
+        self.tn_arcus
+            .update_credentials(c.arcus_key.clone(), c.arcus_sec.clone());
         self.tn_binance
             .update_credentials(c.binance_key.clone(), c.binance_sec.clone());
         if let Err(e) = self.tn_okx.set_base_url(c.okx_url.clone()) {
@@ -3018,6 +3078,11 @@ impl AppEngineState {
             if s.vanta_enabled || account_enabled("vanta") {
                 list.push(("vanta", "Vanta", self.live_vanta.clone()));
             }
+            // Arcus market data is unauthenticated — an enabled venue reads
+            // the real CLOB; order paths fail closed until signing lands.
+            if s.arcus_enabled || account_enabled("arcus") {
+                list.push(("arcus", "Arcus", self.live_arcus.clone()));
+            }
             if s.aster_enabled || account_enabled("aster") {
                 list.push(("aster", "Aster", self.live_aster.clone()));
             }
@@ -3086,8 +3151,14 @@ impl AppEngineState {
             if s.lighter_enabled || account_enabled("lighter") {
                 list.push(("lighter", "Lighter", self.tn_lighter.clone()));
             }
+            if s.robinhood_enabled || account_enabled("robinhood") {
+                list.push(("robinhood", "Robinhood Lighter", self.tn_robinhood.clone()));
+            }
             if s.vanta_enabled || account_enabled("vanta") {
                 list.push(("vanta", "Vanta", self.tn_vanta.clone()));
+            }
+            if s.arcus_enabled || account_enabled("arcus") {
+                list.push(("arcus", "Arcus", self.tn_arcus.clone()));
             }
             if s.popdex_enabled || account_enabled("popdex") {
                 list.push(("popdex", "PopDEX", self.tn_popdex.clone()));
@@ -3384,21 +3455,24 @@ mod tests {
             s.popdex_enabled = true;
         }
         // Testnet environment (default): only venues with a public demo
-        // endpoint are admitted — robinhood/arcus/aster/polymarket/kalshi
-        // have none and are ineligible rather than simulated.
+        // endpoint are admitted — aster/polymarket/kalshi have none and
+        // stay ineligible rather than being simulated. Robinhood resolves
+        // to its testnet Lighter deployment; Arcus to its testnet /v1 API.
         let venues_testnet = state.get_venues();
-        assert_eq!(venues_testnet.len(), 4);
+        assert_eq!(venues_testnet.len(), 6);
         assert_eq!(venues_testnet[0].0, "hyperliquid");
         assert_eq!(venues_testnet[1].0, "lighter");
-        assert_eq!(venues_testnet[2].0, "vanta");
-        assert_eq!(venues_testnet[3].0, "popdex");
+        assert_eq!(venues_testnet[2].0, "robinhood");
+        assert_eq!(venues_testnet[3].0, "vanta");
+        assert_eq!(venues_testnet[4].0, "arcus");
+        assert_eq!(venues_testnet[5].0, "popdex");
 
         assert!(state.get_adapter("hyperliquid").is_some());
         assert!(state.get_adapter("lighter").is_some());
-        assert!(state.get_adapter("robinhood").is_none());
+        assert!(state.get_adapter("robinhood").is_some());
         assert!(state.get_adapter("vanta").is_some());
         assert!(state.get_adapter("aster").is_none());
-        assert!(state.get_adapter("arcus").is_none());
+        assert!(state.get_adapter("arcus").is_some());
         // Removed venues without native trading API stay unresolvable.
         assert!(state.get_adapter("popdex").is_some());
         assert!(state.get_adapter("ondoperps").is_none());

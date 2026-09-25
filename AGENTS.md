@@ -14,11 +14,13 @@
   adapters (`tn_*`) use venue demo endpoints; Live adapters (`live_*`) use
   mainnet. `rest_base_url()` exposes an adapter's configured endpoint —
   feed lanes derive WS URLs from it so env never crosses.
-- Testnet availability per venue is uneven (Binance/Hyperliquid/Lighter/OKX
-  demo-mode/Vanta-Orderly/Decibel/PopDEX have public testnets; Robinhood,
-  Coinbase, Aster, the DexPerp long-tail, and EVM AMMs do not). Venue gaps
-  are acceptable — silent local simulation in place of testnet is not.
-  Simulated exchanges exist only under `#[cfg(test)]` (`test_sims`).
+- Testnet availability per venue is uneven (Binance/Hyperliquid/Lighter/
+  Robinhood-Lighter/OKX demo-mode/Vanta-Orderly/Decibel/PopDEX/Deribit/
+  Arcus/Alpaca-paper have public testnets; Coinbase, Aster, the DexPerp
+  long-tail, EVM AMMs, and IBKR do not — IBKR paper is account-level on the
+  same gateway, not a separate endpoint). Venue gaps are acceptable —
+  silent local simulation in place of testnet is not. Simulated exchanges
+  exist only under `#[cfg(test)]` (`test_sims`).
 
 ## Audit discipline
 

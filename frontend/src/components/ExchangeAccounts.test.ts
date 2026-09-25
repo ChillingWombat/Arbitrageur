@@ -144,8 +144,8 @@ test("AccountCard renders disabled banner when account.enabled is false", () => 
 /* Adapter-less venues — no credential collection (#27c)                */
 /* ------------------------------------------------------------------ */
 
-test("UNSUPPORTED_VENUES is exactly arcus/kalshi/polymarket with no credential schemas", () => {
-  assert.deepEqual([...UNSUPPORTED_VENUES].sort(), ["arcus", "kalshi", "polymarket"]);
+test("UNSUPPORTED_VENUES is exactly kalshi/polymarket with no credential schemas", () => {
+  assert.deepEqual([...UNSUPPORTED_VENUES].sort(), ["kalshi", "polymarket"]);
   for (const id of UNSUPPORTED_VENUES) {
     assert.equal(
       ACCOUNT_CREDENTIAL_FIELDS[id],
@@ -156,10 +156,10 @@ test("UNSUPPORTED_VENUES is exactly arcus/kalshi/polymarket with no credential s
 });
 
 test("AccountCard for an adapter-less venue shows the notice, not credential fields", () => {
-  const arcus = makeMockAccount({
-    id: "arcus-1",
-    venue: "arcus",
-    label: "Arcus #1",
+  const kalshi = makeMockAccount({
+    id: "kalshi-1",
+    venue: "kalshi",
+    label: "Kalshi #1",
     enabled: false,
     credentialsConfigured: false,
     hasApiKey: false,
@@ -167,16 +167,16 @@ test("AccountCard for an adapter-less venue shows the notice, not credential fie
   });
   const html = renderToStaticMarkup(
     React.createElement(AccountCard, {
-      account: arcus,
+      account: kalshi,
       ordinal: 1,
       locked: false,
       bal: null,
       onChanged: () => {},
     })
   );
-  assert.match(html, /No Arcus adapter in this build/);
+  assert.match(html, /No Kalshi adapter in this build/);
   assert.match(html, /the backend refuses them/i);
-  assert.match(html, /unsupported-venue-arcus/);
+  assert.match(html, /unsupported-venue-kalshi/);
   // No credential inputs render — nothing to collect.
   assert.doesNotMatch(html, /API Key|Private Key|Secret/);
 });
