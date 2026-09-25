@@ -7,6 +7,7 @@ use arbitrageur_exchanges::binance::BinanceAdapter;
 use arbitrageur_exchanges::boros::{BorosAdapter, BorosYuMarket};
 use arbitrageur_exchanges::coinbase::CoinbaseAdapter;
 use arbitrageur_exchanges::decibel::DecibelAdapter;
+use arbitrageur_exchanges::deribit::DeribitAdapter;
 use arbitrageur_exchanges::dex_perps::{DexPerpAdapter, ADMITTED_DEX_PERP_VENUE_IDS};
 use arbitrageur_exchanges::evm_amm::{
     EvmAmmAdapter, ADMITTED_EVM_AMM_VENUE_IDS, LIVE_EVM_AMM_VENUE_IDS,
@@ -91,6 +92,8 @@ struct EnvCredentials {
     cb_pass: Option<String>,
     kraken_key: Option<String>,
     kraken_sec: Option<String>,
+    deribit_id: Option<String>,
+    deribit_sec: Option<String>,
     decibel_key: Option<String>,
     decibel_node_key: Option<String>,
     decibel_wallet: Option<String>,
@@ -137,6 +140,8 @@ impl Drop for EnvCredentials {
         z(&mut self.cb_pass);
         z(&mut self.kraken_key);
         z(&mut self.kraken_sec);
+        z(&mut self.deribit_id);
+        z(&mut self.deribit_sec);
         z(&mut self.decibel_key);
         z(&mut self.decibel_node_key);
         z(&mut self.decibel_wallet);
@@ -714,6 +719,16 @@ pub struct EngineSettingsDto {
     pub popdex_network: String,
     #[serde(default)]
     pub coinbase_enabled: bool,
+    /// Deribit crypto options/perpetuals (BTC + ETH). Off by default — the
+    /// options parity strategy is the only consumer.
+    #[serde(default)]
+    pub deribit_enabled: bool,
+
+    // Deribit (OAuth2 client_credentials pair)
+    #[serde(default)]
+    pub deribit_client_id: String,
+    #[serde(default)]
+    pub deribit_client_secret: String,
 
     // Kraken Spot & Futures
     #[serde(default)]
@@ -877,6 +892,9 @@ impl Default for EngineSettingsDto {
             kraken_futures_api_key: "".into(),
             kraken_futures_secret: "".into(),
             kraken_futures_url: default_kraken_futures_url(),
+            deribit_enabled: false,
+            deribit_client_id: "".into(),
+            deribit_client_secret: "".into(),
             hyperliquid_wallet: "".into(),
             hyperliquid_private_key: "".into(),
             hyperliquid_url: default_hyperliquid_url(),
@@ -1113,6 +1131,26 @@ impl EngineSettingsDto {
             });
         }
 
+        if has_secret_value(&self.deribit_client_id)
+            || has_secret_value(&self.deribit_client_secret)
+        {
+            out.push(ExchangeCredentials {
+                venue: "deribit".into(),
+                profile_id: None,
+                api_key: self.deribit_client_id.trim().to_string(),
+                api_secret: self.deribit_client_secret.trim().to_string(),
+                passphrase: None,
+                account_id: None,
+                wallet_address: None,
+                account_index: None,
+                subaccount_index: None,
+                api_key_index: None,
+                private_key: None,
+                base_url: None,
+                enabled: self.deribit_enabled,
+            });
+        }
+
         let polymarket_supplied = has_secret_value(&self.polymarket_api_key)
             || has_secret_value(&self.polymarket_secret)
             || has_secret_value(&self.polymarket_passphrase);
@@ -1167,6 +1205,8 @@ impl EngineSettingsDto {
         self.kraken_spot_secret.zeroize();
         self.kraken_futures_api_key.zeroize();
         self.kraken_futures_secret.zeroize();
+        self.deribit_client_id.zeroize();
+        self.deribit_client_secret.zeroize();
         self.hyperliquid_wallet.zeroize();
         self.hyperliquid_private_key.zeroize();
         self.hyperliquid_account_index = None;
@@ -1221,6 +1261,7 @@ pub struct AppEngineState {
     pub live_okx: Arc<OkxAdapter>,
     pub live_coinbase: Arc<CoinbaseAdapter>,
     pub live_kraken: Arc<KrakenAdapter>,
+    pub live_deribit: Arc<DeribitAdapter>,
     pub live_decibel: Arc<DecibelAdapter>,
     // Long-tail perp venues (one shared adapter type, per-venue specs).
     pub live_dex_perps: Vec<Arc<DexPerpAdapter>>,
@@ -1241,6 +1282,7 @@ pub struct AppEngineState {
     pub tn_binance: Arc<BinanceAdapter>,
     pub tn_okx: Arc<OkxAdapter>,
     pub tn_kraken: Arc<KrakenAdapter>,
+    pub tn_deribit: Arc<DeribitAdapter>,
     pub tn_decibel: Arc<DecibelAdapter>,
     pub tn_popdex: Arc<PopDexAdapter>,
     pub market_data_hub: Arc<MarketDataHub>,
@@ -1314,6 +1356,11 @@ pub struct AppEngineState {
     /// the adapter layer once their freshness window lapses. `get_venues`
     /// prefers these over the live adapter fields under cfg(test), so scans
     /// and dispatch paths never touch the network in tests.
+    /// Test-only concrete Deribit override — options parity needs the
+    /// concrete type (option chain, book summaries), so a stub-backed
+    /// adapter is injected here rather than through the dyn registry.
+    #[cfg(test)]
+    pub test_deribit: std::sync::RwLock<Option<Arc<DeribitAdapter>>>,
     #[cfg(test)]
     pub test_sims: std::sync::RwLock<
         std::collections::HashMap<String, Arc<arbitrageur_exchanges::simulated::SimulatedExchange>>,
@@ -1399,6 +1446,7 @@ pub(crate) fn canonical_venue_id(input: &str) -> Option<&'static str> {
         "okx" | "okx swaps" | "okx (perp)" => Some("okx"),
         "coinbase" | "cb" | "coinbase exchange" => Some("coinbase"),
         "kraken" | "krk" | "kfut" | "kraken futures" | "kraken spot" => Some("kraken"),
+        "deribit" | "dbit" | "deribit options" => Some("deribit"),
         "decibel" | "dcb" | "decibel (aptos)" => Some("decibel"),
         // Long-tail perp venues: common display/alias spellings first, then
         // every canonical spec id resolves to itself.
@@ -1726,6 +1774,7 @@ impl AppEngineState {
             None,
             None,
         ));
+        let live_deribit = Arc::new(DeribitAdapter::new(None, None, None));
         let live_decibel = Arc::new(DecibelAdapter::new(None, None, None));
         // Long-tail perp venues share one spec-driven adapter. No
         // endpoint overrides exist for these yet — `None` keeps each
@@ -1777,6 +1826,7 @@ impl AppEngineState {
         ));
         let tn_decibel = Arc::new(DecibelAdapter::for_testnet(None, None));
         let tn_popdex = Arc::new(PopDexAdapter::new(Some("testnet".to_string())));
+        let tn_deribit = Arc::new(DeribitAdapter::for_testnet(None, None));
 
         let market_data_hub = MarketDataHub::new(1024, 400);
         // The hub's slot key follows the persisted USD-quote policy: under
@@ -2050,6 +2100,7 @@ impl AppEngineState {
             live_okx,
             live_coinbase,
             live_kraken,
+            live_deribit,
             live_decibel,
             live_dex_perps,
             live_evm_amms,
@@ -2060,6 +2111,7 @@ impl AppEngineState {
             tn_binance,
             tn_okx,
             tn_kraken,
+            tn_deribit,
             tn_decibel,
             tn_popdex,
             market_data_hub,
@@ -2088,6 +2140,8 @@ impl AppEngineState {
             reconcile_lock: tokio::sync::Mutex::new(()),
             #[cfg(test)]
             test_adapters: std::sync::RwLock::new(std::collections::HashMap::new()),
+            #[cfg(test)]
+            test_deribit: std::sync::RwLock::new(None),
             #[cfg(test)]
             test_sims: std::sync::RwLock::new(std::collections::HashMap::new()),
             autotune_apply_lock: tokio::sync::Mutex::new(()),
@@ -2330,6 +2384,7 @@ impl AppEngineState {
         let _ = self.live_okx.set_base_url(None);
         self.live_coinbase.update_credentials(None, None, None);
         self.live_kraken.update_credentials(None, None);
+        self.live_deribit.update_credentials(None, None);
         self.live_decibel.update_credentials(None, None, None, None);
         for adapter in &self.live_dex_perps {
             let _ = adapter.update_credentials(None, None, None, None, None, None);
@@ -2347,6 +2402,7 @@ impl AppEngineState {
         self.tn_okx.update_credentials(None, None, None);
         let _ = self.tn_okx.set_base_url(None);
         self.tn_kraken.update_credentials(None, None);
+        self.tn_deribit.update_credentials(None, None);
         self.tn_decibel.update_credentials(None, None, None, None);
         let _ = self.tn_popdex.update_credentials(None, None, None);
         // Kalshi's adapter is a prediction stub — no credential setter exists
@@ -2486,6 +2542,12 @@ impl AppEngineState {
                 creds.kraken_sec = Some(cred.api_secret.clone());
             }
         }
+        if let Some(cred) = get_active_cred(&["deribit", "dbit"]) {
+            if !cred.api_key.trim().is_empty() && !cred.api_secret.trim().is_empty() {
+                creds.deribit_id = Some(cred.api_key.clone());
+                creds.deribit_sec = Some(cred.api_secret.clone());
+            }
+        }
         if let Some(cred) = get_active_cred(&["decibel", "dcb", "decibel (aptos)"]) {
             if !cred.api_key.trim().is_empty() {
                 creds.decibel_key = Some(cred.api_key.clone());
@@ -2582,6 +2644,8 @@ impl AppEngineState {
         );
         self.live_kraken
             .update_credentials(c.kraken_key.clone(), c.kraken_sec.clone());
+        self.live_deribit
+            .update_credentials(c.deribit_id.clone(), c.deribit_sec.clone());
         self.live_decibel.update_credentials(
             c.decibel_key.clone(),
             c.decibel_node_key.clone(),
@@ -2729,6 +2793,8 @@ impl AppEngineState {
         }
         self.tn_kraken
             .update_credentials(c.kraken_key.clone(), c.kraken_sec.clone());
+        self.tn_deribit
+            .update_credentials(c.deribit_id.clone(), c.deribit_sec.clone());
         self.tn_decibel.update_credentials(
             c.decibel_key.clone(),
             c.decibel_node_key.clone(),
@@ -2838,6 +2904,9 @@ impl AppEngineState {
             if s.decibel_enabled || account_enabled("decibel") {
                 list.push(("decibel", "Decibel", self.live_decibel.clone()));
             }
+            if s.deribit_enabled || account_enabled("deribit") {
+                list.push(("deribit", "Deribit", self.live_deribit.clone()));
+            }
             // Long-tail perp venues have no engine-settings flags — an enabled
             // account is the only admission switch. Capability flags on the
             // adapter still gate every downstream live path.
@@ -2882,6 +2951,9 @@ impl AppEngineState {
             }
             if s.decibel_enabled || account_enabled("decibel") {
                 list.push(("decibel", "Decibel", self.tn_decibel.clone()));
+            }
+            if s.deribit_enabled || account_enabled("deribit") {
+                list.push(("deribit", "Deribit", self.tn_deribit.clone()));
             }
             // Prediction venues (kalshi/polymarket) never ride this list —
             // they resolve through the prediction paths, not the perp

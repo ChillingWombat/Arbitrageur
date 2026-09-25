@@ -78,6 +78,13 @@ export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
     { key: "apiKey", label: "Futures API Key", secret: true },
     { key: "apiSecret", label: "Futures Secret Key", secret: true },
   ],
+  // Deribit OAuth2 — client_id + client_secret (mint on test.deribit.com
+  // for testnet; a live pair never authenticates against testnet and vice
+  // versa).
+  deribit: [
+    { key: "apiKey", label: "Client ID", secret: true },
+    { key: "apiSecret", label: "Client Secret", secret: true },
+  ],
   // Lighter: api_private_keys{index} + account_index — each API key has its own index (2-254; 0-1 reserved for web/mobile)
   lighter: [
     { key: "accountIndex", label: "Account Index", numeric: true, placeholder: "Exchange-assigned account ID, e.g. 746027" },
@@ -422,6 +429,7 @@ export const ACCOUNT_VENUE_DISPLAY: Record<string, string> = {
   okx: "OKX",
   aster: "Aster",
   coinbase: "Coinbase",
+  deribit: "Deribit",
   // Long-tail perp venues (DexPerpAdapter ids — must match the spec table).
   aevo: "Aevo",
   alphax: "AlphaX",
@@ -472,6 +480,7 @@ const VENUE_SETTINGS_FLAG: Record<string, keyof EngineSettingsDto> = {
   binance: "binance_enabled",
   coinbase: "coinbase_enabled",
   decibel: "decibel_enabled",
+  deribit: "deribit_enabled",
   hyperliquid: "hyperliquid_enabled",
   ibkr: "ibkr_enabled",
   ig: "ig_enabled",

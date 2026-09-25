@@ -388,6 +388,11 @@ pub(crate) fn venue_fee_bps(vid: &str) -> Decimal {
         "aster" => dec!(4.0),
         "binance" => dec!(5.0),
         "okx" => dec!(5.0),
+        // Deribit perp/future taker is 0.05%; options charge
+        // min(0.03% of underlying, 12.5% of premium) — the options-parity
+        // scanner prices that per-instrument; this row covers status
+        // display and the perp leg's generic fee lookups.
+        "deribit" => dec!(5.0),
         "kraken" => dec!(5.0),
         "coinbase" => dec!(5.0),
         "decibel" => dec!(5.0),
@@ -742,6 +747,7 @@ fn venue_enabled_ids(state: &AppEngineState, s: &crate::state::EngineSettingsDto
         s.coinbase_enabled || account_enabled("coinbase"),
     );
     push("okx", s.okx_enabled || account_enabled("okx"));
+    push("deribit", s.deribit_enabled || account_enabled("deribit"));
     push("ibkr", s.ibkr_enabled || account_enabled("ibkr"));
     push("ig", s.ig_enabled || account_enabled("ig"));
     // Long-tail perp venues admit via an enabled account only (no
@@ -795,6 +801,10 @@ fn public_probe_endpoint(vid: &str) -> Option<PublicProbe> {
         "decibel" => p("https://fullnode.mainnet.aptoslabs.com/v1", false),
         "binance" => p("https://api.binance.com/api/v3/ping", false),
         "okx" => p("https://www.okx.com/api/v5/public/time", false),
+        "deribit" => p(
+            "https://www.deribit.com/api/v2/public/get_index_price?index_name=btc_usd",
+            false,
+        ),
         "coinbase" => p("https://api.coinbase.com/v2/time", false),
         "aster" => p("https://fapi.asterdex.com/fapi/v1/ping", false),
         "popdex" => p(
@@ -1146,6 +1156,16 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             status: venue_status("okx", s.okx_enabled || account_enabled("okx")).into(),
             latency_ms: probe_ms("okx"),
             fee_bps: effective_venue_fee_bps(state, "okx"),
+            can_submit: false,
+            can_enter_strategy: false,
+        },
+        VenueStatusDto {
+            id: "deribit".into(),
+            name: "Deribit".into(),
+            market_type: "Options & Perp CLOB".into(),
+            status: venue_status("deribit", s.deribit_enabled || account_enabled("deribit")).into(),
+            latency_ms: probe_ms("deribit"),
+            fee_bps: effective_venue_fee_bps(state, "deribit"),
             can_submit: false,
             can_enter_strategy: false,
         },
@@ -1982,6 +2002,7 @@ pub async fn execute_spot_arbitrage_impl(
 /// flatten path, exactly like any other open position.
 pub(crate) const TRIANGLE_STRATEGY_ID: &str = "triangle";
 pub(crate) const FUNDING_STRATEGY_ID: &str = "funding";
+pub(crate) const OPTIONS_PARITY_STRATEGY_ID: &str = "options_parity";
 
 pub async fn scan_prediction_opportunities_impl(
     market: &str,
@@ -4567,9 +4588,9 @@ mod tests {
         assert_eq!(status.total_realized_pnl, 0.0);
         assert!(!status.circuit_breaker_tripped);
         assert_eq!(status.circuit_breaker_status, "ACTIVE");
-        // 16 primary venues + 26 DexPerpAdapter venues + 11 EvmAmmAdapter
+        // 17 primary venues + 26 DexPerpAdapter venues + 11 EvmAmmAdapter
         // venues (all OFFLINE — nothing enabled, no credentials).
-        assert_eq!(status.active_venues.len(), 53);
+        assert_eq!(status.active_venues.len(), 54);
         for v in &status.active_venues {
             assert_eq!(v.status, "OFFLINE");
             assert_eq!(v.latency_ms, None);

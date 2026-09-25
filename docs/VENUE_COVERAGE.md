@@ -49,7 +49,7 @@ out of scope (this engine's strategy venues are DEX/hybrid first).
 | 19 | KuCoin | CEX | cex | yes | excluded-cex |
 | 20 | Ourbit | CEX | cex | yes | excluded-cex |
 | 21 | Bitmart | CEX | cex | yes | excluded-cex |
-| 22 | Deribit | CEX (options/fut) | cex | yes | excluded-cex |
+| 22 | Deribit | CEX (options/fut) | cex | yes (JSON-RPC, OAuth client_credentials) | supported (`deribit`) — options+perp parity venue |
 | 23 | Aster | perp DEX (hybrid) | med | yes (REST + agent wallet) | supported (`aster`) |
 | 24 | Deepcoin | CEX | cex | yes | excluded-cex |
 | 25 | Phemex | CEX | cex | yes | excluded-cex |
