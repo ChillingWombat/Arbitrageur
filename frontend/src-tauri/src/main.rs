@@ -25,6 +25,7 @@ mod state_store;
 mod strategy_config;
 mod strategy_filters;
 mod stronghold;
+mod totp;
 mod triangle;
 mod vault;
 mod ws_primary;
@@ -231,6 +232,9 @@ fn main() {
             commands::unlock_vault,
             commands::lock_vault,
             commands::change_vault_password,
+            commands::begin_mfa_enrollment,
+            commands::confirm_mfa_enrollment,
+            commands::disable_mfa,
             commands::delete_exchange_credentials,
             commands::list_accounts,
             commands::upsert_account,

@@ -6980,7 +6980,7 @@ mod tests {
         }
 
         let _ = lock_vault_impl(&state);
-        unlock_vault_impl("test password", &state).expect("unlock migrates");
+        unlock_vault_impl("test password", None, &state).expect("unlock migrates");
 
         let data = state.vault.write().get_data().expect("data").clone();
         assert_eq!(
@@ -7017,27 +7017,81 @@ mod tests {
         let _ = lock_vault_impl(&state);
 
         // First failure counts and opens a 1s backoff window.
-        let err = unlock_vault_impl("wrong password", &state).expect_err("must fail");
+        let err = unlock_vault_impl("wrong password", None, &state).expect_err("must fail");
         assert!(
             !err.contains("Too many"),
             "first failure reaches the KDF: {err}"
         );
         // Immediate retry is refused without an unlock attempt.
-        let err = unlock_vault_impl("wrong password", &state).expect_err("throttled");
+        let err = unlock_vault_impl("wrong password", None, &state).expect_err("throttled");
         assert!(
             err.contains("Too many failed unlock attempts"),
             "backoff refusal: {err}"
         );
         // Even the CORRECT password is refused inside the window — the
         // throttle applies to the attempt, not the credential.
-        let err = unlock_vault_impl("correct password", &state).expect_err("still throttled");
+        let err = unlock_vault_impl("correct password", None, &state).expect_err("still throttled");
         assert!(err.contains("Too many"), "throttled: {err}");
 
         // Waiting out the window lets a correct unlock through and resets.
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        unlock_vault_impl("correct password", &state).expect("unlock after backoff");
+        unlock_vault_impl("correct password", None, &state).expect("unlock after backoff");
         let (failures, _) = *state.vault_unlock_backoff.lock();
         assert_eq!(failures, 0, "success resets the backoff counter");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// End-to-end MFA lifecycle through the command layer: enroll → the kv
+    /// flag mirrors state while locked → unlock demands a live code →
+    /// disable requires a live code → password-only unlock restored.
+    #[tokio::test]
+    async fn test_mfa_lifecycle_gates_unlock_and_disable() {
+        let (state, dir) = test_state_with_vault("mfa-gate");
+        initialize_vault_impl("correct password", &state).expect("init vault");
+        assert!(!get_vault_status_impl(&state).mfa_enabled);
+
+        // Locked vault refuses enrollment before it begins.
+        let _ = lock_vault_impl(&state);
+        assert!(begin_mfa_enrollment_impl(&state).is_err());
+        unlock_vault_impl("correct password", None, &state).expect("re-unlock");
+
+        // begin → pending secret + otpauth URI; nothing enrolled yet.
+        let enrollment = begin_mfa_enrollment_impl(&state).expect("begin");
+        assert_eq!(enrollment.secret_base32.len(), 32);
+        assert!(enrollment.otpauth_uri.contains("otpauth://totp/"));
+        assert!(!get_vault_status_impl(&state).mfa_enabled);
+
+        // Wrong confirm code refuses; the pending secret survives for retry.
+        assert!(confirm_mfa_enrollment_impl("000000", &state).is_err());
+        let secret = crate::totp::decode_secret_base32(&enrollment.secret_base32).unwrap();
+        let code = crate::totp::code_at(&secret, crate::totp::unix_now());
+        let status = confirm_mfa_enrollment_impl(&code, &state).expect("confirm");
+        assert!(status.mfa_enabled);
+
+        // A second enrollment refuses while one is active.
+        assert!(begin_mfa_enrollment_impl(&state).is_err());
+
+        // Locked view still reports MFA via the kv flag.
+        let _ = lock_vault_impl(&state);
+        let locked = get_vault_status_impl(&state);
+        assert!(!locked.is_unlocked);
+        assert!(locked.mfa_enabled);
+
+        // Password-only is refused; the live code is mandatory. The failure
+        // trips the unlock backoff — wait out the 1s window.
+        assert!(unlock_vault_impl("correct password", None, &state).is_err());
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let code = crate::totp::code_at(&secret, crate::totp::unix_now());
+        unlock_vault_impl("correct password", Some(&code), &state).expect("unlock with MFA");
+
+        // Disable refuses a wrong code, accepts a live one, and clears the flag.
+        assert!(disable_mfa_impl("000000", &state).is_err());
+        let code = crate::totp::code_at(&secret, crate::totp::unix_now());
+        let status = disable_mfa_impl(&code, &state).expect("disable");
+        assert!(!status.mfa_enabled);
+        let _ = lock_vault_impl(&state);
+        assert!(!get_vault_status_impl(&state).mfa_enabled);
+        unlock_vault_impl("correct password", None, &state).expect("password-only unlock");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -7077,7 +7131,7 @@ mod tests {
             .expect("seed divergent keys");
 
         let _ = lock_vault_impl(&state);
-        unlock_vault_impl("test password", &state).expect("unlock");
+        unlock_vault_impl("test password", None, &state).expect("unlock");
 
         let data = state.vault.write().get_data().expect("data").clone();
         assert!(
@@ -7251,7 +7305,7 @@ mod tests {
         // with an open position must refuse the lock.
         let (state, dir) = test_state_with_vault("lock_gate");
         initialize_vault_impl("test password", &state).expect("init vault");
-        unlock_vault_impl("test password", &state).expect("unlock");
+        unlock_vault_impl("test password", None, &state).expect("unlock");
         state.set_environment(crate::state::TradingEnvironment::Live);
 
         state
@@ -7318,7 +7372,7 @@ mod tests {
         // through it strands exit supervision — refuse until flattened.
         let (state, dir) = test_state_with_vault("cred_gate");
         initialize_vault_impl("test password", &state).expect("init vault");
-        unlock_vault_impl("test password", &state).expect("unlock");
+        unlock_vault_impl("test password", None, &state).expect("unlock");
         state.set_environment(crate::state::TradingEnvironment::Live);
 
         state
@@ -7509,7 +7563,7 @@ mod tests {
             .expect("seed hsm");
 
         let _ = lock_vault_impl(&state);
-        unlock_vault_impl("test password", &state).expect("unlock migrates");
+        unlock_vault_impl("test password", None, &state).expect("unlock migrates");
 
         // Legacy unbound creds migrate to the live environment — scope the
         // listing accordingly (accounts are env-filtered).
@@ -7714,7 +7768,7 @@ mod tests {
         assert_eq!(listed[0].credentials_configured, None);
 
         // The secret survives the refused deletion.
-        unlock_vault_impl("test password", &state).expect("unlock");
+        unlock_vault_impl("test password", None, &state).expect("unlock");
         let stored = state.vault.write().get_data().expect("vault data").clone();
         assert_eq!(stored.credentials.len(), 1);
         assert_eq!(stored.credentials[0].api_secret, "SENTINEL_DEL");
@@ -9153,16 +9207,17 @@ mod tests {
 
         // Wrong current password: rejected, nothing rotated.
         assert!(
-            change_vault_password_impl("not-the-password", "new-password-5678", &state).is_err()
+            change_vault_password_impl("not-the-password", "new-password-5678", None, &state)
+                .is_err()
         );
 
-        change_vault_password_impl("old-password-1234", "new-password-5678", &state)
+        change_vault_password_impl("old-password-1234", "new-password-5678", None, &state)
             .expect("rotate");
 
         // Old password rejected, new password opens the vault.
         let mut probe = crate::vault::SecureVault::new_with_path(dir.join("vault.enc"));
-        assert!(probe.unlock("old-password-1234").is_err());
-        assert!(probe.unlock("new-password-5678").is_ok());
+        assert!(probe.unlock("old-password-1234", None).is_err());
+        assert!(probe.unlock("new-password-5678", None).is_ok());
         drop(probe);
 
         // The live stronghold was reopened under the NEW snapshot key —
@@ -9908,7 +9963,7 @@ mod tests {
 
         // 2. Initialize and unlock vault
         initialize_vault_impl("test-password-123", &state).expect("init vault");
-        unlock_vault_impl("test-password-123", &state).expect("unlock vault");
+        unlock_vault_impl("test-password-123", None, &state).expect("unlock vault");
 
         // 3. Vault unlocked but credentials missing -> rejected
         let res2 = set_live_mode_impl(true, &state);
@@ -10076,7 +10131,7 @@ mod tests {
 
         // 1. Initialize vault and setup 2 live-capable venues
         initialize_vault_impl("test-password-123", &state).expect("init vault");
-        unlock_vault_impl("test-password-123", &state).expect("unlock vault");
+        unlock_vault_impl("test-password-123", None, &state).expect("unlock vault");
 
         {
             let mut vault = state.vault.write();
@@ -10117,7 +10172,7 @@ mod tests {
         let _ = lock_vault_impl(&state);
 
         // 4. Unlock vault: automatically restores is_live_mode without needing to reconfigure Settings!
-        let unlock_res = unlock_vault_impl("test-password-123", &state).expect("unlock");
+        let unlock_res = unlock_vault_impl("test-password-123", None, &state).expect("unlock");
         assert!(unlock_res.is_unlocked);
         assert!(
             state.is_live(),
@@ -10182,7 +10237,7 @@ mod tests {
         );
 
         // Re-unlock reprovisions the adapter.
-        unlock_vault_impl("test-password-123", &state).expect("re-unlock");
+        unlock_vault_impl("test-password-123", None, &state).expect("re-unlock");
         assert!(aster_has_creds(&state), "unlock reprovisions adapter");
     }
 

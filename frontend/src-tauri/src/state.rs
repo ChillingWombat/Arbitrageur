@@ -1432,6 +1432,11 @@ pub struct AppEngineState {
     /// offline attempts); in-memory is sufficient — a restart resets the
     /// counter but the KDF cost floor remains.
     pub vault_unlock_backoff: Mutex<(u32, std::time::Instant)>,
+    /// In-flight MFA enrollment secret, held only between `begin` and
+    /// `confirm` calls. Never persisted — a lock or restart drops it and
+    /// enrollment restarts, so a half-configured factor can't wedge the
+    /// vault in a state the operator can't reproduce.
+    pub mfa_pending: Mutex<Option<zeroize::Zeroizing<Vec<u8>>>>,
     /// Last margin-snapshot write per venue (epoch ms). Bounds the snapshot
     /// cadence: fills and heartbeats record at most one row per venue per
     /// `MARGIN_SNAPSHOT_MIN_INTERVAL_MS`.
@@ -2257,6 +2262,7 @@ impl AppEngineState {
             liq_trim_at: Mutex::new(std::collections::HashMap::new()),
             risk_locked_warn_at: Mutex::new(None),
             vault_unlock_backoff: Mutex::new((0, std::time::Instant::now())),
+            mfa_pending: Mutex::new(None),
             margin_snapshot_at: Mutex::new(std::collections::HashMap::new()),
             latency_ema: Mutex::new(std::collections::HashMap::new()),
             latency_probe_at: Mutex::new(std::collections::HashMap::new()),

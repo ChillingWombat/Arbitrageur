@@ -25,6 +25,7 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [currentPassword, setCurrentPassword] = useState("");
+  const [totpCode, setTotpCode] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -35,6 +36,7 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
       setPassword("");
       setConfirmPassword("");
       setCurrentPassword("");
+      setTotpCode("");
       setError(null);
       setShowPassword(false);
     }
@@ -56,6 +58,12 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
 
   const isInitializing = vaultStatus ? !vaultStatus.is_initialized : false;
   const isChanging = mode === "change";
+  // The code field shows whenever MFA is enrolled — including a change-mode
+  // rotation, which is gated by the same second factor. A backend "code
+  // required" error keeps it visible for flag-drifted vaults.
+  const mfaRequired =
+    !isInitializing &&
+    (vaultStatus?.mfa_enabled === true || /code/i.test(error ?? ""));
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -74,16 +82,18 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
     setLoading(true);
     try {
       let updatedStatus: VaultStatus;
+      const code = totpCode.trim() || undefined;
       if (isChanging) {
-        updatedStatus = await api.changeVaultPassword(currentPassword, password);
+        updatedStatus = await api.changeVaultPassword(currentPassword, password, code);
       } else if (isInitializing) {
         updatedStatus = await api.initializeVault(password);
       } else {
-        updatedStatus = await api.unlockVault(password);
+        updatedStatus = await api.unlockVault(password, code);
       }
       setPassword("");
       setConfirmPassword("");
       setCurrentPassword("");
+      setTotpCode("");
       onSuccess(updatedStatus);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -195,6 +205,24 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
             </div>
           )}
 
+          {mfaRequired && (
+            <div>
+              <label className="block text-xs font-sans font-semibold text-slate-700 mb-1">
+                Authenticator Code
+              </label>
+              <input
+                type="text"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                maxLength={6}
+                value={totpCode}
+                onChange={(e) => setTotpCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                placeholder="6-digit code"
+                className="w-full bg-surface border border-surface-border rounded-lg px-3.5 py-2 text-xs font-mono tracking-[0.3em] text-slate-900 placeholder:text-muted placeholder:tracking-normal focus:outline-none focus:ring-2 focus:ring-primary/15 focus:border-primary transition-all shadow-2xs"
+              />
+            </div>
+          )}
+
           <div className="p-3 rounded-lg bg-blue-50/60 border border-blue-100 flex items-start space-x-2 text-xs text-slate-600">
             <Shield className="w-4 h-4 text-accent-strong shrink-0 mt-0.5" />
             <span className="font-sans leading-relaxed text-[11px]">
@@ -210,7 +238,8 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
                 loading ||
                 password.length === 0 ||
                 ((isInitializing || isChanging) && confirmPassword.length === 0) ||
-                (isChanging && currentPassword.length === 0)
+                (isChanging && currentPassword.length === 0) ||
+                (mfaRequired && totpCode.length !== 6)
               }
               className="w-full btn-primary px-2.5 py-2.5 text-xs font-semibold shadow-xs flex items-center justify-center space-x-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
             >

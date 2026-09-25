@@ -31,8 +31,11 @@ anyhow = { workspace = true }
 async-trait = { workspace = true }
 parking_lot = { workspace = true }
 aes-gcm = { workspace = true }
+sha1 = { workspace = true }
 sha2 = { workspace = true }
 hmac = { workspace = true }
+base32 = { workspace = true }
+urlencoding = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
 argon2 = { workspace = true }

@@ -40,6 +40,7 @@ uuid = { version = "1.8", features = ["v4", "serde"] }
 parking_lot = "0.12"
 dashmap = "6.0"
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
+sha1 = "0.11"
 sha2 = "0.11"
 sha3 = "0.10"
 k256 = { version = "0.14", features = ["ecdsa", "arithmetic"] }
@@ -52,6 +53,7 @@ rand = "0.8"
 aes-gcm = "0.10"
 argon2 = "0.6"
 zeroize = { version = "1.8", features = ["derive"] }
+base32 = "0.5"
 base64 = "0.22"
 bs58 = "0.5"
 libloading = "0.8"

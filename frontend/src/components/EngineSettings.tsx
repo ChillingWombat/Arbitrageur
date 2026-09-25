@@ -4,6 +4,7 @@ import {
   AlertCircle,
   CheckCircle2,
   Key,
+  KeyRound,
   Lock,
   Unlock,
   Sliders,
@@ -15,8 +16,10 @@ import {
   Info,
   Trash2,
   ShieldAlert,
+  ShieldCheck,
   Star,
 } from "lucide-react";
+import * as qrcode from "qrcode-generator";
 import { api } from "../services/api";
 import {
   normalizeRetentionDays,
@@ -24,7 +27,7 @@ import {
   retentionDaysToInput,
   retentionGbToInput,
 } from "../services/retention";
-import type { EngineSettingsDto, SystemStatusDto, VenueStatusDto, VaultStatus, VenueBalanceInfo, AccountDto, VenueLaneStatusDto, VenueCapabilityDto, PassiveUnwindDto, StorageStatsDto, StablecoinHealthDto } from "../types";
+import type { EngineSettingsDto, SystemStatusDto, VenueStatusDto, VaultStatus, VenueBalanceInfo, AccountDto, VenueLaneStatusDto, VenueCapabilityDto, PassiveUnwindDto, StorageStatsDto, StablecoinHealthDto, MfaEnrollment } from "../types";
 import { DEFAULT_PASSIVE_UNWIND } from "../types";
 import { VaultUnlockModal } from "./VaultUnlockModal";
 import { InfoTooltip } from "./InfoTooltip";
@@ -39,7 +42,13 @@ import {
 import { PriceRetriverPanel } from "./PriceRetriverPanel";
 
 
-export type SettingsTab = "execution" | "safety" | "exchanges" | "network" | "about";
+export type SettingsTab =
+  | "execution"
+  | "safety"
+  | "exchanges"
+  | "network"
+  | "security"
+  | "about";
 export type ExchangeId =
   /** Pseudo-venue: the shared EVM wallet card + AMM coverage gadget. */
   | "evm_wallet"
@@ -427,6 +436,14 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   const [vaultStatus, setVaultStatus] = useState<VaultStatus | null>(null);
   const [showVaultModal, setShowVaultModal] = useState(false);
   const [showVaultChangeModal, setShowVaultChangeModal] = useState(false);
+  // MFA (TOTP) enrollment — the pending secret lives only in the backend
+  // session; the UI renders what `begin_mfa_enrollment` returned and confirms
+  // it with a live code.
+  const [mfaEnrollment, setMfaEnrollment] = useState<MfaEnrollment | null>(null);
+  const [mfaCode, setMfaCode] = useState("");
+  const [mfaBusy, setMfaBusy] = useState(false);
+  const [mfaMsg, setMfaMsg] = useState<string | null>(null);
+  const [mfaErr, setMfaErr] = useState<string | null>(null);
   const [configuredVenues, setConfiguredVenues] = useState<string[]>([]);
 
   // Venue execution capabilities & live trading risk gating
@@ -936,6 +953,8 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
       setVaultStatus(s);
       setConfiguredVenues([]);
       clearCredentialInputs();
+      setMfaEnrollment(null);
+      setMfaCode("");
       setShowVaultModal(true);
     } catch (err) {
       // Refused while live positions are open — surface the reason, don't
@@ -943,6 +962,70 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
       const msg = err instanceof Error ? err.message : String(err);
       console.error("Lock refused:", msg);
       setErrorMsg(msg);
+    }
+  };
+
+  /** Render the otpauth URI to a scannable QR data-URL; enrollment still
+   *  works without it via manual secret entry, so a render failure is
+   *  non-fatal. */
+  const mfaQrUrl = (() => {
+    if (!mfaEnrollment) return null;
+    try {
+      const qr = qrcode(0, "M");
+      qr.addData(mfaEnrollment.otpauthUri);
+      qr.make();
+      return qr.createDataURL(4, 8);
+    } catch {
+      return null;
+    }
+  })();
+
+  const handleBeginMfa = async () => {
+    setMfaErr(null);
+    setMfaMsg(null);
+    setMfaBusy(true);
+    try {
+      const enrollment = await api.beginMfaEnrollment();
+      setMfaEnrollment(enrollment);
+      setMfaCode("");
+    } catch (err) {
+      setMfaErr(err instanceof Error ? err.message : String(err));
+    } finally {
+      setMfaBusy(false);
+    }
+  };
+
+  const handleConfirmMfa = async () => {
+    setMfaErr(null);
+    setMfaMsg(null);
+    setMfaBusy(true);
+    try {
+      const status = await api.confirmMfaEnrollment(mfaCode.trim());
+      setVaultStatus(status);
+      setMfaEnrollment(null);
+      setMfaCode("");
+      setMfaMsg("Two-factor authentication is enabled. You'll need your authenticator at the next unlock.");
+    } catch (err) {
+      setMfaErr(err instanceof Error ? err.message : String(err));
+    } finally {
+      setMfaBusy(false);
+    }
+  };
+
+  const handleDisableMfa = async () => {
+    setMfaErr(null);
+    setMfaMsg(null);
+    setMfaBusy(true);
+    try {
+      const status = await api.disableMfa(mfaCode.trim());
+      setVaultStatus(status);
+      setMfaEnrollment(null);
+      setMfaCode("");
+      setMfaMsg("Two-factor authentication disabled.");
+    } catch (err) {
+      setMfaErr(err instanceof Error ? err.message : String(err));
+    } finally {
+      setMfaBusy(false);
     }
   };
 
@@ -1045,8 +1128,8 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
     <div className="flex flex-col h-full min-h-0 overflow-hidden select-none bg-surface">
       {/* Top Section Navigation Bar */}
       <div className="border-b border-surface-border bg-slate-50/80 shrink-0 flex items-stretch select-none">
-        {/* Navigation Tabs with dividers — 5 equal columns spanning the full width */}
-        <div className="grid grid-cols-5 flex-1 items-stretch divide-x divide-surface-border">
+        {/* Navigation Tabs with dividers — 6 equal columns spanning the full width */}
+        <div className="grid grid-cols-6 flex-1 items-stretch divide-x divide-surface-border">
           <button
             type="button"
             onClick={() => setActiveTab("execution")}
@@ -1124,6 +1207,26 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
             />
             <span>Network &amp; VPS</span>
             {activeTab === "network" && (
+              <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab("security")}
+            className={`relative h-10 flex items-center justify-center space-x-2 px-2.5 sm:px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
+              activeTab === "security"
+                ? "text-accent-strong font-bold bg-surface"
+                : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
+            }`}
+          >
+            <ShieldCheck
+              className={`w-3 h-3 transition shrink-0 ${
+                activeTab === "security" ? "text-accent-strong" : "text-muted group-hover:text-slate-600"
+              }`}
+            />
+            <span>Security</span>
+            {activeTab === "security" && (
               <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
             )}
           </button>
@@ -2023,7 +2126,226 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         )}
 
         {/* =================================================================== */}
-        {/* SECTION 5: ABOUT, CHECK FOR UPDATES & BUY ME A SOLO                 */}
+        {/* SECTION 5: SECURITY — master password rotation + optional TOTP MFA  */}
+        {/* =================================================================== */}
+        {activeTab === "security" && (
+          <div className="space-y-4">
+            {/* Vault session status */}
+            <div className="bg-surface border border-surface-border rounded-lg p-3.5 shadow-2xs">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center space-x-3">
+                  <div className="w-9 h-9 rounded-lg bg-accent-dim border border-accent-line flex items-center justify-center text-accent-strong">
+                    {isVaultLocked ? <Lock className="w-4 h-4" /> : <Unlock className="w-4 h-4" />}
+                  </div>
+                  <div>
+                    <h3 className="text-[13px] font-bold font-mono tracking-wider text-slate-900">
+                      Credential Vault
+                    </h3>
+                    <p className="text-[11px] font-mono text-slate-500">
+                      {!api.isTauri
+                        ? "Browser preview — vault is unavailable"
+                        : isVaultInitializing
+                          ? "Not initialized — create a master password to enable credentials"
+                          : isVaultLocked
+                            ? vaultStatus?.auto_locked
+                              ? "Auto-locked by the inactivity timer — venue credentials keep working"
+                              : "Locked — venue credentials are wiped until you unlock"
+                            : `Unlocked${vaultStatus?.unlocked_until ? ` until ${new Date(vaultStatus.unlocked_until).toLocaleTimeString()}` : ""}`}
+                    </p>
+                  </div>
+                </div>
+                {api.isTauri && (
+                  <button
+                    type="button"
+                    onClick={isVaultLocked ? () => setShowVaultModal(true) : handleLockVault}
+                    className="btn-secondary text-xs font-mono flex items-center space-x-1.5 cursor-pointer"
+                  >
+                    {isVaultLocked ? (
+                      <Unlock className="w-3.5 h-3.5 text-warn-strong" />
+                    ) : (
+                      <Lock className="w-3.5 h-3.5 text-slate-500" />
+                    )}
+                    <span>{isVaultLocked ? "Unlock Vault" : "Lock Vault"}</span>
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* Master password rotation */}
+            <div className="bg-surface border border-surface-border rounded-lg p-3.5 shadow-2xs space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center space-x-3">
+                  <div className="w-9 h-9 rounded-lg bg-accent-dim border border-accent-line flex items-center justify-center text-accent-strong">
+                    <KeyRound className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h3 className="text-[13px] font-bold font-mono tracking-wider text-slate-900">
+                      Master Password
+                    </h3>
+                    <p className="text-[11px] font-mono text-slate-500">
+                      Guards vault.enc (AES-256-GCM + Argon2id) and the shared EVM wallet key
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setShowVaultChangeModal(true)}
+                  disabled={isVaultLocked || !api.isTauri}
+                  title={isVaultLocked ? "Unlock the vault to rotate the master password" : "Rotate the master password — re-keys vault.enc and vault.hold atomically"}
+                  className="btn-secondary text-xs font-mono cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  Change Password
+                </button>
+              </div>
+              {isVaultLocked && api.isTauri && (
+                <p className="text-[11px] font-mono text-warn-strong">
+                  Unlock the vault first — rotation re-encrypts the vault and the Stronghold wallet snapshot under the new password.
+                </p>
+              )}
+            </div>
+
+            {/* TOTP MFA */}
+            <div className="bg-surface border border-surface-border rounded-lg p-3.5 shadow-2xs space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center space-x-3">
+                  <div className="w-9 h-9 rounded-lg bg-accent-dim border border-accent-line flex items-center justify-center text-accent-strong">
+                    <ShieldCheck className="w-4 h-4" />
+                  </div>
+                  <div>
+                    <h3 className="text-[13px] font-bold font-mono tracking-wider text-slate-900">
+                      Two-Factor Authentication
+                      {vaultStatus?.mfa_enabled && (
+                        <span className="ml-2 px-1.5 py-0.5 rounded text-[10px] bg-profit-dim border border-profit-border text-profit font-semibold align-middle">
+                          ENABLED
+                        </span>
+                      )}
+                    </h3>
+                    <p className="text-[11px] font-mono text-slate-500">
+                      {vaultStatus?.mfa_enabled
+                        ? "A 6-digit authenticator code is required to unlock the vault and rotate the password"
+                        : "Optionally require a 6-digit TOTP code (Google Authenticator, 1Password, Authy) at vault unlock"}
+                    </p>
+                  </div>
+                </div>
+                {!vaultStatus?.mfa_enabled && !mfaEnrollment && (
+                  <button
+                    type="button"
+                    onClick={handleBeginMfa}
+                    disabled={mfaBusy || isVaultLocked || !api.isTauri || isVaultInitializing}
+                    title={isVaultLocked || isVaultInitializing ? "Unlock the vault to set up MFA" : "Generate an authenticator secret"}
+                    className="btn-primary text-xs font-mono cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {mfaBusy ? "Generating..." : "Set Up MFA"}
+                  </button>
+                )}
+              </div>
+
+              {mfaMsg && (
+                <div className="p-2.5 bg-profit-dim border border-profit-border text-profit rounded-lg text-xs font-mono flex items-center space-x-2">
+                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                  <span>{mfaMsg}</span>
+                </div>
+              )}
+              {mfaErr && (
+                <div className="p-2.5 bg-loss-dim border border-loss-border text-loss rounded-lg text-xs font-mono flex items-center space-x-2">
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                  <span>{mfaErr}</span>
+                </div>
+              )}
+
+              {/* Enrollment in progress: show the secret + QR + confirm */}
+              {mfaEnrollment && (
+                <div className="rounded-lg border border-accent-line bg-accent-dim/40 p-3.5 space-y-3">
+                  <div className="flex flex-col sm:flex-row gap-4">
+                    {mfaQrUrl && (
+                      <img
+                        src={mfaQrUrl}
+                        alt="MFA enrollment QR code"
+                        className="w-32 h-32 rounded-lg border border-surface-border bg-white p-1.5 shrink-0 self-center sm:self-start"
+                      />
+                    )}
+                    <div className="space-y-2 min-w-0 flex-1">
+                      <p className="text-[11px] font-sans text-slate-600 leading-relaxed">
+                        Scan with your authenticator app, or enter this secret manually:
+                      </p>
+                      <div className="font-mono text-sm tracking-[0.15em] text-slate-900 bg-surface border border-surface-border rounded-lg px-3 py-2 break-all select-all">
+                        {mfaEnrollment.secretBase32.match(/.{1,4}/g)?.join(" ")}
+                      </div>
+                      <details className="text-[10px] font-mono text-slate-500">
+                        <summary className="cursor-pointer hover:text-slate-700 select-none">otpauth:// URI</summary>
+                        <div className="mt-1 break-all bg-surface border border-surface-border rounded px-2 py-1.5 select-all">
+                          {mfaEnrollment.otpauthUri}
+                        </div>
+                      </details>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 pt-1 border-t border-accent-line/60">
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      autoComplete="one-time-code"
+                      maxLength={6}
+                      value={mfaCode}
+                      onChange={(e) => setMfaCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                      onKeyDown={(e) => e.key === "Enter" && e.preventDefault()}
+                      placeholder="6-digit code"
+                      className="w-36 bg-surface border border-surface-border rounded-lg px-3 py-2 text-xs font-mono tracking-[0.3em] text-slate-900 placeholder:text-muted placeholder:tracking-normal focus:outline-none focus:ring-2 focus:ring-primary/15 focus:border-primary transition-all shadow-2xs"
+                    />
+                    <button
+                      type="button"
+                      onClick={handleConfirmMfa}
+                      disabled={mfaBusy || mfaCode.length !== 6}
+                      className="btn-primary text-xs font-mono cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {mfaBusy ? "Verifying..." : "Enable MFA"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => { setMfaEnrollment(null); setMfaCode(""); setMfaErr(null); }}
+                      disabled={mfaBusy}
+                      className="btn-secondary text-xs font-mono cursor-pointer disabled:opacity-50"
+                    >
+                      Cancel
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Disable flow: a live code proves the authenticator is still held */}
+              {vaultStatus?.mfa_enabled && (
+                <div className="flex items-center gap-2 pt-1">
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    maxLength={6}
+                    value={mfaCode}
+                    onChange={(e) => setMfaCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                    onKeyDown={(e) => e.key === "Enter" && e.preventDefault()}
+                    placeholder="6-digit code"
+                    className="w-36 bg-surface border border-surface-border rounded-lg px-3 py-2 text-xs font-mono tracking-[0.3em] text-slate-900 placeholder:text-muted placeholder:tracking-normal focus:outline-none focus:ring-2 focus:ring-primary/15 focus:border-primary transition-all shadow-2xs"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleDisableMfa}
+                    disabled={mfaBusy || mfaCode.length !== 6 || isVaultLocked || !api.isTauri}
+                    title={isVaultLocked ? "Unlock the vault to disable MFA" : "Verify a live code to remove the second factor"}
+                    className="px-3 py-2 rounded-lg border border-loss-border bg-surface hover:bg-loss-dim text-loss text-xs font-mono transition cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {mfaBusy ? "Verifying..." : "Disable MFA"}
+                  </button>
+                </div>
+              )}
+
+              <p className="text-[10px] font-sans text-slate-500 leading-relaxed border-t border-surface-border pt-2">
+                MFA gates the unlock path in this app — an operator needs the code, not just the password. The TOTP secret is stored inside the encrypted vault; it does not add encryption strength against theft of the vault file itself.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* =================================================================== */}
+        {/* SECTION 6: ABOUT, CHECK FOR UPDATES & BUY ME A SOLO                 */}
         {/* =================================================================== */}
         {activeTab === "about" && (
           <div className="space-y-4">

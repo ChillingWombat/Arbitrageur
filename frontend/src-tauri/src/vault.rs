@@ -102,10 +102,36 @@ impl std::fmt::Debug for ExchangeCredentials {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[derive(Clone, Serialize, Deserialize, Default)]
 pub struct VaultData {
     pub credentials: Vec<ExchangeCredentials>,
     pub updated_at: DateTime<Utc>,
+    /// Enrolled TOTP secret (base32) gating vault unlock. Lives inside the
+    /// encrypted payload — it is a *verification* secret for the app, not
+    /// extra encryption strength for the file.
+    #[serde(default)]
+    pub mfa_totp_secret: Option<String>,
+}
+
+impl std::fmt::Debug for VaultData {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VaultData")
+            .field("credentials", &self.credentials)
+            .field("updated_at", &self.updated_at)
+            .field(
+                "mfa_totp_secret",
+                &self.mfa_totp_secret.as_ref().map(|_| "<set>"),
+            )
+            .finish()
+    }
+}
+
+impl Drop for VaultData {
+    fn drop(&mut self) {
+        if let Some(secret) = self.mfa_totp_secret.as_mut() {
+            secret.zeroize();
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -118,6 +144,11 @@ pub struct VaultStatus {
     /// keep trading; a manual lock wipes adapter credentials instead.
     pub auto_locked: bool,
     pub unlocked_until: Option<DateTime<Utc>>,
+    /// Whether TOTP MFA is enrolled — surfaced from a plaintext kv flag so
+    /// the locked UI knows to render the code field. Enforcement itself
+    /// reads the secret inside the vault (fail-closed on flag drift).
+    #[serde(default)]
+    pub mfa_enabled: bool,
 }
 
 /// Sanitized view of one stored credential record. `profile_id` links the
@@ -268,6 +299,9 @@ impl SecureVault {
             is_unlocked: unlocked,
             auto_locked: self.is_auto_locked(),
             unlocked_until: self.unlocked_until,
+            // While locked the vault contents are unreadable — the caller
+            // overlays the plaintext kv flag for the locked view.
+            mfa_enabled: unlocked && self.mfa_enrolled(),
         }
     }
 
@@ -444,6 +478,7 @@ impl SecureVault {
         let empty_data = VaultData {
             credentials: Vec::new(),
             updated_at: Utc::now(),
+            mfa_totp_secret: None,
         };
         let mut salt = [0u8; SALT_LEN];
         rand::thread_rng().fill_bytes(&mut salt);
@@ -460,9 +495,45 @@ impl SecureVault {
         Ok(())
     }
 
-    /// Unlock existing vault with password. Legacy (unversioned PBKDF2)
-    /// files are transparently migrated to the v2 format on success.
-    pub fn unlock(&mut self, password: &str) -> anyhow::Result<()> {
+    /// Post-decrypt admission: when a TOTP secret is enrolled, verify the
+    /// presented code BEFORE the session fields are set — a missing or bad
+    /// code leaves the vault locked. Secrets that fail to decode are a
+    /// corrupted-vault error, never a silent bypass.
+    fn admit_unlocked(
+        &mut self,
+        data: VaultData,
+        key: Zeroizing<[u8; 32]>,
+        salt: [u8; SALT_LEN],
+        totp_code: Option<&str>,
+    ) -> anyhow::Result<()> {
+        if let Some(secret_b32) = data.mfa_totp_secret.as_deref() {
+            let secret = crate::totp::decode_secret_base32(secret_b32).map_err(|_| {
+                anyhow::anyhow!(
+                    "Vault MFA data is corrupted — the enrolled secret cannot be decoded"
+                )
+            })?;
+            let code = totp_code.map(str::trim).filter(|c| !c.is_empty()).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Two-factor authentication is enabled — enter the 6-digit code from your authenticator app"
+                )
+            })?;
+            if !crate::totp::verify(&secret, code, crate::totp::unix_now()) {
+                anyhow::bail!("Invalid authentication code");
+            }
+        }
+        self.is_unlocked = true;
+        self.auto_locked = false;
+        self.unlocked_until = Some(Utc::now() + chrono::Duration::minutes(15));
+        self.decrypted_cache = Some(data);
+        self.encryption_key = Some(key);
+        self.kdf_salt = Some(salt);
+        Ok(())
+    }
+
+    /// Unlock existing vault with password (+ TOTP code when MFA is
+    /// enrolled). Legacy (unversioned PBKDF2) files are transparently
+    /// migrated to the v2 format on success.
+    pub fn unlock(&mut self, password: &str, totp_code: Option<&str>) -> anyhow::Result<()> {
         self.lock();
         if !self.storage_path.exists() {
             anyhow::bail!("Vault is not initialized. Please set a password first.");
@@ -501,14 +572,7 @@ impl SecureVault {
 
             let mut salt_arr = [0u8; SALT_LEN];
             salt_arr.copy_from_slice(salt);
-
-            self.is_unlocked = true;
-            self.auto_locked = false;
-            self.unlocked_until = Some(Utc::now() + chrono::Duration::minutes(15));
-            self.decrypted_cache = Some(data);
-            self.encryption_key = Some(key);
-            self.kdf_salt = Some(salt_arr);
-            Ok(())
+            self.admit_unlocked(data, key, salt_arr, totp_code)
         } else {
             // Legacy format: salt || nonce || ciphertext, no magic, no AAD
             if file_bytes.len() < SALT_LEN + NONCE_LEN + 16 {
@@ -541,13 +605,7 @@ impl SecureVault {
             let bytes = Self::encrypt_v2(&data, &new_key, &new_salt)?;
             Self::write_file_atomic(&self.storage_path, &bytes)?;
 
-            self.is_unlocked = true;
-            self.auto_locked = false;
-            self.unlocked_until = Some(Utc::now() + chrono::Duration::minutes(15));
-            self.decrypted_cache = Some(data);
-            self.encryption_key = Some(new_key);
-            self.kdf_salt = Some(new_salt);
-            Ok(())
+            self.admit_unlocked(data, new_key, new_salt, totp_code)
         }
     }
 
@@ -587,18 +645,21 @@ impl SecureVault {
     /// Password verification runs against the file bytes, not the session
     /// key — a legacy (PBKDF2) vault's session key is not the Argon2 key,
     /// so comparing derived keys would false-reject a correct password.
+    /// `totp_code` is forwarded to the check-unlock so a rotation is gated
+    /// by the same second factor as a normal unlock.
     pub fn prepare_password_rotation(
         &mut self,
         current: &str,
         new_password: &str,
+        totp_code: Option<&str>,
     ) -> anyhow::Result<VaultPasswordRotation> {
         if !self.is_unlocked() {
             anyhow::bail!("Vault is locked — unlock before changing the password");
         }
         let mut check = SecureVault::new_with_path(self.storage_path.clone());
         check
-            .unlock(current)
-            .map_err(|_| anyhow::anyhow!("Current password is incorrect"))?;
+            .unlock(current, totp_code)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
         if new_password.chars().count() < MIN_PASSWORD_CHARS {
             anyhow::bail!("New password must be at least 12 characters long");
         }
@@ -645,6 +706,62 @@ impl SecureVault {
         self.decrypted_cache
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("Decrypted vault cache is empty"))
+    }
+
+    /// Whether a TOTP secret is enrolled — meaningful only while unlocked
+    /// (a locked vault cannot read its own payload).
+    pub fn mfa_enrolled(&self) -> bool {
+        self.decrypted_cache
+            .as_ref()
+            .is_some_and(|d| d.mfa_totp_secret.is_some())
+    }
+
+    /// Verify a TOTP code against the enrolled secret. Requires an unlocked
+    /// vault; `Ok(false)` is a wrong code, an error means no secret is
+    /// enrolled or it is corrupted. The secret never leaves the module.
+    pub fn verify_mfa_code(&mut self, code: &str) -> anyhow::Result<bool> {
+        let data = self.get_data()?;
+        let Some(secret_b32) = data.mfa_totp_secret.as_deref() else {
+            anyhow::bail!("Two-factor authentication is not enrolled");
+        };
+        let secret = crate::totp::decode_secret_base32(secret_b32)
+            .map_err(|e| anyhow::anyhow!("vault MFA secret decode failed: {e}"))?;
+        Ok(crate::totp::verify(
+            &secret,
+            code.trim(),
+            crate::totp::unix_now(),
+        ))
+    }
+
+    /// Enroll (or replace) the TOTP secret and persist. The secret is
+    /// decoded once before storing so an unverifiable value can never be
+    /// written. Requires an unlocked vault.
+    pub fn set_mfa_secret(&mut self, secret_b32: String) -> anyhow::Result<()> {
+        if !self.is_unlocked() {
+            anyhow::bail!("Vault is locked. Please unlock before configuring MFA.");
+        }
+        crate::totp::decode_secret_base32(&secret_b32)
+            .map_err(|e| anyhow::anyhow!("invalid MFA secret: {e}"))?;
+        let mut data = self.decrypted_cache.clone().unwrap_or_default();
+        data.mfa_totp_secret = Some(secret_b32);
+        data.updated_at = Utc::now();
+        self.save_data(&data)
+    }
+
+    /// Remove the TOTP secret and persist. Requires an unlocked vault.
+    /// Callers verify a live code first — this primitive deliberately does
+    /// not, so that a forced reset path remains possible.
+    pub fn clear_mfa_secret(&mut self) -> anyhow::Result<()> {
+        if !self.is_unlocked() {
+            anyhow::bail!("Vault is locked. Please unlock before configuring MFA.");
+        }
+        let mut data = self.decrypted_cache.clone().unwrap_or_default();
+        if let Some(mut secret) = data.mfa_totp_secret.take() {
+            secret.zeroize();
+            data.updated_at = Utc::now();
+            self.save_data(&data)?;
+        }
+        Ok(())
     }
 
     /// Sorted, deduplicated, normalized (trimmed lowercase) venue IDs that
@@ -1032,20 +1149,20 @@ mod tests {
 
         // Wrong current password must not prepare anything.
         assert!(vault
-            .prepare_password_rotation("wrong-password", "new-password-5678")
+            .prepare_password_rotation("wrong-password", "new-password-5678", None)
             .is_err());
         // Short new password rejected before any key material is produced.
         assert!(vault
-            .prepare_password_rotation("old-password-1234", "short")
+            .prepare_password_rotation("old-password-1234", "short", None)
             .is_err());
         // A locked vault refuses rotation outright.
         let mut locked = SecureVault::new_with_path(file.clone());
         assert!(locked
-            .prepare_password_rotation("old-password-1234", "new-password-5678")
+            .prepare_password_rotation("old-password-1234", "new-password-5678", None)
             .is_err());
 
         let rotation = vault
-            .prepare_password_rotation("old-password-1234", "new-password-5678")
+            .prepare_password_rotation("old-password-1234", "new-password-5678", None)
             .expect("prepare");
         // The snapshot key must track the session-key generation.
         assert_eq!(
@@ -1063,15 +1180,15 @@ mod tests {
         );
         // Nothing committed yet — old password still opens the file.
         let mut probe = SecureVault::new_with_path(file.clone());
-        assert!(probe.unlock("old-password-1234").is_ok());
+        assert!(probe.unlock("old-password-1234", None).is_ok());
         drop(probe);
 
         vault.commit_password_rotation(rotation).expect("commit");
 
         let mut old_probe = SecureVault::new_with_path(file.clone());
-        assert!(old_probe.unlock("old-password-1234").is_err());
+        assert!(old_probe.unlock("old-password-1234", None).is_err());
         let mut new_probe = SecureVault::new_with_path(file);
-        assert!(new_probe.unlock("new-password-5678").is_ok());
+        assert!(new_probe.unlock("new-password-5678", None).is_ok());
         // Session key swapped — the live vault now derives the new snapshot key.
         assert_ne!(
             vault
@@ -1137,7 +1254,7 @@ mod tests {
         let locked_status = reopened.get_status();
         assert!(locked_status.is_initialized);
         assert!(!locked_status.is_unlocked);
-        reopened.unlock("correct horse battery").unwrap();
+        reopened.unlock("correct horse battery", None).unwrap();
         assert!(reopened.get_status().is_unlocked);
 
         let _ = fs::remove_dir_all(dir);
@@ -1176,7 +1293,7 @@ mod tests {
         assert!(vault.get_data().is_err());
         assert!(vault.configured_venues().is_err());
 
-        vault.unlock("correct horse battery").unwrap();
+        vault.unlock("correct horse battery", None).unwrap();
         assert!(vault.is_unlocked());
         let stored = vault.get_data().unwrap();
         assert_eq!(stored.credentials.len(), 1);
@@ -1195,7 +1312,7 @@ mod tests {
         let mut vault = SecureVault::new_with_path(file);
         vault.initialize("correct horse battery").unwrap();
 
-        let err = vault.unlock("incorrect password!!").unwrap_err();
+        let err = vault.unlock("incorrect password!!", None).unwrap_err();
         assert!(err.to_string().contains("Incorrect password"));
         assert!(!vault.is_unlocked());
         assert!(vault.decrypted_cache.is_none());
@@ -1231,7 +1348,7 @@ mod tests {
         fs::write(&file, b"not-a-vault-file-garbage-bytes").unwrap();
         let mut vault = SecureVault::new_with_path(file.clone());
         assert!(vault.is_initialized(), "file exists = initialized marker");
-        assert!(vault.unlock("correct horse battery").is_err());
+        assert!(vault.unlock("correct horse battery", None).is_err());
         assert!(!vault.is_unlocked());
         assert!(vault.get_data().is_err());
 
@@ -1240,7 +1357,7 @@ mod tests {
         truncated.extend_from_slice(&[0u8; 4]);
         fs::write(&file, &truncated).unwrap();
         let mut vault = SecureVault::new_with_path(file.clone());
-        assert!(vault.unlock("correct horse battery").is_err());
+        assert!(vault.unlock("correct horse battery", None).is_err());
         assert!(!vault.is_unlocked());
 
         // Real vault, then ciphertext corruption — GCM tag rejects it and
@@ -1254,7 +1371,7 @@ mod tests {
         bytes[n - 5] ^= 0x01;
         fs::write(&file, &bytes).unwrap();
         let mut vault = SecureVault::new_with_path(file);
-        let err = vault.unlock("correct horse battery").unwrap_err();
+        let err = vault.unlock("correct horse battery", None).unwrap_err();
         assert!(
             err.to_string()
                 .contains("Incorrect password or corrupted vault"),
@@ -1290,6 +1407,7 @@ mod tests {
                 enabled: true,
             }],
             updated_at: Utc::now(),
+            mfa_totp_secret: None,
         };
         let plaintext = serde_json::to_vec(&legacy_data).unwrap();
         let mut salt = [0u8; SALT_LEN];
@@ -1309,7 +1427,7 @@ mod tests {
         fs::write(&file, &legacy_bytes).unwrap();
 
         let mut vault = SecureVault::new_with_path(file.clone());
-        vault.unlock("legacy password ok").unwrap();
+        vault.unlock("legacy password ok", None).unwrap();
         assert!(vault.is_unlocked());
         let stored = vault.get_data().unwrap();
         assert_eq!(stored.credentials.len(), 1);
@@ -1322,7 +1440,7 @@ mod tests {
         // Re-unlock against the migrated v2 file from a fresh vault instance
         let mut vault2 = SecureVault::new_with_path(file.clone());
         vault2.lock();
-        vault2.unlock("legacy password ok").unwrap();
+        vault2.unlock("legacy password ok", None).unwrap();
         assert_eq!(
             vault2.configured_venues().unwrap(),
             vec!["lighter".to_string()]
@@ -1570,7 +1688,7 @@ mod tests {
 
         vault.lock();
         let mut vault2 = SecureVault::new_with_path(file.clone());
-        vault2.unlock("correct horse battery").unwrap();
+        vault2.unlock("correct horse battery", None).unwrap();
         let stored = vault2.get_data().unwrap();
         assert_eq!(stored.credentials.len(), 1);
         assert_eq!(stored.credentials[0].venue, "lighter");
@@ -1638,9 +1756,116 @@ mod tests {
         assert!(err.to_string().contains("locked"));
 
         let mut vault2 = SecureVault::new_with_path(file.clone());
-        vault2.unlock("correct horse battery").unwrap();
+        vault2.unlock("correct horse battery", None).unwrap();
         assert_eq!(vault2.get_data().unwrap().credentials.len(), 1);
 
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_mfa_enrollment_gates_unlock() {
+        let (dir, file) = temp_vault_path("mfa_unlock");
+        let mut vault = SecureVault::new_with_path(file.clone());
+        vault.initialize("correct horse battery").unwrap();
+
+        // Enroll a known secret so codes are deterministic.
+        let secret = crate::totp::generate_secret();
+        let secret_b32 = crate::totp::encode_secret_base32(&*secret);
+        vault.set_mfa_secret(secret_b32).expect("enroll");
+        assert!(vault.mfa_enrolled());
+
+        vault.lock();
+
+        // Password alone is not enough — the factor is mandatory.
+        let err = vault.unlock("correct horse battery", None).unwrap_err();
+        assert!(err.to_string().contains("Two-factor"), "got: {err}");
+        assert!(!vault.is_unlocked());
+
+        // A wrong code still refuses.
+        let err = vault
+            .unlock("correct horse battery", Some("000000"))
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("Invalid authentication code"),
+            "got: {err}"
+        );
+        assert!(!vault.is_unlocked());
+
+        // A live code from the enrolled secret unlocks.
+        let code = crate::totp::code_at(&*secret, crate::totp::unix_now());
+        vault
+            .unlock("correct horse battery", Some(&code))
+            .expect("unlock with TOTP");
+        assert!(vault.is_unlocked());
+        assert!(vault.mfa_enrolled());
+        assert!(vault.get_status().mfa_enabled);
+
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_mfa_secret_persists_across_vault_instances() {
+        let (dir, file) = temp_vault_path("mfa_persist");
+        let secret = crate::totp::generate_secret();
+        let secret_b32 = crate::totp::encode_secret_base32(&*secret);
+        {
+            let mut vault = SecureVault::new_with_path(file.clone());
+            vault.initialize("correct horse battery").unwrap();
+            vault.set_mfa_secret(secret_b32).expect("enroll");
+        }
+        // A fresh handle on the same file must still demand the factor.
+        let mut reopened = SecureVault::new_with_path(file.clone());
+        assert!(reopened.unlock("correct horse battery", None).is_err());
+        let code = crate::totp::code_at(&*secret, crate::totp::unix_now());
+        reopened
+            .unlock("correct horse battery", Some(&code))
+            .expect("unlock with TOTP");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_mfa_clear_restores_password_only_unlock() {
+        let (dir, file) = temp_vault_path("mfa_clear");
+        let mut vault = SecureVault::new_with_path(file.clone());
+        vault.initialize("correct horse battery").unwrap();
+        let secret = crate::totp::generate_secret();
+        vault
+            .set_mfa_secret(crate::totp::encode_secret_base32(&*secret))
+            .unwrap();
+
+        // Disable path: a live code verifies, then the secret is cleared.
+        let code = crate::totp::code_at(&*secret, crate::totp::unix_now());
+        assert!(vault.verify_mfa_code(&code).unwrap());
+        vault.clear_mfa_secret().unwrap();
+        assert!(!vault.mfa_enrolled());
+        assert!(vault.verify_mfa_code(&code).is_err());
+
+        vault.lock();
+        vault
+            .unlock("correct horse battery", None)
+            .expect("password-only unlock after disable");
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn test_mfa_gates_password_rotation() {
+        let (dir, file) = temp_vault_path("mfa_rotate");
+        let mut vault = SecureVault::new_with_path(file.clone());
+        vault.initialize("old-password-1234").unwrap();
+        let secret = crate::totp::generate_secret();
+        vault
+            .set_mfa_secret(crate::totp::encode_secret_base32(&*secret))
+            .unwrap();
+
+        // Without a code, rotation refuses even with the right password.
+        assert!(vault
+            .prepare_password_rotation("old-password-1234", "new-password-5678", None)
+            .is_err());
+        // A live code lets the rotation prepare.
+        let code = crate::totp::code_at(&*secret, crate::totp::unix_now());
+        vault
+            .prepare_password_rotation("old-password-1234", "new-password-5678", Some(&code))
+            .expect("rotation gated by TOTP");
         let _ = fs::remove_dir_all(dir);
     }
 }

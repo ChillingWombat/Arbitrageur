@@ -38,6 +38,7 @@ import type {
   StrategyPresetDto,
   PassiveUnwindDto,
   VaultStatus,
+  MfaEnrollment,
   VenueBalanceInfo,
   VenueFeesDto,
   ExternalPositionsResponse,
@@ -1029,17 +1030,34 @@ export const api = {
     return invokeDesktop<VaultStatus>("initialize_vault", { password });
   },
 
-  async unlockVault(password: string): Promise<VaultStatus> {
-    return invokeDesktop<VaultStatus>("unlock_vault", { password });
+  async unlockVault(password: string, totpCode?: string): Promise<VaultStatus> {
+    return invokeDesktop<VaultStatus>("unlock_vault", { password, totpCode });
   },
 
   /** Rotate the master password — atomically re-keys the Stronghold
    *  snapshot (`vault.hold`) so the shared EVM wallet survives. */
-  async changeVaultPassword(current: string, newPassword: string): Promise<VaultStatus> {
+  async changeVaultPassword(
+    current: string,
+    newPassword: string,
+    totpCode?: string,
+  ): Promise<VaultStatus> {
     return invokeDesktop<VaultStatus>("change_vault_password", {
       current,
       newPassword,
+      totpCode,
     });
+  },
+
+  async beginMfaEnrollment(): Promise<MfaEnrollment> {
+    return invokeDesktop<MfaEnrollment>("begin_mfa_enrollment");
+  },
+
+  async confirmMfaEnrollment(code: string): Promise<VaultStatus> {
+    return invokeDesktop<VaultStatus>("confirm_mfa_enrollment", { code });
+  },
+
+  async disableMfa(code: string): Promise<VaultStatus> {
+    return invokeDesktop<VaultStatus>("disable_mfa", { code });
   },
 
   async lockVault(): Promise<VaultStatus> {
