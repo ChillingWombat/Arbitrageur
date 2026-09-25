@@ -2413,13 +2413,25 @@ async fn flatten_leg(args: FlattenLegArgs<'_>) -> Result<FlattenLegOutcome, Stri
             )),
         }
         let resp = report.response;
+        let client_order_id = resp.client_order_id.clone();
+        let resp =
+            arbitrageur_execution::enrich_fill_stats(&adapter, symbol, &client_order_id, resp)
+                .await;
         let order_id = (!resp.order_id.trim().is_empty()).then(|| resp.order_id.clone());
+        // A fill whose stats never enriched is not a lost order: return the
+        // order identity and let the reconciler book the venue-truth fill —
+        // erroring here would orphan an accepted (likely filled) order.
         let fill = if resp.filled_qty > dec!(0) {
-            let px = resp
-                .avg_fill_price
-                .filter(|p| *p > dec!(0))
-                .ok_or_else(|| "flatten fill reports no positive price".to_string())?;
-            Some((resp.filled_qty, px, resp.fee))
+            match resp.avg_fill_price.filter(|p| *p > dec!(0)) {
+                Some(px) => Some((resp.filled_qty, px, resp.fee)),
+                None => {
+                    notes.push(format!(
+                        "{sig_id}: {venue} leg order {} reported filled without a verified fill price — reconciler will settle it",
+                        resp.order_id
+                    ));
+                    None
+                }
+            }
         } else {
             None
         };
@@ -2440,18 +2452,20 @@ async fn flatten_leg(args: FlattenLegArgs<'_>) -> Result<FlattenLegOutcome, Stri
         .place_order(order)
         .await
         .map_err(|e| e.to_string())?;
+    let resp =
+        arbitrageur_execution::enrich_fill_stats(&adapter, symbol, &client_order_id, resp).await;
     let order_id = (!resp.order_id.trim().is_empty()).then(|| resp.order_id.clone());
     let fill = if resp.filled_qty > dec!(0) {
-        let px = resp
-            .avg_fill_price
-            .filter(|p| *p > dec!(0))
-            .ok_or_else(|| {
-                format!(
-                    "flatten fill on order {} reports no positive price",
+        match resp.avg_fill_price.filter(|p| *p > dec!(0)) {
+            Some(px) => Some((resp.filled_qty, px, resp.fee)),
+            None => {
+                notes.push(format!(
+                    "{sig_id}: {venue} leg order {} reported filled without a verified fill price — reconciler will settle it",
                     resp.order_id
-                )
-            })?;
-        Some((resp.filled_qty, px, resp.fee))
+                ));
+                None
+            }
+        }
     } else {
         None
     };

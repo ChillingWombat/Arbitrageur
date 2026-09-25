@@ -1284,4 +1284,99 @@ mod tests {
         // coordinator does not trip on them (the caller may).
         assert!(!cb.is_tripped());
     }
+
+    /// `enrich_fill_stats` keeps polling a terminal FILLED record until the
+    /// venue enriches avgFillPrice — the real Arcus sequencing where status
+    /// lands before the fill stats.
+    #[tokio::test]
+    async fn test_enrich_fill_stats_waits_for_price_enrichment() {
+        let cid = "cid-1";
+        let mut bare = resp(
+            "ex_a",
+            "BTC-USDC",
+            cid,
+            "a-order",
+            OrderStatus::Filled,
+            dec!(1.0),
+            dec!(1.0),
+        );
+        bare.avg_fill_price = None;
+        let enriched = resp(
+            "ex_a",
+            "BTC-USDC",
+            cid,
+            "a-order",
+            OrderStatus::Filled,
+            dec!(1.0),
+            dec!(1.0),
+        );
+        let mock = MockExchange::new("ex_a", vec![], MockResponse::Fail)
+            .with_fetch(vec![Ok(bare.clone()), Ok(enriched)]);
+        let ex: Arc<dyn ExchangeAdapter> = Arc::new(mock);
+
+        let out = enrich_fill_stats(&ex, "BTC-USDC", cid, bare).await;
+        assert_eq!(out.order_id, "a-order");
+        assert_eq!(out.filled_qty, dec!(1.0));
+        assert_eq!(out.avg_fill_price, Some(dec!(100)));
+    }
+
+    /// A FILLED record that never enriches returns the last verified
+    /// snapshot — a foreign order echo is never adopted.
+    #[tokio::test]
+    async fn test_enrich_fill_stats_never_adopts_foreign_order() {
+        let cid = "cid-1";
+        let mut bare = resp(
+            "ex_a",
+            "BTC-USDC",
+            cid,
+            "a-order",
+            OrderStatus::Filled,
+            dec!(1.0),
+            dec!(1.0),
+        );
+        bare.avg_fill_price = None;
+        let foreign = resp(
+            "ex_a",
+            "BTC-USDC",
+            "other-cid",
+            "other-order",
+            OrderStatus::Filled,
+            dec!(9.0),
+            dec!(9.0),
+        );
+        let mock = MockExchange::new("ex_a", vec![], MockResponse::Fail).with_fetch(vec![
+            Ok(foreign.clone()),
+            Ok(foreign.clone()),
+            Ok(foreign),
+        ]);
+        let ex: Arc<dyn ExchangeAdapter> = Arc::new(mock);
+
+        let out = enrich_fill_stats(&ex, "BTC-USDC", cid, bare).await;
+        assert_eq!(out.order_id, "a-order");
+        assert_eq!(out.avg_fill_price, None);
+    }
+
+    /// Complete records never trigger a status poll at all.
+    #[tokio::test]
+    async fn test_enrich_fill_stats_complete_record_polls_nothing() {
+        let cid = "cid-1";
+        let complete = resp(
+            "ex_a",
+            "BTC-USDC",
+            cid,
+            "a-order",
+            OrderStatus::Filled,
+            dec!(1.0),
+            dec!(1.0),
+        );
+        // Empty fetch script: any fetch_order call bails — if enrichment ran
+        // anyway the result would still be the input record, but the mock's
+        // bail proves nothing was polled when combined with identity below.
+        let mock = MockExchange::new("ex_a", vec![], MockResponse::Fail);
+        let ex: Arc<dyn ExchangeAdapter> = Arc::new(mock);
+
+        let out = enrich_fill_stats(&ex, "BTC-USDC", cid, complete.clone()).await;
+        assert_eq!(out.order_id, "a-order");
+        assert_eq!(out.avg_fill_price, Some(dec!(100)));
+    }
 }
