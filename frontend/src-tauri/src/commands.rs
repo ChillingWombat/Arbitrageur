@@ -2760,6 +2760,20 @@ fn transition_environment(
     // `get_adapter` under the *new* env — a testnet hedge flattened after a
     // live flip would send real orders to the wrong endpoints.
     if target != state.env() {
+        // A dispatch in flight resolves each leg's adapter through the
+        // *active* env — flipping mid-sequence would send the remaining
+        // legs to the other environment's endpoints. The pending-leg check
+        // below only sees persisted legs, so refuse while the execution
+        // lock is held rather than racing the seam between legs.
+        let _exec_guard = match state.execution_lock.try_lock() {
+            Ok(g) => g,
+            Err(_) => {
+                return Err(
+                    "Cannot switch trading environment while an execution is in progress — retry once it settles."
+                        .into(),
+                )
+            }
+        };
         // Fail closed: a DB read error is not "no exposure" — the switch is
         // refused when unresolved state cannot be verified.
         // Cross-environment view (None): pending legs in EITHER environment
@@ -10709,6 +10723,24 @@ mod tests {
             res.unwrap_err().contains("locked"),
             "next gate must be the vault, not the position gate"
         );
+    }
+
+    #[tokio::test]
+    async fn test_env_switch_refused_during_execution() {
+        // A dispatch resolves each leg's adapter through the active env;
+        // flipping while execution_lock is held would send remaining legs
+        // to the other environment's endpoints. The transition must refuse
+        // even with zero persisted pending legs.
+        let state = AppEngineState::new();
+        let guard = state.execution_lock.lock().await;
+        let res = set_live_mode_impl(true, &state);
+        assert!(res.is_err(), "env flip must refuse mid-execution");
+        assert!(
+            res.unwrap_err().contains("execution is in progress"),
+            "refusal must name the in-flight execution gate"
+        );
+        assert!(!state.is_live(), "env must not flip on refusal");
+        drop(guard);
     }
 
     #[tokio::test]
