@@ -45,6 +45,7 @@ export function normalizeVenueKey(v: string): string {
   if (s.includes("arcus") || s === "arc") return "arcus";
   if (s.includes("pop") || s === "popdex") return "popdex";
   if (s.includes("kraken") || s === "krk") return "kraken";
+  if (s.includes("alpaca") || s === "alp") return "alpaca";
   if (s.includes("poly")) return "polymarket";
   if (s.includes("kalshi")) return "kalshi";
   return s;
@@ -56,6 +57,13 @@ export function normalizeVenueKey(v: string): string {
 export function getVenueContractSpec(venueKey: string, symbol: string, basePrice: number): VenueContractSpec {
   const v = normalizeVenueKey(venueKey);
   const base = symbol.split("-")[0].toUpperCase();
+
+  // Alpaca is spot-only — no leverage; crypto orders carry a $1 minimum
+  // notional (asset min_order_size applies per market from fetch_markets).
+  if (v === "alpaca") {
+    const minUnits = Math.max(0.0001, Math.round((1.0 / Math.max(0.01, basePrice)) * 10000) / 10000);
+    return { venueId: "alpaca", minOrderSize: minUnits, stepSize: 0.0001, maxLeverage: 1, contractMultiplier: 1.0 };
+  }
 
   // Tier 1: BTC
   if (base === "BTC") {

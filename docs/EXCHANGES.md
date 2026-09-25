@@ -34,7 +34,12 @@ This guide details the integration protocols, API specifications, and signing me
 The runtime admits only enabled adapters in `get_venues`; capability remains endpoint-specific and is tracked in `docs/CAPABILITIES.md`:
 
 - Hyperliquid, Lighter, Robinhood Lighter, Vanta/Orderly
-- Aster, PopDEX, Binance, OKX, Coinbase, Kraken, Decibel
+- Aster, PopDEX, Binance, OKX, Coinbase, Kraken, Decibel, Alpaca
+  (US equities + crypto spot broker; real paper-trading host under
+  `paper-api.alpaca.markets` is the Testnet adapter — a genuine venue
+  sandbox, not local simulation. Crypto legs only feed scans; Tier-1
+  fees 15bps maker / 25bps taker are hardcoded per Alpaca's published
+  schedule).
 - Long-tail perp venues via `DexPerpAdapter` (account-enabled admission;
   market data for all, implemented signed order paths on Pacifica /
   StandX / Ondo Perps / GRVT / Derive / Aevo / Vest / QFEX / Nado /

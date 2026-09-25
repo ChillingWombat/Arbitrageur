@@ -101,6 +101,7 @@ export const VENUE_ID_TO_CODE: Record<string, string> = {
   binance: "BNB",
   okx: "OKX",
   coinbase: "CB",
+  alpaca: "ALP",
   decibel: "DCB",
   deribit: "DBT",
 };
@@ -117,6 +118,7 @@ export const VENUE_CODE_TO_ID: Record<string, string> = {
   BNB: "binance",
   OKX: "okx",
   CB: "coinbase",
+  ALP: "alpaca",
   DCB: "decibel",
   DBT: "deribit",
 };
@@ -150,6 +152,7 @@ export interface VenueSettingsFilter {
   binance_enabled?: boolean;
   okx_enabled?: boolean;
   coinbase_enabled?: boolean;
+  alpaca_enabled?: boolean;
   decibel_enabled?: boolean;
   deribit_enabled?: boolean;
   polymarket_enabled?: boolean;
@@ -167,7 +170,7 @@ export interface VenueSettingsFilter {
  * in venues_for_env; venues without a demo endpoint (Robinhood, Aster,
  * Coinbase, long-tail perps, EVM AMMs) are live-only.
  */
-const TESTNET_CAPABLE_CODES = new Set(["HL", "LGT", "VNT", "POP", "BNB", "OKX", "KRK", "DCB", "DBT"]);
+const TESTNET_CAPABLE_CODES = new Set(["HL", "LGT", "VNT", "POP", "BNB", "OKX", "KRK", "ALP", "DCB", "DBT"]);
 
 /**
  * Venue IDs with public testnet/demo endpoints — mirrors the backend `tn_*`
@@ -184,6 +187,7 @@ export const TESTNET_CAPABLE_VENUE_IDS = new Set([
   "okx",
   "kraken",
   "kraken_futures",
+  "alpaca",
   "decibel",
   "deribit",
 ]);
@@ -236,6 +240,7 @@ export function getEnabledConnectedVenueCodes(
       settings.kraken_futures_enabled === true ||
       settings.kraken_spot_enabled === true
   );
+  admit("ALP", settings.alpaca_enabled);
   admit("DCB", settings.decibel_enabled);
   admit("DBT", settings.deribit_enabled);
   return active;

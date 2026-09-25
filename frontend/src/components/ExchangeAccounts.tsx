@@ -198,6 +198,13 @@ export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
     { key: "apiKey", label: "API Key Name", placeholder: "organizations/{org}/apiKeys/{keyId}" },
     { key: "apiSecret", label: "Private Key (EC PEM)", secret: true, placeholder: "-----BEGIN EC PRIVATE KEY-----" },
   ],
+  // Alpaca: OAuth-free key pair — APCA-API-KEY-ID + APCA-API-SECRET-KEY
+  // headers. Paper accounts mint a separate key pair on the paper
+  // dashboard; pick the matching environment zone when adding the account.
+  alpaca: [
+    { key: "apiKey", label: "API Key ID", secret: true, placeholder: "PK…" },
+    { key: "apiSecret", label: "API Secret Key", secret: true },
+  ],
   /* ---------------- Long-tail perp venues (DexPerpAdapter) ---------------- */
   // LIVE-TRADING VENUES — credentials below are what each adapter's
   // has_live_credentials() requires; nothing else gates order paths.
@@ -427,6 +434,7 @@ export const ACCOUNT_VENUE_DISPLAY: Record<string, string> = {
   okx: "OKX",
   aster: "Aster",
   coinbase: "Coinbase",
+  alpaca: "Alpaca",
   deribit: "Deribit",
   // Long-tail perp venues (DexPerpAdapter ids — must match the spec table).
   aevo: "Aevo",
@@ -477,6 +485,7 @@ const VENUE_SETTINGS_FLAG: Record<string, keyof EngineSettingsDto> = {
   aster: "aster_enabled",
   binance: "binance_enabled",
   coinbase: "coinbase_enabled",
+  alpaca: "alpaca_enabled",
   decibel: "decibel_enabled",
   deribit: "deribit_enabled",
   hyperliquid: "hyperliquid_enabled",

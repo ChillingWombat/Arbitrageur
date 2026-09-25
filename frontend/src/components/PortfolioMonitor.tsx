@@ -74,6 +74,7 @@ const formatVenueName = (raw: string) => {
     binance: "Binance",
     okx: "OKX",
     coinbase: "Coinbase",
+    alpaca: "Alpaca",
     kraken: "Kraken",
     decibel: "Decibel",
     arcus: "Arcus",

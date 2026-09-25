@@ -435,6 +435,10 @@ const VENUE_TAKER_FEE_BPS: &[(&str, f64)] = &[
     ("deribit", 5.0),
     ("kraken", 5.0),
     ("coinbase", 5.0),
+    // Alpaca crypto Tier-1: 15bps maker / 25bps taker on order notional
+    // (published fee schedule). Marketable orders are taker; equities are
+    // commission-free but this row covers the crypto legs the engine trades.
+    ("alpaca", 25.0),
     ("decibel", 5.0),
     ("popdex", 10.0),
     ("polymarket", 0.0),
@@ -815,6 +819,7 @@ fn venue_enabled_ids(state: &AppEngineState, s: &crate::state::EngineSettingsDto
         "coinbase",
         s.coinbase_enabled || account_enabled("coinbase"),
     );
+    push("alpaca", s.alpaca_enabled || account_enabled("alpaca"));
     push("okx", s.okx_enabled || account_enabled("okx"));
     push("deribit", s.deribit_enabled || account_enabled("deribit"));
     push("ibkr", s.ibkr_enabled || account_enabled("ibkr"));
@@ -875,6 +880,9 @@ fn public_probe_endpoint(vid: &str) -> Option<PublicProbe> {
             false,
         ),
         "coinbase" => p("https://api.coinbase.com/v2/time", false),
+        // Alpaca's clock endpoint is public; even without keys a 401/403
+        // from the API tier still proves the origin responded.
+        "alpaca" => p("https://api.alpaca.markets/v2/clock", true),
         "aster" => p("https://fapi.asterdex.com/fapi/v1/ping", false),
         "popdex" => p(
             "https://api.popdex.xyz/api/v1/public/market/tickers?category=Futures&limit=1",
@@ -1219,6 +1227,16 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             .into(),
             latency_ms: probe_ms("coinbase"),
             fee_bps: effective_venue_fee_bps(state, "coinbase"),
+            can_submit: false,
+            can_enter_strategy: false,
+        },
+        VenueStatusDto {
+            id: "alpaca".into(),
+            name: "Alpaca".into(),
+            market_type: "Equities & Crypto Spot Broker".into(),
+            status: venue_status("alpaca", s.alpaca_enabled || account_enabled("alpaca")).into(),
+            latency_ms: probe_ms("alpaca"),
+            fee_bps: effective_venue_fee_bps(state, "alpaca"),
             can_submit: false,
             can_enter_strategy: false,
         },
@@ -2720,6 +2738,10 @@ pub fn save_engine_settings_impl(
             settings.coinbase_enabled || account_enabled("coinbase"),
         ),
         (
+            "alpaca".into(),
+            settings.alpaca_enabled || account_enabled("alpaca"),
+        ),
+        (
             "decibel".into(),
             settings.decibel_enabled || account_enabled("decibel"),
         ),
@@ -2752,6 +2774,7 @@ pub fn save_engine_settings_impl(
                 "binance" => old.binance_enabled,
                 "okx" => old.okx_enabled,
                 "coinbase" => old.coinbase_enabled,
+                "alpaca" => old.alpaca_enabled,
                 "decibel" => old.decibel_enabled,
                 "ibkr" => old.ibkr_enabled,
                 "ig" => old.ig_enabled,
@@ -5142,9 +5165,9 @@ mod tests {
         assert_eq!(status.total_realized_pnl, 0.0);
         assert!(!status.circuit_breaker_tripped);
         assert_eq!(status.circuit_breaker_status, "ACTIVE");
-        // 17 primary venues + 26 DexPerpAdapter venues + 11 EvmAmmAdapter
+        // 18 primary venues + 26 DexPerpAdapter venues + 11 EvmAmmAdapter
         // venues (nothing enabled, no credentials).
-        assert_eq!(status.active_venues.len(), 54);
+        assert_eq!(status.active_venues.len(), 55);
         for v in &status.active_venues {
             // Adapter-less venues (arcus/polymarket/kalshi) report
             // UNSUPPORTED unconditionally — enablement can never admit

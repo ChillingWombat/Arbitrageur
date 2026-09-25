@@ -52,6 +52,7 @@ A venue is never “live-entry ready” merely because it has credentials and ca
 | OKX | Perpetual swaps | Yes | Yes | Yes | Yes | Yes | `GET /api/v5/trade/order` poll + restart supervisor | Unit + public reads | Gated by vault + venue readiness |
 | Coinbase | Spot | No perpetual funding | Yes | Yes | Yes | N/A; reduce-only unsupported | `GET /orders/{id}` poll + restart supervisor | Unit + public reads | Gated by vault + venue readiness |
 | Kraken | Linear futures in current adapter | Yes | Yes | Yes | Yes | No explicit implementation | `openorders` + `/fills` aggregation poll + restart supervisor | Unit + public reads | Gated by vault + venue readiness |
+| Alpaca | Crypto spot (equities spot reachable via `AAPL`-form symbols; no perp, no funding) | No perpetual funding | Yes (`GET /v2/account` + positions) | Yes (key/secret headers `APCA-API-*`) | Yes (`DELETE /v2/orders/{id}`) | N/A; reduce-only unsupported | `GET /v2/orders/{id}` poll + restart supervisor | Unit + stub-server round trip | Gated by vault + venue readiness |
 | Decibel | Markets/prices; REST depth unavailable upstream | Yes through prices endpoint | Yes | Yes, Aptos transaction | Yes | No explicit implementation | Commit-event decode + tx-hash poll + post-commit subaccount-tx scan (last 50 txs, identity-matched OrderEvent/TradeEvent; anonymous fills unattributed, window truncation fails closed) | Unit + selected public reads | Gated by vault + venue readiness |
 | Deribit | Options (BTC/ETH) + perpetual + dated futures; orderbook + book-summary reads | Yes (book-summary `funding_8h`) | Yes (`get_account_summary` + `get_positions`, both currencies) | Yes, OAuth `client_credentials` + buy/sell (limit/market/IOC) | Yes (`private/cancel`) | N/A — portfolio margin, no per-instrument leverage | `get_order_state` poll + restart supervisor | Unit + live testnet public-read smoke (`--ignored`); no credentialed order evidence yet | Gated by vault + venue readiness (`live_entry_gate`); options-parity manual entries only |
 | Arcus | Adapter scaffold, not admitted | Unavailable | Unavailable | Unavailable | Unavailable | Unavailable | None | Scaffold only | **No** |
@@ -93,8 +94,9 @@ The engine runs two real execution environments (`TradingEnvironment`); there is
 | Vanta / Orderly | `testnet-api.orderly.org` |
 | Decibel | Aptos testnet (`testnet-app.decibel.trade` domain) |
 | PopDEX | Morph testnet (chain 34952, `testnet-api.popdex.xyz`) |
+| Alpaca | `paper-api.alpaca.markets` (separate paper key namespace) |
 
-Venues without a public demo endpoint — Coinbase, Aster, Robinhood, Arcus, Polymarket, all DexPerp long-tail venues, and all EVM AMMs — are ineligible in testnet; they are never simulated. Testnet account profiles are a separate credential set (`exchange_accounts.environment = 'testnet'`) managed while Testnet Trading is the active mode; fund them at each venue's own faucet.
+Venues without a public demo endpoint — Coinbase, Aster, Robinhood, Arcus, Polymarket, all DexPerp long-tail venues, and all EVM AMMs — are ineligible in testnet; they are never simulated. Alpaca's paper host is a real venue sandbox (its own account namespace + keys), so Testnet admits it through `tn_alpaca`. Testnet account profiles are a separate credential set (`exchange_accounts.environment = 'testnet'`) managed while Testnet Trading is the active mode; fund them at each venue's own faucet.
 
 ## Live mode
 

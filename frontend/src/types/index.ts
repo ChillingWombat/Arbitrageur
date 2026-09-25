@@ -759,6 +759,7 @@ export interface EngineSettingsDto {
   popdex_enabled?: boolean;
   popdex_network?: string;
   coinbase_enabled?: boolean;
+  alpaca_enabled?: boolean;
   deribit_enabled?: boolean;
 
   // Deribit (OAuth2 client credentials pair — mint on test.deribit.com for

@@ -167,6 +167,14 @@ export const VENUE_TRANSFER_PROFILES: VenueTransferProfile[] = [
     confidence: "estimated", sourceNote: "Network fee only on crypto rails — re-check.",
   },
   {
+    venue: "alpaca", label: "Alpaca",
+    depositCoins: ["USD (ACH/wire)", "Crypto transfers"], withdrawCoins: ["USD", "Crypto (supported assets)"],
+    withdrawFeeUsd: null, depositFeeUsd: 0,
+    gasRangeUsd: null, networks: ["ACH / wire", "EVM (crypto transfers)"],
+    supportsDirectToAddress: true, timeEstimate: "~30 min crypto / 1–3 days fiat",
+    confidence: "unknown", sourceNote: "Broker custody; crypto transfer availability varies by account — re-check dashboard.",
+  },
+  {
     venue: "kraken", label: "Kraken",
     depositCoins: ["USDC", "USD"], withdrawCoins: ["USDC", "USD"],
     withdrawFeeUsd: 2.5, depositFeeUsd: 0,

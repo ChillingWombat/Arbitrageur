@@ -1,3 +1,4 @@
+pub mod alpaca;
 pub mod arcus;
 pub mod aster;
 pub mod binance;
@@ -21,6 +22,7 @@ pub mod vanta;
 pub mod wallet;
 pub mod ws;
 
+pub use alpaca::*;
 pub use arcus::*;
 pub use aster::*;
 pub use binance::*;
