@@ -2,10 +2,10 @@ use crate::rate_limiter::AccountRequestCoordinator;
 use arbitrageur_core::exchange::ExchangeAdapter;
 use arbitrageur_core::market::{MarketMetadata, Symbol};
 use arbitrageur_core::order::{CancelRequest, OrderRequest, OrderResponse};
-use arbitrageur_core::position::AccountSnapshot;
+use arbitrageur_core::position::{AccountSnapshot, Balance, Position};
 use arbitrageur_core::quote::{BookLevel, FundingRate, OrderBook, Ticker};
 use arbitrageur_core::symbol::canonical_base;
-use arbitrageur_core::types::{dec, Decimal, VenueId};
+use arbitrageur_core::types::{dec, Decimal, Side, VenueId};
 use async_trait::async_trait;
 use chrono::Utc;
 use parking_lot::RwLock;
@@ -19,15 +19,22 @@ use zeroize::Zeroizing;
 /// environment selects by base URL. Market data is unauthenticated
 /// (`/v1/markets`, `/v1/l2OrderBook/{market}`, `/v1/mids`, `/v1/feetiers`);
 /// order routing requires per-request Ed25519 signatures which are not
-/// implemented here, so order and account paths fail closed rather than
-/// fabricate. The venue is a market-data peer: admitted in both
-/// environments, excluded from execution by `supports_live_execution`.
+/// implemented here, so order paths fail closed rather than fabricate.
+/// Account reads are public (`GET /v1/account?address=…`) and return the
+/// venue's real equity/collateral/positions. The venue is a market-data
+/// peer: admitted in both environments, excluded from execution by
+/// `supports_live_execution`.
 pub struct ArcusAdapter {
     venue_id: VenueId,
     client: Client,
     base_url: String,
     api_key: RwLock<Option<Zeroizing<String>>>,
     api_secret: RwLock<Option<Zeroizing<String>>>,
+    /// Master Ethereum address — `GET /v1/account` scopes by it. Not
+    /// secret (public key material) but stored alongside credentials.
+    wallet_address: RwLock<Option<String>>,
+    /// Arcus subaccount index (0–9); default 0.
+    account_index: RwLock<Option<u64>>,
     rate_limiter: AccountRequestCoordinator,
 }
 
@@ -54,16 +61,26 @@ impl ArcusAdapter {
             base_url: base,
             api_key: RwLock::new(api_key.map(Zeroizing::new)),
             api_secret: RwLock::new(api_secret.map(Zeroizing::new)),
+            wallet_address: RwLock::new(None),
+            account_index: RwLock::new(None),
             rate_limiter: AccountRequestCoordinator::new("arcus", 100, 2000, 500, 10000),
         }
     }
 
-    /// Rotate or clear credentials — Arcus reads are public today; the
-    /// stored key pair is what order signing will use once Ed25519 request
-    /// signing lands.
-    pub fn update_credentials(&self, api_key: Option<String>, api_secret: Option<String>) {
+    /// Rotate or clear credentials. The Ed25519 key pair is what order
+    /// signing will use once implemented; `wallet_address` +
+    /// `account_index` scope the public account/positions reads.
+    pub fn update_credentials(
+        &self,
+        api_key: Option<String>,
+        api_secret: Option<String>,
+        wallet_address: Option<String>,
+        account_index: Option<u64>,
+    ) {
         *self.api_key.write() = api_key.map(Zeroizing::new);
         *self.api_secret.write() = api_secret.map(Zeroizing::new);
+        *self.wallet_address.write() = wallet_address;
+        *self.account_index.write() = account_index;
     }
 
     async fn get_json(&self, path: &str) -> anyhow::Result<serde_json::Value> {
@@ -312,10 +329,135 @@ impl ExchangeAdapter for ArcusAdapter {
     }
 
     async fn fetch_account(&self) -> anyhow::Result<AccountSnapshot> {
-        anyhow::bail!(
-            "Account fetch is not implemented for {}; refusing to fabricate an account snapshot",
-            self.name()
-        )
+        // `GET /v1/account` is a public endpoint scoped by the master
+        // wallet address — only the stored address + subaccount index are
+        // needed, no signature.
+        let wallet = {
+            let guard = self.wallet_address.read();
+            guard
+                .as_deref()
+                .map(str::trim)
+                .filter(|w| !w.is_empty())
+                .map(str::to_string)
+        }
+        .ok_or_else(|| anyhow::anyhow!("Arcus account fetch requires the master wallet address"))?;
+        let idx = self.account_index.read().unwrap_or(0);
+        let path = format!("/v1/account?address={wallet}&accountIndex={idx}");
+
+        let empty_snapshot = |venue: VenueId| AccountSnapshot {
+            venue,
+            equity: dec!(0),
+            free_margin: dec!(0),
+            maintenance_margin: dec!(0),
+            margin_usage_pct: dec!(0),
+            balances: Vec::new(),
+            positions: Vec::new(),
+            timestamp: Utc::now(),
+        };
+
+        // Status-aware fetch (the shared `get_json` bails on non-2xx and
+        // the venue returns 404 for an address that has never deposited —
+        // a truthful empty account, not an error).
+        let data: serde_json::Value =
+            match self.rate_limiter.acquire_or_cache_path(&path, true).await? {
+                Some(cached) => serde_json::from_str(&cached)?,
+                None => {
+                    let url = format!("{}{}", self.base_url, path);
+                    let resp = match self.client.get(&url).send().await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            self.rate_limiter.record_failure(false);
+                            return Err(e.into());
+                        }
+                    };
+                    if resp.status() == reqwest::StatusCode::NOT_FOUND {
+                        return Ok(empty_snapshot(self.venue_id.clone()));
+                    }
+                    if !resp.status().is_success() {
+                        let is_429 = resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS;
+                        self.rate_limiter.record_failure(is_429);
+                        anyhow::bail!("Arcus API error: {} {}", resp.status(), path);
+                    }
+                    let text = resp.text().await?;
+                    self.rate_limiter.record_success_path(&path, text.clone());
+                    serde_json::from_str(&text)?
+                }
+            };
+        // Defensive: some gateway builds echo {"error": ...} on 200 for
+        // the same never-deposited case — treat it like the 404.
+        if data.get("accountIndex").is_none() && data.get("equity").is_none() {
+            return Ok(empty_snapshot(self.venue_id.clone()));
+        }
+
+        let dec_of = |v: Option<&serde_json::Value>| -> Decimal {
+            v.and_then(|v| v.as_str())
+                .and_then(|s| Decimal::from_str_exact(s).ok())
+                .unwrap_or(dec!(0))
+        };
+        let equity = dec_of(data.get("equity"));
+        let free = dec_of(data.get("freeCollateral"));
+        let used = (equity - free).max(dec!(0));
+
+        let mut positions = Vec::new();
+        if let Some(map) = data.get("positions").and_then(|p| p.as_object()) {
+            for (_market_id, p) in map {
+                let size = dec_of(p.get("size"));
+                if size == dec!(0) {
+                    continue;
+                }
+                let side = match p
+                    .get("side")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("")
+                    .to_ascii_uppercase()
+                    .as_str()
+                {
+                    "SHORT" => Side::Sell,
+                    _ => Side::Buy,
+                };
+                let sym = p
+                    .get("marketDisplayName")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("UNKNOWN")
+                    .to_string();
+                positions.push(Position {
+                    symbol: sym,
+                    venue: self.venue_id.clone(),
+                    side,
+                    quantity: size.abs(),
+                    entry_price: dec_of(p.get("averageEntryPrice")),
+                    mark_price: dec_of(p.get("markPx")),
+                    unrealized_pnl: dec_of(p.get("unrealizedPnl")),
+                    realized_pnl: dec!(0),
+                    liquidation_price: None,
+                    leverage: dec_of(p.get("leverage")),
+                    initial_margin: dec_of(p.get("marginUsed")),
+                    maintenance_margin: dec_of(p.get("marginUsed")),
+                    updated_at: Utc::now(),
+                });
+            }
+        }
+
+        Ok(AccountSnapshot {
+            venue: self.venue_id.clone(),
+            equity,
+            free_margin: free,
+            maintenance_margin: used,
+            margin_usage_pct: if equity > dec!(0) {
+                (used / equity) * dec!(100)
+            } else {
+                dec!(0)
+            },
+            balances: vec![Balance {
+                venue: self.venue_id.clone(),
+                currency: "USDG".to_string(),
+                total: equity,
+                free,
+                locked: used,
+            }],
+            positions,
+            timestamp: Utc::now(),
+        })
     }
 
     async fn place_order(&self, _order: OrderRequest) -> anyhow::Result<OrderResponse> {
