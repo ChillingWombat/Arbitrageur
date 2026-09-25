@@ -190,18 +190,6 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
     [qtyBase, minEdgeBps, onRefreshAll],
   );
 
-  if (!deribitAvailable) {
-    return (
-      <div className="p-6">
-        <EmptyState
-          icon={Option}
-          title="Deribit is not enabled"
-          hint="Options parity runs on Deribit only. Enable Deribit in Engine Settings and add its Client ID + Secret under Exchange Accounts (test.deribit.com credentials for Testnet mode)."
-        />
-      </div>
-    );
-  }
-
   return (
     <div className="p-4 space-y-4">
       <div className="panel p-4">
@@ -237,7 +225,12 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
           <button
             type="button"
             onClick={() => void scan()}
-            disabled={scanning || isPaused}
+            disabled={scanning || isPaused || !deribitAvailable}
+            title={
+              !deribitAvailable
+                ? "No options-capable venue is enabled in this environment"
+                : undefined
+            }
             className="btn-primary inline-flex items-center gap-1.5"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${scanning ? "animate-spin" : ""}`} />
@@ -256,6 +249,18 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
           unrealized until expiry — premiums and fees are the only cash at
           entry.
         </p>
+        {!deribitAvailable && (
+          <div className="mt-2 p-2.5 rounded-lg border border-amber-500/40 bg-amber-500/10 text-amber-300 text-xs flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            <span>
+              No options-capable venue is enabled — parity scanning currently
+              requires Deribit. Enable it under Engine Settings → Exchanges and
+              add Client ID + Secret in Exchange Accounts (test.deribit.com
+              credentials in Testnet mode). Additional options venues will slot
+              into this page as they are wired.
+            </span>
+          </div>
+        )}
       </div>
 
       {error && (

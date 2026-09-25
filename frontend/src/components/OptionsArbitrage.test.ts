@@ -53,7 +53,10 @@ const opp = (over: Partial<OptionsParityOpportunityDto> = {}): OptionsParityOppo
   ...over,
 });
 
-test("gate: unadmitted Deribit renders the enable hint, never a scan control", () => {
+test("gate: unadmitted options venue renders the page with a disabled scan + banner", () => {
+  // The page is the strategy monitor — other options venues will exist, so
+  // it stays visible; only the scan action is gated on an options-capable
+  // venue being admitted.
   const html = renderToStaticMarkup(
     React.createElement(OptionsArbitrage, {
       executionLogs: [],
@@ -61,9 +64,12 @@ test("gate: unadmitted Deribit renders the enable hint, never a scan control", (
       deribitAvailable: false,
     })
   );
-  assert.match(html, /Deribit is not enabled/);
+  assert.match(html, /Options ↔ Perp Parity/);
+  assert.match(html, /No options-capable venue is enabled/);
   assert.match(html, /test\.deribit\.com/);
-  assert.ok(!html.includes(">Scan<"), "no scan affordance when unadmitted");
+  const scanBtn = html.match(/<button[^>]*>\s*<svg[\s\S]*?Scan\s*<\/button>/);
+  assert.ok(scanBtn, "Scan button renders (disabled)");
+  assert.match(scanBtn[0], /disabled/);
 });
 
 test("card: conversion legs render with venue prices and the execute gate title", () => {
