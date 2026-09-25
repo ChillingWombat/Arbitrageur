@@ -19,6 +19,7 @@ pub mod rate_limiter;
 pub mod robinhood;
 pub mod simulated;
 pub mod vanta;
+pub mod variational;
 pub mod wallet;
 pub mod ws;
 

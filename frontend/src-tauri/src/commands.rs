@@ -441,6 +441,8 @@ const VENUE_TAKER_FEE_BPS: &[(&str, f64)] = &[
     ("alpaca", 25.0),
     ("decibel", 5.0),
     ("popdex", 10.0),
+    // Variational Omni charges zero trading fees (OLP-internal venue).
+    ("variational", 0.0),
     ("polymarket", 0.0),
     ("kalshi", 10.0),
     // DexPerp family — mirrors each venue's spec-published taker.
@@ -824,6 +826,8 @@ fn venue_enabled_ids(state: &AppEngineState, s: &crate::state::EngineSettingsDto
     push("deribit", s.deribit_enabled || account_enabled("deribit"));
     push("ibkr", s.ibkr_enabled || account_enabled("ibkr"));
     push("ig", s.ig_enabled || account_enabled("ig"));
+    // Credential-less market-data venue — the account row IS the switch.
+    push("variational", account_enabled("variational"));
     // Long-tail perp venues admit via an enabled account only (no
     // engine-settings flags exist for them).
     for adapter in &state.live_dex_perps {
@@ -880,6 +884,12 @@ fn public_probe_endpoint(vid: &str) -> Option<PublicProbe> {
             false,
         ),
         "coinbase" => p("https://api.coinbase.com/v2/time", false),
+        // The Omni stats document is the same public endpoint the adapter
+        // reads — a valid RTT even when the venue isn't adapter-admitted.
+        "variational" => p(
+            "https://omni-client-api.prod.ap-northeast-1.variational.io/metadata/stats",
+            false,
+        ),
         // Alpaca's clock endpoint is public; even without keys a 401/403
         // from the API tier still proves the origin responded.
         "alpaca" => p("https://api.alpaca.markets/v2/clock", true),
@@ -1277,6 +1287,18 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             status: venue_status("ig", s.ig_enabled || account_enabled("ig")).into(),
             latency_ms: probe_ms("ig"),
             fee_bps: 5.0,
+            can_submit: false,
+            can_enter_strategy: false,
+        },
+        VenueStatusDto {
+            id: "variational".into(),
+            name: "Variational Omni".into(),
+            market_type: "Peer-to-Pool Perps".into(),
+            status: venue_status("variational", account_enabled("variational")).into(),
+            latency_ms: probe_ms("variational"),
+            // Omni is zero-fee — the integrated OLP retains market-making
+            // yield instead of charging taker/maker commissions.
+            fee_bps: 0.0,
             can_submit: false,
             can_enter_strategy: false,
         },
@@ -5165,9 +5187,9 @@ mod tests {
         assert_eq!(status.total_realized_pnl, 0.0);
         assert!(!status.circuit_breaker_tripped);
         assert_eq!(status.circuit_breaker_status, "ACTIVE");
-        // 18 primary venues + 26 DexPerpAdapter venues + 11 EvmAmmAdapter
+        // 19 primary venues + 26 DexPerpAdapter venues + 11 EvmAmmAdapter
         // venues (nothing enabled, no credentials).
-        assert_eq!(status.active_venues.len(), 55);
+        assert_eq!(status.active_venues.len(), 56);
         for v in &status.active_venues {
             // Adapter-less venues (arcus/polymarket/kalshi) report
             // UNSUPPORTED unconditionally — enablement can never admit
@@ -5325,6 +5347,73 @@ mod tests {
             assert!(!row.can_submit);
             assert!(!row.can_enter_strategy);
         }
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Variational admits with a credential-less enabled account (market
+    /// data is public; the trading API is not yet released) — Live only.
+    /// Status must read READ_ONLY and get_venues must carry the adapter.
+    #[tokio::test]
+    async fn test_variational_admits_via_credentialless_live_account() {
+        let (state, dir) = test_state_with_vault("variational-admit");
+        state.set_environment(crate::state::TradingEnvironment::Live);
+
+        upsert_account_impl(
+            AccountUpsertInput {
+                environment: None,
+                account_tier: None,
+                max_leverage: None,
+                id: None,
+                venue: "variational".into(),
+                label: "V".into(),
+                enabled: true,
+                make_default: false,
+                credentials: None,
+            },
+            &state,
+        )
+        .expect("create variational account");
+
+        assert!(state
+            .get_venues()
+            .iter()
+            .any(|(v, _, _)| *v == "variational"));
+        assert!(state.get_adapter("variational").is_some());
+        let status = get_system_status_impl(&state).await.expect("status");
+        let row = status
+            .active_venues
+            .iter()
+            .find(|v| v.id == "variational")
+            .expect("variational row");
+        assert_eq!(row.status, "READ_ONLY");
+        // Read-only venue: capability flags must never claim execution.
+        assert!(!row.can_submit);
+        assert!(!row.can_enter_strategy);
+        assert_eq!(row.fee_bps, 0.0);
+
+        // No demo environment exists — Testnet can never admit it even
+        // with a testnet-scoped account row.
+        state.set_environment(crate::state::TradingEnvironment::Testnet);
+        upsert_account_impl(
+            AccountUpsertInput {
+                environment: None,
+                account_tier: None,
+                max_leverage: None,
+                id: None,
+                venue: "variational".into(),
+                label: "V-TN".into(),
+                enabled: true,
+                make_default: false,
+                credentials: None,
+            },
+            &state,
+        )
+        .expect("create testnet variational account");
+        assert!(state
+            .get_venues()
+            .iter()
+            .all(|(v, _, _)| *v != "variational"));
 
         let _ = std::fs::remove_dir_all(dir);
     }

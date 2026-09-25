@@ -71,6 +71,7 @@ export type ExchangeId =
   | "popdex"
   | "robinhood"
   | "vanta"
+  | "variational"
   // Long-tail perp venues (shared DexPerpAdapter; account-enabled only —
   // no engine-settings flags). Live-trading subset: aevo, derive, grvt,
   // nado, ondoperps, pacifica, qfex, standx, vest — the rest are market-data only.
@@ -245,6 +246,7 @@ export const EXCHANGES_ALPHABETICAL: ExchangeMetadata[] = [
   { id: "uniswap", name: "Uniswap V3", type: "Spot AMM — Ethereum (Live)", group: "EVM AMM — Ethereum" },
   { id: "uniswap_v2", name: "Uniswap V2", type: "Spot AMM — Ethereum (Live)", group: "EVM AMM — Ethereum" },
   { id: "vanta", name: "Vanta", type: "Omnichain Perps", group: "Primary" },
+  { id: "variational", name: "Variational", type: "Omni Perps — Zero Fee (Market Data)", group: "Primary" },
   { id: "velodrome", name: "Velodrome", type: "Spot AMM — Optimism (Market Data)", group: "EVM AMM — Optimism" },
   { id: "vest", name: "Vest", type: "Perp DEX (Live)", group: "Perp DEX — Long Tail" },
 ];

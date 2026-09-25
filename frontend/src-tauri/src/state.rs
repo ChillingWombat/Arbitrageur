@@ -19,6 +19,7 @@ use arbitrageur_exchanges::lighter::LighterAdapter;
 use arbitrageur_exchanges::okx::OkxAdapter;
 use arbitrageur_exchanges::popdex::PopDexAdapter;
 use arbitrageur_exchanges::vanta::VantaAdapter;
+use arbitrageur_exchanges::variational::VariationalAdapter;
 use arbitrageur_execution::coordinator::AtomicArbitrageCoordinator;
 use arbitrageur_execution::passive_unwind::PassiveUnwindConfig;
 use arbitrageur_execution::smart_routing::SmartOrderRouter;
@@ -1310,6 +1311,10 @@ pub struct AppEngineState {
     /// Pendle Boros (Arbitrum rate swaps) — the YU hedge venue for
     /// fixed-yield carries. Live-only: Boros has no testnet.
     pub live_boros: Arc<BorosAdapter>,
+    /// Variational Omni (Arbitrum peer-to-pool perps) — market data only:
+    /// its public API is a stats document; the trading API is not yet
+    /// public. Live-only — no demo environment exists.
+    pub live_variational: Arc<VariationalAdapter>,
     /// Testnet adapter set — `None` entries mean the venue has no public
     /// testnet and is ineligible under `TradingEnvironment::Testnet`.
     /// Endpoint overrides (`endpoints.*`) apply to the live set only;
@@ -1515,6 +1520,9 @@ pub(crate) fn canonical_venue_id(input: &str) -> Option<&'static str> {
         "boros" | "pendle boros" | "pendle" | "boros (pendle)" | "boros (arbitrum)" => {
             Some("boros")
         }
+        "variational" | "var" | "variational omni" | "omni" | "variational (omni)" => {
+            Some("variational")
+        }
         "alpha x" => Some("alphax"),
         "antarctic exchange" => Some("antarctic"),
         "eve dex" => Some("evedex"),
@@ -1576,6 +1584,7 @@ pub(crate) fn venue_has_adapter(venue_id: &str) -> bool {
             | "deribit"
             | "decibel"
             | "boros"
+            | "variational"
     ) || ADMITTED_DEX_PERP_VENUE_IDS.contains(&vid)
         || ADMITTED_EVM_AMM_VENUE_IDS.contains(&vid)
 }
@@ -1899,6 +1908,7 @@ impl AppEngineState {
             .filter_map(|id| EvmAmmAdapter::for_venue(id, None).map(Arc::new))
             .collect();
         let live_boros = Arc::new(BorosAdapter::new(None));
+        let live_variational = Arc::new(VariationalAdapter::new(None));
 
         // Testnet adapter set — public testnet/demo endpoints only.
         // Venues absent here (Coinbase, Aster, Arcus, Robinhood, Polymarket,
@@ -2215,6 +2225,7 @@ impl AppEngineState {
             live_dex_perps,
             live_evm_amms,
             live_boros,
+            live_variational,
             tn_hl,
             tn_lighter,
             tn_vanta,
@@ -3056,6 +3067,16 @@ impl AppEngineState {
             // fetched separately and needs no credentials.
             if account_enabled("boros") {
                 list.push(("boros", "Pendle Boros", self.live_boros.clone()));
+            }
+            // Variational Omni needs no credentials — a (credential-less)
+            // enabled account is the admission switch, like the DexPerp
+            // market-data venues.
+            if account_enabled("variational") {
+                list.push((
+                    "variational",
+                    "Variational Omni",
+                    self.live_variational.clone(),
+                ));
             }
         } else {
             // Testnet environment — only venues with public demo endpoints.
