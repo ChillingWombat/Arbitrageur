@@ -179,7 +179,7 @@ async fn dispatch(line: &str, state: &Arc<AppEngineState>) -> Value {
                 arg_u32(&args, "max_units"),
                 arg_f64(&args, "nominal_hurdle_bps"),
                 None,
-                "futures",
+                arg(&args, "strategy_id").unwrap_or("futures"),
                 None,
                 st,
             )
@@ -259,6 +259,8 @@ async fn dispatch(line: &str, state: &Arc<AppEngineState>) -> Value {
         "radar_bot_status" => radar_bot_status(st),
         "radar_bot_config" => radar_bot_config(st),
         "set_radar_bot_config" => set_radar_bot_config(&args, st),
+        "monitor_snapshot" => monitor_snapshot(&args, st),
+        "adopt_position" => adopt_position(&args, st),
 
         _ => Err(format!("unknown cmd '{cmd}'")),
     };
@@ -375,4 +377,69 @@ fn set_radar_bot_config(args: &Value, state: &AppEngineState) -> Result<Value, S
         serde_json::from_value(args.get("config").cloned().unwrap_or_else(|| json!({})))
             .map_err(|e| format!("bad config: {e}"))?;
     crate::auto_exec::OpportunityExecutor::save_config(state, &cfg).map(|_| json!(true))
+}
+
+fn monitor_snapshot(args: &Value, state: &AppEngineState) -> Result<Value, String> {
+    let eng = state
+        .monitor
+        .lock()
+        .clone()
+        .ok_or_else(|| "monitor engine is not running".to_string())?;
+    let snap = eng
+        .snapshot()
+        .ok_or_else(|| "no monitor snapshot yet".to_string())?;
+    let status_filter = arg(args, "status").map(|s| s.to_string());
+    let rows: Vec<Value> = snap
+        .rows
+        .iter()
+        .filter(|r| status_filter.as_deref().is_none_or(|f| r.status == f))
+        .map(|r| {
+            json!({
+                "symbol": r.symbol,
+                "buy": r.buy_venue,
+                "sell": r.sell_venue,
+                "status": r.status,
+                "executable": r.executable,
+                "block": r.block_reason,
+                "edge_bps": r.current_edge_bps,
+                "dev_bps": r.deviation_bps,
+                "baseline_bps": r.baseline_bps,
+                "net_capture_bps": r.net_capture_bps,
+                "p_win": r.p_win,
+                "win_prob": r.win_probability,
+                "win_lower": r.win_probability_lower,
+                "exp_profit_bps": r.expected_profit_bps,
+                "optimal_usd": r.optimal_size_usd,
+                "progress": r.qualification_progress,
+                "episodes": r.observed_episodes,
+            })
+        })
+        .collect();
+    Ok(json!({"ts_ms": snap.generated_ts_ms, "row_count": snap.rows.len(), "rows": rows}))
+}
+
+fn adopt_position(args: &Value, state: &AppEngineState) -> Result<Value, String> {
+    let bot = state
+        .radar_bot
+        .lock()
+        .clone()
+        .ok_or_else(|| "radar bot is not running".to_string())?;
+    let symbol = arg(args, "symbol").unwrap_or_default();
+    let buy = arg(args, "buy_venue").unwrap_or_default();
+    let sell = arg(args, "sell_venue").unwrap_or_default();
+    if symbol.is_empty() || buy.is_empty() || sell.is_empty() {
+        return Err("symbol, buy_venue, sell_venue required".into());
+    }
+    bot.adopt_manual_position(
+        state,
+        symbol,
+        buy,
+        sell,
+        arg_f64(args, "size_usd").unwrap_or(0.0),
+        arg_f64(args, "entry_dev_bps"),
+        arg_f64(args, "baseline_bps"),
+        arg_f64(args, "friction_band_bps"),
+        arg_f64(args, "expected_converge_secs"),
+    )
+    .map(|_| json!(true))
 }
