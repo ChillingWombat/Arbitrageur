@@ -1023,14 +1023,28 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
             if let Some(adapter) = admitted_map.get(vid.as_str()) {
                 let vid = vid.clone();
                 let adapter = Arc::clone(adapter);
+                let fallback = public_probe_endpoint(&vid);
                 probes.push(tokio::spawn(async move {
                     let start = std::time::Instant::now();
-                    let ms = adapter
-                        .ping()
-                        .await
-                        .ok()
-                        .map(|_| start.elapsed().as_millis() as u64);
-                    (vid, ms)
+                    if adapter.ping().await.is_ok() {
+                        return (vid, Some(start.elapsed().as_millis() as u64));
+                    }
+                    // Adapter ping failed — locked vault, an auth-gated
+                    // endpoint, or the venue's local rate-limit backoff
+                    // refusing before a packet ever left. The verified public
+                    // endpoint measures the same API host's network path, so
+                    // fall back to it rather than dropping the sample.
+                    match fallback {
+                        Some(spec) => {
+                            let start = std::time::Instant::now();
+                            let ms = probe_http(spec)
+                                .await
+                                .ok()
+                                .map(|_| start.elapsed().as_millis() as u64);
+                            (vid, ms)
+                        }
+                        None => (vid, None),
+                    }
                 }));
             } else if let Some(spec) = public_probe_endpoint(vid) {
                 let vid = vid.clone();
