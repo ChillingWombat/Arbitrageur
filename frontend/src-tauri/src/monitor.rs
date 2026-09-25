@@ -32,8 +32,8 @@ use arbitrageur_math::pair_monitor::{
 };
 use arbitrageur_math::session::{
     apply_entry_adjust_bps, depth_mult, in_funding_mask, inverse_vol_mult, is_equity_rails,
-    is_ondo_venue, is_weekend, session_allow, session_of, us_cash_open, winsorized_median,
-    FastVolEwma, SessionId, FAST_VOL_HALT_MULT, SPREAD_STANDDOWN_MULT,
+    is_weekend, session_allow, session_of, us_cash_open, winsorized_median, FastVolEwma, SessionId,
+    FAST_VOL_HALT_MULT, SPREAD_STANDDOWN_MULT,
 };
 use chrono::Utc;
 use parking_lot::Mutex;
@@ -2391,6 +2391,24 @@ impl SpreadMonitorEngine {
             .map(|(r, _)| *r)
     }
 
+    /// Whether one leg is bound to US cash-equity hours — resolved
+    /// through the venue's own adapter so equity rails (Alpaca shares,
+    /// Ondo tokenized perps) and 24/7 crypto legs on the same venue
+    /// classify correctly. Unknown venues/lanes report not-bound.
+    fn leg_cash_session_bound(&self, symbol: &str, venue: &str) -> bool {
+        let key = self.leg_lane_key(symbol, venue);
+        let lanes = self.lanes.lock();
+        let Some(l) = lanes.iter().find(|l| l.venue == venue) else {
+            return false;
+        };
+        let sym = l
+            .fetch_symbol
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| self.leg_instrument(symbol, venue));
+        l.adapter.cash_session_bound(&sym)
+    }
+
     /// Venue-facing fetch symbol for a row leg — resolves a member
     /// instrument back to the adapter's own spelling ("QQQ-USD").
     pub(crate) fn leg_venue_symbol(&self, symbol: &str, venue: &str) -> Option<String> {
@@ -3013,7 +3031,13 @@ impl SpreadMonitorEngine {
         // Session regime for this pair at this timestamp. Provisional or
         // missing aggregates degrade every multiplier below to neutral.
         let sess = session_context(state, symbol, buy_v, sell_v, now_ms);
-        let ondo_closed = (is_ondo_venue(buy_v) || is_ondo_venue(sell_v)) && !us_cash_open(now_ms);
+        // Cash-hours gate, per leg: Alpaca share legs and Ondo tokenized
+        // equity legs refuse IOC outside US market hours; crypto pairs on
+        // the same rails trade 24/7. The venue's own adapter classifies
+        // the leg's lane symbol — never assumed by venue name alone.
+        let ondo_closed = (self.leg_cash_session_bound(symbol, buy_v)
+            || self.leg_cash_session_bound(symbol, sell_v))
+            && !us_cash_open(now_ms);
 
         // --- live books ------------------------------------------------
         let buy_book = state.market_data_hub.get_valid_orderbook(
