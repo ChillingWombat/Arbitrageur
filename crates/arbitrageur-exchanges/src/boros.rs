@@ -586,6 +586,14 @@ impl BorosAdapter {
         Self::require_unmatured(m)
     }
 
+    /// Resolve a YU market by venue-style symbol — used by the
+    /// fixed-yield exit path, where persisted legs carry symbols.
+    /// Delegates to `resolve_market` so the `BOROS-{id}` fallback and the
+    /// maturity re-check stay single-sourced.
+    pub async fn market_by_symbol(&self, symbol: &str) -> anyhow::Result<BorosYuMarket> {
+        self.resolve_market(symbol).await
+    }
+
     /// The markets list is cached (TTL window) — a market that matured
     /// inside the window must still refuse orders. Re-check at resolve
     /// time, never trust the cache's fetch-time filter.
@@ -613,7 +621,10 @@ impl BorosAdapter {
 
     /// The agent approval must be live before any order path can work —
     /// checked against the backend, never assumed.
-    async fn agent_approved(&self) -> anyhow::Result<bool> {
+    /// Raw agent-approval expiry (unix seconds). `Ok(None)` means the
+    /// venue answered but carried no parseable expiry — callers must treat
+    /// that as "not approved", never as "approved forever".
+    pub async fn agent_expiry_unix(&self) -> anyhow::Result<Option<u64>> {
         let creds = self.creds()?;
         let val = self
             .get(&format!(
@@ -623,15 +634,72 @@ impl BorosAdapter {
                 creds.agent.address_checksum()
             ))
             .await?;
-        let expiry = val
+        Ok(val
             .get("expiryTime")
             .or_else(|| val.get("expiry"))
             .and_then(|v| {
                 v.as_u64()
                     .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
-            })
-            .unwrap_or(0);
+            }))
+    }
+
+    async fn agent_approved(&self) -> anyhow::Result<bool> {
+        let expiry = self.agent_expiry_unix().await?.unwrap_or(0);
         Ok(expiry > Utc::now().timestamp().max(0) as u64)
+    }
+
+    /// Sponsored-gas treasury in USD, parsed from the account read
+    /// (`market-acc-infos` rows carry it when the venue reports one).
+    /// `Ok(None)` = the venue did not report a balance — callers surface
+    /// "unknown", never a fabricated zero.
+    pub async fn gas_treasury_usd(&self) -> anyhow::Result<Option<f64>> {
+        let creds = self.creds()?;
+        let market_accs = vec![Self::cross_market_acc(&creds, 0)];
+        let resp = self
+            .post(
+                "/v1/accounts/market-acc-infos",
+                &serde_json::json!({ "marketAccs": market_accs }),
+            )
+            .await?;
+        let rows = resp
+            .get("results")
+            .and_then(|r| r.as_array())
+            .cloned()
+            .unwrap_or_default();
+        for row in &rows {
+            for key in [
+                "gasBalanceUsd",
+                "gas_balance_usd",
+                "gasBalance",
+                "gas_balance",
+            ] {
+                if let Some(v) = row.get(key) {
+                    // Encoding is ambiguous by name: JSON numbers and
+                    // decimal strings are plain USD; pure-digit strings
+                    // long enough to be x18 fixed point decode as such.
+                    // Anything unparseable is skipped — never fabricated.
+                    if let Some(f) = v.as_f64().filter(|f| f.is_finite()) {
+                        return Ok(Some(f));
+                    }
+                    if let Some(s) = v.as_str() {
+                        if s.len() >= 15 && s.chars().all(|c| c.is_ascii_digit()) {
+                            if let Some(d) = dec_fixed_x18(Some(v))
+                                .and_then(|d| d.to_f64())
+                                .filter(|f| f.is_finite())
+                            {
+                                return Ok(Some(d));
+                            }
+                        }
+                        if let Ok(f) = s.parse::<f64>() {
+                            if f.is_finite() {
+                                return Ok(Some(f));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok(None)
     }
 
     fn map_order_status(
@@ -1254,6 +1322,349 @@ mod tests {
         assert!(markets
             .iter()
             .any(|m| boros_platform_venue_id(&m.platform).is_some()));
+    }
+
+    /// Minimal scripted HTTP responder — one connection per request,
+    /// dispatch on path prefix, FIFO responses per route. Mirrors the
+    /// funding.rs wire stub at a smaller surface.
+    async fn stub_api(routes: Vec<(&str, Vec<(u16, serde_json::Value)>)>) -> String {
+        use std::collections::{HashMap, VecDeque};
+        use std::sync::Mutex;
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let map: HashMap<String, VecDeque<(u16, String)>> = routes
+            .into_iter()
+            .map(|(k, v)| {
+                (
+                    k.to_string(),
+                    v.into_iter().map(|(s, b)| (s, b.to_string())).collect(),
+                )
+            })
+            .collect();
+        let shared = Arc::new(Mutex::new(map));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    break;
+                };
+                let shared = shared.clone();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let path = req.split_whitespace().nth(1).unwrap_or("").to_string();
+                    let (status, body) = {
+                        let mut guard = shared.lock().unwrap();
+                        guard
+                            .iter_mut()
+                            .find(|(prefix, _)| path.starts_with(prefix.as_str()))
+                            .and_then(|(_, q)| q.pop_front())
+                            .unwrap_or_else(|| (404, "{\"error\":\"unstubbed\"}".to_string()))
+                    };
+                    let resp = format!(
+                        "HTTP/1.1 {status} OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = sock.write_all(resp.as_bytes()).await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn stubbed_adapter(base: &str) -> BorosAdapter {
+        let a = BorosAdapter::new(Some(base.to_string()));
+        a.update_credentials(
+            Some("0x0000000000000000000000000000000000000000000000000000000000000001".to_string()),
+            Some("0x009dcf85824e024fea9e3ef583dccbea68edbc37".to_string()),
+            Some("0".to_string()),
+        )
+        .unwrap();
+        a
+    }
+
+    #[tokio::test]
+    async fn agent_expiry_parses_numeric_string_and_missing() {
+        let base = stub_api(vec![(
+            "/v1/agents/expiry-time",
+            vec![
+                (200, serde_json::json!({"expiryTime": 2_000_000_000u64})),
+                (200, serde_json::json!({"expiryTime": "2000000001"})),
+                (200, serde_json::json!({"expiry": 2_000_000_002u64})),
+                (200, serde_json::json!({})),
+                (200, serde_json::json!({"expiryTime": "not-a-number"})),
+            ],
+        )])
+        .await;
+        let a = stubbed_adapter(&base);
+        assert_eq!(a.agent_expiry_unix().await.unwrap(), Some(2_000_000_000));
+        assert_eq!(a.agent_expiry_unix().await.unwrap(), Some(2_000_000_001));
+        assert_eq!(a.agent_expiry_unix().await.unwrap(), Some(2_000_000_002));
+        // Missing or malformed expiry is `None` — never "approved forever".
+        assert_eq!(a.agent_expiry_unix().await.unwrap(), None);
+        assert_eq!(a.agent_expiry_unix().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn agent_approved_fails_closed_on_expired_and_missing() {
+        let now = Utc::now().timestamp().max(0) as u64;
+        let base = stub_api(vec![(
+            "/v1/agents/expiry-time",
+            vec![
+                (200, serde_json::json!({"expiryTime": now + 3600})),
+                (200, serde_json::json!({"expiryTime": now - 1})),
+                (200, serde_json::json!({})),
+            ],
+        )])
+        .await;
+        let a = stubbed_adapter(&base);
+        assert!(a.agent_approved().await.unwrap());
+        assert!(!a.agent_approved().await.unwrap());
+        assert!(!a.agent_approved().await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn gas_treasury_parses_plain_x18_and_absent() {
+        let base = stub_api(vec![(
+            "/v1/accounts/market-acc-infos",
+            vec![
+                (
+                    200,
+                    serde_json::json!({"results": [{"gasBalanceUsd": 12.5}]}),
+                ),
+                (
+                    200,
+                    serde_json::json!({"results": [{"gas_balance": "2500000000000000000"}]}),
+                ),
+                (
+                    200,
+                    serde_json::json!({"results": [{"gasBalance": "0.75"}]}),
+                ),
+                (200, serde_json::json!({"results": [{}]})),
+                (200, serde_json::json!({"results": []})),
+            ],
+        )])
+        .await;
+        let a = stubbed_adapter(&base);
+        assert_eq!(a.gas_treasury_usd().await.unwrap(), Some(12.5));
+        // 19-digit pure-digit string decodes as x18 fixed point → 2.5.
+        assert_eq!(a.gas_treasury_usd().await.unwrap(), Some(2.5));
+        // Decimal string is plain USD, not x18.
+        assert_eq!(a.gas_treasury_usd().await.unwrap(), Some(0.75));
+        assert_eq!(a.gas_treasury_usd().await.unwrap(), None);
+        assert_eq!(a.gas_treasury_usd().await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn account_reads_fail_closed_on_http_error() {
+        let base = stub_api(vec![
+            ("/v1/agents/expiry-time", vec![(500, serde_json::json!({}))]),
+            (
+                "/v1/accounts/market-acc-infos",
+                vec![(500, serde_json::json!({"error": "down"}))],
+            ),
+        ])
+        .await;
+        let a = stubbed_adapter(&base);
+        assert!(a.agent_expiry_unix().await.is_err());
+        assert!(a.gas_treasury_usd().await.is_err());
+    }
+
+    /// Credentialed live-order evidence run (issue #25). Real Boros
+    /// mainnet, real funds — run manually only:
+    ///
+    /// ```sh
+    /// BOROS_SMOKE_ROOT=0x<root> \
+    /// BOROS_SMOKE_AGENT_KEY=0x<agent-private-key> \
+    /// BOROS_SMOKE_ACCOUNT_ID=0 \
+    /// BOROS_SMOKE_MARKET_ID=<active marketId> \
+    /// BOROS_SMOKE_SIZE_COLLATERAL=<min-size units> \
+    /// cargo test -p arbitrageur-exchanges boros_credentialed -- --ignored
+    /// ```
+    ///
+    /// Exercises: agent approval + expiry read, account truth, a bounded
+    /// IOC at a deliberately off-market rate (expects zero fill or a
+    /// bounded fill, never an unbounded one), venue-truth settle polling,
+    /// and a GTC rest + cancel round-trip when the market accepts the
+    /// bound. Success is recorded in the repo handoff; the gate
+    /// `boros.credentialed_evidence` is set by the operator after a
+    /// verified run — this test cannot self-attest.
+    #[tokio::test]
+    #[ignore]
+    async fn boros_credentialed_order_evidence() {
+        let root = std::env::var("BOROS_SMOKE_ROOT").expect("BOROS_SMOKE_ROOT");
+        let key = std::env::var("BOROS_SMOKE_AGENT_KEY").expect("BOROS_SMOKE_AGENT_KEY");
+        let account = std::env::var("BOROS_SMOKE_ACCOUNT_ID").unwrap_or_else(|_| "0".into());
+        let market_id: u64 = std::env::var("BOROS_SMOKE_MARKET_ID")
+            .expect("BOROS_SMOKE_MARKET_ID")
+            .parse()
+            .expect("market id");
+        let size: f64 = std::env::var("BOROS_SMOKE_SIZE_COLLATERAL")
+            .expect("BOROS_SMOKE_SIZE_COLLATERAL")
+            .parse()
+            .expect("size");
+
+        let adapter = BorosAdapter::new(None);
+        adapter
+            .update_credentials(Some(key), Some(root), Some(account))
+            .expect("credentials");
+        assert!(adapter.has_live_credentials());
+
+        // Agent approval + expiry are live before any order path.
+        let expiry = adapter
+            .agent_expiry_unix()
+            .await
+            .expect("expiry read")
+            .expect("approval must exist for a credentialed run");
+        assert!(
+            expiry > Utc::now().timestamp() as u64,
+            "agent approval expired"
+        );
+        let acct = adapter.fetch_account().await.expect("account truth");
+        println!(
+            "boros account: equity={} positions={}",
+            acct.equity,
+            acct.positions.len()
+        );
+
+        let market = adapter.market_by_id(market_id).await.expect("market");
+        // Off-market SHORT bound: half the best bid can never lift the ask
+        // — the IOC must come back zero-filled, proving the rate bound is
+        // honored rather than an unguarded market order executing.
+        let off_rate =
+            Decimal::from_f64_retain(market.best_bid_apr.unwrap_or(0.0) * 0.5).expect("bound");
+        let qty = Decimal::from_f64_retain(size).expect("qty");
+        let mut resp = adapter
+            .place_order(OrderRequest::new_ioc(
+                VenueId::new("boros"),
+                format!("BOROS-{market_id}"),
+                Side::Sell,
+                off_rate,
+                qty,
+            ))
+            .await
+            .expect("ioc dispatch");
+        for _ in 0..10 {
+            if resp.status.is_final() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            resp = adapter
+                .fetch_order(&format!("BOROS-{market_id}"), &resp.order_id, None)
+                .await
+                .expect("poll");
+        }
+        assert!(
+            resp.status.is_final(),
+            "ioc must settle to a terminal state, got {:?}",
+            resp.status
+        );
+        assert_eq!(
+            resp.filled_qty,
+            dec!(0),
+            "off-market bound must not fill (filled={} avg={:?})",
+            resp.filled_qty,
+            resp.avg_fill_price
+        );
+        println!(
+            "bounded IOC evidence: order {} -> {:?} zero fill",
+            resp.order_id, resp.status
+        );
+
+        // Optional real-fill leg — only when the operator opts in:
+        // `BOROS_SMOKE_ALLOW_FILL=1` spends real collateral proving the
+        // fill path (bounded sell just under best bid → executable, never
+        // unbounded).
+        if std::env::var("BOROS_SMOKE_ALLOW_FILL").as_deref() == Ok("1") {
+            let fill_rate = Decimal::from_f64_retain(market.best_bid_apr.unwrap_or(0.0) * 0.98)
+                .expect("fill bound");
+            let mut fill_resp = adapter
+                .place_order(OrderRequest::new_ioc(
+                    VenueId::new("boros"),
+                    format!("BOROS-{market_id}"),
+                    Side::Sell,
+                    fill_rate,
+                    qty,
+                ))
+                .await
+                .expect("fill ioc dispatch");
+            for _ in 0..10 {
+                if fill_resp.status.is_final() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                fill_resp = adapter
+                    .fetch_order(&format!("BOROS-{market_id}"), &fill_resp.order_id, None)
+                    .await
+                    .expect("fill poll");
+            }
+            assert!(
+                fill_resp.filled_qty > dec!(0),
+                "opted-in fill leg must fill (status {:?})",
+                fill_resp.status
+            );
+            println!(
+                "fill evidence: order {} filled {} @ {:?} -> {:?}",
+                fill_resp.order_id,
+                fill_resp.filled_qty,
+                fill_resp.avg_fill_price,
+                fill_resp.status
+            );
+        }
+
+        // GTC rest + cancel round-trip at the same off-market bound.
+        let mut resting = adapter
+            .place_order(OrderRequest::new_limit(
+                VenueId::new("boros"),
+                format!("BOROS-{market_id}"),
+                Side::Sell,
+                off_rate,
+                qty,
+            ))
+            .await
+            .expect("gtc dispatch");
+        for _ in 0..10 {
+            if resting.status.is_final() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            resting = adapter
+                .fetch_order(&format!("BOROS-{market_id}"), &resting.order_id, None)
+                .await
+                .expect("poll");
+        }
+        if !resting.status.is_final() {
+            adapter
+                .cancel_order(CancelRequest {
+                    venue: VenueId::new("boros"),
+                    symbol: format!("BOROS-{market_id}"),
+                    order_id: Some(resting.order_id.clone()),
+                    client_order_id: None,
+                })
+                .await
+                .expect("cancel");
+            let cancelled = adapter
+                .fetch_order(&format!("BOROS-{market_id}"), &resting.order_id, None)
+                .await
+                .expect("post-cancel poll");
+            assert!(
+                matches!(
+                    cancelled.status,
+                    OrderStatus::Cancelled | OrderStatus::Filled
+                ),
+                "cancel round-trip terminal state, got {:?}",
+                cancelled.status
+            );
+            println!(
+                "cancel evidence: order {} -> {:?}",
+                resting.order_id, cancelled.status
+            );
+        } else {
+            println!("gtc resolved before cancel window: {:?}", resting.status);
+        }
     }
 
     #[test]

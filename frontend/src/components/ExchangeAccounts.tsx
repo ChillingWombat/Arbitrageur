@@ -1206,6 +1206,67 @@ const PopdexAgentToolkit: React.FC<{
   );
 };
 
+/** Boros ops status (issue #25): agent-approval expiry and the sponsored
+ * gas treasury, both read live from the venue. Expired/absent approval
+ * names its remediation; every unreadable field shows "unknown" rather
+ * than a fabricated value. */
+const BorosOpsStatus: React.FC = () => {
+  const [status, setStatus] = useState<import("../types").BorosStatusDto | null>(null);
+  useEffect(() => {
+    let live = true;
+    const load = async () => {
+      try {
+        const s = await api.getBorosStatus();
+        if (live) setStatus(s);
+      } catch {
+        if (live) setStatus(null);
+      }
+    };
+    void load();
+    const t = setInterval(() => void load(), 60_000);
+    return () => {
+      live = false;
+      clearInterval(t);
+    };
+  }, []);
+  if (!status || !status.configured) return null;
+  const expiry = status.agentExpiryUnix;
+  const expMs = expiry != null ? expiry * 1000 : null;
+  const expired = expMs != null && expMs <= Date.now();
+  const expiringSoon = expMs != null && expMs > Date.now() && expMs - Date.now() < 24 * 3600_000;
+  return (
+    <div className="p-3.5 bg-slate-50/70 border border-surface-border rounded-lg space-y-1.5 text-xs font-mono">
+      <div className="flex items-center justify-between">
+        <span className="text-muted">Agent approval</span>
+        {expMs == null ? (
+          <span className="text-loss font-bold">unknown</span>
+        ) : expired ? (
+          <span className="text-loss font-bold">EXPIRED — renew in the Boros app</span>
+        ) : (
+          <span className={expiringSoon ? "text-amber-700 font-bold" : "text-slate-700"}>
+            until {new Date(expMs).toLocaleString()}
+            {expiringSoon ? " (expires <24h)" : ""}
+          </span>
+        )}
+      </div>
+      {status.approvalNote && (
+        <div className="text-[11px] text-loss">{status.approvalNote}</div>
+      )}
+      <div className="flex items-center justify-between">
+        <span className="text-muted">Gas treasury</span>
+        {status.gasTreasuryUsd != null ? (
+          <span className={status.gasTreasuryUsd < 25 ? "text-amber-700 font-bold" : "text-slate-700"}>
+            ${status.gasTreasuryUsd.toFixed(2)}{status.gasTreasuryUsd < 25 ? " (low)" : ""}
+          </span>
+        ) : (
+          <span className="text-slate-400">unknown</span>
+        )}
+      </div>
+      {status.gasNote && <div className="text-[11px] text-loss">{status.gasNote}</div>}
+    </div>
+  );
+};
+
 export const AccountCard: React.FC<AccountCardProps> = ({
   account,
   ordinal,
@@ -1530,6 +1591,7 @@ export const AccountCard: React.FC<AccountCardProps> = ({
           isDefault={account.isDefault}
         />
       )}
+      {account.enabled && account.venue === "boros" && <BorosOpsStatus />}
 
       {/* Account configuration and credentials */}
       <div className="space-y-3 pt-1">

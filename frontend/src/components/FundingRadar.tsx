@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { SlidersHorizontal, X, ChevronDown, Check } from "lucide-react";
-import type { FundingOpportunityDto, FundingTrendDto, ExecutionLogEntry, OpenPositionDto } from "../types";
+import type { FundingOpportunityDto, FundingTrendDto, ExecutionLogEntry, OpenPositionDto, FixedYieldMaturityDto, FixedYieldExitQuoteDto } from "../types";
 import { api, describeCommandError } from "../services/api";
 import type { PerpTicker } from "../types/tickers";
 import { BotLifecycleControls } from "./BotLifecycleControls";
@@ -839,6 +839,243 @@ const CarryDetailModal: React.FC<CarryDetailModalProps> = React.memo(
 
 
 
+/** Fixed-yield YU lock lifecycle panel (issue #25): each row is one
+ * `-yu` sibling signal's venue-truth-tracked maturity. States are
+ * honest — `settled` only ever means the Boros account read showed no
+ * residual position; `due`/`settlement_unverified` still poll venue
+ * truth. Actions are explicit operator choices: at settlement, close
+ * the hedged perp pair or keep it as floating carry; before maturity, a
+ * priced early exit quotes the current book before dispatching. */
+export const FixedYieldPanel: React.FC<{ isLive?: boolean }> = ({ isLive = false }) => {
+  const [rows, setRows] = useState<FixedYieldMaturityDto[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [quote, setQuote] = useState<FixedYieldExitQuoteDto | null>(null);
+  const [quoteErr, setQuoteErr] = useState<string | null>(null);
+  const [quoting, setQuoting] = useState<string | null>(null);
+
+  const refresh = async () => {
+    try {
+      setRows(await api.listFixedYieldMaturities());
+      setErr(null);
+    } catch (e) {
+      setErr(describeCommandError(e, "maturity list failed"));
+    }
+  };
+  useEffect(() => {
+    void refresh();
+    const t = setInterval(() => void refresh(), 30_000);
+    return () => clearInterval(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  if (err) {
+    return (
+      <div className="px-3 py-2 text-[11px] font-sans text-loss border-b border-surface-border">
+        Fixed-yield maturities unreadable: {err}
+      </div>
+    );
+  }
+  if (!rows || rows.length === 0) return null;
+
+  const stateBadge = (m: FixedYieldMaturityDto) => {
+    const map: Record<string, { label: string; cls: string }> = {
+      locked: { label: "LOCKED", cls: "text-slate-600 bg-slate-100" },
+      due: { label: "MATURED — verifying", cls: "text-amber-700 bg-amber-50" },
+      settled: { label: "SETTLED (venue-confirmed)", cls: "text-profit bg-emerald-50" },
+      settlement_unverified: { label: "SETTLEMENT UNVERIFIED", cls: "text-loss bg-red-50" },
+      closed_early: { label: "CLOSED EARLY", cls: "text-slate-600 bg-slate-100" },
+    };
+    const s = map[m.maturityState] ?? { label: m.maturityState.toUpperCase(), cls: "text-slate-600 bg-slate-100" };
+    return (
+      <span className={`px-1.5 py-0.5 rounded text-[10px] font-sans font-bold ${s.cls}`}>{s.label}</span>
+    );
+  };
+
+  const fmtCountdown = (ms: number) => {
+    const d = ms - Date.now();
+    if (d <= 0) return "maturity reached";
+    const days = Math.floor(d / 86_400_000);
+    const hrs = Math.floor((d % 86_400_000) / 3_600_000);
+    return days > 0 ? `${days}d ${hrs}h to maturity` : `${hrs}h ${Math.floor((d % 3_600_000) / 60_000)}m to maturity`;
+  };
+
+  const doResolve = async (m: FixedYieldMaturityDto, action: "close_pair" | "keep_carry") => {
+    setBusy(m.signalId);
+    setNotice(null);
+    try {
+      const res = await api.resolveFixedYieldMaturity(m.signalId, action);
+      setNotice(
+        action === "keep_carry"
+          ? `${m.symbol}: perp pair kept as floating carry`
+          : `${m.symbol}: flatten dispatched — ${res.legsClosed} leg(s) closed, ${res.residualSignals} residual`,
+      );
+      await refresh();
+    } catch (e) {
+      setNotice(describeCommandError(e, "action failed"));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const openQuote = async (m: FixedYieldMaturityDto) => {
+    setQuoting(m.signalId);
+    setQuoteErr(null);
+    try {
+      setQuote(await api.quoteFixedYieldExit(m.signalId));
+    } catch (e) {
+      setQuoteErr(describeCommandError(e, "exit failed"));
+    } finally {
+      setQuoting(null);
+    }
+  };
+
+  const doExit = async () => {
+    if (!quote) return;
+    setBusy(quote.signalId);
+    try {
+      const res = await api.executeFixedYieldExit(quote.signalId);
+      setNotice(`Early exit dispatched — ${res.legsClosed} perp leg(s) closed, ${res.residualSignals} residual`);
+      setQuote(null);
+      await refresh();
+    } catch (e) {
+      setQuoteErr(describeCommandError(e, "exit failed"));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="border-b border-surface-border">
+      <div className="px-3 py-1.5 text-[10px] font-sans font-bold uppercase tracking-wider text-slate-400">
+        Fixed-Yield Locks (Boros YU)
+      </div>
+      {notice && (
+        <div className="mx-3 mb-1 px-2 py-1 rounded bg-slate-50 text-[11px] font-sans text-slate-600">{notice}</div>
+      )}
+      {quoteErr && !quote && (
+        <div className="mx-3 mb-1 px-2 py-1 rounded bg-red-50 text-[11px] font-sans text-loss">{quoteErr}</div>
+      )}
+      <div className="divide-y divide-surface-border">
+        {rows.map((m) => (
+          <div key={m.signalId} className="px-3 py-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="text-xs font-sans font-bold text-slate-900 truncate">{m.symbol || m.signalId}</div>
+                <div className="text-[11px] font-sans text-slate-500">{fmtCountdown(m.lockUntilMs)}</div>
+              </div>
+              {stateBadge(m)}
+            </div>
+            {m.venueObservation && (
+              <div className="mt-1 text-[10px] font-sans text-slate-400 truncate" title={m.venueObservation}>
+                {m.venueObservation}
+              </div>
+            )}
+            {m.resolvedAction && (
+              <div className="mt-1 text-[10px] font-sans text-slate-500">
+                Resolved: {m.resolvedAction === "close_pair" ? "perp pair closed" : "kept as floating carry"}
+              </div>
+            )}
+            {/* Operator actions — only what the current state honestly allows. */}
+            <div className="mt-1.5 flex gap-2">
+              {m.maturityState === "settled" && !m.resolvedAction && (
+                <>
+                  <button
+                    type="button"
+                    disabled={busy === m.signalId}
+                    onClick={() => void doResolve(m, "close_pair")}
+                    className="px-2 py-1 rounded text-[11px] font-sans font-bold bg-slate-900 text-white disabled:opacity-50"
+                    title="Flatten the hedged perp pair (reduce-only exits)"
+                  >
+                    {busy === m.signalId ? "Closing…" : "Close perp pair"}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={busy === m.signalId}
+                    onClick={() => void doResolve(m, "keep_carry")}
+                    className="px-2 py-1 rounded text-[11px] font-sans font-bold bg-slate-100 text-slate-700 disabled:opacity-50"
+                    title="Keep the perp pair running — funding reverts to floating"
+                  >
+                    Keep as carry
+                  </button>
+                </>
+              )}
+              {(m.maturityState === "locked" || m.maturityState === "settlement_unverified" || m.maturityState === "due") &&
+                !m.resolvedAction &&
+                isLive && (
+                  <button
+                    type="button"
+                    disabled={quoting === m.signalId || busy === m.signalId}
+                    onClick={() => void openQuote(m)}
+                    className="px-2 py-1 rounded text-[11px] font-sans font-bold bg-slate-100 text-slate-700 disabled:opacity-50"
+                    title="Quote and optionally exit the YU lock before maturity"
+                  >
+                    {quoting === m.signalId ? "Quoting…" : "Exit early…"}
+                  </button>
+                )}
+            </div>
+          </div>
+        ))}
+      </div>
+
+      {/* Priced-exit confirmation modal — the quote is what the operator
+          signs off on; execution re-quotes at dispatch. */}
+      {quote && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30" onClick={() => setQuote(null)}>
+          <div className="bg-white rounded-xl shadow-xl w-[26rem] p-4" onClick={(e) => e.stopPropagation()}>
+            <div className="text-sm font-sans font-bold text-slate-900">Early exit — {quote.signalId}</div>
+            <div className="mt-1 text-[11px] font-sans text-slate-500">
+              {quote.yearsRemaining.toFixed(2)}y remaining on the lock. Exiting now trades the residual
+              fixed-vs-floating value at the current book.
+            </div>
+            <div className="mt-3 space-y-1.5">
+              {quote.legs.map((l) => (
+                <div key={l.yuSymbol} className="flex items-center justify-between text-[11px] font-sans">
+                  <span className="text-slate-600 truncate">{l.yuSymbol} ({l.legSide})</span>
+                  <span className="tabular-nums text-slate-700">
+                    {l.exitRate != null ? `${(l.entryRate * 100).toFixed(2)}% → ${(l.exitRate * 100).toFixed(2)}%` : "no executable rate"}
+                  </span>
+                  <span className={`tabular-nums font-bold ${l.estExitPnlUsd != null && l.estExitPnlUsd < 0 ? "text-loss" : "text-profit"}`}>
+                    {l.estExitPnlUsd != null ? `${l.estExitPnlUsd >= 0 ? "+" : ""}$${l.estExitPnlUsd.toFixed(2)}` : "—"}
+                  </span>
+                </div>
+              ))}
+            </div>
+            <div className="mt-3 flex items-center justify-between border-t border-surface-border pt-2">
+              <span className="text-[11px] font-sans text-slate-500">Estimated exit PnL</span>
+              <span className={`text-sm font-sans font-bold tabular-nums ${quote.estTotalPnlUsd != null && quote.estTotalPnlUsd < 0 ? "text-loss" : "text-profit"}`}>
+                {quote.estTotalPnlUsd != null ? `${quote.estTotalPnlUsd >= 0 ? "+" : ""}$${quote.estTotalPnlUsd.toFixed(2)}` : "unquotable"}
+              </span>
+            </div>
+            {quote.notes.map((n, i) => (
+              <div key={i} className="mt-1 text-[10px] font-sans text-amber-700">{n}</div>
+            ))}
+            {quoteErr && <div className="mt-2 text-[11px] font-sans text-loss">{quoteErr}</div>}
+            <div className="mt-3 text-[10px] font-sans text-slate-400">
+              Execution re-quotes at dispatch and closes the hedged perp pair after the YU legs confirm.
+            </div>
+            <div className="mt-3 flex justify-end gap-2">
+              <button type="button" onClick={() => { setQuote(null); setQuoteErr(null); }} className="px-3 py-1.5 rounded text-[11px] font-sans font-bold bg-slate-100 text-slate-700">
+                Cancel
+              </button>
+              <button
+                type="button"
+                disabled={busy === quote.signalId || quote.estTotalPnlUsd == null}
+                onClick={() => void doExit()}
+                className="px-3 py-1.5 rounded text-[11px] font-sans font-bold bg-red-600 text-white disabled:opacity-50"
+                title={quote.estTotalPnlUsd == null ? "A leg is unquotable — execution would be blind" : "Dispatch bounded exit orders and flatten the perp pair"}
+              >
+                {busy === quote.signalId ? "Exiting…" : "Exit at quoted rates"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
 export const FundingRadar: React.FC<FundingRadarProps> = ({
   opportunities,
   availableTickers: _availableTickers,
@@ -1382,7 +1619,9 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
         </div>
         <div className="p-3.5 max-h-96 overflow-y-auto">
           {dockTab === "position" ? (
-            fundingPositions.length === 0 ? (
+            <>
+            <FixedYieldPanel isLive={isLive} />
+            {fundingPositions.length === 0 ? (
               <EmptyState
                 plain
                 title="No Open Funding Positions"
@@ -1418,7 +1657,8 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
                   );
                 })}
               </div>
-            )
+            )}
+            </>
           ) : dockTab === "history" ? (
             <TickerTransactionHistory symbol="" logs={fundingLogs} matchAllSymbols />
           ) : (

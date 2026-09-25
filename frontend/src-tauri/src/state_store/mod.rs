@@ -287,6 +287,34 @@ pub struct SignalExecution {
     pub closed_at: Option<String>,
 }
 
+/// One fixed-yield YU lock's maturity tracker (v37). Lifecycle:
+/// `locked` → `due` (wall-clock reached `lock_until_ms`) → `settled`
+/// (Boros account read shows no residual position) or
+/// `settlement_unverified` (venue unreachable or a position still
+/// shows). `closed_early` is terminal — the YU legs exited through the
+/// priced early-exit path before maturity. `resolved_action` records
+/// the operator's explicit choice —
+/// `close_pair` flattens the carry signal's perp legs; `keep_carry`
+/// leaves them running as floating carry.
+#[derive(Debug, Clone)]
+pub struct FixedYieldMaturity {
+    /// The `-yu` sibling signal id this tracker belongs to.
+    pub signal_id: String,
+    /// The carry signal the YU legs hedge.
+    pub parent_signal_id: Option<String>,
+    pub lock_until_ms: i64,
+    /// Boros market ids of the YU legs — position matching after the
+    /// market delists from active feeds falls back to these.
+    pub yu_market_ids: Vec<u64>,
+    pub maturity_state: String,
+    pub resolved_action: Option<String>,
+    /// Last venue-truth observation (positions seen, or the read error).
+    pub venue_observation: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub resolved_at: Option<String>,
+}
+
 /// True when `child_id` is a `flat-{parent_id}-XXXX` or `trim-{parent_id}-XXXX`
 /// family child: the trailing segment must be exactly the 4-hex sequence
 /// suffix, so nested parents never collide (`flat-s-foo-0001` is a child of
@@ -1636,6 +1664,32 @@ PRAGMA user_version = 36;
 COMMIT;
 PRAGMA foreign_keys = ON;";
 
+/// v37 adds the fixed-yield maturity ledger: one row per `-yu` sibling
+/// signal recording the Boros YU lock's maturity, the venue-truth
+/// settlement state, and the operator's explicit resolution. Wall-clock
+/// maturity alone never marks a row settled — only a Boros account read
+/// showing no residual position does. `yu_market_ids` survives the
+/// market's delisting from `isMatured=false` feeds so a still-open
+/// position remains matchable after expiry.
+const MIGRATION_V37_SQL: &str = "\
+BEGIN IMMEDIATE;
+CREATE TABLE fixed_yield_maturities (
+    signal_id TEXT PRIMARY KEY REFERENCES signal_executions(id) ON DELETE CASCADE,
+    parent_signal_id TEXT REFERENCES signal_executions(id) ON DELETE SET NULL,
+    lock_until_ms INTEGER NOT NULL CHECK(lock_until_ms >= 0),
+    yu_market_ids TEXT NOT NULL DEFAULT '',
+    maturity_state TEXT NOT NULL DEFAULT 'locked'
+        CHECK(maturity_state IN ('locked','due','settled','settlement_unverified','closed_early')),
+    resolved_action TEXT
+        CHECK(resolved_action IS NULL OR resolved_action IN ('close_pair','keep_carry')),
+    venue_observation TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    resolved_at TEXT
+);
+PRAGMA user_version = 37;
+COMMIT;";
+
 const MIGRATION_V17_SQL: &str = "\
 BEGIN IMMEDIATE;
 CREATE TABLE strategy_params_v17 (
@@ -2198,7 +2252,7 @@ impl StateStore {
 
     fn migrate(conn: &Connection) -> anyhow::Result<()> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 36 {
+        if version > 37 {
             anyhow::bail!("unsupported state store schema version: {version}");
         }
         if version == 0 {
@@ -2413,6 +2467,12 @@ impl StateStore {
         }
         if version <= 35 {
             if let Err(err) = conn.execute_batch(MIGRATION_V36_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 36 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V37_SQL) {
                 let _ = conn.execute_batch("ROLLBACK;");
                 return Err(err.into());
             }

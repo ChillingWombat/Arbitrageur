@@ -2584,6 +2584,14 @@ pub fn save_engine_settings_impl(
     if !(60..=604_800).contains(&settings.auto_exit_max_hold_secs) {
         return Err("Auto-exit max hold must be within 60 seconds–7 days".into());
     }
+    if !(1..=365).contains(&settings.auto_fixed_yield_min_lock_days) {
+        return Err("Auto fixed-yield min lock must be within 1–365 days".into());
+    }
+    if !settings.auto_fixed_yield_min_gas_usd.is_finite()
+        || !(0.0..=10_000.0).contains(&settings.auto_fixed_yield_min_gas_usd)
+    {
+        return Err("Auto fixed-yield min gas must be within $0–$10,000".into());
+    }
     // USD-quote policy: only the three documented spellings persist —
     // an unknown mode must fail the save, not silently coerce.
     if !matches!(
@@ -2900,6 +2908,22 @@ pub fn save_engine_settings_impl(
     let _ = state.state_store.kv_set(
         "engine.auto_exit_max_hold_secs",
         &sanitized.auto_exit_max_hold_secs.to_string(),
+    );
+    let _ = state.state_store.kv_set(
+        "engine.auto_fixed_yield_enabled",
+        if sanitized.auto_fixed_yield_enabled {
+            "1"
+        } else {
+            "0"
+        },
+    );
+    let _ = state.state_store.kv_set(
+        "engine.auto_fixed_yield_min_lock_days",
+        &sanitized.auto_fixed_yield_min_lock_days.to_string(),
+    );
+    let _ = state.state_store.kv_set(
+        "engine.auto_fixed_yield_min_gas_usd",
+        &sanitized.auto_fixed_yield_min_gas_usd.to_string(),
     );
     // The passive-unwind policy persists — an operator who disables the
     // default-on limit exits must not have the choice silently revert on
@@ -3831,6 +3855,233 @@ pub async fn reconcile_orders_now(
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<crate::reconciliation::ReconcileSummary, String> {
     Ok(crate::reconciliation::reconcile_pending_orders(&state).await)
+}
+
+/// One fixed-yield YU lock's maturity row for the UI. `signal_id` is the
+/// `-yu` sibling signal; `maturity_state` is venue-truth-derived (never
+/// wall-clock-settled); `resolved_action` is the operator's recorded
+/// choice once `settled`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FixedYieldMaturityDto {
+    pub signal_id: String,
+    pub parent_signal_id: Option<String>,
+    pub parent_status: Option<String>,
+    pub symbol: String,
+    pub lock_until_ms: i64,
+    pub maturity_state: String,
+    pub resolved_action: Option<String>,
+    pub venue_observation: Option<String>,
+    pub resolved_at: Option<String>,
+}
+
+pub fn list_fixed_yield_maturities_impl(
+    state: &AppEngineState,
+) -> Result<Vec<FixedYieldMaturityDto>, String> {
+    let rows = state
+        .state_store
+        .list_fixed_yield_maturities()
+        .map_err(|e| e.to_string())?;
+    let signals = state
+        .state_store
+        .list_signals(None, None)
+        .map_err(|e| e.to_string())?;
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            let parent = r
+                .parent_signal_id
+                .as_ref()
+                .and_then(|pid| signals.iter().find(|s| &s.id == pid));
+            let sibling = signals.iter().find(|s| s.id == r.signal_id);
+            FixedYieldMaturityDto {
+                signal_id: r.signal_id,
+                parent_signal_id: r.parent_signal_id,
+                parent_status: parent.map(|p| p.status.as_str().to_string()),
+                symbol: sibling
+                    .map(|s| s.symbol.clone())
+                    .or_else(|| parent.map(|p| p.symbol.clone()))
+                    .unwrap_or_default(),
+                lock_until_ms: r.lock_until_ms,
+                maturity_state: r.maturity_state,
+                resolved_action: r.resolved_action,
+                venue_observation: r.venue_observation,
+                resolved_at: r.resolved_at,
+            }
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub async fn list_fixed_yield_maturities(
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<Vec<FixedYieldMaturityDto>, String> {
+    list_fixed_yield_maturities_impl(&state)
+}
+
+/// Operator resolution of a venue-confirmed settled YU lock:
+/// `close_pair` flattens the parent carry signal's perp legs through the
+/// signal-scoped flatten path (reduce-only exits, reconciler-tracked);
+/// `keep_carry` records the choice and leaves the pair running as
+/// floating carry. Acting before `settled` is refused — the venue has
+/// not confirmed the YU position is gone.
+pub async fn resolve_fixed_yield_maturity_impl(
+    yu_signal_id: &str,
+    action: &str,
+    state: &AppEngineState,
+) -> Result<FlattenResultDto, String> {
+    let row = state
+        .state_store
+        .list_fixed_yield_maturities()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|r| r.signal_id == yu_signal_id)
+        .ok_or_else(|| format!("no fixed-yield maturity row for {yu_signal_id}"))?;
+    if row.maturity_state != "settled" {
+        return Err(format!(
+            "YU lock is '{}' — settlement is not venue-confirmed; resolution is only available once the Boros account shows no residual position",
+            row.maturity_state
+        ));
+    }
+    if let Some(done) = &row.resolved_action {
+        return Err(format!(
+            "YU lock already resolved via '{done}' — resolution is durable and cannot be re-run"
+        ));
+    }
+    match action {
+        "close_pair" => {
+            let parent = row
+                .parent_signal_id
+                .ok_or_else(|| "maturity row has no parent carry signal".to_string())?;
+            let res = crate::execution::flatten_signal_positions_impl(
+                &parent,
+                "funding",
+                None,
+                arbitrageur_execution::virtual_ledger::CycleStatus::Closed,
+                state,
+            )
+            .await?;
+            // Only record the resolution when the flatten actually
+            // finished — a partial close leaves the row actionable.
+            if res.residual_signals == 0 {
+                state
+                    .state_store
+                    .resolve_fixed_yield_maturity(yu_signal_id, "close_pair")
+                    .map_err(|e| e.to_string())?;
+            }
+            Ok(res)
+        }
+        "keep_carry" => {
+            state
+                .state_store
+                .resolve_fixed_yield_maturity(yu_signal_id, "keep_carry")
+                .map_err(|e| e.to_string())?;
+            Ok(FlattenResultDto {
+                strategy_id: "funding".to_string(),
+                symbol: None,
+                signals_processed: 0,
+                signals_closed: 0,
+                legs_closed: 0,
+                residual_signals: 0,
+                notes: vec!["YU lock settled; perp pair retained as floating carry".to_string()],
+            })
+        }
+        other => Err(format!("invalid maturity action '{other}'")),
+    }
+}
+
+#[tauri::command]
+pub async fn resolve_fixed_yield_maturity(
+    yu_signal_id: String,
+    action: String,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<FlattenResultDto, String> {
+    resolve_fixed_yield_maturity_impl(&yu_signal_id, &action, &state).await
+}
+
+/// Priced early-exit quote for a live YU lock — no orders dispatched.
+/// The UI shows this BEFORE the operator commits; execution re-quotes at
+/// dispatch so a stale quote can never price an order.
+#[tauri::command]
+pub async fn quote_fixed_yield_exit(
+    yu_signal_id: String,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<crate::funding::FixedYieldExitQuoteDto, String> {
+    crate::funding::fixed_yield_exit_quote_impl(&yu_signal_id, &state).await
+}
+
+/// Execute the quoted early exit: bounded IOC per open YU leg → venue-
+/// truth settle → parent perp pair flatten → maturity row `closed_early`.
+#[tauri::command]
+pub async fn execute_fixed_yield_exit(
+    yu_signal_id: String,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<FlattenResultDto, String> {
+    crate::funding::execute_fixed_yield_exit_impl(&yu_signal_id, &state).await
+}
+
+/// Boros ops status for the account card (issue #25): agent-approval
+/// expiry and the gas treasury balance, both read live from the venue.
+/// Every field fails closed — an unreadable value surfaces as `None`
+/// with a named reason, never a fabricated number.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BorosStatusDto {
+    pub configured: bool,
+    pub agent_approved: bool,
+    pub agent_expiry_unix: Option<u64>,
+    pub gas_treasury_usd: Option<f64>,
+    pub approval_note: Option<String>,
+    pub gas_note: Option<String>,
+}
+
+pub async fn get_boros_status_impl(state: &AppEngineState) -> Result<BorosStatusDto, String> {
+    let boros = &state.live_boros;
+    if !boros.has_live_credentials() {
+        return Ok(BorosStatusDto {
+            configured: false,
+            agent_approved: false,
+            agent_expiry_unix: None,
+            gas_treasury_usd: None,
+            approval_note: Some(
+                "no Boros credentials configured — add root wallet, agent key, and account id"
+                    .to_string(),
+            ),
+            gas_note: None,
+        });
+    }
+    let now_s = Utc::now().timestamp().max(0) as u64;
+    let (expiry, approval_note) = match boros.agent_expiry_unix().await {
+        Ok(Some(exp)) if exp > now_s => (Some(exp), None),
+        Ok(Some(exp)) => (
+            Some(exp),
+            Some("agent approval EXPIRED — renew it in the Boros app".to_string()),
+        ),
+        Ok(None) => (
+            None,
+            Some("no agent approval found — approve the agent key in the Boros app".to_string()),
+        ),
+        Err(e) => (None, Some(format!("approval unreadable: {e}"))),
+    };
+    let (gas, gas_note) = match boros.gas_treasury_usd().await {
+        Ok(v) => (v, None),
+        Err(e) => (None, Some(format!("gas treasury unreadable: {e}"))),
+    };
+    Ok(BorosStatusDto {
+        configured: true,
+        agent_approved: approval_note.is_none(),
+        agent_expiry_unix: expiry,
+        gas_treasury_usd: gas,
+        approval_note,
+        gas_note,
+    })
+}
+
+#[tauri::command]
+pub async fn get_boros_status(
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<BorosStatusDto, String> {
+    get_boros_status_impl(&state).await
 }
 
 /// Operator-initiated cancel of one persisted venue order. Cancelling is

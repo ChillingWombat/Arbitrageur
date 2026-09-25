@@ -1678,6 +1678,208 @@ pub async fn scan_funding_opportunities_impl(
     });
     Ok(opps)
 }
+/// Fixed-yield maturity sweep (issue #25). Runs on the monitor cadence —
+/// live env only, Boros has no testnet.
+///
+/// State machine per unresolved `-yu` maturity row:
+///   locked  — before `lock_until_ms`; wall-clock only, no venue call.
+///   due     — past `lock_until_ms`; venue truth has not yet confirmed
+///             settlement. Every pass re-reads the Boros account.
+///   settled — the account read shows no residual position on any tracked
+///             market id. Only now may the operator resolve.
+///   settlement_unverified — a position still shows after maturity, or
+///             the previous read failed; the next pass retries.
+///
+/// Wall-clock expiry alone NEVER marks settled — a Boros position that
+/// survived maturity is still live exposure. Read failures keep the row
+/// unresolved (fail-closed) and record the error as the observation.
+pub async fn check_fixed_yield_maturities(state: &AppEngineState) {
+    if !state.is_live() {
+        return;
+    }
+    let rows = match state.state_store.list_fixed_yield_maturities() {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!("fixed-yield maturity scan failed: {e}");
+            return;
+        }
+    };
+    let now_ms = Utc::now().timestamp_millis();
+    let pending: Vec<_> = rows
+        .into_iter()
+        .filter(|r| r.resolved_action.is_none())
+        .filter(|r| r.maturity_state != "settled" && r.maturity_state != "closed_early")
+        .collect();
+    if pending.is_empty() {
+        return;
+    }
+
+    for row in pending {
+        if row.maturity_state == "locked" && now_ms < row.lock_until_ms {
+            continue;
+        }
+        if row.maturity_state == "locked" {
+            let _ = state.state_store.update_fixed_yield_maturity_state(
+                &row.signal_id,
+                "due",
+                Some("lock_until reached — awaiting venue-confirmed settlement"),
+            );
+        }
+        // Venue truth: a residual position on any tracked market id (or a
+        // leg symbol still open) means NOT settled. Positions on matured
+        // markets report as `BOROS-{marketId}` once the market delists
+        // from the active feed — match both.
+        let acct = match boros_for_exec(state).fetch_account().await {
+            Ok(a) => a,
+            Err(e) => {
+                let _ = state.state_store.update_fixed_yield_maturity_state(
+                    &row.signal_id,
+                    "settlement_unverified",
+                    Some(&format!("venue read failed: {e}")),
+                );
+                continue;
+            }
+        };
+        let leg_symbols: Vec<String> = state
+            .state_store
+            .get_signal(&row.signal_id)
+            .ok()
+            .flatten()
+            .map(|s| {
+                s.legs
+                    .iter()
+                    .map(|l| l.symbol.clone())
+                    .filter(|s| !s.is_empty())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let open: Vec<String> = acct
+            .positions
+            .iter()
+            .filter(|p| {
+                row.yu_market_ids
+                    .iter()
+                    .any(|mid| p.symbol == format!("BOROS-{mid}"))
+                    || leg_symbols.iter().any(|s| s == &p.symbol)
+            })
+            .map(|p| p.symbol.clone())
+            .collect();
+        if open.is_empty() {
+            let _ = state.state_store.update_fixed_yield_maturity_state(
+                &row.signal_id,
+                "settled",
+                Some("venue read: no residual YU position — settlement confirmed"),
+            );
+        } else {
+            let _ = state.state_store.update_fixed_yield_maturity_state(
+                &row.signal_id,
+                "settlement_unverified",
+                Some(&format!(
+                    "venue still shows position(s) post-maturity: {}",
+                    open.join(", ")
+                )),
+            );
+        }
+    }
+}
+
+/// Autonomous fixed-yield admission (issue #25). Runs only after the
+/// rescan validated the four-leg row — every check hits live venue truth
+/// or the refreshed DTO, and every refusal names its remediation. The
+/// setting is opt-in: absent `auto_fixed_yield_enabled`, `auto` fixed
+/// entries refuse like every other autonomous live entry.
+async fn fixed_yield_auto_gate(
+    state: &AppEngineState,
+    opp: &FundingOpportunityDto,
+    yu_legs: &[YuLegDto],
+    trade_size_usd: f64,
+) -> Result<(), String> {
+    let s = state.settings.read().clone();
+    if !s.auto_fixed_yield_enabled {
+        return Err(
+            "autonomous fixed-yield entries are disabled — enable 'Auto fixed-yield entries' in System Settings"
+                .into(),
+        );
+    }
+    // Post-cost edge must exist — the scan's expected_return_usd is net
+    // of entry costs and YU taker fees.
+    let ret = opp.expected_return_usd.unwrap_or(0.0);
+    if !ret.is_finite() || ret <= 0.0 {
+        return Err(format!(
+            "fixed-yield expected return ${ret:.2} is not positive post-costs"
+        ));
+    }
+    // Lock term: a sub-minimum lock's costs dominate the carry.
+    let now_ms = Utc::now().timestamp_millis();
+    let lock_ms = opp
+        .lock_until_ms
+        .ok_or_else(|| "fixed-yield row carries no lock_until".to_string())?;
+    let lock_days = (lock_ms - now_ms) as f64 / 86_400_000.0;
+    if lock_days < s.auto_fixed_yield_min_lock_days as f64 {
+        return Err(format!(
+            "fixed-yield lock term {lock_days:.1}d is under the {}d minimum",
+            s.auto_fixed_yield_min_lock_days
+        ));
+    }
+    let boros = boros_for_exec(state);
+    // Agent approval must outlive the entry — entering under an approval
+    // that dies mid-lock strands the unwind path. One hour of buffer is
+    // the minimum sane margin for an entry that polls over seconds.
+    let expiry = boros
+        .agent_expiry_unix()
+        .await
+        .map_err(|e| format!("boros agent approval unreadable: {e}"))?
+        .ok_or_else(|| {
+            "boros agent approval missing — approve the agent key in the Boros app".to_string()
+        })?;
+    let now_s = Utc::now().timestamp().max(0) as u64;
+    if expiry <= now_s {
+        return Err("boros agent approval EXPIRED — renew it in the Boros app".into());
+    }
+    if expiry - now_s < 3600 {
+        return Err(
+            "boros agent approval expires within the hour — renew before auto entry".into(),
+        );
+    }
+    // Gas treasury: Boros sponsors tx gas from it — an empty treasury
+    // cannot submit the YU legs at all.
+    let gas = boros
+        .gas_treasury_usd()
+        .await
+        .map_err(|e| format!("boros gas treasury unreadable: {e}"))?
+        .ok_or_else(|| {
+            "boros gas treasury balance unknown — the venue did not report one".to_string()
+        })?;
+    if gas < s.auto_fixed_yield_min_gas_usd {
+        return Err(format!(
+            "boros gas treasury ${gas:.2} is below the ${:.2} minimum for auto entry",
+            s.auto_fixed_yield_min_gas_usd
+        ));
+    }
+    // Margin: free margin must cover both YU legs' initial margin. The
+    // estimate is notional / market max-leverage per leg — deliberately
+    // conservative (cross-margin offsets are ignored).
+    let acct = boros
+        .fetch_account()
+        .await
+        .map_err(|e| format!("boros account read failed: {e}"))?;
+    let free_usd: f64 = acct.free_margin.to_string().parse().unwrap_or(0.0);
+    let mut required = 0.0f64;
+    for leg in yu_legs {
+        let m = boros
+            .market_by_id(leg.yu_market_id)
+            .await
+            .map_err(|e| format!("YU market {} unresolved: {e}", leg.yu_market_id))?;
+        required += trade_size_usd / m.max_leverage.max(1.0);
+    }
+    if free_usd < required {
+        return Err(format!(
+            "boros free margin ${free_usd:.2} under estimated ${required:.2} requirement"
+        ));
+    }
+    Ok(())
+}
+
 pub async fn execute_funding_carry_impl(
     symbol: &str,
     long_venue: &str,
@@ -1689,10 +1891,24 @@ pub async fn execute_funding_carry_impl(
 ) -> Result<SimStepResultDto, String> {
     // Autonomous entries stay testnet-only in live mode (same policy as
     // the radar bot's evaluate_entry_gates hard-block); operator-directed
-    // manual entries are the live path.
-    if auto && state.is_live() {
+    // manual entries are the live path. The one exception is the
+    // fixed-yield kind behind its explicit opt-in — gated below after the
+    // rescan, where the refreshed DTO's lock/return fields exist.
+    if auto && state.is_live() && kind != Some("fixed_yield") {
         return Err(
             "autonomous funding entries are testnet-only — run a manual Execute for live carry"
+                .into(),
+        );
+    }
+    // Auto fixed-yield is opt-in: refuse fast (before any scan) when the
+    // operator never enabled it — the full venue-side gate runs later.
+    if auto
+        && state.is_live()
+        && kind == Some("fixed_yield")
+        && !state.settings.read().auto_fixed_yield_enabled
+    {
+        return Err(
+            "autonomous fixed-yield entries are disabled — enable 'Auto fixed-yield entries' in System Settings"
                 .into(),
         );
     }
@@ -1815,6 +2031,14 @@ pub async fn execute_funding_carry_impl(
     } else {
         Vec::new()
     };
+    // Autonomous fixed-yield admission (issue #25): the opt-in setting
+    // plus venue-side gates — agent approval validity, gas treasury,
+    // Boros margin, minimum lock term, positive post-cost return — all
+    // checked against LIVE reads after the rescan. Every refusal names
+    // its reason so the UI/log can show what to remediate.
+    if auto && is_fixed {
+        fixed_yield_auto_gate(state, &opp, &yu_legs, trade_size_usd).await?;
+    }
     let (long_vid, short_vid) = (opp.long_venue_id.clone(), opp.short_venue_id.clone());
     let (long_sym, short_sym) = (opp.long_symbol.clone(), opp.short_symbol.clone());
     if long_vid.trim().is_empty() || short_vid.trim().is_empty() {
@@ -2705,6 +2929,37 @@ pub async fn execute_funding_carry_impl(
                 let _ = state
                     .state_store
                     .update_signal_status(&yu_signal_id, yu_status, None);
+                // Maturity tracking starts when YU fills are live — the
+                // fatal path returned above, so any row here hedges real
+                // exposure until venue-confirmed settlement.
+                if yu_fills.iter().any(|(_, f)| f.filled_qty > dec!(0)) {
+                    let market_ids: Vec<u64> = yu_legs.iter().map(|l| l.yu_market_id).collect();
+                    match opp.lock_until_ms {
+                        // No venue-derived maturity → no tracker row; the
+                        // signal note records the gap honestly.
+                        None => {
+                            let _ = state.state_store.update_signal_status(
+                                &yu_signal_id,
+                                yu_status,
+                                Some("no venue lock_until — maturity lifecycle untracked"),
+                            );
+                        }
+                        Some(lock_ms) => {
+                            if let Err(e) = state.state_store.record_fixed_yield_maturity(
+                                &yu_signal_id,
+                                &signal_id,
+                                lock_ms,
+                                &market_ids,
+                            ) {
+                                let _ = state.state_store.update_signal_status(
+                                    &yu_signal_id,
+                                    yu_status,
+                                    Some(&format!("maturity tracker persist failed: {e}")),
+                                );
+                            }
+                        }
+                    }
+                }
                 let partial = yu_fills
                     .iter()
                     .any(|(_, f)| f.remaining_qty > dec!(0) || f.status != OrderStatus::Filled);
@@ -3015,6 +3270,419 @@ pub async fn execute_funding_carry(
             Err(e)
         }
     }
+}
+
+/* --------------------------------------------------------------------- */
+/* Fixed-yield early exit (issue #25)                                     */
+/*                                                                       */
+/* A YU lock can be unwound before maturity — the exit is PRICED: the     */
+/* quote fetches each leg's current executable rate and reports the       */
+/* estimated PnL of closing now vs riding to maturity. Execution re-      */
+/* quotes (books move), dispatches bounded IOCs, then flattens the        */
+/* hedged perp pair. The emergency unwind path is unchanged — wide-bound  */
+/* market-equivalent, no quote dependency.                                */
+/* --------------------------------------------------------------------- */
+
+/// Per-leg exit quote: entry rate vs the rate the book will actually
+/// pay/charge to close now, and the estimated PnL of that close over the
+/// remaining term.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FixedYieldExitQuoteLegDto {
+    pub leg_side: String,
+    pub yu_symbol: String,
+    pub market_id: u64,
+    /// Collateral-unit size still open (entry fills minus prior exits).
+    pub open_qty: f64,
+    /// Entry implied APR (fraction) from the ledger fill.
+    pub entry_rate: f64,
+    /// Current executable exit rate: best bid to close a long, best ask
+    /// to close a short. `None` when the book shows no executable side —
+    /// the leg cannot be quoted, and execution refuses.
+    pub exit_rate: Option<f64>,
+    /// Signed estimate: (exit − entry) × notional × years for a long;
+    /// the mirror for a short. Positive = exiting now is profitable vs
+    /// the entry rate over remaining term.
+    pub est_exit_pnl_usd: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FixedYieldExitQuoteDto {
+    pub signal_id: String,
+    pub parent_signal_id: Option<String>,
+    pub maturity_state: String,
+    pub lock_until_ms: i64,
+    pub years_remaining: f64,
+    pub legs: Vec<FixedYieldExitQuoteLegDto>,
+    /// Sum of quotable legs' estimates — `None` when any leg is
+    /// unquotable, so the UI never shows a partial total as complete.
+    pub est_total_pnl_usd: Option<f64>,
+    /// Residual perp unwind: the parent pair still needs its perp legs
+    /// closed — quoted separately because perp exit cost depends on the
+    /// flatten path, not the YU book.
+    pub notes: Vec<String>,
+}
+
+/// Open collateral-units per sibling leg: entry fills minus fills already
+/// recorded on `flat-{yu_signal_id}-*` close children.
+fn yu_open_qty_by_leg(
+    state: &AppEngineState,
+    yu_signal: &crate::state_store::SignalExecution,
+) -> Result<Vec<Decimal>, String> {
+    let all = state
+        .state_store
+        .list_signals(None, None)
+        .map_err(|e| e.to_string())?;
+    let children: Vec<_> = all
+        .iter()
+        .filter(|s| crate::state_store::is_flatten_child_id(&s.id, &yu_signal.id))
+        .collect();
+    let mut out = Vec::new();
+    for leg in &yu_signal.legs {
+        let entry = crate::execution::ledger_qty_to_dec(leg.filled_qty, "YU leg fill")?;
+        let mut closed = dec!(0);
+        for child in &children {
+            for cl in &child.legs {
+                if cl.side == leg.side {
+                    closed +=
+                        crate::execution::ledger_qty_to_dec(cl.filled_qty, "YU exit leg fill")?;
+                }
+            }
+        }
+        out.push((entry - closed).max(dec!(0)));
+    }
+    Ok(out)
+}
+
+/// Quote-only view of an early exit — no orders dispatched. Usable for
+/// `locked`/`due`/`settlement_unverified` rows; a `settled`/`closed_early`
+/// row has no live YU position to exit.
+pub async fn fixed_yield_exit_quote_impl(
+    yu_signal_id: &str,
+    state: &AppEngineState,
+) -> Result<FixedYieldExitQuoteDto, String> {
+    let row = state
+        .state_store
+        .list_fixed_yield_maturities()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .find(|r| r.signal_id == yu_signal_id)
+        .ok_or_else(|| format!("no fixed-yield maturity row for {yu_signal_id}"))?;
+    if matches!(row.maturity_state.as_str(), "settled" | "closed_early") {
+        return Err(format!(
+            "YU lock {} is {} — no live position to exit",
+            yu_signal_id, row.maturity_state
+        ));
+    }
+    let yu_signal = state
+        .state_store
+        .get_signal(yu_signal_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("signal {yu_signal_id} not found"))?;
+    let boros = boros_for_exec(state);
+    let now_ms = Utc::now().timestamp_millis();
+    let years_remaining =
+        ((row.lock_until_ms - now_ms).max(0) as f64) / (365.25 * 86_400.0 * 1000.0);
+    let open_by_leg = yu_open_qty_by_leg(state, &yu_signal)?;
+
+    let mut notes = Vec::new();
+    let mut legs = Vec::new();
+    for (leg, open_qty) in yu_signal.legs.iter().zip(open_by_leg.iter()) {
+        let leg_side = match leg.side {
+            crate::state_store::LegSide::Long => "long",
+            crate::state_store::LegSide::Short => "short",
+        };
+        let entry_rate = leg.fill_price.or(leg.intended_price).unwrap_or(0.0);
+        let open_f = open_qty.to_string().parse::<f64>().unwrap_or(0.0);
+        if open_f <= 0.0 {
+            notes.push(format!(
+                "{}: no open YU size — leg already flat",
+                leg.symbol
+            ));
+            legs.push(FixedYieldExitQuoteLegDto {
+                leg_side: leg_side.to_string(),
+                yu_symbol: leg.symbol.clone(),
+                market_id: 0,
+                open_qty: 0.0,
+                entry_rate,
+                exit_rate: None,
+                est_exit_pnl_usd: Some(0.0),
+            });
+            continue;
+        }
+        let market = match boros.market_by_symbol(&leg.symbol).await {
+            Ok(m) => m,
+            Err(e) => {
+                notes.push(format!("{}: market unavailable — {e}", leg.symbol));
+                legs.push(FixedYieldExitQuoteLegDto {
+                    leg_side: leg_side.to_string(),
+                    yu_symbol: leg.symbol.clone(),
+                    market_id: 0,
+                    open_qty: open_f,
+                    entry_rate,
+                    exit_rate: None,
+                    est_exit_pnl_usd: None,
+                });
+                continue;
+            }
+        };
+        // Closing a long YU sells into the bid; closing a short buys the
+        // ask. Missing side → unquotable, never guessed from mid.
+        let exit_rate = match leg.side {
+            crate::state_store::LegSide::Long => market.best_bid_apr,
+            crate::state_store::LegSide::Short => market.best_ask_apr,
+        };
+        let est = exit_rate.map(|rx| {
+            let diff = if leg.side == crate::state_store::LegSide::Long {
+                rx - entry_rate
+            } else {
+                entry_rate - rx
+            };
+            diff * open_f * market.collateral_usd_price * years_remaining
+        });
+        legs.push(FixedYieldExitQuoteLegDto {
+            leg_side: leg_side.to_string(),
+            yu_symbol: leg.symbol.clone(),
+            market_id: market.market_id,
+            open_qty: open_f,
+            entry_rate,
+            exit_rate,
+            est_exit_pnl_usd: est,
+        });
+    }
+    let all_quoted = legs
+        .iter()
+        .all(|l| l.open_qty <= 0.0 || l.est_exit_pnl_usd.is_some());
+    let est_total = if all_quoted {
+        Some(legs.iter().filter_map(|l| l.est_exit_pnl_usd).sum())
+    } else {
+        notes.push(
+            "one or more legs unquotable — total withheld (partial totals are misleading)"
+                .to_string(),
+        );
+        None
+    };
+    Ok(FixedYieldExitQuoteDto {
+        signal_id: yu_signal_id.to_string(),
+        parent_signal_id: row.parent_signal_id,
+        maturity_state: row.maturity_state,
+        lock_until_ms: row.lock_until_ms,
+        years_remaining,
+        legs,
+        est_total_pnl_usd: est_total,
+        notes,
+    })
+}
+
+/// Execute a priced early exit: re-quote at dispatch time (never trust a
+/// stale quote), IOC each open YU leg at a bounded rate, poll to
+/// terminal, then flatten the parent carry pair. Any YU leg that cannot
+/// close leaves the pair OPEN and the row unresolved — a partially
+/// unhedged unwind is more dangerous than no unwind.
+pub async fn execute_fixed_yield_exit_impl(
+    yu_signal_id: &str,
+    state: &AppEngineState,
+) -> Result<crate::execution::FlattenResultDto, String> {
+    if !state.is_live() {
+        return Err("fixed-yield exits are live-only — Boros has no testnet".into());
+    }
+    if !state.vault.write().is_unlocked() {
+        return Err("vault is locked — cannot sign Boros exit orders".into());
+    }
+    let _execution_guard = state.execution_lock.lock().await;
+
+    let quote = fixed_yield_exit_quote_impl(yu_signal_id, state).await?;
+    let actionable: Vec<_> = quote.legs.iter().filter(|l| l.open_qty > 0.0).collect();
+    if actionable.is_empty() {
+        return Err("no open YU size to exit".into());
+    }
+    if let Some(l) = actionable.iter().find(|l| l.exit_rate.is_none()) {
+        return Err(format!(
+            "cannot price {} — no executable rate on the Boros book; refusing a blind exit",
+            l.yu_symbol
+        ));
+    }
+
+    let boros = boros_for_exec(state);
+    let boros_adapter: Arc<dyn ExchangeAdapter> = boros.clone();
+    let close_id = format!("flat-{}-{:04x}", yu_signal_id, rand::random::<u16>());
+    let yu_signal = state
+        .state_store
+        .get_signal(yu_signal_id)
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| "signal vanished mid-exit".to_string())?;
+
+    // Persist the close-child BEFORE dispatch — durable order identity
+    // precedes order flow (same convention as the perp flatten path).
+    let child_legs: Vec<crate::state_store::NewSignalLeg> = yu_signal
+        .legs
+        .iter()
+        .zip(quote.legs.iter())
+        .filter(|(_, q)| q.open_qty > 0.0)
+        .map(|(leg, q)| crate::state_store::NewSignalLeg {
+            account_id: leg.account_id.clone(),
+            venue: "boros".to_string(),
+            side: leg.side,
+            symbol: Some(leg.symbol.clone()),
+            intended_qty: q.open_qty,
+            intended_price: q.exit_rate,
+        })
+        .collect();
+    state
+        .state_store
+        .record_signal_execution(
+            &crate::state_store::NewSignalExecution {
+                id: close_id.clone(),
+                strategy_id: FUNDING_STRATEGY_ID.to_string(),
+                symbol: yu_signal.symbol.clone(),
+                route_id: None,
+                expected_net_usd: quote.est_total_pnl_usd,
+                note: Some(format!("priced early exit of YU lock {yu_signal_id}")),
+                legs: child_legs,
+            },
+            state.env().as_str(),
+        )
+        .map_err(|e| format!("Failed to persist YU exit signal record: {e}"))?;
+
+    let mut exit_fills: Vec<(crate::state_store::LegSide, OrderResponse)> = Vec::new();
+    let mut fatal: Option<String> = None;
+    for (leg, q) in yu_signal.legs.iter().zip(quote.legs.iter()) {
+        if q.open_qty <= 0.0 {
+            continue;
+        }
+        let exit_rate = q.exit_rate.unwrap_or(0.0);
+        let qty_dec = Decimal::from_f64_retain(q.open_qty)
+            .ok_or_else(|| "YU exit qty not decimal-safe".to_string())?;
+        let rate_dec = Decimal::from_f64_retain(exit_rate)
+            .ok_or_else(|| "YU exit rate not decimal-safe".to_string())?;
+        // Long YU exits by selling — bound 2% under the quoted bid so a
+        // moved book still fails the IOC rather than filling through the
+        // floor. Short exits by buying — 2% over ask.
+        let (order_side, bound) = match leg.side {
+            crate::state_store::LegSide::Long => (Side::Sell, rate_dec * dec!(0.98)),
+            crate::state_store::LegSide::Short => (Side::Buy, rate_dec * dec!(1.02)),
+        };
+        let req = OrderRequest::new_ioc(
+            VenueId::from("boros"),
+            format!("BOROS-{}", q.market_id),
+            order_side,
+            bound,
+            qty_dec,
+        );
+        let step = async {
+            let mut resp = boros_adapter
+                .place_order(req)
+                .await
+                .map_err(|e| format!("YU exit on {} rejected: {e}", leg.symbol))?;
+            for _ in 0..YU_SETTLE_POLLS {
+                if resp.status.is_final() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(YU_SETTLE_POLL_MS)).await;
+                match boros_adapter
+                    .fetch_order(&format!("BOROS-{}", q.market_id), &resp.order_id, None)
+                    .await
+                {
+                    Ok(polled) => resp = polled,
+                    Err(_) => continue,
+                }
+            }
+            Ok::<OrderResponse, String>(resp)
+        }
+        .await;
+        match step {
+            Ok(resp) => {
+                if resp.filled_qty <= dec!(0) {
+                    fatal = Some(format!(
+                        "YU exit for {} filled nothing ({:?}) — residual position remains",
+                        leg.symbol, resp.status
+                    ));
+                    exit_fills.push((leg.side, resp));
+                    break;
+                }
+                exit_fills.push((leg.side, resp));
+            }
+            Err(e) => {
+                fatal = Some(e);
+                break;
+            }
+        }
+    }
+
+    for (side, fill) in &exit_fills {
+        if !fill.order_id.is_empty() {
+            let _ = state.state_store.record_leg_order_id(
+                &close_id,
+                *side,
+                fill.order_id.as_str(),
+                None,
+            );
+        }
+        let filled = fill.filled_qty.to_string().parse::<f64>().unwrap_or(0.0);
+        let px = fill
+            .avg_fill_price
+            .and_then(|p| p.to_string().parse::<f64>().ok())
+            .unwrap_or(0.0);
+        if filled > 0.0 && px > 0.0 {
+            let fee = fill
+                .fee
+                .map(|v| v.to_string().parse::<f64>().unwrap_or(0.0))
+                .unwrap_or(0.0);
+            let _ = state.state_store.apply_leg_fill(
+                &close_id,
+                *side,
+                filled,
+                px,
+                fee,
+                Some(fill.order_id.as_str()),
+            );
+        }
+    }
+
+    if let Some(fatal) = fatal {
+        let _ = state.state_store.update_signal_status(
+            &close_id,
+            crate::state_store::SignalStatus::Unresolved,
+            Some(&fatal),
+        );
+        return Err(format!(
+            "YU early exit incomplete: {fatal} — perp pair left open; reconcile or retry the exit"
+        ));
+    }
+
+    // All YU legs exited and are verified by venue truth — mark the lock
+    // signal closed BEFORE the perp flatten so its residual_signals count
+    // reflects only the carry pair (open siblings would inflate it). Then
+    // release the execution lock: the flatten acquires the same
+    // non-reentrant mutex internally and would self-deadlock.
+    let _ = state.state_store.update_signal_status(
+        &close_id,
+        crate::state_store::SignalStatus::Closed,
+        None,
+    );
+    let _ = state.state_store.update_signal_status(
+        yu_signal_id,
+        crate::state_store::SignalStatus::Closed,
+        Some("YU lock exited early at quoted rates"),
+    );
+    drop(_execution_guard);
+    let parent = quote
+        .parent_signal_id
+        .ok_or_else(|| "maturity row has no parent carry signal".to_string())?;
+    let flat = crate::execution::flatten_signal_positions_impl(
+        &parent,
+        FUNDING_STRATEGY_ID,
+        None,
+        arbitrageur_execution::virtual_ledger::CycleStatus::Closed,
+        state,
+    )
+    .await?;
+    let _ = state.state_store.mark_fixed_yield_closed_early(
+        yu_signal_id,
+        "priced early exit — all YU legs closed via bounded IOC",
+    );
+    Ok(flat)
 }
 
 #[cfg(test)]
@@ -3391,6 +4059,12 @@ mod tests {
         pending_cancel: Arc<StdMutex<Option<usize>>>,
         place_posts: Arc<AtomicUsize>,
         tx_seq: Arc<AtomicUsize>,
+        /// Positions the account read reports — maturity/settlement tests
+        /// set these to simulate a residual or fully-settled YU book.
+        positions: Arc<StdMutex<Vec<serde_json::Value>>>,
+        /// Gas-treasury field on the account row (USD) — None = venue
+        /// reports no balance.
+        gas_usd: Arc<StdMutex<Option<serde_json::Value>>>,
     }
 
     fn boros_market_json(market_id: u64, platform: &str, maturity: i64) -> serde_json::Value {
@@ -3399,7 +4073,9 @@ mod tests {
             "tokenId": 3,
             "platform": {"name": platform, "platformId": platform},
             "imData": {
-                "symbol": format!("{}-BTCUSDT-STUB", platform.to_uppercase()),
+                // Match `yu_mkt`'s cache-seeded symbols — the ledger legs
+                // persist those, and the exit path re-resolves by symbol.
+                "symbol": format!("{}-BTCUSDT-TEST", platform.to_uppercase()),
                 "maturity": maturity,
                 "tickStep": 2,
             },
@@ -3408,10 +4084,12 @@ mod tests {
                 "maxLeverage": 3.0,
             },
             "data": {
-                "midApr": "80000000000000000",
-                "bestBid": "150000000000000000",
-                "bestAsk": "30000000000000000",
-                "floatingApr": "50000000000000000",
+                // APR fields parse as plain fractions (the live venue
+                // returns numbers, not x18 strings).
+                "midApr": 0.08,
+                "bestBid": 0.15,
+                "bestAsk": 0.03,
+                "floatingApr": 0.05,
                 "notionalOI": "500000",
             },
             "config": {"status": 2, "takerFee": "500000000000000"},
@@ -3459,6 +4137,21 @@ mod tests {
                 200,
                 serde_json::json!({"expiryTime": Utc::now().timestamp() + 86_400}),
             );
+        }
+        if method == "POST" && path == "/v1/accounts/market-acc-infos" {
+            // marketAcc deliberately unparseable → the adapter falls back
+            // to the request's tokenIds (token 3 = USDT @ $1) for the
+            // collateral USD conversion.
+            let mut row = serde_json::json!({
+                "marketAcc": "0xZZZ",
+                "netBalance": "1000000000000000000000",
+                "availableInitialMargin": "100000000000000000000000",
+                "positions": stub.positions.lock().unwrap().clone(),
+            });
+            if let Some(g) = stub.gas_usd.lock().unwrap().clone() {
+                row["gasBalanceUsd"] = g;
+            }
+            return (200, serde_json::json!({"results": [row]}));
         }
         if method == "POST" && path == "/v1/calldata-builder/agent/place-order" {
             stub.place_posts.fetch_add(1, Ordering::SeqCst);
@@ -3592,6 +4285,8 @@ mod tests {
             pending_cancel: Arc::new(StdMutex::new(None)),
             place_posts: Arc::new(AtomicUsize::new(0)),
             tx_seq: Arc::new(AtomicUsize::new(0)),
+            positions: Arc::new(StdMutex::new(Vec::new())),
+            gas_usd: Arc::new(StdMutex::new(Some(serde_json::json!(500.0)))),
         };
         let orders = stub.orders.clone();
         let tx_map = stub.tx_to_order.clone();
@@ -3599,6 +4294,8 @@ mod tests {
         let pending_cancel = stub.pending_cancel.clone();
         let place_posts = stub.place_posts.clone();
         let tx_seq = stub.tx_seq.clone();
+        let positions = stub.positions.clone();
+        let gas_usd = stub.gas_usd.clone();
         tokio::spawn(async move {
             loop {
                 let Ok((mut sock, _)) = listener.accept().await else {
@@ -3612,6 +4309,8 @@ mod tests {
                     pending_cancel: pending_cancel.clone(),
                     place_posts: place_posts.clone(),
                     tx_seq: tx_seq.clone(),
+                    positions: positions.clone(),
+                    gas_usd: gas_usd.clone(),
                 };
                 tokio::spawn(async move {
                     let mut buf = vec![0u8; 8192];
@@ -3903,8 +4602,9 @@ mod tests {
         assert!(err.contains("live-only"), "unexpected error: {err}");
     }
 
-    /// Autonomous fixed-yield entries stay testnet-only policy: in live
-    /// mode `auto` is refused before touching the gate or the scan.
+    /// Autonomous fixed-yield entries require the explicit opt-in: with
+    /// `auto_fixed_yield_enabled` unset, `auto` refuses fast with the
+    /// named remediation — no scan, no dispatch.
     #[tokio::test]
     async fn fixed_yield_refuses_auto_in_live() {
         let dir =
@@ -3922,6 +4622,239 @@ mod tests {
         )
         .await
         .expect_err("auto fixed_yield in live must refuse");
-        assert!(err.contains("testnet-only"), "unexpected error: {err}");
+        assert!(err.contains("disabled"), "unexpected error: {err}");
+    }
+
+    /// Entry persists a maturity tracker on the `-yu` sibling — the row
+    /// carries the venue lock_until and both market ids.
+    #[tokio::test]
+    async fn fixed_yield_entry_records_maturity_row() {
+        let mut scripts = VecDeque::new();
+        scripts.push_back(Some((2, VecDeque::new())));
+        scripts.push_back(Some((2, VecDeque::new())));
+        let stub = spawn_boros_stub(scripts).await;
+        let (state, _l, _s) = fixed_yield_state("maturity", &stub).await;
+        run_fixed_yield(&state).await.expect("fixed-yield executes");
+        let rows = state
+            .state_store
+            .list_fixed_yield_maturities()
+            .expect("list maturities");
+        assert_eq!(rows.len(), 1, "one maturity row per YU hedge");
+        let row = &rows[0];
+        assert!(row.signal_id.ends_with("-yu"));
+        assert_eq!(row.maturity_state, "locked");
+        assert!(row.lock_until_ms > Utc::now().timestamp_millis());
+        assert_eq!(row.yu_market_ids.len(), 2);
+        assert!(row.parent_signal_id.is_some());
+        assert!(row.resolved_action.is_none());
+    }
+
+    /// The sweep never settles on wall-clock alone: pre-maturity stays
+    /// `locked`; past-maturity with a residual venue position is
+    /// `settlement_unverified`; only a clean venue read confirms
+    /// `settled`.
+    #[tokio::test]
+    async fn maturity_sweep_is_venue_truth_only() {
+        let mut scripts = VecDeque::new();
+        scripts.push_back(Some((2, VecDeque::new())));
+        scripts.push_back(Some((2, VecDeque::new())));
+        let stub = spawn_boros_stub(scripts).await;
+        let (state, _l, _s) = fixed_yield_state("sweep", &stub).await;
+        run_fixed_yield(&state).await.expect("fixed-yield executes");
+        let yu_id = state.state_store.list_fixed_yield_maturities().unwrap()[0]
+            .signal_id
+            .clone();
+
+        // Pre-maturity: no venue call, stays locked.
+        check_fixed_yield_maturities(&state).await;
+        let row = &state.state_store.list_fixed_yield_maturities().unwrap()[0];
+        assert_eq!(row.maturity_state, "locked");
+
+        // Past lock_until + residual position → settlement_unverified.
+        let past = Utc::now().timestamp_millis() - 60_000;
+        state
+            .state_store
+            .record_fixed_yield_maturity(
+                &yu_id,
+                row.parent_signal_id.as_deref().unwrap(),
+                past,
+                &[11, 22],
+            )
+            .unwrap();
+        *stub.positions.lock().unwrap() = vec![serde_json::json!({
+            "marketId": 11, "signedSize": "1000000000000000000",
+        })];
+        check_fixed_yield_maturities(&state).await;
+        let row = &state.state_store.list_fixed_yield_maturities().unwrap()[0];
+        assert_eq!(row.maturity_state, "settlement_unverified");
+        assert!(
+            row.venue_observation
+                .as_deref()
+                .unwrap_or("")
+                .contains("position"),
+            "observation must name the residual: {:?}",
+            row.venue_observation
+        );
+
+        // Position cleared → settled (venue-confirmed, not wall-clock).
+        stub.positions.lock().unwrap().clear();
+        check_fixed_yield_maturities(&state).await;
+        let row = &state.state_store.list_fixed_yield_maturities().unwrap()[0];
+        assert_eq!(row.maturity_state, "settled");
+    }
+
+    /// Resolution is gated on venue-confirmed settlement: a `due` row
+    /// refuses, `keep_carry` resolves without touching perps, and a
+    /// second resolution refuses.
+    #[tokio::test]
+    async fn maturity_resolution_gated_on_venue_truth() {
+        let mut scripts = VecDeque::new();
+        scripts.push_back(Some((2, VecDeque::new())));
+        scripts.push_back(Some((2, VecDeque::new())));
+        let stub = spawn_boros_stub(scripts).await;
+        let (state, _l, _s) = fixed_yield_state("resolve", &stub).await;
+        run_fixed_yield(&state).await.expect("fixed-yield executes");
+        let row = state.state_store.list_fixed_yield_maturities().unwrap()[0].clone();
+        let yu_id = row.signal_id.clone();
+        let parent = row.parent_signal_id.clone().unwrap();
+
+        // Not settled → refused.
+        let err = crate::commands::resolve_fixed_yield_maturity_impl(&yu_id, "keep_carry", &state)
+            .await
+            .expect_err("unresolved maturity must refuse");
+        assert!(err.contains("not venue-confirmed"), "unexpected: {err}");
+
+        // Age past maturity; sweep confirms settlement.
+        let past = Utc::now().timestamp_millis() - 60_000;
+        state
+            .state_store
+            .record_fixed_yield_maturity(&yu_id, &parent, past, &[11, 22])
+            .unwrap();
+        check_fixed_yield_maturities(&state).await;
+
+        // keep_carry resolves; the parent signal stays open.
+        let res = crate::commands::resolve_fixed_yield_maturity_impl(&yu_id, "keep_carry", &state)
+            .await
+            .expect("keep_carry resolves");
+        assert_eq!(res.legs_closed, 0);
+        let parent_sig = state.state_store.get_signal(&parent).unwrap().unwrap();
+        assert!(
+            parent_sig.status.counts_as_open(),
+            "parent keeps running as floating carry"
+        );
+        let row = &state.state_store.list_fixed_yield_maturities().unwrap()[0];
+        assert_eq!(row.resolved_action.as_deref(), Some("keep_carry"));
+
+        // Second resolution refuses — the choice is durable.
+        assert!(
+            crate::commands::resolve_fixed_yield_maturity_impl(&yu_id, "close_pair", &state)
+                .await
+                .is_err()
+        );
+    }
+
+    /// The priced exit: quote reflects the live book, execution fills
+    /// both YU exits, flattens the parent pair, and closes the tracker.
+    #[tokio::test]
+    async fn fixed_yield_priced_exit_round_trip() {
+        // Entry fills + two exit fills.
+        let mut scripts = VecDeque::new();
+        for _ in 0..4 {
+            scripts.push_back(Some((2, VecDeque::new())));
+        }
+        let stub = spawn_boros_stub(scripts).await;
+        let (state, _l, _s) = fixed_yield_state("exit", &stub).await;
+        run_fixed_yield(&state).await.expect("fixed-yield executes");
+        let yu_id = state.state_store.list_fixed_yield_maturities().unwrap()[0]
+            .signal_id
+            .clone();
+
+        let quote = fixed_yield_exit_quote_impl(&yu_id, &state)
+            .await
+            .expect("quote");
+        assert_eq!(quote.legs.len(), 2, "notes: {:?}", quote.notes);
+        for leg in &quote.legs {
+            assert!(leg.open_qty > 0.0, "leg must carry open size");
+            assert!(
+                leg.exit_rate.is_some(),
+                "stub book quotes both sides (leg {} notes {:?})",
+                leg.yu_symbol,
+                quote.notes
+            );
+            assert!(leg.est_exit_pnl_usd.is_some());
+        }
+        assert!(quote.est_total_pnl_usd.is_some());
+
+        let flat = execute_fixed_yield_exit_impl(&yu_id, &state)
+            .await
+            .expect("exit executes");
+        assert_eq!(flat.residual_signals, 0, "parent pair fully closed");
+        let row = &state.state_store.list_fixed_yield_maturities().unwrap()[0];
+        assert_eq!(row.maturity_state, "closed_early");
+        assert_eq!(row.resolved_action.as_deref(), Some("close_pair"));
+        // The exit is durable: the sibling closed, a flat- child carries
+        // the exit fills, and a second exit refuses.
+        let yu_sig = state.state_store.get_signal(&yu_id).unwrap().unwrap();
+        assert_eq!(yu_sig.status, crate::state_store::SignalStatus::Closed);
+        assert!(
+            fixed_yield_exit_quote_impl(&yu_id, &state).await.is_err(),
+            "closed lock has nothing to quote"
+        );
+    }
+
+    /// Auto-gate refuses on each named bound and admits when all pass.
+    #[tokio::test]
+    async fn fixed_yield_auto_gate_named_refusals() {
+        let stub = spawn_boros_stub(VecDeque::new()).await;
+        let (state, _l, _s) = fixed_yield_state("gate", &stub).await;
+        // A real scanned row carries the honest lock/return/legs — mutate
+        // fields per case rather than fabricating a DTO.
+        let opp = scan_funding_opportunities_impl("BTC-USDC", 50_000.0, &state)
+            .await
+            .expect("scan")
+            .into_iter()
+            .find(|o| o.kind == "fixed_yield")
+            .expect("fixed_yield row");
+        let legs = opp.yu_legs.clone().expect("yu legs");
+        let now_ms = Utc::now().timestamp_millis();
+
+        // Disabled → refuse by name.
+        let err = fixed_yield_auto_gate(&state, &opp, &legs, 50_000.0)
+            .await
+            .expect_err("disabled refuses");
+        assert!(err.contains("disabled"), "{err}");
+
+        state.settings.write().auto_fixed_yield_enabled = true;
+        // Non-positive post-cost return → refuse.
+        let mut o = opp.clone();
+        o.expected_return_usd = Some(0.0);
+        let err = fixed_yield_auto_gate(&state, &o, &legs, 50_000.0)
+            .await
+            .expect_err("zero return refuses");
+        assert!(err.contains("not positive"), "{err}");
+        // Short lock → refuse.
+        let mut o = opp.clone();
+        o.lock_until_ms = Some(now_ms + 3 * 86_400_000);
+        let err = fixed_yield_auto_gate(&state, &o, &legs, 50_000.0)
+            .await
+            .expect_err("short lock refuses");
+        assert!(err.contains("lock term"), "{err}");
+        // Gas below minimum → refuse.
+        *stub.gas_usd.lock().unwrap() = Some(serde_json::json!(1.0));
+        let err = fixed_yield_auto_gate(&state, &opp, &legs, 50_000.0)
+            .await
+            .expect_err("low gas refuses");
+        assert!(err.contains("gas"), "{err}");
+        // Gas missing entirely → refuse (never assume).
+        *stub.gas_usd.lock().unwrap() = None;
+        let err = fixed_yield_auto_gate(&state, &opp, &legs, 50_000.0)
+            .await
+            .expect_err("unknown gas refuses");
+        assert!(err.contains("unknown"), "{err}");
+        // All gates pass → admitted.
+        *stub.gas_usd.lock().unwrap() = Some(serde_json::json!(500.0));
+        fixed_yield_auto_gate(&state, &opp, &legs, 50_000.0)
+            .await
+            .expect("all gates pass");
     }
 }
