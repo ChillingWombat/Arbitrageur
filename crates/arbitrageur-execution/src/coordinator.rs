@@ -142,6 +142,59 @@ pub enum ArbitrageExecutionResult {
     HaltedByRisk(String),
 }
 
+/// Poll `fetch_order` while a terminal `Filled` response lacks a complete
+/// fill record (positive average fill price covering the filled quantity).
+/// Venues (Arcus) publish `FILLED` before enriching `avgFillPrice`, so a
+/// bare submit ack or early status poll can report a fill without its stats;
+/// validating or booking that snapshot would falsely fail a sound order.
+/// Only identity-consistent polls are adopted — a wrong-order echo leaves
+/// the last verified response in place. Returns the best record observed.
+pub async fn enrich_fill_stats(
+    exchange: &Arc<dyn ExchangeAdapter>,
+    symbol: &str,
+    client_order_id: &str,
+    resp: OrderResponse,
+) -> OrderResponse {
+    #[cfg(not(test))]
+    const POLLS: u32 = 5;
+    #[cfg(test)]
+    const POLLS: u32 = 3;
+    #[cfg(not(test))]
+    const INTERVAL: Duration = Duration::from_millis(600);
+    #[cfg(test)]
+    const INTERVAL: Duration = Duration::from_millis(5);
+
+    let incomplete = |r: &OrderResponse| {
+        r.status == OrderStatus::Filled
+            && r.filled_qty > Decimal::ZERO
+            && (r.avg_fill_price.map(|p| p <= Decimal::ZERO).unwrap_or(true)
+                || r.filled_qty < r.original_qty)
+    };
+    if !incomplete(&resp) {
+        return resp;
+    }
+    let mut latest = resp;
+    for _ in 0..POLLS {
+        tokio::time::sleep(INTERVAL).await;
+        match exchange
+            .fetch_order(symbol, &latest.order_id, Some(client_order_id))
+            .await
+        {
+            Ok(polled)
+                if response_identity_matches(&polled, exchange, symbol, client_order_id)
+                    && polled.order_id == latest.order_id =>
+            {
+                latest = polled;
+                if !incomplete(&latest) {
+                    return latest;
+                }
+            }
+            _ => continue,
+        }
+    }
+    latest
+}
+
 /// A response is attributable to a dispatched order only when the venue,
 /// symbol, and captured client order ID all match and the venue order ID is
 /// nonempty.

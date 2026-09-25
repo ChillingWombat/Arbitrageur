@@ -917,6 +917,34 @@ pub async fn close_external_position_impl(
     } else {
         expected_client_order_id.clone()
     };
+    // Arcus publishes `FILLED` before enriching avgFillPrice — a terminal ack
+    // with an incomplete fill record is transient, not a validation failure.
+    // Poll the venue until the record is complete or the budget runs out.
+    let resp = arbitrageur_execution::enrich_fill_stats(
+        &adapter,
+        &live.symbol,
+        &effective_client_order_id,
+        resp,
+    )
+    .await;
+    // Persist the accepted order id BEFORE validation can fail: a rejected
+    // consistency check must not orphan an order the venue already holds —
+    // the reconciler needs the id to keep polling it to a terminal state.
+    if !resp.order_id.trim().is_empty() && resp.order_id != "0" {
+        if let Err(e) = state.state_store.record_leg_order_id(
+            &sid,
+            leg_side,
+            &resp.order_id,
+            Some(&effective_client_order_id),
+        ) {
+            let note = format!(
+                "External close order {} was accepted but its order id could not be persisted: {e}",
+                resp.order_id
+            );
+            mark_unresolved(&note);
+            return Err(note);
+        }
+    }
     if let Err(e) = validate_close_response(
         &adapter.venue_id(),
         &expected_symbol,
@@ -930,20 +958,6 @@ pub async fn close_external_position_impl(
         );
         mark_unresolved(&note);
         return Err(e);
-    }
-
-    if let Err(e) = state.state_store.record_leg_order_id(
-        &sid,
-        leg_side,
-        &resp.order_id,
-        Some(&effective_client_order_id),
-    ) {
-        let note = format!(
-            "External close order {} was accepted but its order id could not be persisted: {e}",
-            resp.order_id
-        );
-        mark_unresolved(&note);
-        return Err(note);
     }
 
     let filled = resp.filled_qty.to_string().parse::<f64>().unwrap_or(0.0);

@@ -57,6 +57,10 @@ impl AccountRequestCoordinator {
 
     /// Pre-request check for a specific API path/query:
     /// Returns Some(cached_json) if fresh in cache (request coalescing), or throttles and permits request.
+    /// A short residual backoff is waited out rather than refused — reads on
+    /// the order path (mid prices for protective bounds, order-status polls)
+    /// are as latency-critical as the signed request itself. Sustained
+    /// cooldowns still refuse.
     pub async fn acquire_or_cache_path(
         &self,
         path: &str,
@@ -64,6 +68,7 @@ impl AccountRequestCoordinator {
     ) -> Result<Option<String>, anyhow::Error> {
         let now = Instant::now();
         let wait_dur;
+        let mut backoff_wait = None;
 
         {
             let state = self.state.lock();
@@ -82,14 +87,39 @@ impl AccountRequestCoordinator {
                             }
                         }
                     }
+                    if backoff_left > Self::SIGNED_BACKOFF_WAIT_CAP {
+                        anyhow::bail!(
+                            "[{}] Rate limit backoff active for another {:?}",
+                            self.venue_name,
+                            backoff_left
+                        );
+                    }
+                    backoff_wait = Some(backoff_left);
+                }
+            }
+        }
+
+        if let Some(wait) = backoff_wait {
+            sleep(wait).await;
+            // Re-check after the wait — a re-armed long cooldown still
+            // refuses; expiry or a still-short residual proceeds.
+            let state = self.state.lock();
+            let now = Instant::now();
+            if let Some(until) = state.backoff_until {
+                let residual = until.saturating_duration_since(now);
+                if residual > Self::SIGNED_BACKOFF_WAIT_CAP {
                     anyhow::bail!(
-                        "[{}] Rate limit backoff active for another {:?}",
+                        "[{}] Rate limit backoff re-armed for another {:?}",
                         self.venue_name,
-                        backoff_left
+                        residual
                     );
                 }
             }
+        }
 
+        {
+            let state = self.state.lock();
+            let now = Instant::now();
             // 2. Check fresh cache for this exact path
             if allow_cache {
                 if let Some((cached_at, ref payload)) = state.cached_paths.get(path) {

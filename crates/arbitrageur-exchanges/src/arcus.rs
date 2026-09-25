@@ -1074,6 +1074,23 @@ impl ExchangeAdapter for ArcusAdapter {
         self.order_response(&data, symbol, dec!(0), &raw)
     }
 
+    /// Venue position rows carry `marketDisplayName` (`BTC-USD`); engine
+    /// signal legs and `account_position_for` queries speak the canonical
+    /// `BASE-USDC` family — map or flatten/residual checks read a real
+    /// position as flat (observed 2026-09 on a live flatten).
+    fn normalize_account_position(&self, position: &Position) -> anyhow::Result<Option<Position>> {
+        let mut position = position.clone();
+        let base = canonical_base(&position.symbol);
+        if base.is_empty() {
+            anyhow::bail!(
+                "Arcus account position symbol '{}' is not a standard BASE-USD market",
+                position.symbol
+            );
+        }
+        position.symbol = format!("{base}-USDC");
+        Ok(Some(position))
+    }
+
     fn supports_live_execution(&self) -> bool {
         true
     }
@@ -1337,5 +1354,48 @@ mod tests {
             ArcusAdapter::snap_to_tick(dec!(84568.0), tick, Side::Buy, false),
             dec!(84568.0)
         );
+    }
+
+    #[test]
+    fn normalize_account_position_maps_venue_usd_to_engine_usdc() {
+        let a = ArcusAdapter::new(None, None, None);
+        let pos = Position {
+            venue: a.venue_id.clone(),
+            symbol: "BTC-USD".to_string(),
+            side: Side::Sell,
+            quantity: dec!(0.001),
+            entry_price: dec!(84541.3),
+            mark_price: dec!(83998.3),
+            unrealized_pnl: dec!(0.543),
+            realized_pnl: dec!(0),
+            liquidation_price: None,
+            leverage: dec!(40),
+            initial_margin: dec!(2.1),
+            maintenance_margin: dec!(2.1),
+            updated_at: Utc::now(),
+        };
+        let out = a
+            .normalize_account_position(&pos)
+            .expect("standard market maps")
+            .expect("row managed");
+        assert_eq!(out.symbol, "BTC-USDC");
+        // A real position row must resolve for the engine symbol a signal
+        // leg carries — the flatten path depends on this exact match.
+        let account = AccountSnapshot {
+            venue: a.venue_id.clone(),
+            equity: dec!(1000),
+            free_margin: dec!(1000),
+            maintenance_margin: dec!(0),
+            margin_usage_pct: dec!(0),
+            balances: vec![],
+            positions: vec![pos],
+            timestamp: Utc::now(),
+        };
+        let resolved = a
+            .account_position_for(&account, "BTC-USDC")
+            .expect("resolves")
+            .expect("position found");
+        assert_eq!(resolved.quantity, dec!(0.001));
+        assert_eq!(resolved.side, Side::Sell);
     }
 }

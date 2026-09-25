@@ -216,9 +216,42 @@ async fn dispatch(line: &str, state: &Arc<AppEngineState>) -> Value {
             .map(|v| json!(v))
         }
         "killswitch" => crate::execution::trigger_emergency_killswitch_impl(st).map(|v| json!(v)),
+        // Repair a leg that lost its venue order identity (e.g. an accepted
+        // order whose id never persisted). The reconciler can then poll the
+        // real venue state instead of treating the leg as terminally empty.
+        "record_leg_order" => {
+            let sid = arg(&args, "signal_id").unwrap_or_default();
+            let side = arg(&args, "side").unwrap_or_default();
+            let oid = arg(&args, "order_id").unwrap_or_default();
+            let cid = arg(&args, "client_order_id");
+            let leg_side = match side {
+                "long" | "Long" => crate::state_store::LegSide::Long,
+                "short" | "Short" => crate::state_store::LegSide::Short,
+                other => return json!({"id": id, "err": format!("bad side '{other}'")}),
+            };
+            st.state_store
+                .record_leg_order_id(sid, leg_side, oid, cid)
+                .map(|()| json!("recorded"))
+                .map_err(|e| e.to_string())
+        }
         "reconcile_orders" => Ok(json!(
             crate::reconciliation::reconcile_pending_orders(st).await
         )),
+        "external_positions" => crate::external_positions::get_external_positions_impl(st)
+            .await
+            .map(|v| json!(v)),
+        "close_external" => {
+            let input = crate::external_positions::CloseExternalPositionInput {
+                venue: arg(&args, "venue").unwrap_or_default().to_string(),
+                symbol: arg(&args, "symbol").unwrap_or_default().to_string(),
+                mode: arg(&args, "mode").unwrap_or("market").to_string(),
+                limit_price: arg_f64(&args, "limit_price"),
+                close_pct: arg_f64(&args, "close_pct"),
+            };
+            crate::external_positions::close_external_position_impl(input, st)
+                .await
+                .map(|v| json!(v))
+        }
 
         // ── positions / signal ledger / bot ─────────────────────────────────
         "open_positions" => open_positions(&args, st),
