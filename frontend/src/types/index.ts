@@ -913,6 +913,17 @@ export interface VaultStatus {
       keep working. False after a manual lock, which wipes them. */
   auto_locked?: boolean;
   unlocked_until?: string | null;
+  /** Whether TOTP MFA is enrolled — while locked this is the plaintext kv
+      flag (the secret itself lives inside the vault); while unlocked it is
+      the authoritative vault content. */
+  mfa_enabled?: boolean;
+}
+
+/** Material returned once by `begin_mfa_enrollment` — shown to the operator
+    for authenticator-app enrollment, then confirmed with a live code. */
+export interface MfaEnrollment {
+  secretBase32: string;
+  otpauthUri: string;
 }
 
 // External (non-system) positions: live on-exchange holdings minus every

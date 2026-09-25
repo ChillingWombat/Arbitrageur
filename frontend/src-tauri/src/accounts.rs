@@ -17,9 +17,47 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::State;
 
+/// kv flag mirroring `VaultData.mfa_totp_secret` for the locked view —
+/// the secret itself lives inside the encrypted payload, so while locked
+/// this plaintext flag is the only signal the UI can read to render the
+/// code field. It is metadata, never secret material.
+const MFA_ENABLED_KV_KEY: &str = "security.mfa_enabled";
+
+fn mfa_flag(state: &AppEngineState) -> bool {
+    state
+        .state_store
+        .kv_get(MFA_ENABLED_KV_KEY)
+        .ok()
+        .flatten()
+        .as_deref()
+        == Some("1")
+}
+
+fn set_mfa_flag(state: &AppEngineState, enabled: bool) {
+    if let Err(e) = state
+        .state_store
+        .kv_set(MFA_ENABLED_KV_KEY, if enabled { "1" } else { "0" })
+    {
+        tracing::warn!("mfa flag persist failed: {e}");
+    }
+}
+
 pub fn get_vault_status_impl(state: &AppEngineState) -> VaultStatus {
-    let mut vault = state.vault.write();
-    vault.get_status()
+    let mut status = {
+        let mut vault = state.vault.write();
+        vault.get_status()
+    };
+    let flag = mfa_flag(state);
+    if status.is_unlocked {
+        // Authoritative reconcile: the vault payload wins over the flag
+        // (handles drift from restored or hand-edited files).
+        if status.mfa_enabled != flag {
+            set_mfa_flag(state, status.mfa_enabled);
+        }
+    } else {
+        status.mfa_enabled = flag;
+    }
+    status
 }
 
 pub fn initialize_vault_impl(
@@ -44,7 +82,11 @@ fn unlock_backoff_secs(failures: u32) -> u64 {
     (1u64 << failures.min(5)).min(30)
 }
 
-pub fn unlock_vault_impl(password: &str, state: &AppEngineState) -> Result<VaultStatus, String> {
+pub fn unlock_vault_impl(
+    password: &str,
+    totp_code: Option<&str>,
+    state: &AppEngineState,
+) -> Result<VaultStatus, String> {
     {
         let backoff = state.vault_unlock_backoff.lock();
         let retry_in = backoff
@@ -59,7 +101,7 @@ pub fn unlock_vault_impl(password: &str, state: &AppEngineState) -> Result<Vault
     }
     let status = {
         let mut vault = state.vault.write();
-        match vault.unlock(password) {
+        match vault.unlock(password, totp_code) {
             Ok(()) => {
                 *state.vault_unlock_backoff.lock() = (0, std::time::Instant::now());
                 vault.get_status()
@@ -80,6 +122,7 @@ pub fn unlock_vault_impl(password: &str, state: &AppEngineState) -> Result<Vault
     // credential provisioning (adapters stay unauthenticated and fail
     // closed) rather than making the unlock look atomic-rolled-back.
     // Each step logs its own failure and the next still runs.
+    set_mfa_flag(state, status.mfa_enabled);
     if let Err(e) = ensure_credential_migration(state) {
         tracing::warn!("post-unlock credential migration failed: {e}");
     }
@@ -163,11 +206,12 @@ pub fn lock_vault_impl(state: &AppEngineState) -> Result<VaultStatus, String> {
 pub fn change_vault_password_impl(
     current: &str,
     new_password: &str,
+    totp_code: Option<&str>,
     state: &AppEngineState,
 ) -> Result<VaultStatus, String> {
     let mut vault = state.vault.write();
     let rotation = vault
-        .prepare_password_rotation(current, new_password)
+        .prepare_password_rotation(current, new_password, totp_code)
         .map_err(|e| e.to_string())?;
     let hold_path = vault.stronghold_snapshot_path();
     let hold_exists = hold_path.exists();
@@ -218,6 +262,91 @@ pub fn change_vault_password_impl(
     // sync — adapter `Client` handles into the dropped engine are replaced.
     state.open_evm_stronghold();
     state.sync_vault_credentials_to_adapters();
+    Ok(status)
+}
+
+/// Material returned by `begin_mfa_enrollment` — the shared secret in
+/// base32 (manual entry) plus a ready `otpauth://` URI for QR/URI-based
+/// enrollment. Secret material is only ever in this response and the
+/// in-memory pending slot; it is persisted to the vault solely after the
+/// operator proves enrollment with a live code.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MfaEnrollmentDto {
+    pub secret_base32: String,
+    pub otpauth_uri: String,
+}
+
+/// Start MFA enrollment: generate a fresh secret and hold it in memory as
+/// pending. Requires an unlocked vault; refuses when MFA is already
+/// enrolled (disable first) or a pending enrollment exists (restart it by
+/// calling begin again — the pending secret is replaced).
+pub fn begin_mfa_enrollment_impl(state: &AppEngineState) -> Result<MfaEnrollmentDto, String> {
+    {
+        let mut vault = state.vault.write();
+        if !vault.is_unlocked() {
+            return Err("Vault is locked — unlock before configuring MFA".into());
+        }
+        if vault.mfa_enrolled() {
+            return Err("Two-factor authentication is already enabled — disable it first".into());
+        }
+    }
+    let secret = crate::totp::generate_secret();
+    let secret_b32 = crate::totp::encode_secret_base32(&*secret);
+    *state.mfa_pending.lock() = Some(zeroize::Zeroizing::new(secret.to_vec()));
+    Ok(MfaEnrollmentDto {
+        secret_base32: secret_b32.clone(),
+        otpauth_uri: crate::totp::otpauth_uri(&secret_b32, "Arbitrageur", "operator"),
+    })
+}
+
+/// Finish MFA enrollment: verify the operator's first code against the
+/// pending secret, then persist the secret inside the vault. A wrong code
+/// keeps the pending secret so a mistyped first attempt can be retried.
+pub fn confirm_mfa_enrollment_impl(
+    code: &str,
+    state: &AppEngineState,
+) -> Result<VaultStatus, String> {
+    let pending = state
+        .mfa_pending
+        .lock()
+        .clone()
+        .ok_or("No MFA enrollment in progress — start setup first")?;
+    if !crate::totp::verify(&pending, code, crate::totp::unix_now()) {
+        return Err("Invalid authentication code — check your authenticator and retry".into());
+    }
+    let status = {
+        let mut vault = state.vault.write();
+        if !vault.is_unlocked() {
+            return Err("Vault is locked — unlock before configuring MFA".into());
+        }
+        vault
+            .set_mfa_secret(crate::totp::encode_secret_base32(&pending))
+            .map_err(|e| e.to_string())?;
+        vault.get_status()
+    };
+    *state.mfa_pending.lock() = None;
+    set_mfa_flag(state, true);
+    Ok(status)
+}
+
+/// Disable MFA. Requires the current factor — a live code proves the
+/// operator still holds the authenticator, so a stale unlocked session
+/// cannot silently strip the second factor.
+pub fn disable_mfa_impl(code: &str, state: &AppEngineState) -> Result<VaultStatus, String> {
+    let status = {
+        let mut vault = state.vault.write();
+        if !vault.is_unlocked() {
+            return Err("Vault is locked — unlock before configuring MFA".into());
+        }
+        match vault.verify_mfa_code(code).map_err(|e| e.to_string())? {
+            true => {}
+            false => return Err("Invalid authentication code".into()),
+        }
+        vault.clear_mfa_secret().map_err(|e| e.to_string())?;
+        vault.get_status()
+    };
+    set_mfa_flag(state, false);
     Ok(status)
 }
 
@@ -1732,9 +1861,10 @@ pub async fn initialize_vault(
 #[tauri::command]
 pub async fn unlock_vault(
     password: String,
+    totp_code: Option<String>,
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<VaultStatus, String> {
-    unlock_vault_impl(&password, &state)
+    unlock_vault_impl(&password, totp_code.as_deref(), &state)
 }
 
 #[tauri::command]
@@ -1746,9 +1876,33 @@ pub async fn lock_vault(state: State<'_, Arc<AppEngineState>>) -> Result<VaultSt
 pub async fn change_vault_password(
     current: String,
     new_password: String,
+    totp_code: Option<String>,
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<VaultStatus, String> {
-    change_vault_password_impl(&current, &new_password, &state)
+    change_vault_password_impl(&current, &new_password, totp_code.as_deref(), &state)
+}
+
+#[tauri::command]
+pub async fn begin_mfa_enrollment(
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<MfaEnrollmentDto, String> {
+    begin_mfa_enrollment_impl(&state)
+}
+
+#[tauri::command]
+pub async fn confirm_mfa_enrollment(
+    code: String,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<VaultStatus, String> {
+    confirm_mfa_enrollment_impl(&code, &state)
+}
+
+#[tauri::command]
+pub async fn disable_mfa(
+    code: String,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<VaultStatus, String> {
+    disable_mfa_impl(&code, &state)
 }
 
 #[tauri::command]
