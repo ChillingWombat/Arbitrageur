@@ -38,10 +38,14 @@ async fn settle_working_leg(
     resp: OrderResponse,
     cancel_partial: bool,
 ) -> OrderResponse {
-    if resp.status.is_final()
-        || !response_identity_matches(&resp, exchange, symbol, client_order_id)
-    {
+    if !response_identity_matches(&resp, exchange, symbol, client_order_id) {
         return resp;
+    }
+    if resp.status.is_final() {
+        // A terminal `Filled` can still carry an incomplete fill record —
+        // Arcus publishes the status before enriching avgFillPrice. Enrich
+        // before classifying or the fill reads as failed and gets unwound.
+        return enrich_fill_stats(exchange, symbol, client_order_id, resp).await;
     }
     let mut latest = resp;
     for _ in 0..LEG_SETTLE_POLLS {
