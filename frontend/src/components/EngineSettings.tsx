@@ -374,7 +374,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   const [arcusEnabled, setArcusEnabled] = useState(false);
   const [asterEnabled, setAsterEnabled] = useState(false);
   const [popdexEnabled, setPopdexEnabled] = useState(false);
-  const [popdexNetwork, setPopdexNetwork] = useState("mainnet");
   const [binanceEnabled, setBinanceEnabled] = useState(false);
   const [coinbaseEnabled, setCoinbaseEnabled] = useState(false);
   const [alpacaEnabled, setAlpacaEnabled] = useState(false);
@@ -714,7 +713,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         setOkxEnabled(s.okx_enabled ?? false);
         setAsterEnabled(s.aster_enabled ?? false);
         setPopdexEnabled(s.popdex_enabled ?? false);
-        setPopdexNetwork((s as unknown as Record<string, unknown>).popdex_network === "testnet" ? "testnet" : "mainnet");
         setCoinbaseEnabled(s.coinbase_enabled ?? false);
         setAlpacaEnabled(s.alpaca_enabled ?? false);
 
@@ -882,7 +880,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
           okx_enabled: okxEnabled,
           aster_enabled: asterEnabled,
           popdex_enabled: popdexEnabled,
-          popdex_network: popdexNetwork,
           coinbase_enabled: coinbaseEnabled,
           alpaca_enabled: alpacaEnabled,
           arcus_api_key: arcusApiKey.trim(),
@@ -1586,35 +1583,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
             )}
 
             {/* Standard Exchanges */}
-            {selectedExchange === "popdex" && (
-              <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs space-y-2">
-                <label className="text-slate-800 font-bold block text-xs font-mono">
-                  Network
-                </label>
-                <p className="text-[11px] text-slate-500 font-sans leading-normal">
-                  Mainnet (Morph Tachyon chain 2184) uses real funds and live prices.
-                  Validate automation on testnet (chain 34952 + test USDT faucet) first —
-                  contracts, functions and flow are identical, only RPC and app host change.
-                </p>
-                <div className="flex gap-2">
-                  {(["mainnet", "testnet"] as const).map((n) => (
-                    <button
-                      key={n}
-                      type="button"
-                      onClick={() => setPopdexNetwork(n)}
-                      aria-pressed={popdexNetwork === n}
-                      className={`px-3 py-1.5 rounded-lg text-xs font-mono font-bold border transition cursor-pointer ${
-                        popdexNetwork === n
-                          ? "bg-accent text-white border-accent"
-                          : "text-slate-500 border-surface-border hover:text-slate-800 hover:bg-slate-100/70"
-                      }`}
-                    >
-                      {n === "mainnet" ? "Mainnet" : "Testnet"}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            )}
 
             {/* Shared EVM wallet — one key fanned out to every AMM venue */}
             {selectedExchange === "evm_wallet" && (
