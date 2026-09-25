@@ -1834,8 +1834,10 @@ mod tests {
     #[tokio::test]
     async fn live_unverifiable_cancel_stops_stacking_orders() {
         // The post-cancel fetch errors — the driver cannot prove the resting
-        // order is dead, so it must NOT peg another limit; it market-closes
-        // the remainder instead.
+        // order is dead, so it must NOT peg another limit AND must not
+        // market-close either: a market order would stack a second reduce on
+        // top of one that may still be live, flipping past flat. The run
+        // ends Unresolved with exactly one order ever placed.
         let adapter = Arc::new(ScriptedLive::new(vec![vec![
             Poll::Error,
             Poll::Error,
@@ -1855,13 +1857,13 @@ mod tests {
         )
         .await
         .expect("reduce resolves");
-        // Exactly one limit order was ever resting.
-        assert_eq!(adapter.orders.lock().expect("test mutex").len(), 2); // 1 limit + 1 market
-        assert!(matches!(
-            report.outcome,
-            PassiveOutcome::MarketFallback { .. }
-        ));
-        assert_eq!(report.response.filled_qty, dec!(1));
+        // Exactly one limit order was ever resting — no market order was
+        // stacked behind an order whose state could not be verified.
+        assert_eq!(adapter.orders.lock().expect("test mutex").len(), 1);
+        assert!(matches!(report.outcome, PassiveOutcome::Unresolved { .. }));
+        // Nothing provably filled — the report claims no fill rather than
+        // inventing one.
+        assert_eq!(report.response.filled_qty, dec!(0));
     }
 
     #[tokio::test]

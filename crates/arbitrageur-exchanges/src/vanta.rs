@@ -35,6 +35,18 @@ fn dec_from_json(v: Option<&serde_json::Value>) -> Option<Decimal> {
     }
 }
 
+/// Executed quantity on an Orderly order payload. Deployments have shipped
+/// `executed_quantity`, `total_executed_quantity`, and bare `executed`
+/// spellings — absent keys must not silently read as zero on a terminal
+/// status (a real FILLED order went invisible behind this 2026-09).
+fn orderly_executed_qty(data: &serde_json::Value) -> Decimal {
+    dec_from_json(data.get("executed_quantity"))
+        .or_else(|| dec_from_json(data.get("total_executed_quantity")))
+        .or_else(|| dec_from_json(data.get("executed")))
+        .filter(|q| *q >= dec!(0))
+        .unwrap_or_default()
+}
+
 fn ts_from_json(v: Option<&serde_json::Value>) -> Option<DateTime<Utc>> {
     let ms = match v? {
         serde_json::Value::Number(n) => n.as_i64()?,
@@ -1119,9 +1131,7 @@ impl ExchangeAdapter for VantaAdapter {
         let orig_qty = dec_from_json(data.get("quantity"))
             .filter(|q| *q > dec!(0))
             .ok_or_else(|| anyhow::anyhow!("Vanta fetch_order missing quantity: {v}"))?;
-        let filled_qty = dec_from_json(data.get("executed_quantity"))
-            .filter(|q| *q >= dec!(0))
-            .unwrap_or_default();
+        let filled_qty = orderly_executed_qty(data);
         if filled_qty > orig_qty {
             anyhow::bail!(
                 "Vanta fetch_order executed_quantity {filled_qty} exceeds quantity {orig_qty}: {v}"
@@ -1606,5 +1616,29 @@ mod tests {
         assert_eq!(vols.get("BTC-USDC"), Some(&dec!(50000000.0)));
         assert_eq!(vols.get("ETH-USDC"), Some(&dec!(250000.0)));
         assert_eq!(vols.get("SOL-USDC"), None);
+    }
+
+    #[test]
+    fn orderly_executed_qty_reads_every_shipped_spelling() {
+        // The exact payload Orderly testnet returned for order 3766660282 —
+        // `total_executed_quantity` and `executed`, no `executed_quantity`.
+        let filled = serde_json::json!({
+            "status": "FILLED",
+            "quantity": 0.001,
+            "executed": 0.001,
+            "total_executed_quantity": 0.001
+        });
+        assert_eq!(orderly_executed_qty(&filled), dec!(0.001));
+
+        // Legacy spelling still wins when present.
+        let legacy = serde_json::json!({
+            "executed_quantity": 0.0004,
+            "executed": 0.001
+        });
+        assert_eq!(orderly_executed_qty(&legacy), dec!(0.0004));
+
+        // A working order with no execution fields reads zero — truthfully.
+        let working = serde_json::json!({"status": "NEW", "quantity": 0.001});
+        assert_eq!(orderly_executed_qty(&working), dec!(0));
     }
 }

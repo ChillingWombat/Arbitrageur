@@ -206,6 +206,20 @@ impl ArcusAdapter {
         hex::encode(key.sign(payload.as_bytes()).to_bytes())
     }
 
+    /// Snap a price onto the market's tick grid. `loosen=true` widens the
+    /// bound (buy up / sell down — used for MARKET protective bounds so the
+    /// guard never rejects our own intent); `loosen=false` preserves the
+    /// caller's limit (buy down / sell up — the wire price never exceeds
+    /// the limit).
+    fn snap_to_tick(price: Decimal, tick_size: Decimal, side: Side, loosen: bool) -> Decimal {
+        let ticks = price / tick_size;
+        let snapped = match (side, loosen) {
+            (Side::Buy, true) | (Side::Sell, false) => ticks.ceil(),
+            (Side::Sell, true) | (Side::Buy, false) => ticks.floor(),
+        };
+        snapped * tick_size
+    }
+
     /// Exact integer ticks/quantums: `value / step` must be integral or the
     /// signed payload would not match what the venue validates.
     fn exact_units(value: Decimal, step: Decimal, what: &str, market: &str) -> anyhow::Result<u64> {
@@ -835,19 +849,15 @@ impl ExchangeAdapter for ArcusAdapter {
             anyhow::bail!("Arcus MARKET orders cannot be ALO");
         }
 
-        // MARKET orders still carry a mandatory protective price bound
-        // within 10% of mark; derive one from the mid when the caller
-        // didn't supply a bound. The bound is snapped looser (buy up /
-        // sell down) so the signed tick integer stays exactly aligned.
+        // Venue prices must land exactly on tick multiples. LIMIT prices
+        // snap inward (buy down / sell up) so the wire price never exceeds
+        // the caller's bound. MARKET orders still carry a mandatory
+        // protective price bound within 10% of mark; derive one from the
+        // mid when the caller didn't supply a bound — snapped looser
+        // (buy up / sell down) so the signed tick integer stays aligned.
         let price = match order.price {
-            Some(p) if !is_market => p,
-            Some(p) => {
-                let ticks = p / spec.tick_size;
-                (match order.side {
-                    Side::Buy => ticks.ceil(),
-                    Side::Sell => ticks.floor(),
-                }) * spec.tick_size
-            }
+            Some(p) if !is_market => Self::snap_to_tick(p, spec.tick_size, order.side, false),
+            Some(p) => Self::snap_to_tick(p, spec.tick_size, order.side, true),
             None if is_market => {
                 let mids = self.fetch_market_prices().await?;
                 let mid = *mids.get(&market).ok_or_else(|| {
@@ -859,17 +869,15 @@ impl ExchangeAdapter for ArcusAdapter {
                     Side::Buy => mid * dec!(1.05),
                     Side::Sell => mid * dec!(0.95),
                 };
-                let ticks = bound / spec.tick_size;
-                (match order.side {
-                    Side::Buy => ticks.ceil(),
-                    Side::Sell => ticks.floor(),
-                }) * spec.tick_size
+                Self::snap_to_tick(bound, spec.tick_size, order.side, true)
             }
             None => anyhow::bail!("Arcus limit order requires a price"),
         };
 
         let p = Self::exact_units(price, spec.tick_size, "price", &market)?;
-        let q = Self::exact_units(order.quantity, spec.step_size, "quantity", &market)?;
+        // Quantities floor to the step grid — never size up on the wire.
+        let qty = (order.quantity / spec.step_size).floor() * spec.step_size;
+        let q = Self::exact_units(qty, spec.step_size, "quantity", &market)?;
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1299,5 +1307,35 @@ mod tests {
         assert_eq!(wallet, "0xe3abf3d7e567a17d3f6ae4ebd4896654ac544eb8");
         assert_eq!(ai, 0);
         assert!(a.has_live_credentials());
+    }
+
+    #[test]
+    fn snap_to_tick_preserves_limit_bounds_and_loosens_market_guards() {
+        let tick = dec!(0.1);
+        // The real testnet failure: engine-derived sell at 84567.99485 is
+        // off-grid. Limit snap keeps the bound — sell goes UP to 84568.0
+        // (never sells below intent); buy goes DOWN to 84567.9.
+        assert_eq!(
+            ArcusAdapter::snap_to_tick(dec!(84567.99485), tick, Side::Sell, false),
+            dec!(84568.0)
+        );
+        assert_eq!(
+            ArcusAdapter::snap_to_tick(dec!(84567.99485), tick, Side::Buy, false),
+            dec!(84567.9)
+        );
+        // Market protective bounds snap looser — the opposite direction.
+        assert_eq!(
+            ArcusAdapter::snap_to_tick(dec!(84567.99485), tick, Side::Sell, true),
+            dec!(84567.9)
+        );
+        assert_eq!(
+            ArcusAdapter::snap_to_tick(dec!(84567.99485), tick, Side::Buy, true),
+            dec!(84568.0)
+        );
+        // Already-aligned prices are untouched.
+        assert_eq!(
+            ArcusAdapter::snap_to_tick(dec!(84568.0), tick, Side::Buy, false),
+            dec!(84568.0)
+        );
     }
 }
