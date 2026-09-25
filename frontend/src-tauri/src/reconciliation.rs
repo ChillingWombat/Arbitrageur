@@ -1005,6 +1005,7 @@ async fn dispatch_residual_flatten(state: &AppEngineState, signal_id: &str) {
             symbol: (!l.symbol.is_empty()).then(|| l.symbol.clone()),
             intended_qty: *qty,
             intended_price: None,
+            unit_scale: None,
         })
         .collect();
     if let Err(e) = state.state_store.record_signal_execution(
@@ -1401,6 +1402,7 @@ mod tests {
             venue_order_id: Some("o".into()),
             client_order_id: None,
             intended_price: None,
+            unit_scale: 1.0,
             created_at: Utc::now().to_rfc3339(),
             updated_at: Utc::now().to_rfc3339(),
         }
@@ -1868,6 +1870,7 @@ mod tests {
                             symbol: Some("BTC-USD".into()),
                             intended_qty: 1.0,
                             intended_price: None,
+                            unit_scale: None,
                         })
                         .collect(),
                 },
@@ -2247,6 +2250,7 @@ mod tests {
                             symbol: Some("BTC-USD".into()),
                             intended_qty: 1.0,
                             intended_price: None,
+                            unit_scale: None,
                         },
                         crate::state_store::NewSignalLeg {
                             account_id: None,
@@ -2255,6 +2259,7 @@ mod tests {
                             symbol: Some("BTC-USD".into()),
                             intended_qty: 1.0,
                             intended_price: None,
+                            unit_scale: None,
                         },
                     ],
                 },
@@ -2341,6 +2346,7 @@ mod tests {
                             symbol: Some("BTC-USD".into()),
                             intended_qty: 1.0,
                             intended_price: None,
+                            unit_scale: None,
                         },
                         crate::state_store::NewSignalLeg {
                             account_id: None,
@@ -2349,6 +2355,7 @@ mod tests {
                             symbol: Some("BTC-USD".into()),
                             intended_qty: 1.0,
                             intended_price: None,
+                            unit_scale: None,
                         },
                     ],
                 },
@@ -2386,6 +2393,7 @@ mod tests {
                         symbol: Some("BTC-USD".into()),
                         intended_qty: 1.0,
                         intended_price: None,
+                        unit_scale: None,
                     }],
                 },
                 "testnet",

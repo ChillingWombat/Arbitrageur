@@ -258,6 +258,12 @@ pub struct SignalLeg {
     /// Dispatch-time expected fill price (schema v27). `None` for legs
     /// recorded before v27 or without book context.
     pub intended_price: Option<f64>,
+    /// Leg venue-units per unit of the parent signal's symbol (schema
+    /// v39). Tracked-group legs fill in their own instrument's units —
+    /// a QQQ leg on a NAS100 row carries ~39.4 — so delta and exposure
+    /// reads divide by this scale to compare legs in shared units.
+    /// `1.0` for every same-instrument and pre-v39 leg.
+    pub unit_scale: f64,
     pub created_at: String,
     pub updated_at: String,
 }
@@ -343,6 +349,11 @@ pub struct NewSignalLeg {
     /// Dispatch-time expected fill price (the quote the order was priced
     /// against). `None` for legs recorded without book context.
     pub intended_price: Option<f64>,
+    /// Leg venue-units per unit of the parent symbol. `None`/`Some(1.0)`
+    /// for same-instrument legs; cross-instrument tracked-group legs
+    /// carry the conversion the entry was sized under so delta and
+    /// exposure reads compare legs in shared units.
+    pub unit_scale: Option<f64>,
 }
 
 pub struct NewSignalExecution {
@@ -1740,6 +1751,20 @@ COMMIT;";
 /// open-position tracker stays visible to BOTH environments (fail-closed,
 /// mirroring v32 signal semantics): an unwatched real position is worse
 /// than a watched ambiguous one.
+/// v39 adds `signal_legs.unit_scale`: the leg's venue-unit quantity per
+/// unit of the parent signal's symbol. Cross-instrument tracked-group
+/// pairs (index perp ↔ ETF perp — long 39.4 QQQ vs short 1.0 NAS100)
+/// store fills in venue-native units, so per-signal delta and ticker net
+/// position must divide by this scale to compare legs in shared units.
+/// Same-instrument legs keep the default 1.0 — the queries are identical
+/// for every pre-v39 row.
+const MIGRATION_V39_SQL: &str = "\
+BEGIN IMMEDIATE;
+ALTER TABLE signal_legs ADD COLUMN unit_scale
+    REAL NOT NULL DEFAULT 1.0 CHECK(unit_scale > 0);
+PRAGMA user_version = 39;
+COMMIT;";
+
 const MIGRATION_V38_SQL: &str = "\
 PRAGMA foreign_keys = OFF;
 BEGIN IMMEDIATE;
@@ -2282,6 +2307,13 @@ fn leg_from_row(row: &Row<'_>) -> rusqlite::Result<SignalLeg> {
             .flatten()
             .filter(|s| !s.trim().is_empty()),
         intended_price: row.get::<_, Option<f64>>(14).ok().flatten(),
+        // Corrupt/NULL scale reads as 1.0 — the same-unit semantic —
+        // rather than poisoning shared-unit math with a bad divisor.
+        unit_scale: row
+            .get::<_, f64>(15)
+            .ok()
+            .filter(|s| s.is_finite() && *s > 0.0)
+            .unwrap_or(1.0),
         created_at: row.get(10)?,
         updated_at: row.get(11)?,
     })
@@ -2508,7 +2540,7 @@ impl StateStore {
 
     fn migrate(conn: &Connection) -> anyhow::Result<()> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 38 {
+        if version > 39 {
             anyhow::bail!("unsupported state store schema version: {version}");
         }
         if version == 0 {
@@ -2735,6 +2767,12 @@ impl StateStore {
         }
         if version <= 37 {
             if let Err(err) = conn.execute_batch(MIGRATION_V38_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 38 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V39_SQL) {
                 let _ = conn.execute_batch("ROLLBACK;");
                 return Err(err.into());
             }

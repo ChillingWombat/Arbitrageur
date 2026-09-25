@@ -245,6 +245,38 @@ pub(crate) async fn execute_monitor_opportunity_impl(
                 expected_net_bps: None,
             })
         });
+    // Cross-instrument legs: a group-keyed row carries the member each
+    // venue actually trades. Resolve each leg's lane key (raw-book lookup),
+    // venue-facing symbol (order placement), and the conversion scale the
+    // row was priced under — an unlearned or evicted scale refuses
+    // dispatch rather than re-price the pair on stale truth.
+    let pair_legs = if row.buy_instrument.is_some() || row.sell_instrument.is_some() {
+        match (
+            engine.leg_group_scale(&sym, buy_venue),
+            engine.leg_group_scale(&sym, sell_venue),
+            engine.leg_venue_symbol(&sym, buy_venue),
+            engine.leg_venue_symbol(&sym, sell_venue),
+        ) {
+            (Some(bs), Some(ss), Some(bv), Some(sv)) => {
+                Some(crate::execution::PairLegs {
+                    buy_key: engine.leg_lane_key(&sym, buy_venue),
+                    sell_key: engine.leg_lane_key(&sym, sell_venue),
+                    buy_symbol: bv,
+                    sell_symbol: sv,
+                    buy_scale: bs,
+                    sell_scale: ss,
+                })
+            }
+            _ => {
+                return Err(
+                    "tracked-group leg resolution unavailable (ratio unlearned or lane missing) — refusing dispatch"
+                        .into(),
+                )
+            }
+        }
+    } else {
+        None
+    };
     // Radar-dispatched fills persist under the "radar" strategy so the
     // Spread Radar page scopes positions separately from Simple Spread.
     let res = execute_spatial_arbitrage_inner(
@@ -261,6 +293,7 @@ pub(crate) async fn execute_monitor_opportunity_impl(
         None,
         "radar",
         prediction,
+        pair_legs.as_ref(),
         state,
     )
     .await?;

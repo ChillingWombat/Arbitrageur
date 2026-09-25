@@ -375,6 +375,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_scaled_legs_match_in_common_units() {
+        // Tracked-group pair: leg A is the index numéraire (1 common unit
+        // per leg unit), leg B is the ETF (1/40 common unit per leg unit —
+        // ~40 ETF units hedge 1 index unit). A fills 0.5 of 1.0 index;
+        // B fills all 40 ETF units. The match must keep 20 ETF units and
+        // trim the other 20 — comparing raw fill quantities (0.5 vs 40)
+        // would trim 39.5 ETF and leave a naked half-index.
+        let mock_a = MockExchange::new(
+            "ex_a",
+            vec![MockResponse::Partial(dec!(0.5))],
+            MockResponse::Full,
+        );
+        let mock_b = MockExchange::new("ex_b", vec![], MockResponse::Full);
+        let log_b = mock_b.call_log();
+        let ex_a: Arc<dyn ExchangeAdapter> = Arc::new(mock_a);
+        let ex_b: Arc<dyn ExchangeAdapter> = Arc::new(mock_b);
+
+        let (coordinator, cb) = make_coordinator();
+
+        let order_a = OrderRequest::new_limit(
+            ex_a.venue_id(),
+            "US100-USDC",
+            Side::Buy,
+            dec!(29270),
+            dec!(1.0),
+        );
+        let order_b = OrderRequest::new_limit(
+            ex_b.venue_id(),
+            "QQQ-USD",
+            Side::Sell,
+            dec!(744),
+            dec!(40.0),
+        );
+
+        let res = coordinator
+            .execute_two_leg_scaled(
+                &ex_a,
+                order_a,
+                &ex_b,
+                order_b,
+                Some((dec!(1), dec!(1) / dec!(40))),
+            )
+            .await;
+        match res {
+            ArbitrageExecutionResult::PartialPairKept {
+                matched_qty,
+                unwind_a,
+                unwind_b,
+                ..
+            } => {
+                // Common units: 0.5 index-units matched.
+                assert_eq!(matched_qty, dec!(0.5));
+                assert!(unwind_a.is_none());
+                // B keeps 20 ETF units; the other 20 trim.
+                assert_eq!(unwind_b.expect("B excess must trim").filled_qty, dec!(20));
+            }
+            other => panic!("Expected PartialPairKept, got {:?}", other),
+        }
+        assert!(!cb.is_tripped());
+        let calls_b = log_b.lock().unwrap();
+        assert_eq!(calls_b.len(), 2);
+        assert_eq!(calls_b[1].side, Side::Buy);
+        assert_eq!(calls_b[1].quantity, dec!(20));
+    }
+
+    #[tokio::test]
     async fn test_partial_pair_kept_includes_trim_price_pnl() {
         // Same shape as above: A buys 0.4 @60000, B sells 1.0 @60100, the
         // 0.6 short excess is bought back by the market trim (mock: @100).

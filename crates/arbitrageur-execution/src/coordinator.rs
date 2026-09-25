@@ -340,6 +340,25 @@ impl AtomicArbitrageCoordinator {
         exchange_b: &Arc<dyn ExchangeAdapter>,
         order_b: OrderRequest,
     ) -> ArbitrageExecutionResult {
+        self.execute_two_leg_scaled(exchange_a, order_a, exchange_b, order_b, None)
+            .await
+    }
+
+    /// `execute_two_leg` with explicit leg-unit weights for cross-instrument
+    /// pairs (tracked groups: index perp vs ETF perp). `leg_unit_scale` is
+    /// (common units per leg-A unit, common units per leg-B unit): a partial
+    /// fill compares and trims in common units so ~40 ETF units hedge 1
+    /// index unit rather than 1 ETF unit. `matched_qty` in the result is
+    /// reported in common units — callers convert per leg. `None` keeps the
+    /// identical-instrument semantics every existing caller relies on.
+    pub async fn execute_two_leg_scaled(
+        &self,
+        exchange_a: &Arc<dyn ExchangeAdapter>,
+        order_a: OrderRequest,
+        exchange_b: &Arc<dyn ExchangeAdapter>,
+        order_b: OrderRequest,
+        leg_unit_scale: Option<(Decimal, Decimal)>,
+    ) -> ArbitrageExecutionResult {
         // 1. Pre-trade Risk Check
         if let Err(reason) = self.circuit_breaker.is_trading_allowed() {
             warn!("Arbitrage execution blocked by circuit breaker: {}", reason);
@@ -449,9 +468,18 @@ impl AtomicArbitrageCoordinator {
                         && sound_a
                         && sound_b
                     {
-                        let matched_qty = fill_a.filled_qty.min(fill_b.filled_qty);
-                        let excess_a = fill_a.filled_qty - matched_qty;
-                        let excess_b = fill_b.filled_qty - matched_qty;
+                        // Cross-instrument legs compare in common units
+                        // (leg qty × weight); each leg's kept/trimmed
+                        // quantity converts back to its own venue units.
+                        // Division rounding can overshoot by dust —
+                        // clamp the kept qty to the actual fill so the
+                        // excess never goes negative.
+                        let (wa, wb) = leg_unit_scale.unwrap_or((Decimal::ONE, Decimal::ONE));
+                        let matched_qty = (fill_a.filled_qty * wa).min(fill_b.filled_qty * wb);
+                        let keep_a = (matched_qty / wa).min(fill_a.filled_qty);
+                        let keep_b = (matched_qty / wb).min(fill_b.filled_qty);
+                        let excess_a = fill_a.filled_qty - keep_a;
+                        let excess_b = fill_b.filled_qty - keep_b;
 
                         let (trim_a, trim_b) = tokio::join!(
                             async {

@@ -1093,6 +1093,7 @@ fn record_options_leg_intent(
                     symbol: Some(symbol.to_string()),
                     intended_qty: qty_f64,
                     intended_price: None,
+                    unit_scale: None,
                 }],
             },
             state.env().as_str(),

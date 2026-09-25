@@ -77,12 +77,16 @@ impl StateStore {
                 Some(sym) => normalize_symbol(sym)?,
                 None => symbol.clone(),
             };
+            let unit_scale = leg.unit_scale.unwrap_or(1.0);
+            if !unit_scale.is_finite() || unit_scale <= 0.0 {
+                anyhow::bail!("leg unit_scale must be finite and positive");
+            }
             tx.execute(
                 "INSERT INTO signal_legs
                     (id, signal_id, account_id, venue, side, intended_qty,
                      filled_qty, fill_price, fee_usd, created_at, updated_at, symbol,
-                     intended_price)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, NULL, 0, ?7, ?7, ?8, ?9)",
+                     intended_price, unit_scale)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, NULL, 0, ?7, ?7, ?8, ?9, ?10)",
                 params![
                     leg_id,
                     id,
@@ -92,7 +96,8 @@ impl StateStore {
                     leg.intended_qty,
                     now,
                     leg_symbol,
-                    leg.intended_price
+                    leg.intended_price,
+                    unit_scale
                 ],
             )?;
         }
@@ -802,11 +807,33 @@ impl StateStore {
     /// Signed net delta of one signal's filled legs (long +, short −).
     /// Delta ≈ 0 means the signal hedged itself; anything else is residual
     /// directional exposure belonging to that signal alone.
+    /// Signed filled delta between a signal's legs in shared units (leg
+    /// qty ÷ `unit_scale`). Cross-instrument tracked-group legs fill in
+    /// their own instrument's units — dividing by the recorded scale
+    /// compares them in the parent symbol's units the way same-unit
+    /// legs always did.
     pub fn signal_delta(&self, signal_id: &str) -> anyhow::Result<f64> {
         let signal_id = normalize_id(signal_id)?;
         let conn = self.conn.lock();
         Ok(conn.query_row(
-            "SELECT COALESCE(SUM(CASE side WHEN 'long' THEN filled_qty ELSE -filled_qty END), 0)
+            "SELECT COALESCE(SUM(CASE side WHEN 'long' THEN filled_qty ELSE -filled_qty END / unit_scale), 0)
+             FROM signal_legs WHERE signal_id = ?1",
+            [&signal_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Signed intended (dispatch-quantity) delta in shared units — the
+    /// asymmetry baked in by per-venue wire-grid snapping. A scaled pair's
+    /// snapped leg quantities can differ in shared units by up to one
+    /// venue step per leg; comparing the filled delta against this bound
+    /// keeps construction dust from reading as an imbalance while a real
+    /// fill-time asymmetry still flags.
+    pub fn signal_intended_delta(&self, signal_id: &str) -> anyhow::Result<f64> {
+        let signal_id = normalize_id(signal_id)?;
+        let conn = self.conn.lock();
+        Ok(conn.query_row(
+            "SELECT COALESCE(SUM(CASE side WHEN 'long' THEN intended_qty ELSE -intended_qty END / unit_scale), 0)
              FROM signal_legs WHERE signal_id = ?1",
             [&signal_id],
             |r| r.get(0),
@@ -825,7 +852,7 @@ impl StateStore {
         let symbol = normalize_symbol(symbol)?;
         let conn = self.conn.lock();
         let mut sql = String::from(
-            "SELECT COALESCE(SUM(CASE l.side WHEN 'long' THEN l.filled_qty ELSE -l.filled_qty END), 0)
+            "SELECT COALESCE(SUM(CASE l.side WHEN 'long' THEN l.filled_qty ELSE -l.filled_qty END / l.unit_scale), 0)
              FROM signal_legs l
              JOIN signal_executions s ON s.id = l.signal_id
              WHERE s.symbol = ?1 COLLATE NOCASE AND s.status NOT IN ('closed', 'failed')",
@@ -1105,7 +1132,8 @@ impl StateStore {
         let mut stmt = conn.prepare(
             "SELECT id, signal_id, account_id, venue, side, intended_qty,
                     filled_qty, fill_price, fee_usd, venue_order_id,
-                    created_at, updated_at, symbol, client_order_id, intended_price
+                    created_at, updated_at, symbol, client_order_id, intended_price,
+                    unit_scale
              FROM signal_legs WHERE signal_id = ?1
              ORDER BY CASE side WHEN 'long' THEN 0 ELSE 1 END",
         )?;

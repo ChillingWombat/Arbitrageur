@@ -167,6 +167,20 @@ async fn dispatch(line: &str, state: &Arc<AppEngineState>) -> Value {
             let sym = arg(&args, "symbol").unwrap_or_default();
             let buy = arg(&args, "buy_venue").unwrap_or_default();
             let sell = arg(&args, "sell_venue").unwrap_or_default();
+            // Optional cross-instrument legs (tracked-group testing):
+            // pass buy_symbol+sell_symbol (+keys/scales) to route each leg
+            // on its own instrument under a shared group key.
+            let legs = match (arg(&args, "buy_symbol"), arg(&args, "sell_symbol")) {
+                (Some(bs), Some(ss)) => Some(crate::execution::PairLegs {
+                    buy_key: arg(&args, "buy_key").unwrap_or(bs).to_string(),
+                    sell_key: arg(&args, "sell_key").unwrap_or(ss).to_string(),
+                    buy_symbol: bs.to_string(),
+                    sell_symbol: ss.to_string(),
+                    buy_scale: arg_f64(&args, "buy_scale").unwrap_or(1.0),
+                    sell_scale: arg_f64(&args, "sell_scale").unwrap_or(1.0),
+                }),
+                _ => None,
+            };
             crate::execution::execute_spatial_arbitrage_inner(
                 sym,
                 buy,
@@ -181,6 +195,7 @@ async fn dispatch(line: &str, state: &Arc<AppEngineState>) -> Value {
                 None,
                 arg(&args, "strategy_id").unwrap_or("futures"),
                 None,
+                legs.as_ref(),
                 st,
             )
             .await

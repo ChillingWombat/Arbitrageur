@@ -626,6 +626,14 @@ pub fn is_ondo_venue(venue: &str) -> bool {
     )
 }
 
+/// True when the venue trades cash shares rather than perpetuals — the
+/// only venues whose legs owe dividend/borrow/expense carry in addition
+/// to (or instead of) perp funding. Alpaca is the share venue; Ondo legs
+/// are tokenized perps whose funding already wraps the carry.
+pub fn is_equity_rails(venue: &str) -> bool {
+    matches!(venue.trim().to_lowercase().as_str(), "alpaca")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

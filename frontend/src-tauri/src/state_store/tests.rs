@@ -51,7 +51,7 @@ fn test_file_store_config_and_permissions() {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 38);
+        assert_eq!(version, 39);
         let mode: String = conn
             .query_row("PRAGMA journal_mode", [], |r| r.get(0))
             .unwrap();
@@ -724,6 +724,7 @@ fn two_leg_signal(
                 symbol: None,
                 intended_qty: 1.0,
                 intended_price: None,
+                unit_scale: None,
             },
             NewSignalLeg {
                 account_id: acct_b.map(|s| s.to_string()),
@@ -732,6 +733,7 @@ fn two_leg_signal(
                 symbol: None,
                 intended_qty: 1.0,
                 intended_price: None,
+                unit_scale: None,
             },
         ],
     }
@@ -745,7 +747,7 @@ fn test_leg_symbol_none_resolves_to_root_and_some_is_exact() {
         .lock()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 38);
+    assert_eq!(version, 39);
     store
         .record_signal_execution(
             &NewSignalExecution {
@@ -763,6 +765,7 @@ fn test_leg_symbol_none_resolves_to_root_and_some_is_exact() {
                         symbol: Some("BTC-SPOT".to_string()),
                         intended_qty: 0.5,
                         intended_price: None,
+                        unit_scale: None,
                     },
                     NewSignalLeg {
                         account_id: None,
@@ -771,6 +774,7 @@ fn test_leg_symbol_none_resolves_to_root_and_some_is_exact() {
                         symbol: None,
                         intended_qty: 0.5,
                         intended_price: None,
+                        unit_scale: None,
                     },
                 ],
             },
@@ -798,6 +802,106 @@ fn test_leg_symbol_none_resolves_to_root_and_some_is_exact() {
         .unwrap();
     assert!((store.venue_symbol_net("lighter", "BTC-SPOT", None).unwrap() - 0.5).abs() < 1e-9);
     assert!((store.venue_symbol_net("lighter", "BTC-USDC", None).unwrap() + 0.5).abs() < 1e-9);
+}
+
+#[test]
+fn test_v39_scaled_legs_delta_reads_in_shared_units() {
+    // Tracked-group pair (index perp ↔ ETF perp): legs fill in their own
+    // venue units — 39.4 QQQ vs 1.0 NAS100 — and `unit_scale` records the
+    // entry-time conversion. Raw leg-unit sums would read a balanced pair
+    // as +38.4 of exposure; shared-unit delta must be ~0.
+    let store = StateStore::open_in_memory().unwrap();
+    store
+        .record_signal_execution(
+            &NewSignalExecution {
+                id: "ndx-1".to_string(),
+                strategy_id: "futures".into(),
+                symbol: "NAS100".to_string(),
+                route_id: None,
+                expected_net_usd: None,
+                note: None,
+                legs: vec![
+                    NewSignalLeg {
+                        account_id: None,
+                        venue: "arcus".into(),
+                        side: LegSide::Long,
+                        symbol: Some("QQQ".to_string()),
+                        intended_qty: 39.4,
+                        intended_price: None,
+                        unit_scale: Some(39.4),
+                    },
+                    NewSignalLeg {
+                        account_id: None,
+                        venue: "robinhood".into(),
+                        side: LegSide::Short,
+                        symbol: Some("US100".to_string()),
+                        intended_qty: 1.0,
+                        intended_price: None,
+                        unit_scale: Some(1.0),
+                    },
+                ],
+            },
+            "testnet",
+        )
+        .unwrap();
+    store
+        .apply_leg_fill("ndx-1", LegSide::Long, 39.4, 744.0, 0.03, None)
+        .unwrap();
+    store
+        .apply_leg_fill("ndx-1", LegSide::Short, 1.0, 29_273.0, 0.03, None)
+        .unwrap();
+    assert!(
+        store.signal_delta("ndx-1").unwrap().abs() < 1e-9,
+        "scaled legs must net in shared units: {:?}",
+        store.signal_delta("ndx-1").unwrap()
+    );
+    assert_eq!(store.signal_intended_delta("ndx-1").unwrap(), 0.0);
+    // Ticker net reads in parent (NAS100) units — a balanced pair nets 0.
+    assert_eq!(store.ticker_net_position("NAS100", None).unwrap(), 0.0);
+    // The per-venue symbol reads stay in venue-native units for
+    // external-position matching: 39.4 QQQ, −1.0 US100.
+    assert_eq!(store.venue_symbol_net("arcus", "QQQ", None).unwrap(), 39.4);
+    assert_eq!(
+        store.venue_symbol_net("robinhood", "US100", None).unwrap(),
+        -1.0
+    );
+    // Snap-dust asymmetry: intended legs off by construction dust carry a
+    // nonzero intended delta — the fill matching it stays inside the bound.
+    store
+        .record_signal_execution(
+            &NewSignalExecution {
+                id: "ndx-2".to_string(),
+                strategy_id: "futures".into(),
+                symbol: "NAS100".to_string(),
+                route_id: None,
+                expected_net_usd: None,
+                note: None,
+                legs: vec![
+                    NewSignalLeg {
+                        account_id: None,
+                        venue: "arcus".into(),
+                        side: LegSide::Long,
+                        symbol: Some("QQQ".to_string()),
+                        intended_qty: 39.45,
+                        intended_price: None,
+                        unit_scale: Some(39.4),
+                    },
+                    NewSignalLeg {
+                        account_id: None,
+                        venue: "robinhood".into(),
+                        side: LegSide::Short,
+                        symbol: Some("US100".to_string()),
+                        intended_qty: 1.0,
+                        intended_price: None,
+                        unit_scale: Some(1.0),
+                    },
+                ],
+            },
+            "testnet",
+        )
+        .unwrap();
+    let dust = store.signal_intended_delta("ndx-2").unwrap();
+    assert!(dust > 0.0 && dust < 0.01, "dust asymmetry, got {dust}");
 }
 
 #[test]
@@ -1185,7 +1289,7 @@ fn test_migration_v27_intended_price_defaults_null() {
     let v: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 38);
+    assert_eq!(v, 39);
     let ip: Option<f64> = conn
         .query_row(
             "SELECT intended_price FROM signal_legs WHERE id = 'leg-pre'",
@@ -1925,7 +2029,7 @@ fn test_kv_survives_reopen() {
             .lock()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 38);
+        assert_eq!(version, 39);
     }
     let _ = fs::remove_dir_all(dir);
 }
@@ -2557,7 +2661,7 @@ fn test_migration_v20_rescales_lighter_funding_history() {
     let v: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 38);
+    assert_eq!(v, 39);
 
     let mut stmt = conn
             .prepare("SELECT venue_id, rate_8h, interval_hours FROM funding_rate_samples ORDER BY venue_id, ts_ms")
@@ -2677,7 +2781,7 @@ fn test_migration_v7_to_v8_preserves_data() {
     let v10: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v10, 38);
+    assert_eq!(v10, 39);
     // v19 remaps the renamed lifecycle statuses on the way through.
     let remapped: String = conn
         .query_row(
@@ -3627,7 +3731,7 @@ fn test_migration_v24_admits_external_and_preserves_rows() {
     let v: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 38);
+    assert_eq!(v, 39);
     let kept: String = conn
         .query_row(
             "SELECT strategy_id FROM signal_executions WHERE id = 'sig-keep'",
@@ -3682,6 +3786,7 @@ fn external_strategy_signal_persists() {
             symbol: Some("BTC-USD".into()),
             intended_qty: 0.5,
             intended_price: None,
+            unit_scale: None,
         }],
     };
     store.record_signal_execution(&sig, "testnet").unwrap();
@@ -3710,6 +3815,7 @@ fn every_allowed_strategy_id_persists() {
                         symbol: Some("BTC-USD".into()),
                         intended_qty: 1.0,
                         intended_price: None,
+                        unit_scale: None,
                     }],
                 },
                 "testnet",
