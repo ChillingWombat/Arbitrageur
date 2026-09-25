@@ -712,7 +712,9 @@ mod tests {
         let arcus = ArcusAdapter::new(None, None, None);
         assert_eq!(arcus.name(), "Arcus");
         assert_eq!(arcus.venue_id(), VenueId::new("arcus"));
-        assert!(arcus.fetch_orderbook("BTC-USDC").await.is_err());
+        // Unknown bases fail closed — the venue 404s the L2 snapshot, and
+        // offline the request itself errors; either way nothing fabricates.
+        assert!(arcus.fetch_orderbook("ZZZNOTREAL").await.is_err());
     }
 
     #[tokio::test]

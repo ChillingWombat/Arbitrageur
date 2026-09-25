@@ -64,7 +64,6 @@ interface CredFieldSpec {
  * the form renders a notice instead of fields.
  */
 export const UNSUPPORTED_VENUES: ReadonlySet<string> = new Set([
-  "arcus",
   "kalshi",
   "polymarket",
 ]);
@@ -267,6 +266,16 @@ export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
   // Variational Omni: the public API is a single stats document — no keys
   // exist yet (trading API not yet public per docs.variational.io).
   variational: [],
+  // Arcus: market data is unauthenticated today; the account model is a
+  // master Ethereum address plus a registered Ed25519 API key (docs
+  // arcus.xyz). Order signing is not yet implemented — stored material
+  // provisions the adapter but nothing submits.
+  arcus: [
+    { key: "walletAddress", label: "Master Wallet Address", placeholder: "0x… Arcus account address" },
+    { key: "apiKey", label: "API Public Key", placeholder: "Ed25519 key registered via Arcus" },
+    { key: "apiSecret", label: "API Private Key", secret: true, placeholder: "0x… Ed25519 private key" },
+    { key: "accountId", label: "Subaccount Index", optional: true, numeric: true, placeholder: "0" },
+  ],
   // dYdX Chain (Cosmos appchain): orders are signed `MsgPlaceOrder`
   // transactions broadcast over validator gRPC. The credential is the
   // account's 24-word BIP-39 mnemonic — the venue derives

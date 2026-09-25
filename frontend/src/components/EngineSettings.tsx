@@ -1479,9 +1479,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                                 : "Testnet venue equity — demo funds, not live exchange equity"
                             }
                           >
-                            {bal.is_live
-                              ? `$${bal.equity_usd.toLocaleString("en-US", { maximumFractionDigits: 0 })}`
-                              : `Testnet $${bal.equity_usd.toLocaleString("en-US", { maximumFractionDigits: 0 })}`}
+                            {`$${bal.equity_usd.toLocaleString("en-US", { maximumFractionDigits: 0 })}`}
                           </span>
                           )}
                         </div>

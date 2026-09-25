@@ -831,7 +831,7 @@ pub fn upsert_account_impl(
         .as_ref()
         .map(|e| e.venue.clone())
         .unwrap_or_else(|| input.venue.trim().to_lowercase());
-    // Venues with no constructed adapter (e.g. arcus/polymarket/kalshi)
+    // Venues with no constructed adapter (e.g. polymarket/kalshi/ibkr)
     // can never consume stored material: refuse the write instead of
     // silently warehousing secrets that provision nothing. Credential-less
     // account rows still save — presence flags and the enabled switch are

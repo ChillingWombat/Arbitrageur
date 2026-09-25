@@ -1707,6 +1707,13 @@ mod tests {
             lighter_chain_id_for_url("https://api.rh.lighter.xyz"),
             466324
         );
+        // The Robinhood *testnet* deployment signs with chain id 300 (shared
+        // with Lighter's own testnet per the official endpoint profiles) —
+        // the "testnet" substring check must keep winning over "rh".
+        assert_eq!(
+            lighter_chain_id_for_url("https://api.rh-testnet.lighter.xyz"),
+            300
+        );
         assert_eq!(lighter_chain_id_for_url("https://example.com"), 304);
     }
 
