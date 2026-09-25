@@ -340,14 +340,16 @@ impl ExchangeAdapter for AlpacaAdapter {
     }
 
     async fn fetch_markets(&self) -> anyhow::Result<Vec<MarketMetadata>> {
-        // Crypto spot pairs only — the venue's equity universe has no
-        // counterparty venue here, so listing it would be pure scan noise.
+        // Crypto spot pairs plus the equity/ETF tickers that belong to a
+        // tracked-instrument group — Arcus lists ETF perps and the
+        // index↔ETF machinery pairs members across venues, so the share
+        // side of those groups is a real counterparty universe, not scan
+        // noise. The full equity universe stays unlisted by design.
+        let mut out = Vec::new();
         let v = self
             .trade_request("GET", "/v2/assets?status=active&asset_class=crypto", None)
             .await?;
-        let rows = v.as_array().cloned().unwrap_or_default();
-        let mut out = Vec::new();
-        for row in rows {
+        for row in v.as_array().cloned().unwrap_or_default() {
             let tradable = row
                 .get("tradable")
                 .and_then(|t| t.as_bool())
@@ -377,6 +379,49 @@ impl ExchangeAdapter for AlpacaAdapter {
                 contract_size: dec!(1),
                 is_active: tradable,
             });
+        }
+        // Equity legs: tracked-group members only, and only names the
+        // venue marks shortable — an unshortable ticker can never take
+        // the sell leg, so listing it would pair a guaranteed-fail
+        // direction. Penny tick + whole-share grid mirror the venue's
+        // IOC constraints (fractional fills are DAY-market only).
+        if let Ok(v) = self
+            .trade_request(
+                "GET",
+                "/v2/assets?status=active&asset_class=us_equity",
+                None,
+            )
+            .await
+        {
+            for row in v.as_array().cloned().unwrap_or_default() {
+                let sym = match row.get("symbol").and_then(|s| s.as_str()) {
+                    Some(s) => s,
+                    None => continue,
+                };
+                if arbitrageur_core::tracking::track_group(sym).is_none() {
+                    continue;
+                }
+                let flag = |k: &str| row.get(k).and_then(|t| t.as_bool());
+                if flag("tradable") != Some(true)
+                    || flag("shortable") == Some(false)
+                    || flag("easy_to_borrow") == Some(false)
+                {
+                    continue;
+                }
+                out.push(MarketMetadata {
+                    symbol: Symbol::spot(sym.to_string(), "USD".to_string()),
+                    venue: self.venue_id.clone(),
+                    venue_symbol: sym.to_string(),
+                    price_decimals: 2,
+                    size_decimals: 0,
+                    min_order_size: dec!(1),
+                    min_notional: dec!(0),
+                    maker_fee_bps: dec!(0),
+                    taker_fee_bps: dec!(0),
+                    contract_size: dec!(1),
+                    is_active: true,
+                });
+            }
         }
         Ok(out)
     }
