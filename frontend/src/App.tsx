@@ -1119,7 +1119,7 @@ export const App: React.FC = () => {
               onRefreshAll={refreshAllData}
               isPaused={isPaused}
               isLive={systemStatus?.is_live_mode === true}
-              deribitAvailable={activeVenueCodes.has("DBT")}
+              optionsVenueAvailable={activeVenueCodes.has("DBT")}
             />
           )}
 

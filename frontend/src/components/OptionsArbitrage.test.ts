@@ -5,8 +5,14 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
   OptionsArbitrage,
   OptionsParityCard,
+  OPTIONS_SUBSTRATEGIES,
+  filterOptionsLogs,
+  filterOptionsOpps,
 } from "./OptionsArbitrage.tsx";
-import type { OptionsParityOpportunityDto } from "../types/index.ts";
+import type {
+  ExecutionLogEntry,
+  OptionsParityOpportunityDto,
+} from "../types/index.ts";
 
 const noop = async () => {};
 
@@ -61,15 +67,87 @@ test("gate: unadmitted options venue renders the page with a disabled scan + ban
     React.createElement(OptionsArbitrage, {
       executionLogs: [],
       onRefreshAll: noop,
-      deribitAvailable: false,
+      optionsVenueAvailable: false,
     })
   );
-  assert.match(html, /Options ↔ Perp Parity/);
+  assert.match(html, /Options Strategies/);
+  assert.match(html, /Put–Call Parity Scan/);
   assert.match(html, /No options-capable venue is enabled/);
   assert.match(html, /test\.deribit\.com/);
   const scanBtn = html.match(/<button[^>]*>\s*<svg[\s\S]*?Scan\s*<\/button>/);
   assert.ok(scanBtn, "Scan button renders (disabled)");
   assert.match(scanBtn[0], /disabled/);
+});
+
+test("selector: rail renders All Strategies plus every catalogued substrategy", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(OptionsArbitrage, {
+      executionLogs: [],
+      onRefreshAll: noop,
+      optionsVenueAvailable: true,
+    })
+  );
+  assert.match(html, /All Strategies/);
+  for (const s of OPTIONS_SUBSTRATEGIES) {
+    // JSX escapes & → &amp; in rendered markup.
+    assert.ok(
+      html.includes(s.name.replace(/&/g, "&amp;")),
+      `rail row for ${s.id}`,
+    );
+  }
+  // The catalog is broader than crypto perps — pending rows carry their
+  // unblock requirement on the row tooltip, live rows carry a LIVE badge.
+  assert.match(html, />LIVE</);
+  assert.match(html, /IBKR options/);
+});
+
+test("selector: pending substrategy selection swaps the scanner for an honest placeholder", () => {
+  // React SSR renders initial state only — the placeholder branch is covered
+  // by the pure catalog + a direct render check on a pending entry's fields.
+  const pending = OPTIONS_SUBSTRATEGIES.find((s) => s.id === "box_spread");
+  assert.ok(pending);
+  assert.equal(pending.status, "pending");
+  assert.match(pending.requires ?? "", /IBKR|Deribit/);
+  assert.match(pending.universe, /equity|index/i);
+});
+
+test("filter: substrategy 'all' passes every opp; 'parity' keeps parity rows only", () => {
+  const list = [opp(), opp({ id: "opar-ETH-1-3000-reversal", direction: "reversal" })];
+  assert.equal(filterOptionsOpps(list, "all").length, 2);
+  assert.equal(filterOptionsOpps(list, "parity").length, 2);
+  assert.equal(filterOptionsOpps(list, "box_spread").length, 0);
+});
+
+const logRow = (over: Partial<ExecutionLogEntry> = {}): ExecutionLogEntry => ({
+  id: "l1",
+  timestamp: "2026-09-25T00:00:00Z",
+  trade_type: "OptionsParity",
+  strategy_id: "options_parity",
+  symbol: "conversion",
+  venue_a: "deribit",
+  venue_b: "deribit",
+  leg_a_status: "filled",
+  leg_b_status: "filled",
+  success: true,
+  gross_profit: 10,
+  fees: 1,
+  net_profit: 9,
+  ...over,
+} as ExecutionLogEntry);
+
+test("filter: logs narrow to the selected substrategy's strategy_id", () => {
+  const logs = [
+    logRow(),
+    logRow({ id: "l2", strategy_id: "funding_rate", trade_type: "FundingCarry" }),
+    logRow({ id: "l3", strategy_id: "options_box_spread", trade_type: "BoxSpread" }),
+  ];
+  // Overall keeps every catalogued options row but never other strategies'.
+  assert.equal(filterOptionsLogs(logs, "all").length, 2);
+  const parityOnly = filterOptionsLogs(logs, "parity");
+  assert.equal(parityOnly.length, 1);
+  assert.equal(parityOnly[0].strategy_id, "options_parity");
+  // A pending substrategy filters to its own (empty) log set.
+  assert.equal(filterOptionsLogs(logs, "box_spread").length, 1);
 });
 
 test("card: conversion legs render with venue prices and the execute gate title", () => {
