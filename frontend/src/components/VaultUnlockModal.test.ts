@@ -55,6 +55,30 @@ test("VaultUnlockModal renders Unlock Workspace when initialized & locked withou
   assert.doesNotMatch(html, /Continue/);
 });
 
+test("VaultUnlockModal change mode collects current + new + confirm", () => {
+  const unlockedStatus: VaultStatus = {
+    is_initialized: true,
+    is_unlocked: true,
+  };
+
+  const html = renderToStaticMarkup(
+    React.createElement(VaultUnlockModal, {
+      isOpen: true,
+      vaultStatus: unlockedStatus,
+      mode: "change",
+      dismissible: true,
+      onClose: noop,
+      onSuccess: noop,
+    })
+  );
+
+  assert.match(html, /Change Master Password/);
+  assert.match(html, /Current Password/);
+  assert.match(html, /New Password/);
+  assert.match(html, /Confirm Password/);
+  assert.match(html, /EVM wallet/);
+});
+
 test("VaultUnlockModal renders nothing when isOpen is false", () => {
   const lockedStatus: VaultStatus = {
     is_initialized: true,

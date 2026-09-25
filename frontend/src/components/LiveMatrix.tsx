@@ -36,6 +36,7 @@ import {
   getMatrixCellVisuals,
   globalSpreadTracker,
   parseDuration,
+  setVenueFees,
 } from "../services/matrixQuant";
 import { deriveStepSizing } from "../services/contractSpecs";
 import { describeCommandError } from "../services/api";
@@ -579,6 +580,21 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
   }, [effectiveFuturesParams]);
 
   const [baselineSnapshot, setBaselineSnapshot] = useState<MatrixBaselineSnapshotDto | null>(null);
+
+  // Hydrate the executor's venue fee table once — the matrix's fee cells
+  // read it via `getVenueFeeBps` so displayed net edge matches executed
+  // cost. Falls back to the executor's default arm until this resolves.
+  useEffect(() => {
+    api
+      .getVenueFees()
+      .then((d) => {
+        if (d && Array.isArray(d.fees)) setVenueFees(d.fees, d.default_bps);
+      })
+      .catch(() => {
+        /* desktop offline — matrix cells fall back to the default arm */
+      });
+  }, []);
+
   useEffect(() => {
     if (symbol === null) {
       setBaselineSnapshot(null);

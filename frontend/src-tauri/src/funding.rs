@@ -270,6 +270,32 @@ fn capacity_bounds(curve: &[crate::monitor::DepthCurvePointDto]) -> (Option<f64>
 /// cover the extra leg costs, and emitting them would just be noise.
 const FIXED_MIN_LOCK_HOURS: f64 = 24.0;
 
+/// The Boros adapter the fixed-yield executor trades through. Production
+/// always uses `live_boros` (Boros has no testnet — fixed-yield is
+/// live-only); tests inject a stub-backed `BorosAdapter` here so the real
+/// signing/wire path runs against a local fixture.
+#[cfg(not(test))]
+fn boros_for_exec(state: &AppEngineState) -> Arc<arbitrageur_exchanges::boros::BorosAdapter> {
+    state.live_boros.clone()
+}
+#[cfg(test)]
+fn boros_for_exec(state: &AppEngineState) -> Arc<arbitrageur_exchanges::boros::BorosAdapter> {
+    if let Some(a) = state.test_boros.read().ok().and_then(|g| g.clone()) {
+        return a;
+    }
+    state.live_boros.clone()
+}
+
+/// YU order settle-poll cadence: each poll is real venue truth
+/// (`fetch_order`), the budget bounds how long a hedge dispatch can run
+/// past its ack. Test builds shorten the cadence so the never-resolves
+/// scenario finishes in milliseconds instead of seconds.
+#[cfg(not(test))]
+const YU_SETTLE_POLL_MS: u64 = 900;
+#[cfg(test)]
+const YU_SETTLE_POLL_MS: u64 = 15;
+const YU_SETTLE_POLLS: u32 = 8;
+
 /// Fetch-or-reuse the Boros YU market snapshot. Public data — no
 /// credentials needed and identical in both environments (Boros has no
 /// testnet). Fail-open by design: `None` simply means no fixed-yield
@@ -2384,7 +2410,8 @@ pub async fn execute_funding_carry_impl(
             let mut fixed_note = String::new();
             if is_fixed {
                 let yu_signal_id = format!("{cycle_tag}-yu");
-                let boros_adapter: Arc<dyn ExchangeAdapter> = state.live_boros.clone();
+                let boros_concrete = boros_for_exec(state);
+                let boros_adapter: Arc<dyn ExchangeAdapter> = boros_concrete.clone();
                 // Resolve markets + sizes BEFORE persisting or dispatching —
                 // the signal ledger must carry real intended quantities,
                 // and an unresolvable market fails before any YU order.
@@ -2395,8 +2422,7 @@ pub async fn execute_funding_carry_impl(
                     } else {
                         short_px_f
                     };
-                    let market = state
-                        .live_boros
+                    let market = boros_concrete
                         .market_by_id(leg.yu_market_id)
                         .await
                         .map_err(|e| format!("YU market {} unavailable: {e}", leg.yu_market_id))?;
@@ -2484,11 +2510,12 @@ pub async fn execute_funding_carry_impl(
                             .map_err(|e| format!("YU order on {} rejected: {e}", leg.yu_symbol))?;
                         // Settle to terminal via venue truth — a submission
                         // ack is never a fill.
-                        for _ in 0..8 {
+                        for _ in 0..YU_SETTLE_POLLS {
                             if resp.status.is_final() {
                                 break;
                             }
-                            tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+                            tokio::time::sleep(std::time::Duration::from_millis(YU_SETTLE_POLL_MS))
+                                .await;
                             match boros_adapter
                                 .fetch_order(
                                     &format!("BOROS-{}", leg.yu_market_id),
@@ -3162,5 +3189,739 @@ mod tests {
             5_000.0,
         )
         .is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // Fixed-yield executor e2e (#27d): scripted perp venues drive the
+    // two-leg coordinator; a stub-socket Boros responder serves the real
+    // HTTP wire surface (markets, calldata-builder, bulk-calls, order
+    // polling) so the YU hedge path runs end-to-end without credentials.
+    // ------------------------------------------------------------------
+
+    use arbitrageur_core::market::MarketMetadata;
+    use arbitrageur_core::order::CancelRequest;
+    use arbitrageur_core::position::AccountSnapshot;
+    use arbitrageur_core::quote::{BookLevel, FundingRate, Ticker};
+    use arbitrageur_exchanges::boros::BorosAdapter;
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex as StdMutex;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    /// Perp venue mock for the two-leg coordinator: always-fill IOC
+    /// responses, a fixed tight book, deep account. Order calls are
+    /// recorded so tests can assert the emergency unwind fired.
+    struct ScriptedPerpVenue {
+        vid: &'static str,
+        display: &'static str,
+        bid: Decimal,
+        ask: Decimal,
+        rate_8h: Decimal,
+        placed: StdMutex<Vec<(String, Side, Decimal)>>,
+        place_seq: AtomicUsize,
+        fail_place: std::sync::atomic::AtomicBool,
+    }
+
+    impl ScriptedPerpVenue {
+        fn new(vid: &'static str, display: &'static str, rate_8h: Decimal) -> Self {
+            Self {
+                vid,
+                display,
+                bid: dec!(99.99),
+                ask: dec!(100.01),
+                rate_8h,
+                placed: StdMutex::new(Vec::new()),
+                place_seq: AtomicUsize::new(0),
+                fail_place: std::sync::atomic::AtomicBool::new(false),
+            }
+        }
+
+        fn book(&self, symbol: &str) -> OrderBook {
+            OrderBook {
+                venue: VenueId::new(self.vid),
+                symbol: symbol.to_string(),
+                bids: vec![BookLevel::new(self.bid, dec!(10000))],
+                asks: vec![BookLevel::new(self.ask, dec!(10000))],
+                timestamp: Utc::now(),
+                sequence: 1,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ExchangeAdapter for ScriptedPerpVenue {
+        fn venue_id(&self) -> VenueId {
+            VenueId::new(self.vid)
+        }
+        fn name(&self) -> &str {
+            self.display
+        }
+        async fn fetch_markets(&self) -> anyhow::Result<Vec<MarketMetadata>> {
+            Ok(Vec::new())
+        }
+        async fn fetch_orderbook(&self, symbol: &str) -> anyhow::Result<OrderBook> {
+            Ok(self.book(symbol))
+        }
+        async fn fetch_ticker(&self, symbol: &str) -> anyhow::Result<Ticker> {
+            Ok(Ticker {
+                venue: VenueId::new(self.vid),
+                symbol: symbol.to_string(),
+                bid: self.bid,
+                ask: self.ask,
+                last: dec!(100),
+                timestamp: Utc::now(),
+            })
+        }
+        async fn fetch_funding_rate(&self, symbol: &str) -> anyhow::Result<FundingRate> {
+            Ok(FundingRate {
+                venue: VenueId::new(self.vid),
+                symbol: symbol.to_string(),
+                rate: self.rate_8h,
+                predicted_rate: None,
+                interval_hours: 8,
+                next_funding_time: Utc::now(),
+                timestamp: Utc::now(),
+            })
+        }
+        async fn fetch_account(&self) -> anyhow::Result<AccountSnapshot> {
+            Ok(AccountSnapshot {
+                venue: VenueId::new(self.vid),
+                equity: dec!(100000),
+                free_margin: dec!(100000),
+                maintenance_margin: dec!(0),
+                margin_usage_pct: dec!(0),
+                balances: vec![],
+                positions: vec![],
+                timestamp: Utc::now(),
+            })
+        }
+        async fn place_order(&self, order: OrderRequest) -> anyhow::Result<OrderResponse> {
+            if self.fail_place.load(Ordering::SeqCst) {
+                anyhow::bail!("{} venue rejected the order", self.vid);
+            }
+            let n = self.place_seq.fetch_add(1, Ordering::SeqCst) + 1;
+            self.placed
+                .lock()
+                .unwrap()
+                .push((order.symbol.clone(), order.side, order.quantity));
+            Ok(OrderResponse {
+                order_id: format!("MOCK-{}-{n}", self.vid),
+                client_order_id: order.client_order_id.clone(),
+                venue: VenueId::new(self.vid),
+                symbol: order.symbol.clone(),
+                status: OrderStatus::Filled,
+                original_qty: order.quantity,
+                filled_qty: order.quantity,
+                remaining_qty: dec!(0),
+                // Fill at the mid (price improvement on the IOC bound) so
+                // both perp legs book identical notional — equal YU sizes
+                // are what the balanced-signal check requires.
+                avg_fill_price: Some(dec!(100)),
+                fee: Some(dec!(0.05)),
+                fee_currency: "USD".into(),
+                raw_response: None,
+                timestamp: Utc::now(),
+            })
+        }
+        async fn cancel_order(&self, _req: CancelRequest) -> anyhow::Result<()> {
+            Ok(())
+        }
+        async fn fetch_order(
+            &self,
+            symbol: &str,
+            order_id: &str,
+            client_order_id: Option<&str>,
+        ) -> anyhow::Result<OrderResponse> {
+            Ok(OrderResponse {
+                order_id: order_id.to_string(),
+                client_order_id: client_order_id.unwrap_or("").to_string(),
+                venue: VenueId::new(self.vid),
+                symbol: symbol.to_string(),
+                status: OrderStatus::Filled,
+                original_qty: dec!(0),
+                filled_qty: dec!(0),
+                remaining_qty: dec!(0),
+                avg_fill_price: Some(dec!(100)),
+                fee: None,
+                fee_currency: "USD".into(),
+                raw_response: None,
+                timestamp: Utc::now(),
+            })
+        }
+        fn supports_live_execution(&self) -> bool {
+            true
+        }
+        fn live_order_submission_implemented(&self) -> bool {
+            true
+        }
+        fn order_status_polling_implemented(&self) -> bool {
+            true
+        }
+        fn live_strategy_entry_implemented(&self) -> bool {
+            true
+        }
+        fn has_live_credentials(&self) -> bool {
+            true
+        }
+    }
+
+    /// Boros wire stub: serves the REST surface the adapter actually calls
+    /// (assets, markets, agent approval, calldata-builder, bulk-calls, order
+    /// resolution + polling). Order lifecycle is scripted per place-order
+    /// call; every submitted tx hash resolves to its order row.
+    struct BorosStubOrder {
+        market_id: u64,
+        order_id: String,
+        placed_size_x18: String,
+        ack_status: u64,
+        polls: VecDeque<u64>,
+        cancelled: bool,
+    }
+
+    /// (ack_status, poll_statuses) consumed per place-order POST; a
+    /// `None` script slot simulates a transport failure.
+    type StubPlaceScript = Option<(u64, VecDeque<u64>)>;
+
+    struct BorosStub {
+        url: String,
+        orders: Arc<StdMutex<Vec<BorosStubOrder>>>,
+        tx_to_order: Arc<StdMutex<HashMap<String, usize>>>,
+        place_scripts: Arc<StdMutex<VecDeque<StubPlaceScript>>>,
+        pending_cancel: Arc<StdMutex<Option<usize>>>,
+        place_posts: Arc<AtomicUsize>,
+        tx_seq: Arc<AtomicUsize>,
+    }
+
+    fn boros_market_json(market_id: u64, platform: &str, maturity: i64) -> serde_json::Value {
+        serde_json::json!({
+            "marketId": market_id,
+            "tokenId": 3,
+            "platform": {"name": platform, "platformId": platform},
+            "imData": {
+                "symbol": format!("{}-BTCUSDT-STUB", platform.to_uppercase()),
+                "maturity": maturity,
+                "tickStep": 2,
+            },
+            "metadata": {
+                "underlyingSymbol": "BTC",
+                "maxLeverage": 3.0,
+            },
+            "data": {
+                "midApr": "80000000000000000",
+                "bestBid": "150000000000000000",
+                "bestAsk": "30000000000000000",
+                "floatingApr": "50000000000000000",
+                "notionalOI": "500000",
+            },
+            "config": {"status": 2, "takerFee": "500000000000000"},
+            "extConfig": {"paymentPeriod": 28800},
+        })
+    }
+
+    fn boros_order_row(o: &BorosStubOrder, status: u64) -> serde_json::Value {
+        let filled = status == 2;
+        serde_json::json!({
+            "orderId": o.order_id,
+            "marketId": o.market_id,
+            "placedSize": o.placed_size_x18,
+            "unfilledSize": if filled { "0".to_string() } else { o.placed_size_x18.clone() },
+            "status": status,
+        })
+    }
+
+    fn boros_stub_dispatch(
+        method: &str,
+        path: &str,
+        body: &str,
+        stub: &BorosStub,
+    ) -> (u16, serde_json::Value) {
+        if path.starts_with("/v1/assets") {
+            return (
+                200,
+                serde_json::json!({"results": [
+                    {"tokenId": 3, "symbol": "USDT", "isCollateral": true, "usdPrice": 1.0}
+                ]}),
+            );
+        }
+        if path.starts_with("/v1/markets") {
+            let maturity = Utc::now().timestamp() + 30 * 86_400;
+            return (
+                200,
+                serde_json::json!({"results": [
+                    boros_market_json(11, "Binance", maturity),
+                    boros_market_json(22, "Hyperliquid", maturity),
+                ]}),
+            );
+        }
+        if path.starts_with("/v1/agents/expiry-time") {
+            return (
+                200,
+                serde_json::json!({"expiryTime": Utc::now().timestamp() + 86_400}),
+            );
+        }
+        if method == "POST" && path == "/v1/calldata-builder/agent/place-order" {
+            stub.place_posts.fetch_add(1, Ordering::SeqCst);
+            let script = stub.place_scripts.lock().unwrap().pop_front().flatten();
+            let Some((ack_status, polls)) = script else {
+                // Missing script = simulated transport failure.
+                return (
+                    500,
+                    serde_json::json!({"error": "stub place-order failure"}),
+                );
+            };
+            let v: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+            let market_id = v.get("marketId").and_then(|m| m.as_u64()).unwrap_or(0);
+            let size = v
+                .get("size")
+                .and_then(|s| s.as_str())
+                .unwrap_or("0")
+                .to_string();
+            let mut orders = stub.orders.lock().unwrap();
+            let idx = orders.len();
+            orders.push(BorosStubOrder {
+                market_id,
+                order_id: format!("O{idx}"),
+                placed_size_x18: size,
+                ack_status,
+                polls,
+                cancelled: false,
+            });
+            return (
+                200,
+                serde_json::json!({"calls": [{"calldata": "0xdeadbeef", "accountId": 0}]}),
+            );
+        }
+        if method == "POST" && path == "/v1/calldata-builder/agent/cancel-orders" {
+            let v: serde_json::Value = serde_json::from_str(body).unwrap_or_default();
+            if let Some(ids) = v
+                .get("markets")
+                .and_then(|m| m.as_array())
+                .and_then(|m| m.first())
+                .and_then(|m| m.get("orderIds"))
+                .and_then(|i| i.as_array())
+            {
+                let mut orders = stub.orders.lock().unwrap();
+                for (i, o) in orders.iter_mut().enumerate() {
+                    if ids.iter().any(|id| {
+                        id.as_str().map(|s| s == o.order_id).unwrap_or(false)
+                            || id
+                                .as_u64()
+                                .map(|n| n.to_string() == o.order_id)
+                                .unwrap_or(false)
+                    }) {
+                        o.cancelled = true;
+                        *stub.pending_cancel.lock().unwrap() = Some(i);
+                    }
+                }
+            }
+            return (
+                200,
+                serde_json::json!({"calls": [{"calldata": "0xcancel", "accountId": 0}]}),
+            );
+        }
+        if method == "POST" && path == "/v1/send-txs/bulk-calls" {
+            let n = stub.tx_seq.fetch_add(1, Ordering::SeqCst);
+            let tx = format!("0x{:064x}", n + 1);
+            // A cancel batch targets an existing order; a place batch opens
+            // the most recently built one.
+            let idx = stub
+                .pending_cancel
+                .lock()
+                .unwrap()
+                .take()
+                .unwrap_or_else(|| stub.orders.lock().unwrap().len().saturating_sub(1));
+            stub.tx_to_order.lock().unwrap().insert(tx.clone(), idx);
+            return (
+                200,
+                serde_json::json!([{"status": "success", "txHash": tx}]),
+            );
+        }
+        if path.starts_with("/v1/orders/by-tx-hash") {
+            let tx = path
+                .split("placedTxHash=")
+                .nth(1)
+                .and_then(|s| s.split('&').next())
+                .unwrap_or("");
+            let map = stub.tx_to_order.lock().unwrap();
+            let orders = stub.orders.lock().unwrap();
+            if let Some(&idx) = map.get(tx) {
+                if let Some(o) = orders.get(idx) {
+                    let status = if o.cancelled { 1 } else { o.ack_status };
+                    return (200, serde_json::json!([boros_order_row(o, status)]));
+                }
+            }
+            return (200, serde_json::json!([]));
+        }
+        if path.starts_with("/v1/accounts/orders") {
+            let market_id: u64 = path
+                .split("marketId=")
+                .nth(1)
+                .and_then(|s| s.split('&').next())
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(0);
+            let mut orders = stub.orders.lock().unwrap();
+            let rows: Vec<serde_json::Value> = orders
+                .iter_mut()
+                .filter(|o| o.market_id == market_id)
+                .map(|o| {
+                    let status = if o.cancelled {
+                        1
+                    } else {
+                        o.polls.pop_front().unwrap_or(o.ack_status)
+                    };
+                    boros_order_row(o, status)
+                })
+                .collect();
+            return (200, serde_json::json!(rows));
+        }
+        (
+            404,
+            serde_json::json!({"error": format!("unhandled: {method} {path}")}),
+        )
+    }
+
+    async fn spawn_boros_stub(place_scripts: VecDeque<Option<(u64, VecDeque<u64>)>>) -> BorosStub {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let stub = BorosStub {
+            url: format!("http://127.0.0.1:{port}"),
+            orders: Arc::new(StdMutex::new(Vec::new())),
+            tx_to_order: Arc::new(StdMutex::new(HashMap::new())),
+            place_scripts: Arc::new(StdMutex::new(place_scripts)),
+            pending_cancel: Arc::new(StdMutex::new(None)),
+            place_posts: Arc::new(AtomicUsize::new(0)),
+            tx_seq: Arc::new(AtomicUsize::new(0)),
+        };
+        let orders = stub.orders.clone();
+        let tx_map = stub.tx_to_order.clone();
+        let scripts = stub.place_scripts.clone();
+        let pending_cancel = stub.pending_cancel.clone();
+        let place_posts = stub.place_posts.clone();
+        let tx_seq = stub.tx_seq.clone();
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let inner = BorosStub {
+                    url: String::new(),
+                    orders: orders.clone(),
+                    tx_to_order: tx_map.clone(),
+                    place_scripts: scripts.clone(),
+                    pending_cancel: pending_cancel.clone(),
+                    place_posts: place_posts.clone(),
+                    tx_seq: tx_seq.clone(),
+                };
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 8192];
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let mut lines = req.lines();
+                    let first = lines.next().unwrap_or("");
+                    let mut parts = first.split_whitespace();
+                    let method = parts.next().unwrap_or("");
+                    let path = parts.next().unwrap_or("");
+                    // Body follows the blank line; Content-Length governs.
+                    let body = req.split("\r\n\r\n").nth(1).unwrap_or("").to_string();
+                    let (code, resp) = boros_stub_dispatch(method, path, &body, &inner);
+                    let status = if code == 200 { "200 OK" } else { "500 ERR" };
+                    let payload = resp.to_string();
+                    let out = format!(
+                        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
+                        payload.len(),
+                    );
+                    let _ = sock.write_all(out.as_bytes()).await;
+                });
+            }
+        });
+        stub
+    }
+
+    /// Live-env state with scripted perp venues (Binance long / Hyperliquid
+    /// short at divergent funding) + a stub-socket Boros adapter + seeded
+    /// hub funding/books and a warm YU market cache — the exact inputs the
+    /// scan and the executor each consume.
+    async fn fixed_yield_state(
+        tag: &str,
+        stub: &BorosStub,
+    ) -> (
+        AppEngineState,
+        Arc<ScriptedPerpVenue>,
+        Arc<ScriptedPerpVenue>,
+    ) {
+        let dir =
+            std::env::temp_dir().join(format!("arbitrageur_fy_{tag}_{}", rand::random::<u64>()));
+        let state = AppEngineState::new_with_vault_path(dir.join("vault.enc"));
+        state.set_environment(crate::state::TradingEnvironment::Live);
+        crate::accounts::initialize_vault_impl("test password", &state).expect("init vault");
+        {
+            let mut s = state.settings.write();
+            s.binance_enabled = true;
+            s.hyperliquid_enabled = true;
+        }
+        let long = Arc::new(ScriptedPerpVenue::new("binance", "Binance", dec!(-0.0005)));
+        let short = Arc::new(ScriptedPerpVenue::new(
+            "hyperliquid",
+            "Hyperliquid",
+            dec!(0.0015),
+        ));
+        state.test_adapters.write().unwrap().insert(
+            "binance".to_string(),
+            long.clone() as Arc<dyn ExchangeAdapter>,
+        );
+        state.test_adapters.write().unwrap().insert(
+            "hyperliquid".to_string(),
+            short.clone() as Arc<dyn ExchangeAdapter>,
+        );
+        // The live gate resolves "boros" through the dyn registry; the YU
+        // order path itself uses the concrete stub adapter below.
+        state.test_adapters.write().unwrap().insert(
+            "boros".to_string(),
+            Arc::new(ScriptedPerpVenue::new("boros", "Boros", dec!(0))) as Arc<dyn ExchangeAdapter>,
+        );
+        let boros = BorosAdapter::new(Some(stub.url.clone()));
+        boros
+            .update_credentials(
+                Some("0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80".into()),
+                Some("0xf39Fd6e51aad88F6F4ce6aB8827279cffFb92266".into()),
+                Some("0".into()),
+            )
+            .expect("boros test creds");
+        *state.test_boros.write().unwrap() = Some(Arc::new(boros));
+
+        // Hub seeds the scan consumes (executor rescan is network-fetch=off).
+        let sym = "BTC-USDC";
+        state.market_data_hub.update_funding(FundingRate {
+            venue: VenueId::new("binance"),
+            symbol: sym.into(),
+            rate: dec!(-0.0005),
+            predicted_rate: None,
+            interval_hours: 8,
+            next_funding_time: Utc::now(),
+            timestamp: Utc::now(),
+        });
+        state.market_data_hub.update_funding(FundingRate {
+            venue: VenueId::new("hyperliquid"),
+            symbol: sym.into(),
+            rate: dec!(0.0015),
+            predicted_rate: None,
+            interval_hours: 8,
+            next_funding_time: Utc::now(),
+            timestamp: Utc::now(),
+        });
+        state.market_data_hub.update_orderbook(long.book(sym));
+        state.market_data_hub.update_orderbook(short.book(sym));
+
+        // Warm YU cache: Binance YU ask 3% (long pays), Hyperliquid YU bid
+        // 15% (short receives) → ~12% locked APR over a 30d maturity.
+        let maturity = Utc::now().timestamp() + 30 * 86_400;
+        *state.boros_yu_cache.lock() = Some(crate::state::BorosYuCache {
+            fetched_at: std::time::Instant::now(),
+            markets: Arc::new(vec![
+                yu_mkt(11, "Binance", "BTC", maturity, 0.029, 0.030),
+                yu_mkt(22, "Hyperliquid", "BTC", maturity, 0.150, 0.151),
+            ]),
+            gas_usd: 0.10,
+        });
+        (state, long, short)
+    }
+
+    /// Scan → pick the fixed_yield row → execute with its display triple.
+    async fn run_fixed_yield(state: &AppEngineState) -> Result<SimStepResultDto, String> {
+        let opps = scan_funding_opportunities_impl("BTC-USDC", 50_000.0, state).await?;
+        let row = opps
+            .iter()
+            .find(|o| o.kind == "fixed_yield")
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "no fixed_yield row emitted; opps={:?}",
+                    opps.iter().map(|o| o.kind.clone()).collect::<Vec<_>>()
+                )
+            })?;
+        execute_funding_carry_impl(
+            "BTC-USDC",
+            &row.long_venue,
+            &row.short_venue,
+            50_000.0,
+            state,
+            false,
+            Some("fixed_yield"),
+        )
+        .await
+    }
+
+    /// Happy path: both perp legs fill through the coordinator, both YU
+    /// orders ack FILLED at the venue — four real legs, two balanced
+    /// signals, hedged-to-maturity note in the message.
+    #[tokio::test]
+    async fn fixed_yield_e2e_all_four_legs_fill() {
+        let mut scripts = VecDeque::new();
+        scripts.push_back(Some((2, VecDeque::new()))); // long YU: ack Filled
+        scripts.push_back(Some((2, VecDeque::new()))); // short YU: ack Filled
+        let stub = spawn_boros_stub(scripts).await;
+        let (state, _long, _short) = fixed_yield_state("fill", &stub).await;
+        let res = run_fixed_yield(&state).await.expect("fixed-yield executes");
+        assert!(res.execution_success);
+        assert!(
+            res.message.contains("hedge locked"),
+            "expected locked-hedge note, got: {}",
+            res.message
+        );
+        assert_eq!(stub.place_posts.load(Ordering::SeqCst), 2);
+        let signals = state
+            .state_store
+            .list_signals(Some("BTC-USDC"), None)
+            .expect("list signals");
+        assert_eq!(signals.len(), 2, "carry + YU sibling signals");
+        for s in &signals {
+            assert_eq!(
+                s.status,
+                crate::state_store::SignalStatus::Balanced,
+                "signal {} must reconcile Balanced",
+                s.id
+            );
+        }
+        assert!(signals.iter().any(|s| s.id.ends_with("-yu")));
+    }
+
+    /// YU leg acks non-terminal (Filling) and never resolves within the
+    /// settle budget → fail closed: perp pair emergency-unwound, both
+    /// signals Failed, no second YU leg stacked on top.
+    #[tokio::test]
+    async fn fixed_yield_e2e_unresolved_yu_unwinds_perps() {
+        let mut scripts = VecDeque::new();
+        scripts.push_back(Some((0, VecDeque::from([0; 16])))); // stays Filling forever
+        let stub = spawn_boros_stub(scripts).await;
+        let (state, long_perp, _short) = fixed_yield_state("never", &stub).await;
+        let err = run_fixed_yield(&state)
+            .await
+            .expect_err("unresolved YU must fail");
+        assert!(
+            err.contains("never resolved") || err.contains("unwound to flat"),
+            "expected unresolved/unwound error, got: {err}"
+        );
+        // Only one YU place-order went out — no stacking.
+        assert_eq!(stub.place_posts.load(Ordering::SeqCst), 1);
+        // Both perp mocks took an emergency exit order (2nd order each).
+        assert!(
+            long_perp.placed.lock().unwrap().len() >= 2,
+            "long perp must see the entry buy + emergency exit"
+        );
+        let signals = state
+            .state_store
+            .list_signals(Some("BTC-USDC"), None)
+            .expect("list signals");
+        assert!(
+            signals
+                .iter()
+                .all(|s| s.status == crate::state_store::SignalStatus::Failed),
+            "both signals must be Failed after the unwind"
+        );
+    }
+
+    /// YU leg acks a terminal reject (Expired) with zero fills → fatal: perp
+    /// pair unwound, sibling signals Failed.
+    #[tokio::test]
+    async fn fixed_yield_e2e_expired_yu_unwinds_perps() {
+        let mut scripts = VecDeque::new();
+        scripts.push_back(Some((3, VecDeque::new()))); // Expired, zero fill
+        let stub = spawn_boros_stub(scripts).await;
+        let (state, _long, _short) = fixed_yield_state("expired", &stub).await;
+        let err = run_fixed_yield(&state)
+            .await
+            .expect_err("expired YU must fail");
+        assert!(
+            err.contains("filled nothing") || err.contains("unwound to flat"),
+            "expected zero-fill failure, got: {err}"
+        );
+        assert_eq!(stub.place_posts.load(Ordering::SeqCst), 1);
+        let signals = state
+            .state_store
+            .list_signals(Some("BTC-USDC"), None)
+            .expect("list signals");
+        assert!(
+            signals
+                .iter()
+                .all(|s| s.status == crate::state_store::SignalStatus::Failed),
+            "both signals must be Failed after the unwind"
+        );
+    }
+
+    /// First YU leg fills, second's place-order POST fails at the wire →
+    /// fatal: perps unwind AND the filled YU side gets an IOC exit (a third
+    /// place-order call carrying the opposite side).
+    #[tokio::test]
+    async fn fixed_yield_e2e_second_yu_failure_exits_filled_leg() {
+        let mut scripts = VecDeque::new();
+        scripts.push_back(Some((2, VecDeque::new()))); // leg 1 fills
+        scripts.push_back(None); // leg 2: transport failure
+        scripts.push_back(Some((2, VecDeque::new()))); // leg-1 IOC exit fills
+        let stub = spawn_boros_stub(scripts).await;
+        let (state, _long, _short) = fixed_yield_state("leg2fail", &stub).await;
+        let err = run_fixed_yield(&state)
+            .await
+            .expect_err("second-leg failure must fail the entry");
+        assert!(
+            err.contains("rejected") || err.contains("unwound to flat"),
+            "expected rejection + unwind, got: {err}"
+        );
+        assert_eq!(
+            stub.place_posts.load(Ordering::SeqCst),
+            3,
+            "place leg1 + failed leg2 + IOC exit of leg1"
+        );
+        let signals = state
+            .state_store
+            .list_signals(Some("BTC-USDC"), None)
+            .expect("list signals");
+        assert!(
+            signals
+                .iter()
+                .all(|s| s.status == crate::state_store::SignalStatus::Failed),
+            "both signals must be Failed after the unwind"
+        );
+    }
+
+    /// fixed_yield is live-only (Boros has no testnet) — testnet env
+    /// refuses before any scan or dispatch.
+    #[tokio::test]
+    async fn fixed_yield_refuses_testnet_env() {
+        let state = AppEngineState::new();
+        let err = execute_funding_carry_impl(
+            "BTC-USDC",
+            "Binance",
+            "Hyperliquid",
+            50_000.0,
+            &state,
+            false,
+            Some("fixed_yield"),
+        )
+        .await
+        .expect_err("testnet fixed_yield must refuse");
+        assert!(err.contains("live-only"), "unexpected error: {err}");
+    }
+
+    /// Autonomous fixed-yield entries stay testnet-only policy: in live
+    /// mode `auto` is refused before touching the gate or the scan.
+    #[tokio::test]
+    async fn fixed_yield_refuses_auto_in_live() {
+        let dir =
+            std::env::temp_dir().join(format!("arbitrageur_fy_auto_{}", rand::random::<u64>()));
+        let state = AppEngineState::new_with_vault_path(dir.join("vault.enc"));
+        state.set_environment(crate::state::TradingEnvironment::Live);
+        let err = execute_funding_carry_impl(
+            "BTC-USDC",
+            "Binance",
+            "Hyperliquid",
+            50_000.0,
+            &state,
+            true,
+            Some("fixed_yield"),
+        )
+        .await
+        .expect_err("auto fixed_yield in live must refuse");
+        assert!(err.contains("testnet-only"), "unexpected error: {err}");
     }
 }

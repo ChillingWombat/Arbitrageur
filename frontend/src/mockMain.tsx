@@ -152,6 +152,15 @@ const FIXTURES: Record<string, (args?: Record<string, unknown>) => unknown> = {
       reduceOnly: false,
     },
   ],
+  get_venue_fees: () => ({
+    default_bps: 4.0,
+    fees: [
+      { venue_id: "hyperliquid", taker_bps: 4.5 },
+      { venue_id: "lighter", taker_bps: 1.5 },
+      { venue_id: "binance", taker_bps: 5.0 },
+      { venue_id: "uniswap", taker_bps: 30.0 },
+    ],
+  }),
   get_venue_balances: () => VENUES.slice(0, 4).map((v, i) => ({
     venue: v.id, equity_usd: [82000, 61400, 71000, 73000][i],
     available_margin_usd: [79000, 60000, 70500, 71200][i],

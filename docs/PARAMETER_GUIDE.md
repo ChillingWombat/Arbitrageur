@@ -1,6 +1,6 @@
 # Manual Strategy Parameter Guide
 
-This guide explains how to set parameters without treating software defaults as profitable recommendations. Arbitrageur does not ship Conservative/Balanced/Aggressive trading presets yet because the repository does not contain a sufficiently broad, reviewed outcome corpus from which to derive them honestly.
+This guide explains how to set parameters without treating software defaults as profitable recommendations. Arbitrageur ships a small versioned preset table (see [Presets](#presets)) whose values are an operator-judgment risk ladder — they are **not** derived from a reviewed outcome corpus, and the guide's evidence discipline still applies.
 
 Use Testnet mode, collect venue-specific history, review AutoTune's held-out results, and change one risk dimension at a time.
 
@@ -187,9 +187,23 @@ Review and reduce these values for the actual account before any testnet run. Li
 
 `spread_samples_max_days` and `spread_samples_max_gb` (Engine Settings → storage/retention inputs, persisted as `retention.max_days`/`retention.max_gb`) bound the always-on market-data recorder via the hourly `enforce_retention_pass`. Both default to **unlimited**. Measured growth on a 9-venue watchlist (2026-09-13→23): ~83 MB/day — `spread_samples` dominates (4.9M rows, 831 MB total DB after 10 days). The same day-cutoff also bounds `venue_volume_samples`, `monitor_signal_events`, `margin_snapshots`, and `funding_rate_samples`. Analytics consumers never read beyond 30 days (`BASELINE_RETENTION_MS`), so `max_days = 30` loses no model input. `max_gb` caps the DB's *used* bytes (allocated minus freelist — the file's own size cannot shrink on deletes alone); after evictions the pass runs a bounded `PRAGMA incremental_vacuum` so the file converges toward the cap over successive hourly runs. `session_profiles`/`session_hour_bins` are derived rollups and are never pruned.
 
-## Why fixed risk presets are still gated
+## Presets
 
-A named preset creates an implied recommendation. To publish one responsibly, the project needs:
+The ticker configurator (Futures tab → **Presets**) ships a versioned table of three bundles. Values live in `strategy_config.rs::strategy_presets` (`STRATEGY_PRESET_VERSION = 1`); the UI reads them over `get_strategy_presets` rather than duplicating the table.
+
+| Preset | Hurdle | Percentile | Window | Mode | Step mult / cap | Equity cap | Leverage |
+|---|---|---|---|---|---|---|---|
+| Conservative | 8 bps | p90 | 6h | single-way | 5× / $1,000 | 10% | 2× |
+| Balanced | 3 bps | p75 | 12h | single-way | 10× / $2,500 | 20% | 5× |
+| Aggressive | 1.5 bps | p60 | 24h | double-way | 15× / $5,000 | 30% | 8× |
+
+**What they are:** a monotone risk ladder — Conservative takes only deep, rare dislocations with small steps and low leverage; Aggressive trades a wider net with more turnover and drawdown variance. Applying one writes through the ordinary save path (`save_strategy_params` + `save_ticker_strategy_config`), recomputes `unitSize`/`maxAccumulatedUnits` through `deriveStepSizing`, clamps leverage to the ticker's venue max, forces the sliding window to manual mode, and appends a provenance row (`source: "preset"`, preset id + version) to `autotune_apply_events`.
+
+**What they are not:** fitted parameters. The table predates a versioned outcome corpus — it encodes posture ordering, not measured edge. A preset applied to a ticker with no local spread history is still a cold start; AutoTune's held-out validation remains the evidence path for tuning beyond the ladder.
+
+## Why broader presets remain gated
+
+A named preset creates an implied recommendation. Beyond the single fixed ladder above, richer presets (per-regime, per-asset-class) still need:
 
 - A versioned source dataset
 - Venue and asset-class coverage
@@ -198,4 +212,4 @@ A named preset creates an implied recommendation. To publish one responsibly, th
 - Stability across sessions and regimes
 - Documented sample thresholds and invalidation rules
 
-Until that evidence exists, the honest cold-start behavior is a clearly labeled software default plus manual guidance, not fabricated risk tiers.
+Until that evidence exists, the honest cold-start behavior is the labeled ladder above plus manual guidance — not fabricated risk tiers.

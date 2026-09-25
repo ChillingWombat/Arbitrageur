@@ -18,6 +18,7 @@ import {
 import type {
   TickerStrategyConfigDto,
   StrategyParamsDto,
+  StrategyPresetDto,
   PassiveUnwindDto,
   ArbitrageExecutionMode,
   MatrixBaselineSnapshotDto,
@@ -200,6 +201,52 @@ const NumberInput: React.FC<NumberInputProps> = ({
   </div>
 );
 
+interface PresetPanelProps {
+  presets: StrategyPresetDto[];
+  busyId: string | null;
+  notice: string | null;
+  onApply: (preset: StrategyPresetDto) => void;
+}
+
+/** Curated preset cards — each shows the backend-provided regime/risk
+ *  description verbatim plus the parameter summary; clicking a card applies
+ *  the preset through the ordinary save path and records an audit row. */
+export const PresetPanel: React.FC<PresetPanelProps> = ({ presets, busyId, notice, onApply }) => (
+  <div className="rounded-xl border border-surface-border bg-surface-raised/60 p-2.5 space-y-2">
+    <div className="grid grid-cols-3 gap-2">
+      {presets.map((p) => (
+        <button
+          key={p.id}
+          type="button"
+          onClick={() => onApply(p)}
+          disabled={busyId != null}
+          title={`Apply ${p.label} preset (v${p.version})`}
+          className="text-left rounded-lg border border-surface-border bg-surface px-2.5 py-2 transition hover:border-accent-line hover:bg-accent-dim/40 cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
+        >
+          <div className="flex items-center justify-between">
+            <span className="text-[11px] font-bold font-sans text-slate-800">{p.label}</span>
+            <span className="text-[9px] font-mono text-muted">v{p.version}</span>
+          </div>
+          <p className="text-[10px] font-sans text-muted leading-snug mt-0.5">{p.description}</p>
+          <p className="text-[10px] font-mono text-slate-600 mt-1">
+            {p.targetProfitBps} bps · p{p.windowPercentile} · {formatDuration(p.slidingWindowSecs)} ·{" "}
+            {p.executionMode === "DOUBLE_WAY" ? "2-way" : "1-way"} · {p.userTargetLeverage}x · ≤
+            {p.maxTickerEquityPct}% eq
+          </p>
+          {busyId === p.id && (
+            <p className="text-[10px] font-mono text-accent-strong mt-1">Applying…</p>
+          )}
+        </button>
+      ))}
+    </div>
+    {notice && (
+      <p role="status" className="text-[11px] font-sans text-slate-600 px-0.5">
+        {notice}
+      </p>
+    )}
+  </div>
+);
+
 export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
   isOpen,
   onClose,
@@ -319,6 +366,13 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
   // UI status
   const saveBtn = useSaveButton();
   const [saveError, setSaveError] = useState<string | null>(null);
+  // Curated parameter presets (Conservative/Balanced/Aggressive) — served by
+  // the backend table; applying one writes through the ordinary save path
+  // and then records a provenance audit row.
+  const [presets, setPresets] = useState<StrategyPresetDto[]>([]);
+  const [presetsOpen, setPresetsOpen] = useState(false);
+  const [presetBusyId, setPresetBusyId] = useState<string | null>(null);
+  const [presetNotice, setPresetNotice] = useState<string | null>(null);
   // True when the initial params read failed — the form then holds defaults,
   // so a save would silently overwrite live settings. Block it until a
   // successful load repopulates real values.
@@ -345,6 +399,24 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
       void reloadRoutes();
     }
   }, [isOpen, activeSection, reloadRoutes]);
+
+  // Fetch the backend preset table once per open — the backend owns values
+  // and versioning so the UI can never drift from what gets audited.
+  useEffect(() => {
+    if (!isOpen) return;
+    let stopped = false;
+    api
+      .getStrategyPresets()
+      .then((rows) => {
+        if (!stopped) setPresets(rows);
+      })
+      .catch(() => {
+        if (!stopped) setPresets([]);
+      });
+    return () => {
+      stopped = true;
+    };
+  }, [isOpen]);
 
   // Load universal strategy params + context ticker grid state on open
   useEffect(() => {
@@ -502,7 +574,6 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
     });
   }, [ticker, stepSizeMult, maxStepUsd, maxTickerEquityPct, totalEquityUsd]);
   const unitSize = sizing.stepBaseQty;
-  const maxAccumulatedUnits = sizing.maxSteps;
 
   const safeLeverage = useMemo(() => {
     return computeSafeLeverage(
@@ -907,16 +978,43 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
           <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Signal Trigger & Timing</h3>
           <p className="text-[11px] font-sans text-muted mt-0.5">Thresholds and historical baseline models</p>
         </div>
-        <button
-          type="button"
-          onClick={handleOpenAutotune}
-          disabled={autotuneDisabledReason != null}
-          title={autotuneDisabledReason ?? "Walk-forward AutoTune preview (70/30 split; selected READY rows can be applied)"}
-          className="px-2 py-2 rounded-lg font-mono text-[11px] font-semibold border transition cursor-pointer disabled:cursor-not-allowed bg-accent-dim border-accent-line text-accent-strong hover:bg-blue-100 disabled:bg-surface-raised disabled:border-surface-border disabled:text-muted shadow-2xs"
-        >
-          AutoTune
-        </button>
+        <div className="flex items-center gap-1.5">
+          <button
+            type="button"
+            onClick={() => {
+              setPresetsOpen((o) => !o);
+              setPresetNotice(null);
+            }}
+            disabled={presets.length === 0}
+            title={
+              presets.length === 0
+                ? "Preset table unavailable (backend did not return any)"
+                : "Curated parameter bundles — one click writes them through the normal save path"
+            }
+            className="px-2 py-2 rounded-lg font-mono text-[11px] font-semibold border transition cursor-pointer disabled:cursor-not-allowed bg-surface border-surface-border text-slate-600 hover:text-slate-900 hover:bg-surface-raised disabled:text-muted shadow-2xs"
+          >
+            Presets
+          </button>
+          <button
+            type="button"
+            onClick={handleOpenAutotune}
+            disabled={autotuneDisabledReason != null}
+            title={autotuneDisabledReason ?? "Walk-forward AutoTune preview (70/30 split; selected READY rows can be applied)"}
+            className="px-2 py-2 rounded-lg font-mono text-[11px] font-semibold border transition cursor-pointer disabled:cursor-not-allowed bg-accent-dim border-accent-line text-accent-strong hover:bg-blue-100 disabled:bg-surface-raised disabled:border-surface-border disabled:text-muted shadow-2xs"
+          >
+            AutoTune
+          </button>
+        </div>
       </div>
+
+      {presetsOpen && presets.length > 0 && (
+        <PresetPanel
+          presets={presets}
+          busyId={presetBusyId}
+          notice={presetNotice}
+          onApply={(p) => void applyPreset(p)}
+        />
+      )}
 
       <SettingRow
         label="Min Net Profit"
@@ -1461,22 +1559,66 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
     </div>
   );
 
-  const handleSave = async () => {
+  const handleSave = async (preset?: StrategyPresetDto) => {
     setSaveError(null);
+    // Preset applies override the futures-scope fields with table values;
+    // every other field still comes from form state so untouched scopes
+    // persist unchanged. Window mode is forced manual — a preset's seconds
+    // are the explicit duration, not the auto-derived one.
+    const effTargetProfitBps = preset?.targetProfitBps ?? targetProfitBps;
+    const effWindowPercentile = preset?.windowPercentile ?? windowPercentile;
+    const effWindowSecs = preset?.slidingWindowSecs ?? manualWindowSecs;
+    const effWindowMode: "manual" | "auto" = preset ? "manual" : slidingWindowMode;
+    const effExecutionMode = preset?.executionMode ?? executionMode;
+    const effStepSizeMult = preset?.stepSizeMult ?? stepSizeMult;
+    const effMaxStepUsd = preset?.maxStepUsd ?? maxStepUsd;
+    const effMaxTickerEquityPct = preset?.maxTickerEquityPct ?? maxTickerEquityPct;
+    const effLeverage = preset?.userTargetLeverage ?? userTargetLeverage;
+    // Sizing must reflect the preset's step/equity inputs, not the form's —
+    // deriveStepSizing is the single derivation path either way.
+    const effSizing = preset
+      ? deriveStepSizing(ticker.symbol, ticker.venues, ticker.basePrice, totalEquityUsd, {
+          stepSizeMult: effStepSizeMult,
+          maxStepUsd: effMaxStepUsd,
+          maxTickerEquityPct: effMaxTickerEquityPct,
+        })
+      : sizing;
+    // Clamp the applied leverage to the venue margin ceiling — a preset
+    // never writes leverage the ticker's venues cannot carry.
+    const effLeverageClamped = preset
+      ? Math.min(
+          effLeverage,
+          Math.max(
+            1,
+            Math.floor(
+              computeSafeLeverage(
+                ticker.symbol,
+                ticker.venues,
+                ticker.basePrice,
+                effSizing.stepBaseQty,
+                effLeverage
+              ).maxVenueLeverage
+            )
+          )
+        )
+      : effLeverage;
     const ok = await saveBtn.run(async () => {
     if (paramsLoadFailed) {
       const msg = "Current parameters never loaded — refusing to write form defaults over live settings.";
       setSaveError(msg);
       throw new Error(msg);
     }
-    const canonicalWindow = formatDuration(manualWindowSecs);
+    const canonicalWindow = formatDuration(effWindowSecs);
+    // Presets are futures-scope bundles — the write always targets the
+    // futures record regardless of which tab is visible.
+    const targetStrategyId = preset ? "futures" : activeStrategyTab;
     // Fail closed on read errors: the save writes the whole record, so
     // without the current values untouched fields would be reset to
     // defaults over the live settings. `null` (no record yet) is fine —
     // defaults then are genuinely the first write.
     let currentRecord: StrategyParamsDto | null = null;
     try {
-      currentRecord = await api.getStrategyParams(activeStrategyTab);
+      currentRecord = await api.getStrategyParams(targetStrategyId);
     } catch (err) {
       const msg =
         "Could not load current strategy parameters — refusing to write defaults over live settings.";
@@ -1484,17 +1626,17 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
       throw err instanceof Error ? err : new Error(msg);
     }
     const updatedParams: StrategyParamsDto = {
-      strategyId: activeStrategyTab,
-      targetProfitBps,
-      windowPercentile,
+      strategyId: targetStrategyId,
+      targetProfitBps: effTargetProfitBps,
+      windowPercentile: effWindowPercentile,
       slidingWindow: canonicalWindow,
-      slidingWindowMode,
-      slidingWindowSecs: manualWindowSecs,
-      stepSizeMult,
-      maxStepUsd,
-      maxTickerEquityPct,
-      executionMode,
-      userTargetLeverage,
+      slidingWindowMode: effWindowMode,
+      slidingWindowSecs: effWindowSecs,
+      stepSizeMult: effStepSizeMult,
+      maxStepUsd: effMaxStepUsd,
+      maxTickerEquityPct: effMaxTickerEquityPct,
+      executionMode: effExecutionMode,
+      userTargetLeverage: effLeverageClamped,
       autoMinVolumeUsd: parseAutoThreshold(autoMinVolumeUsd),
       autoMinPriceUsd: parseAutoThreshold(autoMinPriceUsd),
       autoMinEventVolumeUsd,
@@ -1542,22 +1684,49 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
 
     try {
       await api.saveStrategyParams(updatedParams);
-      if (activeStrategyTab === "futures") {
+      if (targetStrategyId === "futures") {
         const tickerConfig: TickerStrategyConfigDto = {
           symbol: ticker.symbol,
-          targetProfitBps,
-          windowPercentile,
+          targetProfitBps: effTargetProfitBps,
+          windowPercentile: effWindowPercentile,
           slidingWindow: canonicalWindow,
           sliding_window: canonicalWindow,
-          maxAccumulatedUnits,
+          maxAccumulatedUnits: effSizing.maxSteps,
           currentAccumulatedUnits,
-          executionMode,
-          unitSize,
-          userTargetLeverage,
+          executionMode: effExecutionMode,
+          unitSize: effSizing.stepBaseQty,
+          userTargetLeverage: effLeverageClamped,
         };
         await api.saveTickerStrategyConfig(tickerConfig).catch((err) => {
           console.warn("Failed to persist ticker grid state:", err);
         });
+      }
+      if (preset) {
+        // Reflect what was actually persisted so a follow-up manual save
+        // starts from the applied values, not the pre-preset form state.
+        setTargetProfitBps(effTargetProfitBps);
+        setWindowPercentile(effWindowPercentile);
+        const parts = durationParts(effWindowSecs);
+        setWindowValue(parts.value);
+        setWindowUnit(parts.unit);
+        setSlidingWindowMode("manual");
+        setExecutionMode(effExecutionMode);
+        setStepSizeMult(effStepSizeMult);
+        setMaxStepUsd(effMaxStepUsd);
+        setMaxTickerEquityPct(effMaxTickerEquityPct);
+        setUserTargetLeverage(effLeverageClamped);
+        // Provenance row — reads the persisted record server-side. A
+        // failure here is surfaced but does not un-save the apply.
+        try {
+          await api.recordPresetApplied(ticker.symbol, preset.id, preset.version);
+          setPresetNotice(`Applied ${preset.label} (v${preset.version}).`);
+        } catch (auditErr) {
+          setPresetNotice(
+            `Applied ${preset.label}, but the audit record failed: ${
+              auditErr instanceof Error ? auditErr.message : String(auditErr)
+            }`
+          );
+        }
       }
       if (onSaveConfig) {
         await onSaveConfig(updatedParams);
@@ -1578,7 +1747,20 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
       throw err; // rethrow so the save button lands on "Failed!"
     }
     });
-    if (ok) setTimeout(onClose, 400);
+    // Preset applies keep the modal open so the operator sees the new values.
+    if (ok && !preset) setTimeout(onClose, 400);
+    return ok;
+  };
+
+  const applyPreset = async (preset: StrategyPresetDto) => {
+    setPresetNotice(null);
+    setPresetBusyId(preset.id);
+    try {
+      const ok = await handleSave(preset);
+      if (!ok) setPresetNotice(null);
+    } finally {
+      setPresetBusyId(null);
+    }
   };
 
   return (
@@ -1768,7 +1950,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
               Cancel
             </button>
 
-            <SaveButton state={saveBtn.state} onClick={handleSave} />
+            <SaveButton state={saveBtn.state} onClick={() => void handleSave()} />
           </div>
         </div>
 

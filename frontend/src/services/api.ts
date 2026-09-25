@@ -34,9 +34,11 @@ import type {
   TickerMarketQuoteDto,
   TickerStrategyConfigDto,
   StrategyParamsDto,
+  StrategyPresetDto,
   PassiveUnwindDto,
   VaultStatus,
   VenueBalanceInfo,
+  VenueFeesDto,
   ExternalPositionsResponse,
   CloseRecommendationDto,
   ScheduledExitDto,
@@ -153,6 +155,7 @@ const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   "get_market_universe",
   "fetch_orderbooks",
   "get_ticker_volumes",
+  "get_venue_fees",
   "get_signal_series",
   "get_matrix_baselines",
   "scan_spatial_opportunities",
@@ -191,6 +194,8 @@ const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   "get_strategy_params",
   "save_strategy_params",
   "get_all_strategy_params",
+  "get_strategy_presets",
+  "record_preset_applied",
   "get_strategy_tickers",
   "get_account_equity_events",
   "get_autotune_recommendation",
@@ -201,6 +206,7 @@ const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   "initialize_vault",
   "unlock_vault",
   "lock_vault",
+  "change_vault_password",
   "delete_exchange_credentials",
   "list_accounts",
   "upsert_account",
@@ -860,6 +866,28 @@ export const api = {
     return (res || []).map(normalizeStrategyParams);
   },
 
+  /** Curated parameter bundles (Conservative/Balanced/Aggressive). The
+   *  backend owns the table + version; the UI applies them through the
+   *  ordinary save path so validation and sizing derivation stay single-
+   *  sourced. */
+  async getStrategyPresets(): Promise<StrategyPresetDto[]> {
+    return invokeDesktop<StrategyPresetDto[]>("get_strategy_presets");
+  },
+
+  /** Audit-row write after a preset apply succeeds — records the persisted
+   *  values (re-read server-side), never the client's payload. */
+  async recordPresetApplied(
+    symbol: string,
+    presetId: string,
+    presetVersion: number
+  ): Promise<number> {
+    return invokeDesktop<number>("record_preset_applied", {
+      symbol,
+      presetId,
+      presetVersion,
+    });
+  },
+
   async getAutotuneRecommendation(symbol: string): Promise<AutotuneRecommendationDto> {
     const res = await invokeDesktop<AutotuneRecommendationDto>("get_autotune_recommendation", {
       symbol,
@@ -948,6 +976,15 @@ export const api = {
 
   async unlockVault(password: string): Promise<VaultStatus> {
     return invokeDesktop<VaultStatus>("unlock_vault", { password });
+  },
+
+  /** Rotate the master password — atomically re-keys the Stronghold
+   *  snapshot (`vault.hold`) so the shared EVM wallet survives. */
+  async changeVaultPassword(current: string, newPassword: string): Promise<VaultStatus> {
+    return invokeDesktop<VaultStatus>("change_vault_password", {
+      current,
+      newPassword,
+    });
   },
 
   async lockVault(): Promise<VaultStatus> {
@@ -1105,6 +1142,12 @@ export const api = {
 
   async getVenueBalances(): Promise<VenueBalanceInfo[]> {
     return invokeDesktop<VenueBalanceInfo[]>("get_venue_balances");
+  },
+
+  /** The executor's venue taker-fee table — the only fee source UI
+   *  surfaces should read. */
+  async getVenueFees(): Promise<VenueFeesDto> {
+    return invokeDesktop<VenueFeesDto>("get_venue_fees");
   },
 
   async getStrategyPerformance(strategyId?: string): Promise<StrategyMetrics[]> {
