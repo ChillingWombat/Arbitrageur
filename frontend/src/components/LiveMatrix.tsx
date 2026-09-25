@@ -177,6 +177,7 @@ const STATIC_SUBMIT_CAPABLE = new Set([
   "binance",
   "okx",
   "coinbase",
+  "alpaca",
   "kraken",
   "decibel",
   "aevo",

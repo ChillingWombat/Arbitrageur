@@ -47,6 +47,7 @@ export type ExchangeId =
   | "aster"
   | "binance"
   | "coinbase"
+  | "alpaca"
   | "decibel"
   | "deribit"
   | "hyperliquid"
@@ -157,6 +158,7 @@ export const EXCHANGES_ALPHABETICAL: ExchangeMetadata[] = [
   { id: "alphax", name: "AlphaX", type: "Perp DEX (Market Data)", group: "Perp DEX — Long Tail" },
   { id: "antarctic", name: "Antarctic", type: "Perp DEX (Market Data)", group: "Perp DEX — Long Tail" },
   { id: "apex", name: "ApeX Omni", type: "Perp DEX (Market Data)", group: "Perp DEX — Long Tail" },
+  { id: "alpaca", name: "Alpaca", type: "US Equities & Crypto Spot Broker", group: "Primary" },
   { id: "arcus", name: "Arcus", type: "CLOB DEX", group: "Primary" },
   { id: "aster", name: "Aster", type: "Multi-Chain Perp DEX", group: "Primary" },
   { id: "astros", name: "Astros", type: "Perp DEX (Market Data)", group: "Perp DEX — Long Tail" },
@@ -338,6 +340,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   const [popdexNetwork, setPopdexNetwork] = useState("mainnet");
   const [binanceEnabled, setBinanceEnabled] = useState(false);
   const [coinbaseEnabled, setCoinbaseEnabled] = useState(false);
+  const [alpacaEnabled, setAlpacaEnabled] = useState(false);
   const [decibelEnabled, setDecibelEnabled] = useState(false);
   const [deribitEnabled, setDeribitEnabled] = useState(false);
   const [ibkrEnabled, setIbkrEnabled] = useState(false);
@@ -457,6 +460,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
       case "popdex": return popdexEnabled;
       case "binance": return binanceEnabled;
       case "coinbase": return coinbaseEnabled;
+      case "alpaca": return alpacaEnabled;
       case "decibel": return decibelEnabled;
       case "deribit": return deribitEnabled;
       case "hyperliquid": return hlEnabled;
@@ -480,6 +484,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
       case "popdex": setPopdexEnabled(enabled); break;
       case "binance": setBinanceEnabled(enabled); break;
       case "coinbase": setCoinbaseEnabled(enabled); break;
+      case "alpaca": setAlpacaEnabled(enabled); break;
       case "decibel": setDecibelEnabled(enabled); break;
       case "deribit": setDeribitEnabled(enabled); break;
       case "hyperliquid": setHlEnabled(enabled); break;
@@ -664,6 +669,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         setPopdexEnabled(s.popdex_enabled ?? false);
         setPopdexNetwork((s as unknown as Record<string, unknown>).popdex_network === "testnet" ? "testnet" : "mainnet");
         setCoinbaseEnabled(s.coinbase_enabled ?? false);
+        setAlpacaEnabled(s.alpaca_enabled ?? false);
 
         setArcusApiKey(s.arcus_api_key || "");
         setArcusSecret(s.arcus_secret || "");
@@ -831,6 +837,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
           popdex_enabled: popdexEnabled,
           popdex_network: popdexNetwork,
           coinbase_enabled: coinbaseEnabled,
+          alpaca_enabled: alpacaEnabled,
           arcus_api_key: arcusApiKey.trim(),
           arcus_secret: arcusSecret.trim(),
           arcus_url: arcusUrl.trim(),

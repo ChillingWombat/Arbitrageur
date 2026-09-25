@@ -2,6 +2,7 @@ use crate::vault::ExchangeCredentials;
 use arbitrageur_core::hub::MarketDataHub;
 use arbitrageur_core::position::AccountSnapshot;
 use arbitrageur_core::types::{dec, Decimal};
+use arbitrageur_exchanges::alpaca::AlpacaAdapter;
 use arbitrageur_exchanges::aster::AsterAdapter;
 use arbitrageur_exchanges::binance::BinanceAdapter;
 use arbitrageur_exchanges::boros::{BorosAdapter, BorosYuMarket};
@@ -92,6 +93,8 @@ struct EnvCredentials {
     cb_pass: Option<String>,
     kraken_key: Option<String>,
     kraken_sec: Option<String>,
+    alpaca_key: Option<String>,
+    alpaca_sec: Option<String>,
     deribit_id: Option<String>,
     deribit_sec: Option<String>,
     decibel_key: Option<String>,
@@ -140,6 +143,8 @@ impl Drop for EnvCredentials {
         z(&mut self.cb_pass);
         z(&mut self.kraken_key);
         z(&mut self.kraken_sec);
+        z(&mut self.alpaca_key);
+        z(&mut self.alpaca_sec);
         z(&mut self.deribit_id);
         z(&mut self.deribit_sec);
         z(&mut self.decibel_key);
@@ -742,6 +747,9 @@ pub struct EngineSettingsDto {
     pub popdex_network: String,
     #[serde(default)]
     pub coinbase_enabled: bool,
+    /// Alpaca — US equities & crypto spot broker (live + real paper env).
+    #[serde(default)]
+    pub alpaca_enabled: bool,
     /// Deribit crypto options/perpetuals (BTC + ETH). Off by default — the
     /// options parity strategy is the only consumer.
     #[serde(default)]
@@ -907,6 +915,7 @@ impl Default for EngineSettingsDto {
             popdex_enabled: false,
             popdex_network: default_popdex_network(),
             coinbase_enabled: false,
+            alpaca_enabled: false,
             kraken_enabled: false,
             kraken_spot_enabled: false,
             kraken_futures_enabled: false,
@@ -1287,6 +1296,9 @@ pub struct AppEngineState {
     pub live_okx: Arc<OkxAdapter>,
     pub live_coinbase: Arc<CoinbaseAdapter>,
     pub live_kraken: Arc<KrakenAdapter>,
+    /// Alpaca — US equities + crypto spot broker (REST). Spot-only: no
+    /// funding streams, no perp positions.
+    pub live_alpaca: Arc<AlpacaAdapter>,
     pub live_deribit: Arc<DeribitAdapter>,
     pub live_decibel: Arc<DecibelAdapter>,
     // Long-tail perp venues (one shared adapter type, per-venue specs).
@@ -1308,6 +1320,9 @@ pub struct AppEngineState {
     pub tn_binance: Arc<BinanceAdapter>,
     pub tn_okx: Arc<OkxAdapter>,
     pub tn_kraken: Arc<KrakenAdapter>,
+    /// Alpaca paper-trading environment (paper-api.alpaca.markets) — a real
+    /// venue sandbox, not a local simulation.
+    pub tn_alpaca: Arc<AlpacaAdapter>,
     pub tn_deribit: Arc<DeribitAdapter>,
     pub tn_decibel: Arc<DecibelAdapter>,
     pub tn_popdex: Arc<PopDexAdapter>,
@@ -1479,6 +1494,7 @@ pub(crate) fn canonical_venue_id(input: &str) -> Option<&'static str> {
         "okx" | "okx swaps" | "okx (perp)" => Some("okx"),
         "coinbase" | "cb" | "coinbase exchange" => Some("coinbase"),
         "kraken" | "krk" | "kfut" | "kraken futures" | "kraken spot" => Some("kraken"),
+        "alpaca" | "alp" | "alpaca markets" | "alpaca crypto" => Some("alpaca"),
         "deribit" | "dbit" | "deribit options" => Some("deribit"),
         "decibel" | "dcb" | "decibel (aptos)" => Some("decibel"),
         // Long-tail perp venues: common display/alias spellings first, then
@@ -1551,6 +1567,7 @@ pub(crate) fn venue_has_adapter(venue_id: &str) -> bool {
             | "okx"
             | "coinbase"
             | "kraken"
+            | "alpaca"
             | "deribit"
             | "decibel"
             | "boros"
@@ -1850,6 +1867,10 @@ impl AppEngineState {
         let live_binance = Arc::new(BinanceAdapter::new(None, None, None));
         let live_okx = Arc::new(OkxAdapter::new(None, None, None, None));
         let live_coinbase = Arc::new(CoinbaseAdapter::new(None, None, None, None));
+        let live_alpaca = Arc::new(AlpacaAdapter::new(None, None, None, None));
+        // Alpaca paper trading is a real venue sandbox (separate host +
+        // separate key namespace) — testnet admits it honestly.
+        let tn_alpaca = Arc::new(AlpacaAdapter::for_paper(None, None));
         let live_kraken = Arc::new(KrakenAdapter::new(
             endpoint(&initial_settings.kraken_futures_url),
             endpoint(&initial_settings.kraken_spot_url),
@@ -2182,6 +2203,8 @@ impl AppEngineState {
             live_okx,
             live_coinbase,
             live_kraken,
+            live_alpaca,
+            tn_alpaca,
             live_deribit,
             live_decibel,
             live_dex_perps,
@@ -2468,6 +2491,7 @@ impl AppEngineState {
         let _ = self.live_okx.set_base_url(None);
         self.live_coinbase.update_credentials(None, None, None);
         self.live_kraken.update_credentials(None, None);
+        self.live_alpaca.update_credentials(None, None);
         self.live_deribit.update_credentials(None, None);
         self.live_decibel.update_credentials(None, None, None, None);
         for adapter in &self.live_dex_perps {
@@ -2486,6 +2510,7 @@ impl AppEngineState {
         self.tn_okx.update_credentials(None, None, None);
         let _ = self.tn_okx.set_base_url(None);
         self.tn_kraken.update_credentials(None, None);
+        self.tn_alpaca.update_credentials(None, None);
         self.tn_deribit.update_credentials(None, None);
         self.tn_decibel.update_credentials(None, None, None, None);
         let _ = self.tn_popdex.update_credentials(None, None, None);
@@ -2626,6 +2651,12 @@ impl AppEngineState {
                 creds.kraken_sec = Some(cred.api_secret.clone());
             }
         }
+        if let Some(cred) = get_active_cred(&["alpaca"]) {
+            if !cred.api_key.trim().is_empty() && !cred.api_secret.trim().is_empty() {
+                creds.alpaca_key = Some(cred.api_key.clone());
+                creds.alpaca_sec = Some(cred.api_secret.clone());
+            }
+        }
         if let Some(cred) = get_active_cred(&["deribit", "dbit"]) {
             if !cred.api_key.trim().is_empty() && !cred.api_secret.trim().is_empty() {
                 creds.deribit_id = Some(cred.api_key.clone());
@@ -2728,6 +2759,8 @@ impl AppEngineState {
         );
         self.live_kraken
             .update_credentials(c.kraken_key.clone(), c.kraken_sec.clone());
+        self.live_alpaca
+            .update_credentials(c.alpaca_key.clone(), c.alpaca_sec.clone());
         self.live_deribit
             .update_credentials(c.deribit_id.clone(), c.deribit_sec.clone());
         self.live_decibel.update_credentials(
@@ -2877,6 +2910,11 @@ impl AppEngineState {
         }
         self.tn_kraken
             .update_credentials(c.kraken_key.clone(), c.kraken_sec.clone());
+        // Alpaca paper keys are a separate namespace minted in the paper
+        // dashboard — the same record resolves to the paper host via the
+        // env-scoped account, never reusing a live key pair.
+        self.tn_alpaca
+            .update_credentials(c.alpaca_key.clone(), c.alpaca_sec.clone());
         self.tn_deribit
             .update_credentials(c.deribit_id.clone(), c.deribit_sec.clone());
         self.tn_decibel.update_credentials(
@@ -2985,6 +3023,9 @@ impl AppEngineState {
             {
                 list.push(("kraken", "Kraken", self.live_kraken.clone()));
             }
+            if s.alpaca_enabled || account_enabled("alpaca") {
+                list.push(("alpaca", "Alpaca", self.live_alpaca.clone()));
+            }
             if s.decibel_enabled || account_enabled("decibel") {
                 list.push(("decibel", "Decibel", self.live_decibel.clone()));
             }
@@ -3032,6 +3073,9 @@ impl AppEngineState {
             }
             if s.kraken_enabled || s.kraken_futures_enabled || account_enabled("kraken") {
                 list.push(("kraken", "Kraken", self.tn_kraken.clone()));
+            }
+            if s.alpaca_enabled || account_enabled("alpaca") {
+                list.push(("alpaca", "Alpaca", self.tn_alpaca.clone()));
             }
             if s.decibel_enabled || account_enabled("decibel") {
                 list.push(("decibel", "Decibel", self.tn_decibel.clone()));

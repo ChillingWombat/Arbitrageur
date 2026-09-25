@@ -465,6 +465,7 @@ export const PriceRetriverPanel: React.FC<PriceRetriverPanelProps> = ({ onNotify
                 <option value="hyperliquid">Hyperliquid</option>
                 <option value="okx">OKX</option>
                 <option value="coinbase">Coinbase</option>
+                <option value="alpaca">Alpaca</option>
                 <option value="kraken">Kraken</option>
               </select>
 

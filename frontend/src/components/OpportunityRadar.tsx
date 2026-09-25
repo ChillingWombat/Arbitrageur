@@ -116,6 +116,7 @@ const VENUE_NAME: Record<string, string> = {
   kalshi: "Kalshi",
   binance: "Binance",
   coinbase: "Coinbase",
+  alpaca: "Alpaca",
   decibel: "Decibel",
   ibkr: "IBKR",
   ig: "IG",
@@ -135,6 +136,7 @@ const VENUE_LABEL: Record<string, string> = {
   kalshi: "KLSH",
   binance: "BNB",
   coinbase: "CB",
+  alpaca: "ALP",
   decibel: "DCB",
   ibkr: "IBKR",
   ig: "IG",
@@ -151,6 +153,7 @@ const STATIC_SUBMIT_CAPABLE = new Set([
   "binance",
   "okx",
   "coinbase",
+  "alpaca",
   "kraken",
   "decibel",
   // DexPerpAdapter venues with implemented order paths — the backend

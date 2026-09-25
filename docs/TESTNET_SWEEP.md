@@ -20,6 +20,7 @@
 | Decibel | testnet via `for_testnet` | Decibel testnet app | Aptos-based |
 | PopDEX | testnet profile | PopDEX testnet app | Alpha-stage venue |
 | Deribit | `test.deribit.com` | test.deribit.com account → API keys | Options + perp; very thin testnet books — expect empty/one-sided depth |
+| Alpaca | `paper-api.alpaca.markets` | Alpaca dashboard → Paper Trading → API keys | Real venue sandbox: separate host + separate key namespace. Crypto spot legs only. |
 
 Not in scope (no public testnet — must never be simulated locally):
 Coinbase, Aster, Robinhood, the DexPerp long-tail (GRVT, EdgeX,

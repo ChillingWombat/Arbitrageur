@@ -231,6 +231,7 @@ const DELETABLE_CREDENTIAL_VENUES: &[&str] = &[
     "popdex",
     "kraken_spot",
     "kraken_futures",
+    "alpaca",
     "polymarket",
     "kalshi",
 ];

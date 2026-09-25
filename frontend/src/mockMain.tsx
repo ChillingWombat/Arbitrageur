@@ -54,7 +54,7 @@ const FIXTURES: Record<string, (args?: Record<string, unknown>) => unknown> = {
     hyperliquid_enabled: true, lighter_enabled: true, vanta_enabled: true,
     binance_enabled: true, okx_enabled: true, kraken_futures_enabled: true,
     decibel_enabled: true, popdex_enabled: false, aster_enabled: false,
-    robinhood_enabled: false, coinbase_enabled: false,
+    robinhood_enabled: false, coinbase_enabled: false, alpaca_enabled: false,
     hyperliquid_url: "https://api.hyperliquid.xyz",
     vanta_url: "https://api.orderly.org",
     lighter_url: "https://mainnet.zklighter.elliot.ai",
