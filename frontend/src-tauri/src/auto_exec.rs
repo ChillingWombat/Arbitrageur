@@ -194,6 +194,14 @@ pub struct RadarBotStatusDto {
     pub audit_errors: u64,
     pub monitor_running: bool,
     pub snapshot_present: bool,
+    /// Wall-clock of the last poll iteration — proves the loop is alive even
+    /// when no decision has ever fired.
+    pub last_tick_ms: Option<i64>,
+    /// Ready+executable candidate count on the last poll.
+    pub ready_rows: u64,
+    /// `triggered`-status rows on the last poll (active signals still inside
+    /// the qualification gates).
+    pub triggered_rows: u64,
 }
 
 /// Execution seam. Production calls the existing guarded dispatch path; tests
@@ -319,6 +327,17 @@ pub struct OpportunityExecutor {
     last_decision: Mutex<Option<BotDecisionDto>>,
     last_error: Mutex<Option<String>>,
     audit_errors: AtomicU64,
+    /// Wall-clock of the most recent completed poll. A live bot ticks
+    /// regardless of whether a decision was made; a stale tick timestamp is
+    /// the honest signal that the loop is dead, not that signals are absent.
+    last_tick_ms: AtomicU64,
+    /// Ready+executable rows seen on the last poll — nonzero means the entry
+    /// gate has live candidates, zero means the bot is correctly waiting on
+    /// statistical qualification rather than being broken.
+    ready_rows: AtomicU64,
+    /// Rows in `triggered` on the last poll — the qualification pipeline's
+    /// active-signal depth, so an empty `ready_rows` is diagnosable.
+    triggered_rows: AtomicU64,
     shutdown: Mutex<bool>,
 }
 
@@ -331,6 +350,9 @@ impl OpportunityExecutor {
             last_decision: Mutex::new(None),
             last_error: Mutex::new(None),
             audit_errors: AtomicU64::new(0),
+            last_tick_ms: AtomicU64::new(0),
+            ready_rows: AtomicU64::new(0),
+            triggered_rows: AtomicU64::new(0),
             shutdown: Mutex::new(false),
         })
     }
@@ -741,6 +763,8 @@ impl OpportunityExecutor {
     /// a lock across dispatch awaits; per-pair failures never abort the tick.
     pub async fn tick_once(&self, state: &AppEngineState, dispatch: &dyn BotDispatch) -> u64 {
         let now_ms = Utc::now().timestamp_millis();
+        self.last_tick_ms
+            .store(now_ms.max(0) as u64, Ordering::Relaxed);
         let (cfg, mode) = Self::load_config(state);
         if !mode.exits_allowed() {
             // Fully inert: no entries, no exit maintenance. The manual
@@ -819,11 +843,26 @@ impl OpportunityExecutor {
             }
         }
 
+        // Liveness + pipeline telemetry: the status surface must distinguish
+        // "bot alive, waiting on qualification" from "bot dead". Snapshot
+        // rows and ready count are sampled every tick the loop reaches.
+        let ready = if snapshot_present {
+            eng.ready_opportunities()
+        } else {
+            Vec::new()
+        };
+        self.ready_rows.store(ready.len() as u64, Ordering::Relaxed);
+        self.triggered_rows.store(
+            snap.as_ref()
+                .map(|s| s.rows.iter().filter(|r| r.status == "triggered").count() as u64)
+                .unwrap_or(0),
+            Ordering::Relaxed,
+        );
+
         // Entries only when explicitly armed in full-auto. Anything else
         // (paused, reduce-only, disabled flag) skips entries silently —
         // denial audits would otherwise spam while disarmed.
         if cfg.enabled && snapshot_present {
-            let ready = eng.ready_opportunities();
             for row in ready {
                 let signal = Self::signal_of(&row);
                 let key = PairKey::new(&signal.symbol, &signal.buy_venue, &signal.sell_venue);
@@ -1027,6 +1066,12 @@ impl OpportunityExecutor {
                 .map(|e| e.snapshot().is_some())
                 .unwrap_or(false),
             snapshot_present: snap.is_some(),
+            last_tick_ms: {
+                let t = self.last_tick_ms.load(Ordering::Relaxed);
+                (t > 0).then_some(t as i64)
+            },
+            ready_rows: self.ready_rows.load(Ordering::Relaxed),
+            triggered_rows: self.triggered_rows.load(Ordering::Relaxed),
         }
     }
 
@@ -1051,6 +1096,9 @@ impl Default for OpportunityExecutor {
             last_decision: Mutex::new(None),
             last_error: Mutex::new(None),
             audit_errors: AtomicU64::new(0),
+            last_tick_ms: AtomicU64::new(0),
+            ready_rows: AtomicU64::new(0),
+            triggered_rows: AtomicU64::new(0),
             shutdown: Mutex::new(false),
         }
     }
