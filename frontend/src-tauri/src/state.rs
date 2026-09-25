@@ -86,6 +86,8 @@ struct EnvCredentials {
     vanta_sec: Option<String>,
     arcus_key: Option<String>,
     arcus_sec: Option<String>,
+    arcus_wallet: Option<String>,
+    arcus_subaccount: Option<u64>,
     binance_key: Option<String>,
     binance_sec: Option<String>,
     okx_key: Option<String>,
@@ -136,6 +138,9 @@ impl Drop for EnvCredentials {
         z(&mut self.vanta_acc);
         z(&mut self.vanta_key);
         z(&mut self.vanta_sec);
+        z(&mut self.arcus_key);
+        z(&mut self.arcus_sec);
+        z(&mut self.arcus_wallet);
         z(&mut self.binance_key);
         z(&mut self.binance_sec);
         z(&mut self.okx_key);
@@ -2547,7 +2552,7 @@ impl AppEngineState {
             let _ = adapter.set_base_url(None);
         }
         let _ = self.live_boros.update_credentials(None, None, None);
-        self.live_arcus.update_credentials(None, None);
+        self.live_arcus.update_credentials(None, None, None, None);
         self.tn_hl.update_credentials(None, None);
         self.tn_lighter.update_credentials(None, None);
         self.tn_lighter.set_api_key_index(None);
@@ -2562,7 +2567,7 @@ impl AppEngineState {
         let _ = self.tn_popdex.update_credentials(None, None, None);
         self.tn_robinhood.update_credentials(None, None);
         self.tn_robinhood.set_api_key_index(None);
-        self.tn_arcus.update_credentials(None, None);
+        self.tn_arcus.update_credentials(None, None, None, None);
         // Kalshi's adapter is a prediction stub — no credential setter exists
         // to clear; its demo endpoint carries no secrets.
     }
@@ -2681,6 +2686,8 @@ impl AppEngineState {
                 creds.arcus_key = Some(cred.api_key.clone());
                 creds.arcus_sec = Some(cred.api_secret.clone());
             }
+            creds.arcus_wallet = cred.wallet_address.clone().filter(|w| !w.trim().is_empty());
+            creds.arcus_subaccount = cred.subaccount_index;
         }
         if let Some(cred) = get_active_cred(&["okx"]) {
             // Regional-domain override applies to public endpoints too —
@@ -2785,8 +2792,12 @@ impl AppEngineState {
             c.vanta_key.clone(),
             c.vanta_sec.clone(),
         );
-        self.live_arcus
-            .update_credentials(c.arcus_key.clone(), c.arcus_sec.clone());
+        self.live_arcus.update_credentials(
+            c.arcus_key.clone(),
+            c.arcus_sec.clone(),
+            c.arcus_wallet.clone(),
+            c.arcus_subaccount,
+        );
         self.live_binance
             .update_credentials(c.binance_key.clone(), c.binance_sec.clone());
         // Endpoint identity precedes credentials: a regional-entity key
@@ -2951,8 +2962,12 @@ impl AppEngineState {
         self.tn_robinhood
             .update_credentials(c.rh_idx, c.rh_key.clone());
         self.tn_robinhood.set_api_key_index(c.rh_key_idx);
-        self.tn_arcus
-            .update_credentials(c.arcus_key.clone(), c.arcus_sec.clone());
+        self.tn_arcus.update_credentials(
+            c.arcus_key.clone(),
+            c.arcus_sec.clone(),
+            c.arcus_wallet.clone(),
+            c.arcus_subaccount,
+        );
         self.tn_binance
             .update_credentials(c.binance_key.clone(), c.binance_sec.clone());
         if let Err(e) = self.tn_okx.set_base_url(c.okx_url.clone()) {
