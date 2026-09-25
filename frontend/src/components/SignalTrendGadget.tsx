@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Activity } from "lucide-react";
-import type { SignalSeriesDto } from "../types";
+import type { SignalSeriesDto, SpreadAnalyticsDto } from "../types";
 import { api } from "../services/api";
 import { formatDuration } from "../services/matrixQuant";
 import { sessionSegments, SESSION_BAND_COLOR } from "../services/session.ts";
@@ -47,6 +47,7 @@ function SignalTrendGadgetInner({
   const [baselineMode, setBaselineMode] = useState<BaselineMode>("consensus");
   const [windowSec, setWindowSec] = useState(botWindowSec);
   const [series, setSeries] = useState<SignalSeriesDto | null>(null);
+  const [analytics, setAnalytics] = useState<SpreadAnalyticsDto | null>(null);
   const [failed, setFailed] = useState(false);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
   const containerRef = useRef<HTMLDivElement | null>(null);
@@ -106,6 +107,14 @@ function SignalTrendGadgetInner({
       } catch {
         if (!stopped) setFailed(true);
       }
+      // Distribution stats ride the same cadence but tolerate failure —
+      // a missing stats line must not blank the series.
+      try {
+        const a = await api.getSpreadAnalytics(symbol, windowSec, hurdleBps);
+        if (!stopped) setAnalytics(a);
+      } catch {
+        if (!stopped) setAnalytics(null);
+      }
     };
     load();
     const iv = setInterval(load, cadence);
@@ -113,7 +122,7 @@ function SignalTrendGadgetInner({
       stopped = true;
       clearInterval(iv);
     };
-  }, [symbol, baselineMode, windowSec]);
+  }, [symbol, baselineMode, windowSec, hurdleBps]);
 
   const venueIds = series?.venues ?? [];
   const venueColor = (vid: string) =>
@@ -629,6 +638,21 @@ function SignalTrendGadgetInner({
               : series.mode === "leader"
                 ? "baseline = most-liquid venue"
                 : "baseline = volume-weighted consensus"}
+          </span>
+        </div>
+      )}
+      {analytics && analytics.band.sample_count > 0 && (
+        <div className="flex items-center justify-between text-xs text-muted px-0.5 mt-0.5">
+          <span title="Distribution of the per-poll max–min venue spread over this window">
+            band μ {fmtBps(analytics.band.mean_bps ?? 0, false)} · p90{" "}
+            {fmtBps(analytics.band.p90_bps ?? 0, false)} · max{" "}
+            {fmtBps(analytics.band.max_bps ?? 0, false)} bps
+          </span>
+          <span title={`Share of polls where the band met the ${hurdleBps} bps hurdle`}>
+            ≥{hurdleBps} bps hurdle{" "}
+            {analytics.band.frac_at_or_above_hurdle != null
+              ? `${(analytics.band.frac_at_or_above_hurdle * 100).toFixed(0)}% of polls`
+              : "—"}
           </span>
         </div>
       )}

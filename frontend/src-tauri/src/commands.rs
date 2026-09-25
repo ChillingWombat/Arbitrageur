@@ -15,7 +15,9 @@ pub(crate) use crate::monitor_ipc::*;
 pub(crate) use crate::performance::*;
 pub(crate) use crate::strategy_config::*;
 pub(crate) use crate::triangle::*;
-use arbitrageur_math::dislocation::{compute_deviation_series, BaselineMode, MidSample};
+use arbitrageur_math::dislocation::{
+    compute_deviation_series, distribution_stats, BaselineMode, MidSample,
+};
 use arbitrageur_math::funding_carry::backtest_gap_carry;
 use arbitrageur_math::optimal_thresholds::compute_bertram_thresholds;
 use arbitrageur_math::ou_process::OuModelParams;
@@ -3497,6 +3499,213 @@ pub async fn get_matrix_baselines(
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<MatrixBaselineSnapshotDto, String> {
     get_matrix_baselines_impl(&symbol, &mode, manual_window_secs, percentile, &state).await
+}
+
+/// Per-series distribution statistics; every metric is `None` on empty
+/// input rather than reporting a fabricated zero.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SpreadStatsDto {
+    pub sample_count: u64,
+    pub history_span_secs: u64,
+    pub mean_bps: Option<f64>,
+    pub std_bps: Option<f64>,
+    pub p50_bps: Option<f64>,
+    pub p90_bps: Option<f64>,
+    pub p99_bps: Option<f64>,
+    pub max_bps: Option<f64>,
+    /// Share of observations at or above the caller's hurdle (0..=1).
+    pub frac_at_or_above_hurdle: Option<f64>,
+}
+
+impl From<arbitrageur_math::dislocation::DistributionStats> for SpreadStatsDto {
+    fn from(s: arbitrageur_math::dislocation::DistributionStats) -> Self {
+        Self {
+            sample_count: s.sample_count as u64,
+            history_span_secs: s.history_span_secs,
+            mean_bps: s.mean,
+            std_bps: s.std_dev,
+            p50_bps: s.p50,
+            p90_bps: s.p90,
+            p99_bps: s.p99,
+            max_bps: s.max,
+            frac_at_or_above_hurdle: s.frac_at_or_above,
+        }
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SpreadPairAnalyticsDto {
+    pub buy_venue: String,
+    pub sell_venue: String,
+    pub stats: SpreadStatsDto,
+    /// OU mean-reversion half-life — `None` when the fit gates
+    /// (min obs, min span, R²) are unmet.
+    pub half_life_secs: Option<f64>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct SpreadAnalyticsDto {
+    pub symbol: String,
+    pub window_secs: u64,
+    pub hurdle_bps: f64,
+    pub venues_seen: Vec<String>,
+    /// Per-ticker dislocation band: at each poll timestamp the gross
+    /// max–min venue spread in bps, then distribution stats over it.
+    pub band: SpreadStatsDto,
+    /// Per venue-pair gross-spread stats + half-life.
+    pub pairs: Vec<SpreadPairAnalyticsDto>,
+}
+
+/// Per-ticker dislocation analytics over a bounded window: band
+/// distribution (how often the spread even exists at hurdle size) plus
+/// per-pair stats and half-lives. Read-only over `spread_samples`; every
+/// thin-data field stays `None`/empty rather than fabricating numbers.
+pub async fn get_spread_analytics_impl(
+    symbol: &str,
+    window_secs: u64,
+    hurdle_bps: f64,
+    state: &AppEngineState,
+) -> Result<SpreadAnalyticsDto, String> {
+    validate_market_symbol(symbol)?;
+    let window_secs = window_secs.clamp(60, 30 * 86_400);
+    if !hurdle_bps.is_finite() || hurdle_bps < 0.0 {
+        return Err("hurdle_bps must be finite and non-negative".into());
+    }
+
+    let base = symbol
+        .split(['-', '/', '_'])
+        .next()
+        .unwrap_or(symbol)
+        .to_ascii_uppercase();
+    let merge_usd = state.usd_merge_quotes();
+    let keys: Vec<String> = if merge_usd {
+        vec![base.clone(), format!("{base}-USDC"), format!("{base}-USD")]
+    } else {
+        vec![symbol.trim().to_string()]
+    };
+    let now_ms = Utc::now().timestamp_millis();
+    let since_ms = now_ms - (window_secs as i64) * 1000;
+    let store = state.state_store.clone();
+    let sym = symbol.to_string();
+    tokio::task::spawn_blocking(move || {
+        let mut all = Vec::new();
+        for k in &keys {
+            if let Ok(mut rows) = store.spread_samples_mode(k, merge_usd, since_ms, now_ms) {
+                all.append(&mut rows);
+            }
+        }
+        all.sort_by(|a, b| (a.ts_ms, a.venue_id.as_str()).cmp(&(b.ts_ms, &b.venue_id)));
+        all.dedup_by(|a, b| a.ts_ms == b.ts_ms && a.venue_id == b.venue_id);
+
+        // Band series: one (ts, max/min - 1) point per poll timestamp that
+        // actually observed ≥2 distinct venues — single-venue ticks can't
+        // express a dislocation and are dropped, never zeroed.
+        let mut mids_by_venue: HashMap<String, Vec<(i64, f64)>> = HashMap::new();
+        let mut by_ts: HashMap<i64, (f64, f64, std::collections::HashSet<String>)> = HashMap::new();
+        for s in &all {
+            if !s.mid.is_finite() || s.mid <= 0.0 {
+                continue;
+            }
+            mids_by_venue
+                .entry(s.venue_id.clone())
+                .or_default()
+                .push((s.ts_ms, s.mid));
+            let e = by_ts.entry(s.ts_ms).or_insert((
+                f64::INFINITY,
+                f64::NEG_INFINITY,
+                Default::default(),
+            ));
+            e.0 = e.0.min(s.mid);
+            e.1 = e.1.max(s.mid);
+            e.2.insert(s.venue_id.clone());
+        }
+        let mut venues_seen: Vec<String> = mids_by_venue.keys().cloned().collect();
+        venues_seen.sort();
+        let mut band_series: Vec<(i64, f64)> = by_ts
+            .into_iter()
+            .filter(|(_, (_, _, vs))| vs.len() >= 2)
+            .map(|(ts, (lo, hi, _))| (ts, (hi / lo - 1.0) * 10_000.0))
+            .collect();
+        band_series.sort_by_key(|(t, _)| *t);
+
+        let mut pairs = Vec::new();
+        for buy_v in &venues_seen {
+            for sell_v in &venues_seen {
+                if buy_v == sell_v {
+                    continue;
+                }
+                let (Some(a), Some(b)) = (mids_by_venue.get(buy_v), mids_by_venue.get(sell_v))
+                else {
+                    continue;
+                };
+                let series =
+                    arbitrageur_math::pair_monitor::build_pair_series(a, b, PAIR_ALIGN_GAP_MS);
+                if series.is_empty() {
+                    continue;
+                }
+                let vals: Vec<(i64, f64)> =
+                    series.iter().map(|o| (o.ts_ms, o.spread_bps)).collect();
+                let span_ms = series.last().unwrap().ts_ms - series[0].ts_ms;
+                let span_secs = (span_ms / 1000).max(0) as u64;
+                let half_life_secs =
+                    if series.len() >= OU_MIN_OBS && span_secs as f64 >= OU_MIN_SPAN_SECS {
+                        let dt = span_ms as f64 / 1000.0 / (series.len() - 1) as f64;
+                        if dt.is_finite() && dt > 0.0 {
+                            let v: Vec<f64> = series.iter().map(|o| o.spread_bps).collect();
+                            OuModelParams::fit(&v, dt)
+                                .filter(|p| {
+                                    p.half_life.is_finite()
+                                        && p.half_life > 0.0
+                                        && p.r_squared.is_some_and(|r| r >= OU_MIN_R2)
+                                })
+                                .map(|p| p.half_life)
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                pairs.push(SpreadPairAnalyticsDto {
+                    buy_venue: buy_v.clone(),
+                    sell_venue: sell_v.clone(),
+                    stats: distribution_stats(&vals, hurdle_bps).into(),
+                    half_life_secs,
+                });
+            }
+        }
+        pairs.sort_by(|a, b| {
+            (a.buy_venue.as_str(), a.sell_venue.as_str())
+                .cmp(&(b.buy_venue.as_str(), b.sell_venue.as_str()))
+        });
+
+        Ok::<_, anyhow::Error>(SpreadAnalyticsDto {
+            symbol: sym,
+            window_secs,
+            hurdle_bps,
+            venues_seen,
+            band: distribution_stats(&band_series, hurdle_bps).into(),
+            pairs,
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn get_spread_analytics(
+    symbol: String,
+    window_secs: Option<u64>,
+    hurdle_bps: Option<f64>,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<SpreadAnalyticsDto, String> {
+    get_spread_analytics_impl(
+        &symbol,
+        window_secs.unwrap_or(86_400),
+        hurdle_bps.unwrap_or(0.0),
+        &state,
+    )
+    .await
 }
 
 #[tauri::command]
@@ -13164,6 +13373,88 @@ mod tests {
         assert_eq!(s.sample_count, 3);
         assert_eq!(s.earliest_ts_ms, Some(now - 3_000));
         assert!(!s.ts_ms.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_spread_analytics_empty_is_honest() {
+        let state = AppEngineState::new();
+        let a = get_spread_analytics_impl("BTC-USDC", 3600, 5.0, &state)
+            .await
+            .expect("analytics");
+        assert_eq!(a.band.sample_count, 0);
+        assert!(a.band.mean_bps.is_none());
+        assert!(a.band.frac_at_or_above_hurdle.is_none());
+        assert!(a.pairs.is_empty());
+        assert!(a.venues_seen.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_spread_analytics_band_and_pair_stats() {
+        let state = AppEngineState::new();
+        let now = Utc::now().timestamp_millis();
+        // 10 polls at 1s cadence: A=100.0 constant, B ramps 100.1..101.0 —
+        // band = B/A - 1 in bps, i.e. ~10..100 bps.
+        for i in 0..10 {
+            seed_samples(
+                &state,
+                "BTC-USDC",
+                now - (9 - i) * 1_000,
+                &[
+                    ("hyperliquid", 100.0),
+                    ("lighter", 100.0 + (i as f64 + 1.0) / 10.0),
+                ],
+            );
+        }
+        let a = get_spread_analytics_impl("BTC-USDC", 3600, 50.0, &state)
+            .await
+            .expect("analytics");
+        assert_eq!(a.band.sample_count, 10);
+        assert_eq!(a.venues_seen, vec!["hyperliquid", "lighter"]);
+        // band values ≈ 10,20,...,100 bps (hi/lo-1): mean ~55
+        let mean = a.band.mean_bps.expect("mean");
+        assert!((mean - 55.0).abs() < 1.0, "band mean {mean}");
+        assert!(a.band.max_bps.unwrap() > 99.0 && a.band.max_bps.unwrap() < 101.0);
+        // 5 of 10 band points ≥ 50 bps (≈50.25,60.3,...,100.4 above; 60+ are 5)
+        let frac = a.band.frac_at_or_above_hurdle.expect("frac");
+        assert!((frac - 0.5).abs() < 0.11, "frac {frac}");
+        // Both pair directions present with mirrored signs.
+        assert_eq!(a.pairs.len(), 2);
+        let fwd = a
+            .pairs
+            .iter()
+            .find(|p| p.buy_venue == "hyperliquid")
+            .expect("hl->lgt pair");
+        assert_eq!(fwd.stats.sample_count, 10);
+        // buy cheap HL / sell rich LGT -> positive carry spread
+        assert!(
+            fwd.stats.mean_bps.unwrap() > 0.0,
+            "buy cheap leg is positive"
+        );
+        let rev = a
+            .pairs
+            .iter()
+            .find(|p| p.buy_venue == "lighter")
+            .expect("lgt->hl pair");
+        assert!(
+            (rev.stats.mean_bps.unwrap() + fwd.stats.mean_bps.unwrap()).abs() < 1.0,
+            "directions mirror"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_spread_analytics_single_venue_ticks_dropped() {
+        let state = AppEngineState::new();
+        let now = Utc::now().timestamp_millis();
+        // Alternating single-venue polls: no timestamp ever has ≥2 venues,
+        // so the band must be empty — never a fabricated zero-spread series.
+        seed_samples(&state, "BTC-USDC", now - 2_000, &[("hyperliquid", 100.0)]);
+        seed_samples(&state, "BTC-USDC", now - 1_000, &[("lighter", 101.0)]);
+        let a = get_spread_analytics_impl("BTC-USDC", 3600, 5.0, &state)
+            .await
+            .expect("analytics");
+        assert_eq!(a.band.sample_count, 0);
+        assert!(a.band.mean_bps.is_none());
+        assert_eq!(a.venues_seen.len(), 2);
     }
 
     #[tokio::test]

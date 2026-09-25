@@ -1018,6 +1018,37 @@ export interface VenueFeesDto {
   default_bps: number;
 }
 
+/** Distribution stats over a spread/deviation series — every metric is
+ *  null on empty input rather than a fabricated zero. */
+export interface SpreadStatsDto {
+  sample_count: number;
+  history_span_secs: number;
+  mean_bps: number | null;
+  std_bps: number | null;
+  p50_bps: number | null;
+  p90_bps: number | null;
+  p99_bps: number | null;
+  max_bps: number | null;
+  frac_at_or_above_hurdle: number | null;
+}
+
+export interface SpreadPairAnalyticsDto {
+  buy_venue: string;
+  sell_venue: string;
+  stats: SpreadStatsDto;
+  half_life_secs: number | null;
+}
+
+export interface SpreadAnalyticsDto {
+  symbol: string;
+  window_secs: number;
+  hurdle_bps: number;
+  venues_seen: string[];
+  /** Per-ticker dislocation band stats (max–min venue spread per poll). */
+  band: SpreadStatsDto;
+  pairs: SpreadPairAnalyticsDto[];
+}
+
 export interface VenueBalanceInfo {
   venue: string;
   equity_usd: number;

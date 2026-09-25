@@ -266,6 +266,71 @@ pub fn compute_deviation_series(
     out
 }
 
+/// Distribution statistics over a gross-spread (or deviation-band) series.
+/// Every field except `sample_count`/`history_span_secs` is `None` when the
+/// series is empty — thin data reports nothing rather than a fake zero.
+#[derive(Debug, Clone, Default)]
+pub struct DistributionStats {
+    pub sample_count: usize,
+    pub history_span_secs: u64,
+    pub mean: Option<f64>,
+    pub std_dev: Option<f64>,
+    pub p50: Option<f64>,
+    pub p90: Option<f64>,
+    pub p99: Option<f64>,
+    pub max: Option<f64>,
+    /// Fraction of samples at or above `hurdle` (0..=1). `None` when empty.
+    pub frac_at_or_above: Option<f64>,
+}
+
+/// Nearest-rank percentile over a sorted-ascending slice (p in 0..=100).
+fn percentile_sorted(sorted: &[f64], p: f64) -> f64 {
+    debug_assert!(!sorted.is_empty());
+    let idx = ((p / 100.0) * sorted.len() as f64).ceil() as usize;
+    sorted[idx.saturating_sub(1).min(sorted.len() - 1)]
+}
+
+/// Distribution stats over `(ts_ms, value)` observations. Non-finite values
+/// are dropped at the boundary. `hurdle` feeds `frac_at_or_above` — pass
+/// `f64::INFINITY` when no threshold applies (fraction reports 0).
+pub fn distribution_stats(series: &[(i64, f64)], hurdle: f64) -> DistributionStats {
+    let mut vals: Vec<f64> = series
+        .iter()
+        .filter(|(_, v)| v.is_finite())
+        .map(|(_, v)| *v)
+        .collect();
+    let n = vals.len();
+    if n == 0 {
+        return DistributionStats::default();
+    }
+    let (lo, hi) = series
+        .iter()
+        .filter(|(_, v)| v.is_finite())
+        .fold((i64::MAX, i64::MIN), |(lo, hi), (t, _)| {
+            (lo.min(*t), hi.max(*t))
+        });
+    let span_secs = if hi > lo {
+        ((hi - lo) / 1000).max(0) as u64
+    } else {
+        0
+    };
+    vals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let mean = vals.iter().sum::<f64>() / n as f64;
+    let var = vals.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n as f64;
+    let above = vals.iter().filter(|&&v| v >= hurdle).count();
+    DistributionStats {
+        sample_count: n,
+        history_span_secs: span_secs,
+        mean: Some(mean),
+        std_dev: Some(var.sqrt()),
+        p50: Some(percentile_sorted(&vals, 50.0)),
+        p90: Some(percentile_sorted(&vals, 90.0)),
+        p99: Some(percentile_sorted(&vals, 99.0)),
+        max: vals.last().copied(),
+        frac_at_or_above: Some(above as f64 / n as f64),
+    }
+}
+
 /// Median of a non-empty slice: middle element, or the mean of the two
 /// middles for even counts. Callers guarantee non-empty.
 fn median(vals: &mut [f64]) -> f64 {
@@ -631,5 +696,44 @@ mod tests {
         assert_eq!(series.venues, vec!["c", "d"]);
         assert_eq!(series.dev_bps.len(), 1);
         assert!(series.dev_bps[0][0].is_some());
+    }
+
+    #[test]
+    fn distribution_stats_empty_reports_nothing() {
+        let st = distribution_stats(&[], 10.0);
+        assert_eq!(st.sample_count, 0);
+        assert!(st.mean.is_none() && st.p50.is_none() && st.max.is_none());
+        assert!(st.frac_at_or_above.is_none());
+    }
+
+    #[test]
+    fn distribution_stats_known_series() {
+        // values 1..=10 at 1s cadence
+        let series: Vec<(i64, f64)> = (1..=10).map(|i| (i * 1000, i as f64)).collect();
+        let st = distribution_stats(&series, 5.0);
+        assert_eq!(st.sample_count, 10);
+        assert_eq!(st.history_span_secs, 9);
+        assert!((st.mean.unwrap() - 5.5).abs() < 1e-9);
+        assert!((st.std_dev.unwrap() - 2.872281).abs() < 1e-4);
+        assert_eq!(st.p50, Some(5.0));
+        assert_eq!(st.p90, Some(9.0));
+        assert_eq!(st.p99, Some(10.0));
+        assert_eq!(st.max, Some(10.0));
+        // 5,6,7,8,9,10 -> 6 of 10 at/above the hurdle
+        assert!((st.frac_at_or_above.unwrap() - 0.6).abs() < 1e-9);
+    }
+
+    #[test]
+    fn distribution_stats_drops_non_finite() {
+        let series = vec![
+            (1000i64, 4.0),
+            (2000, f64::NAN),
+            (3000, f64::INFINITY),
+            (4000, 8.0),
+        ];
+        let st = distribution_stats(&series, 5.0);
+        assert_eq!(st.sample_count, 2);
+        assert_eq!(st.max, Some(8.0));
+        assert!((st.frac_at_or_above.unwrap() - 0.5).abs() < 1e-9);
     }
 }
