@@ -2073,32 +2073,376 @@ pub async fn scan_spatial_opportunities_impl(
     Ok(opps)
 }
 
+/// Cross-venue spot scan: every admitted venue lists its instruments and
+/// only real `MarketType::Spot` rows qualify — a perpetual must never stand
+/// in for the asset itself. A route exists only when BOTH venues list the
+/// SAME canonical instrument (e.g. `BTC-USD`): mixing `BTC-USD` and
+/// `BTC-USDC` legs would leave a residual quote-asset basis the two-leg
+/// executor cannot represent, so quote families are never merged here.
+/// Economics reuse the shared route model (entry+exit VWAP, venue taker
+/// fees, closing spread) — a spot basis trade unwinds the same way the
+/// Simple Spread does, so `net_spread_bps` is net of round-trip friction.
 pub async fn scan_spot_opportunities_impl(
     symbol_filter: &str,
     state: &AppEngineState,
 ) -> Result<Vec<SpotOpportunityDto>, String> {
-    let _ = (symbol_filter, state);
-    Ok(Vec::new())
+    let filter = symbol_filter.trim().to_uppercase();
+    if !filter.is_empty() {
+        validate_market_symbol(&filter)?;
+    }
+    let venues = state.get_venues();
+    if venues.len() < 2 {
+        return Ok(Vec::new());
+    }
+
+    // canonical spot symbol -> venues listing it (first listing wins when a
+    // venue exposes duplicate instruments for one canonical pair).
+    let mut symbol_venues: HashMap<String, Vec<usize>> = HashMap::new();
+    for (idx, (_vid, _vname, adapter)) in venues.iter().enumerate() {
+        let mut seen = std::collections::HashSet::new();
+        if let Ok(markets) = adapter.fetch_markets().await {
+            for m in markets {
+                if m.symbol.market_type != arbitrageur_core::market::MarketType::Spot
+                    || !m.is_active
+                {
+                    continue;
+                }
+                let canonical = m.symbol.canonical();
+                if !filter.is_empty() && canonical != filter && m.symbol.base != filter {
+                    continue;
+                }
+                if seen.insert(canonical.clone()) {
+                    symbol_venues.entry(canonical).or_default().push(idx);
+                }
+            }
+        }
+    }
+    // Only canonical instruments shared by >=2 venues can form a route.
+    let shared: Vec<String> = symbol_venues
+        .iter()
+        .filter(|(_, v)| v.len() >= 2)
+        .map(|(s, _)| s.clone())
+        .collect();
+    if shared.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let (trade_size_usd, min_net_bps) = {
+        let params = state.strategy_params.read();
+        let p = params.get("spot");
+        let default = StrategyParamsDto::defaults_for("spot");
+        (
+            p.map(|p| p.spot_trade_size_usd)
+                .filter(|v| v.is_finite() && *v > 0.0)
+                .unwrap_or(default.spot_trade_size_usd),
+            p.map(|p| p.spot_min_net_spread_bps)
+                .filter(|v| v.is_finite() && *v > 0.0)
+                .unwrap_or(default.spot_min_net_spread_bps),
+        )
+    };
+    let max_slip_dec = Decimal::from_f64_retain(strategy_slippage_bps(state, "spot"))
+        .ok_or_else(|| "Invalid spot max slippage setting".to_string())?;
+    let min_depth_dec = Decimal::from_f64_retain(state.settings.read().min_depth_ratio)
+        .ok_or_else(|| "Invalid min depth ratio setting".to_string())?;
+    let monitor_cfg = state
+        .state_store
+        .monitor_config_json()
+        .ok()
+        .flatten()
+        .and_then(|j| serde_json::from_str::<crate::monitor::MonitorConfigDto>(&j).ok())
+        .unwrap_or_default();
+    let latency_by_venue: HashMap<String, f64> = state.latency_ema.lock().clone();
+
+    let mut opps = Vec::new();
+    for canonical in shared {
+        let idxs = &symbol_venues[&canonical];
+        state.ensure_market(&canonical);
+
+        let mut books = Vec::new();
+        for &idx in idxs {
+            let (vid, vname, adapter) = &venues[idx];
+            let venue_id = adapter.venue_id();
+            let book = match crate::ws_primary::resolve_book_ws_first(
+                &state.market_data_hub,
+                &state.orderbook_flights,
+                adapter,
+                &canonical,
+                std::time::Duration::from_millis(350),
+            )
+            .await
+            {
+                Some(crate::ws_primary::ResolvedBook::Ws(b))
+                | Some(crate::ws_primary::ResolvedBook::Cached(b)) => b,
+                Some(crate::ws_primary::ResolvedBook::Fresh(b)) => {
+                    if validate_adapter_book(&b, &venue_id, &canonical).is_err() {
+                        continue;
+                    }
+                    state.market_data_hub.update_orderbook(b.clone());
+                    b
+                }
+                None => continue,
+            };
+            if validate_adapter_book(&book, &venue_id, &canonical).is_err() {
+                continue;
+            }
+            books.push((*vid, *vname, book, effective_venue_fee_bps(state, vid)));
+        }
+        if books.len() < 2 {
+            continue;
+        }
+
+        for i in 0..books.len() {
+            for j in 0..books.len() {
+                if i == j {
+                    continue;
+                }
+                let (buy_id, buy_name, ref book_buy, buy_fee) = books[i];
+                let (sell_id, sell_name, ref book_sell, sell_fee) = books[j];
+                let Some(buy_ask) = book_buy
+                    .best_ask_price()
+                    .and_then(|p| p.to_string().parse::<f64>().ok())
+                    .filter(|p| *p > 0.0)
+                else {
+                    continue;
+                };
+                let Some(sell_bid) = book_sell
+                    .best_bid_price()
+                    .and_then(|p| p.to_string().parse::<f64>().ok())
+                    .filter(|p| *p > 0.0)
+                else {
+                    continue;
+                };
+                let order_qty = match Decimal::from_f64_retain(trade_size_usd / buy_ask) {
+                    Some(q) if q > dec!(0) => q,
+                    _ => continue,
+                };
+                let Some(econ) = compute_route_economics(
+                    book_buy,
+                    book_sell,
+                    order_qty,
+                    buy_fee,
+                    sell_fee,
+                    min_net_bps,
+                ) else {
+                    continue;
+                };
+                let (slippage_ok, depth_ok) = route_execution_gates(
+                    book_buy,
+                    book_sell,
+                    order_qty,
+                    max_slip_dec,
+                    min_depth_dec,
+                );
+                let is_executable = econ.expected_net_bps >= min_net_bps && slippage_ok && depth_ok;
+
+                // Depth available to this size: notional covered by the
+                // bounded-entry walks on both legs.
+                let buy_depth_usd: f64 = book_buy
+                    .asks
+                    .iter()
+                    .map(|l| l.price * l.size)
+                    .sum::<Decimal>()
+                    .to_string()
+                    .parse()
+                    .unwrap_or(0.0);
+                let sell_depth_usd: f64 = book_sell
+                    .bids
+                    .iter()
+                    .map(|l| l.price * l.size)
+                    .sum::<Decimal>()
+                    .to_string()
+                    .parse()
+                    .unwrap_or(0.0);
+                let available_depth_usd = buy_depth_usd.min(sell_depth_usd);
+
+                // Concurrent dispatch: the pair's latency is the slower
+                // leg's probed round-trip (0 when unprobed — honest "—").
+                let estimated_latency_ms = [
+                    latency_by_venue.get(buy_id).copied(),
+                    latency_by_venue.get(sell_id).copied(),
+                ]
+                .into_iter()
+                .flatten()
+                .filter(|v| v.is_finite() && *v >= 0.0)
+                .fold(0.0f64, f64::max) as u64;
+
+                // Capacity curve: same lockstep level-pair walk the Simple
+                // Spread monitor uses; no spot episode history exists, so the
+                // expected-value channels stay None (never fabricated).
+                let to_pairs = |levels: &[arbitrageur_core::quote::BookLevel]| {
+                    levels
+                        .iter()
+                        .filter_map(|l| {
+                            let p = l.price.to_string().parse::<f64>().ok()?;
+                            let q = l.size.to_string().parse::<f64>().ok()?;
+                            (p.is_finite() && p > 0.0 && q.is_finite() && q > 0.0).then_some((p, q))
+                        })
+                        .collect::<Vec<(f64, f64)>>()
+                };
+                let asks = to_pairs(&book_buy.asks);
+                let bids = to_pairs(&book_sell.bids);
+                let cap_rep = capacity_ladder(
+                    &asks,
+                    &bids,
+                    0.0,
+                    econ.expected_friction_bps,
+                    &monitor_cfg.capacity_tiers_usd,
+                    &arbitrageur_math::pair_monitor::PWinCurve {
+                        points: Vec::new(),
+                        episodes: 0,
+                        point_wins: Vec::new(),
+                        point_trials: Vec::new(),
+                        point_censored: Vec::new(),
+                        point_sum_w2: Vec::new(),
+                    },
+                    monitor_cfg.min_win_probability,
+                    None,
+                    crate::monitor::WIN_PRIOR_STRENGTH,
+                );
+
+                opps.push(SpotOpportunityDto {
+                    id: format!("{}-{}-{}", canonical, buy_id, sell_id),
+                    symbol: canonical.clone(),
+                    buy_venue: buy_name.to_string(),
+                    sell_venue: sell_name.to_string(),
+                    buy_price: buy_ask,
+                    sell_price: sell_bid,
+                    gross_spread_bps: econ.top_gross_bps,
+                    buy_fee_bps: econ.buy_fee_bps,
+                    sell_fee_bps: econ.sell_fee_bps,
+                    // No asset transfer happens inside the atomic window —
+                    // venue inventory is rebalanced separately.
+                    transfer_cost_usd: 0.0,
+                    net_spread_bps: econ.expected_net_bps,
+                    net_profit_usd: econ.estimated_profit_usd,
+                    available_depth_usd,
+                    estimated_latency_ms,
+                    is_executable,
+                    depth_curve: cap_rep
+                        .depth_curve
+                        .iter()
+                        .map(crate::monitor::DepthCurvePointDto::from)
+                        .collect(),
+                });
+            }
+        }
+    }
+
+    opps.sort_by(|a, b| {
+        b.net_spread_bps
+            .partial_cmp(&a.net_spread_bps)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Ok(opps)
 }
 
+/// Spot execution rides the shared atomic two-leg path with
+/// `strategy_id = "spot"` — the inner gates read the spot strategy's own
+/// reduce-only flag, slippage and hurdle, while margin/leverage preflights
+/// are replaced by cash/inventory balances (spot cannot short or lever).
 pub async fn execute_spot_arbitrage_impl(
     params: SpotExecutionParams,
     state: &AppEngineState,
 ) -> Result<SimStepResultDto, String> {
-    if let Err(reason) = state.circuit_breaker.is_trading_allowed() {
-        return Err(format!(
-            "Execution halted by Risk Circuit Breaker: {}",
-            reason
-        ));
+    validate_market_symbol(&params.symbol)?;
+    if !params.trade_size_usd.is_finite() || params.trade_size_usd <= 0.0 {
+        return Err("trade_size_usd must be a finite positive number".into());
     }
-    if *state.is_paused.read() {
-        return Err(
-            "Trading engine is PAUSED. Positions are preserved, but new executions are suspended."
-                .into(),
-        );
+    if params.buy_venue.trim().is_empty() || params.sell_venue.trim().is_empty() {
+        return Err("Buy and sell venues must both be specified".into());
     }
-    let _ = params;
-    Err("Native 'spot' execution is disabled until authentic order submission and reconciliation are implemented".into())
+    if params.buy_venue.eq_ignore_ascii_case(&params.sell_venue) {
+        return Err("Buy and sell venues must be distinct".into());
+    }
+
+    // Fail closed on market class: the symbol must be a listed SPOT
+    // instrument on both venues — otherwise `fetch_orderbook`/order routing
+    // could silently resolve a perp or future with the same canonical name.
+    let buy_adapter = state.get_adapter(&params.buy_venue).ok_or_else(|| {
+        format!(
+            "Buy venue '{}' is not admitted for execution",
+            params.buy_venue
+        )
+    })?;
+    let sell_adapter = state.get_adapter(&params.sell_venue).ok_or_else(|| {
+        format!(
+            "Sell venue '{}' is not admitted for execution",
+            params.sell_venue
+        )
+    })?;
+    for (vname, adapter) in [
+        (params.buy_venue.as_str(), &buy_adapter),
+        (params.sell_venue.as_str(), &sell_adapter),
+    ] {
+        let markets = adapter
+            .fetch_markets()
+            .await
+            .map_err(|e| format!("Cannot verify {vname} spot listings: {e}"))?;
+        let listed = markets.iter().any(|m| {
+            m.symbol.market_type == arbitrageur_core::market::MarketType::Spot
+                && m.is_active
+                && m.symbol.canonical().eq_ignore_ascii_case(&params.symbol)
+        });
+        if !listed {
+            return Err(format!(
+                "{} does not list {} as a spot market — refusing to route the order through a non-spot instrument",
+                vname, params.symbol
+            ));
+        }
+    }
+
+    // Price the order quantity off the buy side's live ask.
+    let buy_book = match state.market_data_hub.get_valid_orderbook(
+        &buy_adapter.venue_id(),
+        &params.symbol,
+        Some(std::time::Duration::from_secs(2)),
+    ) {
+        Some(b) => b,
+        None => {
+            let b = buy_adapter
+                .fetch_orderbook(&params.symbol)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "No fresh {} orderbook for {}: {}",
+                        params.buy_venue, params.symbol, e
+                    )
+                })?;
+            validate_adapter_book(&b, &buy_adapter.venue_id(), &params.symbol)
+                .map_err(|e| format!("Buy-side order book rejected: {e}"))?;
+            state.market_data_hub.update_orderbook(b.clone());
+            b
+        }
+    };
+    let best_ask = buy_book
+        .best_ask_price()
+        .and_then(|p| p.to_string().parse::<f64>().ok())
+        .filter(|p| *p > 0.0)
+        .ok_or_else(|| {
+            format!(
+                "No asks on {} spot book for {}",
+                params.buy_venue, params.symbol
+            )
+        })?;
+    let order_qty = params.trade_size_usd / best_ask;
+
+    execute_spatial_arbitrage_inner(
+        &params.symbol,
+        &params.buy_venue,
+        &params.sell_venue,
+        order_qty,
+        Some("Spot Cross-Venue Flash".to_string()),
+        params.net_spread_bps,
+        None,
+        None,
+        None,
+        None,
+        None,
+        "spot",
+        None,
+        state,
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -5680,6 +6024,181 @@ mod tests {
             .expect("scan should succeed");
         // Zero synthetic data: unconfigured state returns empty
         assert_eq!(opps.len(), 0);
+    }
+
+    /// Two spot-capable test venues (Alpaca paper + OKX demo admit sims).
+    /// Trade size stays inside the seeded 10-unit level at the default 3x
+    /// depth-ratio gate so routes can be executable.
+    fn setup_spot_test_state() -> AppEngineState {
+        let state = AppEngineState::new();
+        {
+            let mut s = state.settings.write();
+            s.alpaca_enabled = true;
+            s.okx_enabled = true;
+            s.passive_unwind.timeout_secs = 0;
+        }
+        for v in ["alpaca", "okx"] {
+            let sim = state.install_test_sim(v).expect("spot sim installs");
+            sim.set_market_type(arbitrageur_core::market::MarketType::Spot);
+        }
+        let mut p = StrategyParamsDto::defaults_for("spot");
+        p.spot_trade_size_usd = 200.0;
+        p.spot_min_net_spread_bps = 10.0;
+        state.strategy_params.write().insert("spot".to_string(), p);
+        state
+    }
+
+    #[tokio::test]
+    async fn test_spot_scan_reports_shared_spot_markets() {
+        let state = setup_spot_test_state();
+        seed_test_book(&state, "alpaca", "BTC-USDC", dec!(99.9), dec!(100.0));
+        seed_test_book(&state, "okx", "BTC-USDC", dec!(101.0), dec!(101.1));
+
+        let opps = scan_spot_opportunities_impl("", &state)
+            .await
+            .expect("spot scan");
+
+        // The profitable direction buys the cheaper ask and sells the
+        // richer bid; the reverse direction is reported but not executable.
+        let good = opps
+            .iter()
+            .find(|o| o.id == "BTC-USDC-alpaca-okx")
+            .expect("alpaca->okx route must exist");
+        assert_eq!(good.symbol, "BTC-USDC");
+        assert!(good.gross_spread_bps > 0.0);
+        assert!(good.net_spread_bps < good.gross_spread_bps);
+        assert!(
+            good.net_spread_bps > 10.0,
+            "net {} should clear the hurdle",
+            good.net_spread_bps
+        );
+        assert!(good.is_executable);
+        assert_eq!(good.transfer_cost_usd, 0.0);
+        let bad = opps
+            .iter()
+            .find(|o| o.id == "BTC-USDC-okx-alpaca")
+            .expect("reverse direction must be reported");
+        assert!(bad.gross_spread_bps < 0.0);
+        assert!(!bad.is_executable);
+
+        // Base-name filtering scopes the scan.
+        let filtered = scan_spot_opportunities_impl("BTC", &state)
+            .await
+            .expect("filtered scan");
+        assert_eq!(filtered.len(), opps.len());
+        let filtered = scan_spot_opportunities_impl("ETH", &state)
+            .await
+            .expect("filtered scan");
+        assert!(filtered.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_spot_scan_ignores_perp_only_venues() {
+        // The standard harness installs perp sims — fetch_markets reports
+        // MarketType::Perpetual, so no spot route may be fabricated.
+        let state = setup_test_state_with_venues();
+        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(99.9), dec!(100.0));
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(101.0), dec!(101.1));
+        let opps = scan_spot_opportunities_impl("", &state)
+            .await
+            .expect("spot scan");
+        assert!(opps.is_empty(), "perp markets must not produce spot routes");
+    }
+
+    #[tokio::test]
+    async fn test_spot_scan_needs_two_venues_listing() {
+        // A spot market listed on a single venue cannot form a route.
+        let state = setup_spot_test_state();
+        seed_test_book(&state, "alpaca", "BTC-USDC", dec!(99.9), dec!(100.0));
+        // ETH prices keep the configured size inside the seeded level.
+        seed_test_book(&state, "alpaca", "ETH-USDC", dec!(499.5), dec!(500.0));
+        seed_test_book(&state, "okx", "ETH-USDC", dec!(505.0), dec!(505.5));
+        let opps = scan_spot_opportunities_impl("", &state)
+            .await
+            .expect("spot scan");
+        assert!(opps.iter().all(|o| o.symbol == "ETH-USDC"));
+        assert!(opps.iter().any(|o| o.symbol == "ETH-USDC"));
+    }
+
+    #[tokio::test]
+    async fn test_spot_execution_fills_via_dual_leg() {
+        let state = setup_spot_test_state();
+        seed_test_book(&state, "alpaca", "BTC-USDC", dec!(99.9), dec!(100.0));
+        seed_test_book(&state, "okx", "BTC-USDC", dec!(101.0), dec!(101.1));
+        // Spot sell leg needs pre-positioned base inventory on OKX.
+        state
+            .test_sim("okx")
+            .expect("okx sim")
+            .seed_balance("BTC", dec!(10));
+
+        let res = execute_spot_arbitrage_impl(
+            SpotExecutionParams {
+                symbol: "BTC-USDC".into(),
+                buy_venue: "alpaca".into(),
+                sell_venue: "okx".into(),
+                trade_size_usd: 200.0,
+                max_slippage_bps: 5.0,
+                net_spread_bps: None,
+            },
+            &state,
+        )
+        .await;
+        let res = res.unwrap_or_else(|e| panic!("spot execution must succeed: {e}"));
+        let _ = res;
+        let signals = state
+            .state_store
+            .list_signals(Some("BTC-USDC"), None)
+            .expect("signals");
+        assert!(
+            signals
+                .iter()
+                .any(|s| s.strategy_id == "spot" && s.symbol == "BTC-USDC"),
+            "the pair must persist as a durable 'spot' signal"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_spot_execution_refuses_without_sell_inventory() {
+        let state = setup_spot_test_state();
+        seed_test_book(&state, "alpaca", "BTC-USDC", dec!(99.9), dec!(100.0));
+        seed_test_book(&state, "okx", "BTC-USDC", dec!(101.0), dec!(101.1));
+        // No BTC on the sell venue: a spot sell cannot borrow.
+
+        let res = execute_spot_arbitrage_impl(
+            SpotExecutionParams {
+                symbol: "BTC-USDC".into(),
+                buy_venue: "alpaca".into(),
+                sell_venue: "okx".into(),
+                trade_size_usd: 200.0,
+                max_slippage_bps: 5.0,
+                net_spread_bps: None,
+            },
+            &state,
+        )
+        .await;
+        let err = res.expect_err("sell leg has no inventory to draw");
+        assert!(err.contains("inventory"), "unexpected err: {err}");
+    }
+
+    #[tokio::test]
+    async fn test_spot_execution_refuses_perp_only_venues() {
+        let state = setup_test_state_with_venues();
+        seed_test_book(&state, "hyperliquid", "BTC-USDC", dec!(99.9), dec!(100.0));
+        seed_test_book(&state, "lighter", "BTC-USDC", dec!(101.0), dec!(101.1));
+        let res = execute_spot_arbitrage_impl(
+            SpotExecutionParams {
+                symbol: "BTC-USDC".into(),
+                buy_venue: "hyperliquid".into(),
+                sell_venue: "lighter".into(),
+                trade_size_usd: 200.0,
+                max_slippage_bps: 5.0,
+                net_spread_bps: None,
+            },
+            &state,
+        )
+        .await;
+        let err = res.expect_err("perp venues cannot route spot orders");
+        assert!(err.contains("spot"), "unexpected err: {err}");
     }
 
     #[test]
