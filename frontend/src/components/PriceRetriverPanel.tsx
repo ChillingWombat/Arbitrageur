@@ -1,21 +1,17 @@
-import React, { useState, useEffect } from "react";
+import React, { useState } from "react";
 import {
   Server,
   HardDrive,
   Database,
   Download,
   Play,
-  Square,
   RefreshCw,
   CheckCircle2,
   AlertTriangle,
   Code,
-  FileText,
-  Sliders,
   Terminal,
   Shield,
   Clock,
-  Layers,
   ChevronDown,
   ChevronUp,
 } from "lucide-react";
@@ -86,7 +82,7 @@ export const PriceRetriverPanel: React.FC<PriceRetriverPanelProps> = ({ onNotify
 
   // Download state
   const [downloadingVenue, setDownloadingVenue] = useState<string>("");
-  const [downloadingSymbol, setDownloadingSymbol] = useState<string>("");
+  const [downloadingSymbol] = useState<string>("");
   const [isDownloading, setIsDownloading] = useState<boolean>(false);
   const [downloadMsg, setDownloadMsg] = useState<string | null>(null);
 
@@ -102,7 +98,7 @@ export const PriceRetriverPanel: React.FC<PriceRetriverPanelProps> = ({ onNotify
   const [customScript, setCustomScript] = useState<string>(
     `#!/usr/bin/env python3\nimport sys, json\nprint("[Arbitrageur Custom Preprocess] Processing stream...")\n# Process input file and output features\n`
   );
-  const [customLanguage, setCustomLanguage] = useState<string>("python");
+  const [customLanguage] = useState<string>("python");
   const [customOutput, setCustomOutput] = useState<{ stdout: string; stderr: string; success: boolean; duration_ms: number } | null>(null);
 
   // Guide accordion

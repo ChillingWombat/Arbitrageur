@@ -16,6 +16,7 @@ mod monitor_ipc;
 mod num;
 mod options_parity;
 mod performance;
+mod priceretriver;
 mod reconciliation;
 mod seasonality;
 mod stablecoin_fx;
@@ -276,6 +277,11 @@ fn main() {
             commands::check_popdex_agent,
             commands::sign_popdex_approve_with_main,
             commands::open_external_url,
+            priceretriver::priceretriver_status,
+            priceretriver::priceretriver_list_partitions,
+            priceretriver::priceretriver_download_data,
+            priceretriver::priceretriver_run_pipeline,
+            priceretriver::priceretriver_run_custom_script,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Arbitrageur Tauri desktop application");
