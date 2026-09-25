@@ -648,7 +648,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
               <div className="h-2.5 w-full bg-slate-200 rounded-full overflow-hidden">
                 <div
                   className="h-full bg-amber-500 transition-all duration-300"
-                  style={{ width: `${Math.max(5, ((riskData?.consecutive_failures ?? 0) / (riskData?.max_failures_allowed ?? 3)) * 100)}%` }}
+                  style={{ width: `${Math.min(100, Math.max(0, ((riskData?.consecutive_failures ?? 0) / (riskData?.max_failures_allowed ?? 3)) * 100))}%` }}
                 />
               </div>
               <div className="flex justify-between items-center gap-2 pt-1">
