@@ -3390,11 +3390,6 @@ pub fn save_engine_settings_impl(
                 defaults.arcus_url.as_str(),
             ),
             (
-                "endpoints.popdex_network",
-                sanitized.popdex_network.as_str(),
-                defaults.popdex_network.as_str(),
-            ),
-            (
                 "endpoints.polymarket_url",
                 sanitized.polymarket_url.as_str(),
                 defaults.polymarket_url.as_str(),

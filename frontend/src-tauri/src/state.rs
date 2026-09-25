@@ -577,12 +577,6 @@ fn default_kraken_spot_url() -> String {
 fn default_kraken_futures_url() -> String {
     "https://futures.kraken.com".into()
 }
-fn default_popdex_network() -> String {
-    // PopDEX network selector: mainnet (chain 2184, real prices) by default;
-    // operators should validate automation on testnet (chain 34952) first.
-    "mainnet".into()
-}
-
 fn default_arcus_url() -> String {
     "https://api.arcus.xyz".into()
 }
@@ -747,8 +741,6 @@ pub struct EngineSettingsDto {
     pub aster_enabled: bool,
     #[serde(default)]
     pub popdex_enabled: bool,
-    #[serde(default = "default_popdex_network")]
-    pub popdex_network: String,
     #[serde(default)]
     pub coinbase_enabled: bool,
     /// Alpaca — US equities & crypto spot broker (live + real paper env).
@@ -917,7 +909,6 @@ impl Default for EngineSettingsDto {
             okx_enabled: false,
             aster_enabled: false,
             popdex_enabled: false,
-            popdex_network: default_popdex_network(),
             coinbase_enabled: false,
             alpaca_enabled: false,
             kraken_enabled: false,
@@ -1833,10 +1824,6 @@ impl AppEngineState {
                 ),
                 ("endpoints.arcus_url", &mut initial_settings.arcus_url),
                 (
-                    "endpoints.popdex_network",
-                    &mut initial_settings.popdex_network,
-                ),
-                (
                     "endpoints.polymarket_url",
                     &mut initial_settings.polymarket_url,
                 ),
@@ -1890,9 +1877,9 @@ impl AppEngineState {
             "robinhood",
         ));
         let live_aster = Arc::new(AsterAdapter::new(None, None, None));
-        let live_popdex = Arc::new(PopDexAdapter::new(endpoint(
-            &initial_settings.popdex_network,
-        )));
+        // PopDEX's network is environment-driven like every other venue:
+        // live_* always mainnet, tn_* always testnet — no per-venue toggle.
+        let live_popdex = Arc::new(PopDexAdapter::new(None));
         let live_binance = Arc::new(BinanceAdapter::new(None, None, None));
         let live_okx = Arc::new(OkxAdapter::new(None, None, None, None));
         let live_coinbase = Arc::new(CoinbaseAdapter::new(None, None, None, None));
@@ -2773,20 +2760,13 @@ impl AppEngineState {
     fn apply_live_credentials(&self, c: &EnvCredentials) {
         self.live_aster
             .update_credentials(c.aster.0.clone(), c.aster.1.clone());
-        // PopDEX: main account + delegated agent key from the vault, network
-        // from settings. The agent key alone enables trading; the main key
-        // is never held (one-time approveAgent runs externally per docs).
-        let popdex_network = {
-            let guards = self.settings.read();
-            let n = guards.popdex_network.trim().to_string();
-            if n.is_empty() {
-                None
-            } else {
-                Some(n)
-            }
-        };
+        // PopDEX: main account + delegated agent key from the vault. The
+        // agent key alone enables trading; the main key is never held
+        // (one-time approveAgent runs externally per docs). Network stays
+        // at the constructor's mainnet binding — the trading environment
+        // toggle is the only network selector.
         if let Err(e) = self.live_popdex.update_credentials(
-            popdex_network,
+            None,
             c.popdex_wallet.clone(),
             c.popdex_agent.clone(),
         ) {
@@ -2953,8 +2933,8 @@ impl AppEngineState {
 
     /// Provision resolved testnet credentials onto the demo adapter set.
     /// Same extraction rules; testnet accounts provision `tn_*` adapters
-    /// only. `popdex` is pinned to its testnet network regardless of the
-    /// mainnet-tuned `popdex_network` setting.
+    /// only. `popdex` is pinned to its testnet network by construction —
+    /// the trading environment is the only network selector.
     fn apply_testnet_credentials(&self, c: &EnvCredentials) {
         self.tn_hl
             .update_credentials(c.hl_wallet.clone(), c.hl_pk.clone());

@@ -757,7 +757,6 @@ export interface EngineSettingsDto {
   okx_enabled?: boolean;
   aster_enabled?: boolean;
   popdex_enabled?: boolean;
-  popdex_network?: string;
   coinbase_enabled?: boolean;
   alpaca_enabled?: boolean;
   deribit_enabled?: boolean;
