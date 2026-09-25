@@ -132,24 +132,57 @@ impl AccountRequestCoordinator {
         self.acquire_or_cache_path("default", allow_cache).await
     }
 
+    /// Maximum residual backoff a signed request will wait out. Transient
+    /// non-rate-limit failures write sub-second backoffs that would
+    /// otherwise refuse a time-critical order leg mid-dispatch; genuine
+    /// sustained cooldowns (chained 429s, challenge walls) still refuse.
+    const SIGNED_BACKOFF_WAIT_CAP: Duration = Duration::from_secs(3);
+
     /// Pre-submit gate for SIGNED paths (orders, cancels, private POSTs).
-    /// A venue-level backoff (including one written by a failed submit)
-    /// blocks order submission — never serves cached data, since a signed
-    /// request must always reach the venue. Throttles signed calls at
+    /// A venue-level backoff longer than `SIGNED_BACKOFF_WAIT_CAP` blocks
+    /// order submission — never serves cached data, since a signed request
+    /// must always reach the venue. Short residuals are waited out: an
+    /// order refused because a market-data poll tripped a 500 ms backoff
+    /// is a self-inflicted dispatch failure. Throttles signed calls at
     /// `min_interval` on a bucket separate from public reads.
     pub async fn acquire_signed(&self) -> Result<(), anyhow::Error> {
-        let wait_dur = {
+        let backoff_wait = {
             let state = self.state.lock();
+            let now = Instant::now();
+            match state.backoff_until {
+                Some(until) if now < until => {
+                    let residual = until - now;
+                    if residual > Self::SIGNED_BACKOFF_WAIT_CAP {
+                        anyhow::bail!(
+                            "[{}] Rate limit backoff active for another {:?} — signed request refused",
+                            self.venue_name,
+                            residual
+                        );
+                    }
+                    Some(residual)
+                }
+                _ => None,
+            }
+        };
+        if let Some(wait) = backoff_wait {
+            sleep(wait).await;
+            // The backoff may have been re-armed while sleeping — only a
+            // genuinely-expired or still-short residual may proceed.
+            let state = self.state.lock();
+            let now = Instant::now();
             if let Some(until) = state.backoff_until {
-                let now = Instant::now();
-                if now < until {
+                let residual = until.saturating_duration_since(now);
+                if residual > Self::SIGNED_BACKOFF_WAIT_CAP {
                     anyhow::bail!(
-                        "[{}] Rate limit backoff active for another {:?} — signed request refused",
+                        "[{}] Rate limit backoff re-armed for another {:?} — signed request refused",
                         self.venue_name,
-                        until - now
+                        residual
                     );
                 }
             }
+        }
+        let wait_dur = {
+            let state = self.state.lock();
             state
                 .last_signed_request_time
                 .and_then(|last| self.min_interval.checked_sub(last.elapsed()))
@@ -262,6 +295,29 @@ mod tests {
         assert!(!is_waf_challenge(429, &empty, ""));
         assert!(!is_waf_challenge(200, &empty, "{\"code\":200}"));
         assert!(!is_waf_challenge(405, &empty, "{\"code\":-4021}"));
+    }
+
+    #[tokio::test]
+    async fn test_signed_request_waits_short_backoff_refuses_long() {
+        // A transient 100 ms residual must not refuse a signed order —
+        // the gate waits it out instead of failing a dispatch mid-flight.
+        let c = AccountRequestCoordinator::new("test", 0, 0, 100, 10_000);
+        c.record_failure(false);
+        let started = Instant::now();
+        c.acquire_signed()
+            .await
+            .expect("short residual is waited out");
+        assert!(
+            started.elapsed() >= Duration::from_millis(90),
+            "signed gate did not wait out the residual"
+        );
+
+        // A sustained cooldown refuses immediately — orders must not be
+        // delayed into a venue-imposed penalty window.
+        let c = AccountRequestCoordinator::new("test", 0, 0, 5_000, 10_000);
+        c.record_failure(true);
+        let err = c.acquire_signed().await.expect_err("long backoff refuses");
+        assert!(err.to_string().contains("backoff active"));
     }
 
     #[test]
