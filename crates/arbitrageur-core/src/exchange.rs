@@ -149,6 +149,15 @@ pub trait ExchangeAdapter: Send + Sync {
         true
     }
 
+    /// Whether orders for `symbol` are bound to US cash-equity hours
+    /// (09:30–16:00 ET, non-holiday weekdays): equity shares and tokenized
+    /// equity perps refuse IOC outside the session — dispatching then is a
+    /// guaranteed leg failure. Crypto pairs on the same venue trade 24/7.
+    /// Default: `false` (24/7 venue).
+    fn cash_session_bound(&self, _symbol: &str) -> bool {
+        false
+    }
+
     /// Cancel an existing order.
     async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()>;
 

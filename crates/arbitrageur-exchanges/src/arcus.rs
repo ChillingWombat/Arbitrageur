@@ -822,6 +822,15 @@ impl ExchangeAdapter for ArcusAdapter {
         })
     }
 
+    /// Wire grid = the market's `stepSize`, floored — the same snap
+    /// `place_order` applies before signing, so pair sizing sees the true
+    /// tradeable size instead of discovering the grid via a 400.
+    async fn wire_base_qty(&self, symbol: &str, qty: Decimal) -> anyhow::Result<Decimal> {
+        let market = arcus_market_name(symbol);
+        let spec = self.market_spec(&market).await?;
+        Ok((qty / spec.step_size).floor() * spec.step_size)
+    }
+
     /// `POST /v1/placeOrder` — Ed25519-signed typed payload (Scheme 1).
     /// The response is asynchronous: `202`/`ACK` carries no terminal state,
     /// so this maps to `New` and truth comes from `fetch_order` polling.
@@ -911,7 +920,10 @@ impl ExchangeAdapter for ArcusAdapter {
             "accountIndex": ai,
             "orderSide": if s == 0 { "BUY" } else { "SELL" },
             "orderType": if is_market { "MARKET" } else { "LIMIT" },
-            "quantity": order.quantity.to_string(),
+            // The wire quantity is the step-floored value the signature
+            // covers — posting the raw request would 400 on the market's
+            // size increment while the signed payload claims the snap.
+            "quantity": qty.to_string(),
             "price": price.to_string(),
             "timeInForce": tif_str,
             "goodTilTime": gtt_micros.to_string(),

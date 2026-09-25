@@ -4984,6 +4984,12 @@ impl ExchangeAdapter for DexPerpAdapter {
         &self.name
     }
 
+    /// Ondo Perps lists tokenized equity underlyings — every market is
+    /// bound to US cash hours (the venue halts IOC outside the session).
+    fn cash_session_bound(&self, _symbol: &str) -> bool {
+        self.spec_id == "ondoperps"
+    }
+
     async fn ping(&self) -> anyhow::Result<()> {
         // Bypass the response cache so the round-trip is a real probe.
         let spec = spec_for(self.spec_id)

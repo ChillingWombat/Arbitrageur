@@ -417,9 +417,11 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
     let sell_order_sym = legs.map(|l| l.sell_symbol.as_str()).unwrap_or(symbol);
     let scale_buy = legs
         .and_then(|l| Decimal::from_f64_retain(l.buy_scale))
+        .map(|d| d.round_dp(9))
         .unwrap_or(dec!(1));
     let scale_sell = legs
         .and_then(|l| Decimal::from_f64_retain(l.sell_scale))
+        .map(|d| d.round_dp(9))
         .unwrap_or(dec!(1));
     if buy_venue.trim().is_empty() || sell_venue.trim().is_empty() {
         return Err("Buy and sell venues must both be specified".into());
@@ -559,6 +561,20 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
     let sell_vid = sell_adapter.venue_id();
     if crate::state::canonical_venue_id(buy_venue) == crate::state::canonical_venue_id(sell_venue) {
         return Err("Buy and sell venues must resolve to distinct canonical venues".into());
+    }
+
+    // Cash-session preflight: equity-rail legs (Alpaca shares, Ondo
+    // tokenized perps) refuse IOC outside US market hours — dispatching
+    // then is a guaranteed leg failure plus an unnecessary unwind of the
+    // other leg. The adapter classifies the leg's own order symbol, so
+    // 24/7 crypto on the same rails is unaffected.
+    if !arbitrageur_math::session::us_cash_open(Utc::now().timestamp_millis())
+        && (buy_adapter.cash_session_bound(buy_order_sym)
+            || sell_adapter.cash_session_bound(sell_order_sym))
+    {
+        return Err(format!(
+            "cash-equity leg outside US market hours — {buy_venue}/{sell_venue} would reject IOC outright"
+        ));
     }
 
     // Order books must come from the hub cache (max age 2s) or a fresh fetch

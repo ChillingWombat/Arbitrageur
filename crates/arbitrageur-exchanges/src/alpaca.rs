@@ -128,6 +128,26 @@ impl AlpacaAdapter {
         symbol.contains('/')
     }
 
+    /// US equities are NMS instruments: limit prices must be quoted in
+    /// whole-penny increments (Rule 612) — the venue 422s anything finer.
+    /// Snap in the intent-preserving direction: a buy cap rounds down, a
+    /// sell floor rounds up. Crypto pairs are exempt and pass through.
+    fn snap_limit_price(
+        price: rust_decimal::Decimal,
+        side: Side,
+        crypto: bool,
+    ) -> rust_decimal::Decimal {
+        if crypto {
+            return price.normalize();
+        }
+        let cents = (price * dec!(100)).normalize();
+        let rounded = match side {
+            Side::Buy => cents.floor(),
+            Side::Sell => cents.ceil(),
+        };
+        (rounded / dec!(100)).normalize()
+    }
+
     /// Canonical `BTC-USD` / `AAPL` → Alpaca `BTC/USD` / `AAPL`.
     /// Crypto venue symbols always carry the `/` quote separator; an
     /// equity ticker passes through uppercase-validated.
@@ -649,6 +669,14 @@ impl ExchangeAdapter for AlpacaAdapter {
         if crypto && !matches!(tif, "gtc" | "ioc") {
             anyhow::bail!("Alpaca crypto orders accept only gtc/ioc time-in-force");
         }
+        // Fractional shares are fillable only as `day` market orders —
+        // the venue 422s a fractional limit/ioc/fok before it reaches the
+        // book. Refuse early so the caller sees the real constraint.
+        if !crypto && order.quantity.fract() != dec!(0) && (tif != "day" || ty != "market") {
+            anyhow::bail!(
+                "Alpaca equity orders of fractional qty must be DAY market orders (got {ty}/{tif})"
+            );
+        }
         if order.reduce_only && crypto {
             // Spot has no short to reduce — a sell is inherently
             // position-reducing and Alpaca rejects oversells natively.
@@ -676,7 +704,11 @@ impl ExchangeAdapter for AlpacaAdapter {
             if price <= dec!(0) {
                 anyhow::bail!("limit price must be positive");
             }
-            body["limit_price"] = price.normalize().to_string().into();
+            let snapped = Self::snap_limit_price(price, order.side, crypto);
+            if snapped <= dec!(0) {
+                anyhow::bail!("limit price snaps below the penny tick");
+            }
+            body["limit_price"] = snapped.to_string().into();
         }
         let v = self
             .trade_request("POST", "/v2/orders", Some(&body))
@@ -740,8 +772,31 @@ impl ExchangeAdapter for AlpacaAdapter {
         anyhow::bail!("Alpaca is a spot broker — per-symbol leverage does not exist")
     }
 
+    /// Equities: Alpaca fills fractional-share orders only as `day`
+    /// market orders — every IOC/limit path requires a whole-share wire
+    /// quantity, so the pair-sizing grid snaps to whole shares. Crypto
+    /// quantities pass through (venue accepts fractional crypto on any
+    /// order type it supports).
+    async fn wire_base_qty(&self, symbol: &str, qty: Decimal) -> anyhow::Result<Decimal> {
+        if Self::is_crypto_symbol(&Self::to_venue_symbol(symbol)?) {
+            return Ok(qty);
+        }
+        Ok(qty.floor())
+    }
+
     fn supports_reduce_only(&self, _symbol: &str) -> bool {
         false
+    }
+
+    /// Equity shares are NMS instruments — IOC is accepted only while US
+    /// cash hours are open. Crypto pairs (`BTC/USD`) trade around the
+    /// clock. The symbol maps through the same `to_venue_symbol` the order
+    /// path uses, so an unmapped spelling fails closed to session-bound.
+    fn cash_session_bound(&self, symbol: &str) -> bool {
+        match Self::to_venue_symbol(symbol) {
+            Ok(v) => !Self::is_crypto_symbol(&v),
+            Err(_) => true,
+        }
     }
 
     fn supports_live_execution(&self) -> bool {
@@ -881,6 +936,45 @@ mod tests {
             AlpacaAdapter::normalize_position_symbol("us_equity", "AAPL"),
             "AAPL"
         );
+    }
+
+    #[test]
+    fn equity_limit_price_snaps_to_penny_tick() {
+        // Reg NMS 612: equity limits must be whole-penny. A buy cap floors
+        // (never pays more than intended), a sell floor ceils.
+        assert_eq!(
+            AlpacaAdapter::snap_limit_price("744.617505".parse().unwrap(), Side::Sell, false),
+            dec!(744.62)
+        );
+        assert_eq!(
+            AlpacaAdapter::snap_limit_price("754.567095".parse().unwrap(), Side::Buy, false),
+            dec!(754.56)
+        );
+        // Already-on-tick prices pass through unchanged.
+        assert_eq!(
+            AlpacaAdapter::snap_limit_price(dec!(745.18), Side::Sell, false),
+            dec!(745.18)
+        );
+        // Crypto pairs are exempt from the equity tick.
+        assert_eq!(
+            AlpacaAdapter::snap_limit_price("65123.4567".parse().unwrap(), Side::Buy, true),
+            "65123.4567".parse().unwrap()
+        );
+    }
+
+    #[test]
+    fn equity_wire_qty_snaps_to_whole_shares() {
+        // Fractional equity fills are DAY-market only; the pair-sizing
+        // grid (IOC paths) therefore resolves to whole shares. Crypto
+        // stays fractional.
+        let a = AlpacaAdapter::for_paper(None, None);
+        futures::executor::block_on(async {
+            assert_eq!(a.wire_base_qty("QQQ", dec!(2.06)).await.unwrap(), dec!(2));
+            assert_eq!(
+                a.wire_base_qty("BTC-USD", dec!(0.0115)).await.unwrap(),
+                dec!(0.0115)
+            );
+        });
     }
 
     #[test]
