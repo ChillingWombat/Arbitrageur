@@ -50,7 +50,20 @@ impl EmergencyUnwindHandler {
                 let mut cur = resp;
                 let mut poll_misses = 0u32;
                 for _ in 0..UNWIND_POLL_ATTEMPTS {
-                    if cur.status.is_final() || cur.order_id.is_empty() {
+                    // A terminal status with an incomplete fill record is not
+                    // yet trustworthy: some venues (Arcus) publish `FILLED`
+                    // before enriching `avgFillPrice`/`filledSize`. Treating
+                    // that snapshot as final would fail-closed on venue truth
+                    // that arrives milliseconds later — keep polling while
+                    // the record is incomplete.
+                    let fill_record_incomplete = cur.status == OrderStatus::Filled
+                        && (cur
+                            .avg_fill_price
+                            .map(|p| p <= Decimal::ZERO)
+                            .unwrap_or(true)
+                            || cur.filled_qty < unhedged_qty);
+                    if (cur.status.is_final() && !fill_record_incomplete) || cur.order_id.is_empty()
+                    {
                         break;
                     }
                     tokio::time::sleep(UNWIND_POLL_INTERVAL).await;
@@ -220,6 +233,126 @@ mod tests {
         ) -> anyhow::Result<()> {
             anyhow::bail!("not used")
         }
+    }
+
+    /// Venue that acks `New`, then reports `FILLED` before enriching the
+    /// fill record (avgFillPrice arrives a poll later — the real Arcus
+    /// testnet behavior observed 2026-09).
+    struct StaggeredFillExchange {
+        polls: std::sync::atomic::AtomicU32,
+    }
+
+    #[async_trait]
+    impl ExchangeAdapter for StaggeredFillExchange {
+        fn venue_id(&self) -> arbitrageur_core::types::VenueId {
+            "staggered".into()
+        }
+
+        fn name(&self) -> &str {
+            "staggered"
+        }
+
+        async fn fetch_markets(
+            &self,
+        ) -> anyhow::Result<Vec<arbitrageur_core::market::MarketMetadata>> {
+            anyhow::bail!("not used")
+        }
+
+        async fn fetch_orderbook(
+            &self,
+            _symbol: &str,
+        ) -> anyhow::Result<arbitrageur_core::quote::OrderBook> {
+            anyhow::bail!("not used")
+        }
+
+        async fn fetch_ticker(
+            &self,
+            _symbol: &str,
+        ) -> anyhow::Result<arbitrageur_core::quote::Ticker> {
+            anyhow::bail!("not used")
+        }
+
+        async fn fetch_funding_rate(
+            &self,
+            _symbol: &str,
+        ) -> anyhow::Result<arbitrageur_core::quote::FundingRate> {
+            anyhow::bail!("not used")
+        }
+
+        async fn fetch_account(
+            &self,
+        ) -> anyhow::Result<arbitrageur_core::position::AccountSnapshot> {
+            anyhow::bail!("not used")
+        }
+
+        async fn place_order(&self, order: OrderRequest) -> anyhow::Result<OrderResponse> {
+            Ok(OrderResponse {
+                order_id: "ord_1".to_string(),
+                client_order_id: order.client_order_id.clone(),
+                venue: order.venue.clone(),
+                symbol: order.symbol.clone(),
+                status: OrderStatus::New,
+                original_qty: order.quantity,
+                filled_qty: Decimal::ZERO,
+                remaining_qty: order.quantity,
+                avg_fill_price: None,
+                fee: None,
+                fee_currency: "USDC".to_string(),
+                raw_response: None,
+                timestamp: chrono::Utc::now(),
+            })
+        }
+
+        async fn fetch_order(
+            &self,
+            symbol: &str,
+            order_id: &str,
+            client_order_id: Option<&str>,
+        ) -> anyhow::Result<OrderResponse> {
+            let n = self.polls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let enriched = n >= 1;
+            Ok(OrderResponse {
+                order_id: order_id.to_string(),
+                client_order_id: client_order_id.unwrap_or_default().to_string(),
+                venue: self.venue_id(),
+                symbol: symbol.to_string(),
+                status: OrderStatus::Filled,
+                original_qty: arbitrageur_core::types::dec!(0.5),
+                filled_qty: arbitrageur_core::types::dec!(0.5),
+                remaining_qty: Decimal::ZERO,
+                avg_fill_price: enriched.then(|| arbitrageur_core::types::dec!(101)),
+                fee: Some(Decimal::ZERO),
+                fee_currency: "USDC".to_string(),
+                raw_response: None,
+                timestamp: chrono::Utc::now(),
+            })
+        }
+
+        async fn cancel_order(
+            &self,
+            _req: arbitrageur_core::order::CancelRequest,
+        ) -> anyhow::Result<()> {
+            anyhow::bail!("not used")
+        }
+    }
+
+    #[tokio::test]
+    async fn test_unwind_waits_for_enriched_fill_record() {
+        let exchange: Arc<dyn ExchangeAdapter> =
+            Arc::new(StaggeredFillExchange { polls: 0.into() });
+        let resp = EmergencyUnwindHandler::unwind_leg(
+            &exchange,
+            "BTC-USD",
+            Side::Sell,
+            arbitrageur_core::types::dec!(0.5),
+        )
+        .await
+        .expect("unwind must succeed once the venue enriches the fill record");
+        assert_eq!(resp.status, OrderStatus::Filled);
+        assert_eq!(
+            resp.avg_fill_price,
+            Some(arbitrageur_core::types::dec!(101))
+        );
     }
 
     #[tokio::test]

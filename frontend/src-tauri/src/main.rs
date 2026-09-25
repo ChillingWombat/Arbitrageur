@@ -6,6 +6,7 @@ mod attribution;
 mod auto_exec;
 mod autotune;
 mod commands;
+mod dev_rpc;
 mod equity_attribution;
 mod execution;
 mod external_positions;
@@ -154,6 +155,10 @@ fn main() {
             }
         });
     }
+
+    // Dev-only JSON bridge for hands-on testing. Active solely when
+    // ARBITRAGEUR_DEV_SOCK names a socket path; otherwise a complete no-op.
+    dev_rpc::maybe_spawn(engine_state.clone());
 
     tauri::Builder::default()
         .manage(engine_state)

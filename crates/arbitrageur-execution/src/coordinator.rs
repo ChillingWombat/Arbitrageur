@@ -52,7 +52,17 @@ async fn settle_working_leg(
         {
             Ok(polled) if response_identity_matches(&polled, exchange, symbol, client_order_id) => {
                 latest = polled;
-                if latest.status.is_final() {
+                // A terminal `Filled` with an incomplete fill record is not
+                // yet trustworthy — venues (Arcus) can publish the status
+                // before enriching avgFillPrice/filledSize. Keep polling
+                // until the fill record is complete or attempts run out.
+                let fill_record_incomplete = latest.status == OrderStatus::Filled
+                    && (latest
+                        .avg_fill_price
+                        .map(|p| p <= Decimal::ZERO)
+                        .unwrap_or(true)
+                        || latest.filled_qty < latest.original_qty);
+                if latest.status.is_final() && !fill_record_incomplete {
                     return latest;
                 }
             }
