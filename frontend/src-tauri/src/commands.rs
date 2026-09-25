@@ -2459,6 +2459,7 @@ pub async fn execute_spot_arbitrage_impl(
         None,
         "spot",
         None,
+        None,
         state,
     )
     .await
@@ -7982,6 +7983,7 @@ mod tests {
                             symbol: Some("BTC-USDC".into()),
                             intended_qty: 0.01,
                             intended_price: Some(100_000.0),
+                            unit_scale: None,
                         },
                         crate::state_store::NewSignalLeg {
                             account_id: None,
@@ -7990,6 +7992,7 @@ mod tests {
                             symbol: Some("BTC-USDC".into()),
                             intended_qty: 0.01,
                             intended_price: Some(100_000.0),
+                            unit_scale: None,
                         },
                     ],
                 },
@@ -8049,6 +8052,7 @@ mod tests {
                             symbol: Some("BTC-USDC".into()),
                             intended_qty: 0.01,
                             intended_price: Some(100_000.0),
+                            unit_scale: None,
                         },
                         crate::state_store::NewSignalLeg {
                             account_id: None,
@@ -8057,6 +8061,7 @@ mod tests {
                             symbol: Some("BTC-USDC".into()),
                             intended_qty: 0.01,
                             intended_price: Some(100_000.0),
+                            unit_scale: None,
                         },
                     ],
                 },
@@ -8126,6 +8131,7 @@ mod tests {
                             symbol: Some("BTC-USDC".into()),
                             intended_qty: 0.01,
                             intended_price: Some(100_000.0),
+                            unit_scale: None,
                         },
                         crate::state_store::NewSignalLeg {
                             account_id: None,
@@ -8134,6 +8140,7 @@ mod tests {
                             symbol: Some("BTC-USDC".into()),
                             intended_qty: 0.01,
                             intended_price: Some(100_000.0),
+                            unit_scale: None,
                         },
                     ],
                 },
@@ -8853,6 +8860,7 @@ mod tests {
             None,
             "futures",
             None,
+            None,
             &state,
         )
         .await
@@ -8875,6 +8883,7 @@ mod tests {
             None,
             None,
             "radar",
+            None,
             None,
             &state,
         )
@@ -8899,6 +8908,7 @@ mod tests {
             None,
             None,
             "radar",
+            None,
             None,
             &state,
         )
@@ -10675,6 +10685,7 @@ mod tests {
                             symbol: Some("BTC-USDC".into()),
                             intended_qty: 0.01,
                             intended_price: Some(100_000.0),
+                            unit_scale: None,
                         },
                         crate::state_store::NewSignalLeg {
                             account_id: None,
@@ -10683,6 +10694,7 @@ mod tests {
                             symbol: Some("BTC-USDC".into()),
                             intended_qty: 0.01,
                             intended_price: Some(100_000.0),
+                            unit_scale: None,
                         },
                     ],
                 },
@@ -10864,7 +10876,7 @@ mod tests {
         // any account/book/order work is dispatched.
         let sim_err = execute_spatial_arbitrage_inner(
             "BTC-USDC", "aster", "vanta", 100.0, None, None, None, None, None, None, None,
-            "futures", None, &state,
+            "futures", None, None, &state,
         )
         .await;
         let sim_err = sim_err.unwrap_err();
@@ -10882,7 +10894,7 @@ mod tests {
         // regardless of which venues the route names.
         let decibel_err = execute_spatial_arbitrage_inner(
             "BTC-USDC", "aster", "decibel", 100.0, None, None, None, None, None, None, None,
-            "futures", None, &state,
+            "futures", None, None, &state,
         )
         .await;
         assert!(decibel_err.is_err());
@@ -11343,6 +11355,7 @@ mod tests {
                                 symbol: None,
                                 intended_qty: 0.1,
                                 intended_price: None,
+                                unit_scale: None,
                             },
                             crate::state_store::NewSignalLeg {
                                 account_id: None,
@@ -11351,6 +11364,7 @@ mod tests {
                                 symbol: None,
                                 intended_qty: 0.1,
                                 intended_price: None,
+                                unit_scale: None,
                             },
                         ],
                     },
@@ -11461,6 +11475,7 @@ mod tests {
                                 symbol: None,
                                 intended_qty: 0.1,
                                 intended_price: None,
+                                unit_scale: None,
                             },
                             crate::state_store::NewSignalLeg {
                                 account_id: None,
@@ -11469,6 +11484,7 @@ mod tests {
                                 symbol: None,
                                 intended_qty: 0.1,
                                 intended_price: None,
+                                unit_scale: None,
                             },
                         ],
                     },
@@ -11551,6 +11567,7 @@ mod tests {
                                 symbol: None,
                                 intended_qty: 0.1,
                                 intended_price: None,
+                                unit_scale: None,
                             },
                             crate::state_store::NewSignalLeg {
                                 account_id: None,
@@ -11559,6 +11576,7 @@ mod tests {
                                 symbol: None,
                                 intended_qty: 0.1,
                                 intended_price: None,
+                                unit_scale: None,
                             },
                         ],
                     },
@@ -11599,6 +11617,7 @@ mod tests {
                                 symbol: Some("BTC-USDC".into()),
                                 intended_qty: 0.04,
                                 intended_price: None,
+                                unit_scale: None,
                             },
                             crate::state_store::NewSignalLeg {
                                 account_id: None,
@@ -11607,6 +11626,7 @@ mod tests {
                                 symbol: Some("BTC-USDC".into()),
                                 intended_qty: 0.04,
                                 intended_price: None,
+                                unit_scale: None,
                             },
                         ],
                     },
@@ -11673,6 +11693,7 @@ mod tests {
                             symbol: None,
                             intended_qty: 1.0,
                             intended_price: None,
+                            unit_scale: None,
                         },
                         NewSignalLeg {
                             account_id: None,
@@ -11681,6 +11702,7 @@ mod tests {
                             symbol: None,
                             intended_qty: 1.0,
                             intended_price: None,
+                            unit_scale: None,
                         },
                     ],
                 },
@@ -11737,6 +11759,7 @@ mod tests {
                             symbol: Some("BTC-USDC".into()),
                             intended_qty: 0.4,
                             intended_price: None,
+                            unit_scale: None,
                         },
                         NewSignalLeg {
                             account_id: None,
@@ -11745,6 +11768,7 @@ mod tests {
                             symbol: Some("BTC-USDC".into()),
                             intended_qty: 0.4,
                             intended_price: None,
+                            unit_scale: None,
                         },
                     ],
                 },
@@ -11874,6 +11898,7 @@ mod tests {
                             symbol: Some("BTC-USDC".into()),
                             intended_qty: 0.5,
                             intended_price: None,
+                            unit_scale: None,
                         },
                         NewSignalLeg {
                             account_id: None,
@@ -11882,6 +11907,7 @@ mod tests {
                             symbol: Some("BTC-USDC".into()),
                             intended_qty: 0.5,
                             intended_price: None,
+                            unit_scale: None,
                         },
                     ],
                 },
@@ -12531,6 +12557,7 @@ mod tests {
                                 symbol: None,
                                 intended_qty: 1.0,
                                 intended_price: Some(100.0),
+                                unit_scale: None,
                             },
                             crate::state_store::NewSignalLeg {
                                 account_id: None,
@@ -12539,6 +12566,7 @@ mod tests {
                                 symbol: None,
                                 intended_qty: 1.0,
                                 intended_price: Some(100.5),
+                                unit_scale: None,
                             },
                         ],
                     },
@@ -13069,6 +13097,7 @@ mod tests {
             None,
             "futures",
             None,
+            None,
             &state,
         )
         .await
@@ -13089,6 +13118,7 @@ mod tests {
             None,
             None,
             "futures",
+            None,
             None,
             &state,
         )
@@ -13125,6 +13155,7 @@ mod tests {
                             symbol: None,
                             intended_qty: 0.1,
                             intended_price: Some(100.0),
+                            unit_scale: None,
                         },
                         crate::state_store::NewSignalLeg {
                             account_id: None,
@@ -13133,6 +13164,7 @@ mod tests {
                             symbol: None,
                             intended_qty: 0.1,
                             intended_price: Some(100.5),
+                            unit_scale: None,
                         },
                     ],
                 },
@@ -13160,6 +13192,7 @@ mod tests {
             None,
             None,
             "futures",
+            None,
             None,
             &state,
         )
@@ -13897,6 +13930,7 @@ mod tests {
                             symbol: None,
                             intended_qty: 0.1,
                             intended_price: None,
+                            unit_scale: None,
                         },
                         crate::state_store::NewSignalLeg {
                             account_id: None,
@@ -13905,6 +13939,7 @@ mod tests {
                             symbol: None,
                             intended_qty: 0.1,
                             intended_price: None,
+                            unit_scale: None,
                         },
                     ],
                 },
@@ -14107,6 +14142,7 @@ mod tests {
                         symbol: None,
                         intended_qty: 0.1,
                         intended_price: None,
+                        unit_scale: None,
                     }],
                 },
                 "testnet",
@@ -14215,6 +14251,7 @@ mod tests {
                         symbol: None,
                         intended_qty: 0.1,
                         intended_price: None,
+                        unit_scale: None,
                     }],
                 },
                 "testnet",
@@ -14748,6 +14785,7 @@ mod tests {
                     symbol: None,
                     intended_qty: 1.0,
                     intended_price: None,
+                    unit_scale: None,
                 },
                 NewSignalLeg {
                     account_id: None,
@@ -14756,6 +14794,7 @@ mod tests {
                     symbol: None,
                     intended_qty: 1.0,
                     intended_price: None,
+                    unit_scale: None,
                 },
             ]
         };
@@ -14804,6 +14843,7 @@ mod tests {
                             symbol: None,
                             intended_qty: 1.0,
                             intended_price: None,
+                            unit_scale: None,
                         },
                         NewSignalLeg {
                             account_id: None,
@@ -14812,6 +14852,7 @@ mod tests {
                             symbol: None,
                             intended_qty: 1.0,
                             intended_price: None,
+                            unit_scale: None,
                         },
                     ],
                 },
@@ -14912,6 +14953,7 @@ mod tests {
                         symbol: None,
                         intended_qty: 1.0,
                         intended_price: None,
+                        unit_scale: None,
                     }],
                 },
                 "testnet",
@@ -14942,6 +14984,7 @@ mod tests {
                             symbol: None,
                             intended_qty: 1.0,
                             intended_price: None,
+                            unit_scale: None,
                         },
                         NewSignalLeg {
                             account_id: None,
@@ -14950,6 +14993,7 @@ mod tests {
                             symbol: None,
                             intended_qty: 1.0,
                             intended_price: None,
+                            unit_scale: None,
                         },
                     ],
                 },
@@ -15543,6 +15587,7 @@ mod tests {
                             symbol: None,
                             intended_qty: 0.1,
                             intended_price: None,
+                            unit_scale: None,
                         }],
                     },
                     "testnet",
@@ -15678,6 +15723,7 @@ mod tests {
                         symbol: None,
                         intended_qty: 0.1,
                         intended_price: None,
+                        unit_scale: None,
                     }],
                 },
                 "testnet",
@@ -16688,6 +16734,7 @@ mod tests {
                             symbol: None,
                             intended_qty: 0.1,
                             intended_price: None,
+                            unit_scale: None,
                         },
                         crate::state_store::NewSignalLeg {
                             account_id: None,
@@ -16696,6 +16743,7 @@ mod tests {
                             symbol: None,
                             intended_qty: 0.1,
                             intended_price: None,
+                            unit_scale: None,
                         },
                     ],
                 },

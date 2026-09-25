@@ -772,6 +772,14 @@ const SignalDetailModal: React.FC<SignalDetailModalProps> = React.memo(
           <div className="flex items-center justify-between px-6 py-3.5 border-b border-surface-border bg-surface shrink-0">
             <div className="flex items-center gap-2 min-w-0">
               <span className="text-sm font-bold font-sans text-slate-900">{r.symbol}</span>
+              {(r.buyInstrument || r.sellInstrument) && (
+                <span
+                  className="px-1.5 py-0.5 rounded-full border border-sky-300 bg-sky-50 text-sky-700 text-[10px] font-sans font-bold"
+                  title={`Tracked-instrument group: buy leg trades ${r.buyInstrument ?? r.symbol} on ${r.buyVenue}, sell leg trades ${r.sellInstrument ?? r.symbol} on ${r.sellVenue} — prices convert to ${r.symbol} units via the learned fair ratio.`}
+                >
+                  {r.buyInstrument ?? r.symbol}⇄{r.sellInstrument ?? r.symbol}
+                </span>
+              )}
               <span className="inline-flex items-center gap-1 text-xs font-sans text-slate-500">
                 <VenueLogo venueId={r.buyVenue} name={VENUE_NAME[r.buyVenue] ?? r.buyVenue} size={15} />
                 {VENUE_LABEL[r.buyVenue] ?? r.buyVenue}→
@@ -1002,6 +1010,14 @@ const RadarRow: React.FC<RadarRowProps> = React.memo(
         >
           <td className="px-2 py-2 font-bold font-sans text-xs text-slate-900">
             {r.symbol}
+            {(r.buyInstrument || r.sellInstrument) && (
+              <span
+                className="ml-1.5 px-1.5 py-px rounded-full border border-sky-300 bg-sky-50 text-sky-700 text-[10px] font-mono font-bold"
+                title={`Tracked-instrument group: buy leg trades ${r.buyInstrument ?? r.symbol} on ${r.buyVenue}, sell leg trades ${r.sellInstrument ?? r.symbol} on ${r.sellVenue} — prices convert to ${r.symbol} units via the learned fair ratio.`}
+              >
+                {r.buyInstrument ?? r.symbol}⇄{r.sellInstrument ?? r.symbol}
+              </span>
+            )}
             {held && (
               <span
                 className="ml-1.5 px-1.5 py-px rounded-full border border-profit-border bg-profit-dim text-profit text-[10px] font-mono font-bold"

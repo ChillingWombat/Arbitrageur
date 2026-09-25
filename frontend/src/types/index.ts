@@ -1643,6 +1643,15 @@ export interface MonitorRowDto {
   symbol: string;
   buyVenue: string;
   sellVenue: string;
+  /** Tracked-group legs: the instrument this venue actually trades for the
+   * buy leg ("QQQ" serving a NAS100 group row). Absent on same-instrument
+   * rows — both legs trade `symbol`. */
+  buyInstrument?: string | null;
+  /** See buyInstrument. */
+  sellInstrument?: string | null;
+  /** Asset-class carry charged into friction for the expected hold
+   * (dividend + borrow + expense drag on share legs), bps. */
+  assetCarryBps?: number | null;
   status: MonitorRowStatus;
   currentEdgeBps: number | null;
   baselineBps: number | null;

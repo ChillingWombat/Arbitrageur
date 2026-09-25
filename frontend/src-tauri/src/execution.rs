@@ -186,16 +186,29 @@ pub(crate) fn reconcile_signal_legs(
                 .map_err(|e| e.to_string())?;
         }
     }
+    // Delta reads in shared units (leg qty ÷ its persisted unit_scale).
+    // The balanced bound is the intended-delta magnitude: per-venue wire
+    // grids quantize the legs independently, so a scaled pair's matched
+    // fills can differ in shared units by up to that construction
+    // asymmetry — in either direction, since a coordinator trim leaves
+    // delta at exactly 0. Anything beyond the bound is real one-sided
+    // exposure (partial, overfill) and still flags Imbalanced.
     let delta = state
         .state_store
         .signal_delta(signal_id)
         .map_err(|e| e.to_string())?;
-    let eps = 1e-6;
-    Ok(if delta.is_finite() && delta.abs() <= eps {
-        SignalStatus::Balanced
-    } else {
-        SignalStatus::Imbalanced
-    })
+    let intended = state
+        .state_store
+        .signal_intended_delta(signal_id)
+        .map_err(|e| e.to_string())?;
+    let eps = 1e-6 * (1.0 + intended.abs());
+    Ok(
+        if delta.is_finite() && intended.is_finite() && delta.abs() <= intended.abs() + eps {
+            SignalStatus::Balanced
+        } else {
+            SignalStatus::Imbalanced
+        },
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -227,6 +240,7 @@ pub async fn execute_spatial_arbitrage_impl(
         nominal_hurdle_bps,
         None,
         "futures",
+        None,
         None,
         state,
     )
@@ -265,6 +279,45 @@ pub(crate) struct EntryPrediction {
     pub win_probability: f64,
     /// Expected net bps under the same forecast, when produced.
     pub expected_net_bps: Option<f64>,
+}
+
+/// Cross-instrument leg resolution for tracked-group rows (index perp ↔
+/// ETF perp). `symbol` remains the group's numéraire key — the ledger and
+/// signal namespace stay group-level; every venue-facing concern (book
+/// fetch, position check, leverage, order placement) uses the leg's own
+/// instrument.
+///
+/// Quantities: `order_qty` is in GROUP units — the same unit the monitor's
+/// converted books express. Each leg's wire quantity is
+/// `order_qty × scale` (leg units per group unit), snapped on its own
+/// venue's grid; the matched hedge can therefore differ between legs by
+/// at most one venue step in notional.
+#[derive(Debug, Clone)]
+pub(crate) struct PairLegs {
+    /// Hub/lane key the leg's RAW book persists under (the member's own
+    /// watchlist key — "QQQ" under merge, "QQQ-USD" under separate).
+    pub buy_key: String,
+    pub sell_key: String,
+    /// Venue-facing canonical symbol the adapter fetches and orders by.
+    pub buy_symbol: String,
+    pub sell_symbol: String,
+    /// Group-unit price per leg-unit price — the learned conversion the
+    /// monitor used to build the row (numéraire leg = 1.0). A QQQ leg on a
+    /// NAS100 row carries ~40; converted books multiply price by scale
+    /// and divide size by scale.
+    pub buy_scale: f64,
+    pub sell_scale: f64,
+}
+
+/// Scale a book into group units: price × scale, size ÷ scale. Linear —
+/// top-of-book order and depth ordering are preserved.
+fn group_scaled_book(book: &OrderBook, scale: Decimal) -> OrderBook {
+    let mut b = book.clone();
+    for l in b.bids.iter_mut().chain(b.asks.iter_mut()) {
+        l.price *= scale;
+        l.size /= scale;
+    }
+    b
 }
 
 /// Snap a two-leg order quantity onto BOTH venues' wire grids. Each adapter
@@ -335,11 +388,39 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
     route_id: Option<&str>,
     strategy_id: &str,
     prediction: Option<EntryPrediction>,
+    pair_legs: Option<&PairLegs>,
     state: &AppEngineState,
 ) -> Result<SimStepResultDto, String> {
     if !order_qty.is_finite() || order_qty <= 0.0 {
         return Err("order_qty must be a finite positive number".into());
     }
+    // Cross-instrument legs resolve once up front: `*_hubkey` for book
+    // lookup, `*_order_sym` for adapter calls, scales for shared-unit
+    // economics. Validation of scale sanity is mandatory — a corrupt
+    // conversion silently misprices every leg.
+    let legs = match pair_legs {
+        Some(l) => {
+            let ok = |s: f64| s.is_finite() && s > 0.0;
+            if !(ok(l.buy_scale) && ok(l.sell_scale)) {
+                return Err("cross-instrument leg scales must be finite and positive".into());
+            }
+            if l.buy_symbol.trim().is_empty() || l.sell_symbol.trim().is_empty() {
+                return Err("cross-instrument legs need explicit venue symbols".into());
+            }
+            Some(l)
+        }
+        None => None,
+    };
+    let buy_hubkey = legs.map(|l| l.buy_key.as_str()).unwrap_or(symbol);
+    let sell_hubkey = legs.map(|l| l.sell_key.as_str()).unwrap_or(symbol);
+    let buy_order_sym = legs.map(|l| l.buy_symbol.as_str()).unwrap_or(symbol);
+    let sell_order_sym = legs.map(|l| l.sell_symbol.as_str()).unwrap_or(symbol);
+    let scale_buy = legs
+        .and_then(|l| Decimal::from_f64_retain(l.buy_scale))
+        .unwrap_or(dec!(1));
+    let scale_sell = legs
+        .and_then(|l| Decimal::from_f64_retain(l.sell_scale))
+        .unwrap_or(dec!(1));
     if buy_venue.trim().is_empty() || sell_venue.trim().is_empty() {
         return Err("Buy and sell venues must both be specified".into());
     }
@@ -417,12 +498,20 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
     // a paper-mode spread measured against a depegged quote is the same
     // phantom edge. Stable-vs-USD books are exempt (they ARE the depeg
     // arbitrage — the base-is-family check lives inside the gate).
-    for (v, q) in [
-        (buy_venue, state.book_quote(buy_venue, symbol)),
-        (sell_venue, state.book_quote(sell_venue, symbol)),
+    for (v, q, k) in [
+        (
+            buy_venue,
+            state.book_quote(buy_venue, buy_hubkey),
+            buy_hubkey,
+        ),
+        (
+            sell_venue,
+            state.book_quote(sell_venue, sell_hubkey),
+            sell_hubkey,
+        ),
     ] {
         state
-            .stablecoin_gate(symbol, &q)
+            .stablecoin_gate(k, &q)
             .map_err(|e| format!("{v}: {e}"))?;
     }
     let _ = trigger_spread_bps; // caller-supplied spread is never trusted for eligibility
@@ -476,51 +565,118 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
     // through the admitted read-only adapter; ticker data is not a substitute.
     // Cached or fetched, a book must carry the exact requested venue and symbol
     // and pass execution validation before it is trusted or cached.
-    let book_buy = match state.market_data_hub.get_valid_orderbook(
+    let book_buy_raw = match state.market_data_hub.get_valid_orderbook(
         &buy_vid,
-        symbol,
+        buy_hubkey,
         Some(std::time::Duration::from_secs(2)),
     ) {
         Some(b) => b,
         None => {
             let b = buy_adapter
-                .fetch_orderbook(symbol)
+                .fetch_orderbook(buy_order_sym)
                 .await
-                .map_err(|e| format!("No fresh {} orderbook for {}: {}", buy_venue, symbol, e))?;
-            validate_adapter_book(&b, &buy_vid, symbol)
+                .map_err(|e| {
+                    format!(
+                        "No fresh {} orderbook for {}: {}",
+                        buy_venue, buy_order_sym, e
+                    )
+                })?;
+            validate_adapter_book(&b, &buy_vid, buy_order_sym)
                 .map_err(|e| format!("Buy-side order book rejected: {}", e))?;
             state.market_data_hub.update_orderbook(b.clone());
             b
         }
     };
-    let book_sell = match state.market_data_hub.get_valid_orderbook(
+    let book_sell_raw = match state.market_data_hub.get_valid_orderbook(
         &sell_vid,
-        symbol,
+        sell_hubkey,
         Some(std::time::Duration::from_secs(2)),
     ) {
         Some(b) => b,
         None => {
             let b = sell_adapter
-                .fetch_orderbook(symbol)
+                .fetch_orderbook(sell_order_sym)
                 .await
-                .map_err(|e| format!("No fresh {} orderbook for {}: {}", sell_venue, symbol, e))?;
-            validate_adapter_book(&b, &sell_vid, symbol)
+                .map_err(|e| {
+                    format!(
+                        "No fresh {} orderbook for {}: {}",
+                        sell_venue, sell_order_sym, e
+                    )
+                })?;
+            validate_adapter_book(&b, &sell_vid, sell_order_sym)
                 .map_err(|e| format!("Sell-side order book rejected: {}", e))?;
             state.market_data_hub.update_orderbook(b.clone());
             b
         }
     };
-    validate_adapter_book(&book_buy, &buy_vid, symbol)
+    validate_adapter_book(&book_buy_raw, &buy_vid, buy_order_sym)
         .map_err(|e| format!("Buy-side order book rejected: {}", e))?;
-    validate_adapter_book(&book_sell, &sell_vid, symbol)
+    validate_adapter_book(&book_sell_raw, &sell_vid, sell_order_sym)
         .map_err(|e| format!("Sell-side order book rejected: {}", e))?;
+    // Shared-unit economics run on group-converted books (identity at
+    // scale 1 for same-instrument pairs); venue-facing work — IOC bounds,
+    // order symbols, signal-leg intended prices — reads the raw books.
+    let book_buy = group_scaled_book(&book_buy_raw, scale_buy);
+    let book_sell = group_scaled_book(&book_sell_raw, scale_sell);
 
     let qty_dec = Decimal::from_str_exact(&order_qty.to_string())
         .ok()
         .filter(|q| *q > dec!(0))
         .ok_or_else(|| "Invalid order quantity".to_string())?;
 
-    let qty_dec = common_wire_qty(symbol, qty_dec, &buy_adapter, &sell_adapter).await?;
+    // Leg quantities: `qty_dec` stays in group units for the shared-unit
+    // economics below; `qty_buy_leg`/`qty_sell_leg` are the native-unit
+    // wire quantities each venue actually receives.
+    let (qty_dec, qty_buy_leg, qty_sell_leg) = match legs {
+        Some(l) => {
+            let req_b = qty_dec * scale_buy;
+            let req_s = qty_dec * scale_sell;
+            let wb = buy_adapter
+                .wire_base_qty(&l.buy_symbol, req_b)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "{buy_vid} cannot size {} on its wire grid: {e}",
+                        l.buy_symbol
+                    )
+                })?;
+            let ws = sell_adapter
+                .wire_base_qty(&l.sell_symbol, req_s)
+                .await
+                .map_err(|e| {
+                    format!(
+                        "{sell_vid} cannot size {} on its wire grid: {e}",
+                        l.sell_symbol
+                    )
+                })?;
+            if wb <= dec!(0) || ws <= dec!(0) {
+                return Err(format!(
+                    "{symbol} leg quantity snaps to zero on {buy_vid}/{sell_vid} wire grids"
+                ));
+            }
+            // Snapping can only shrink a leg — the effective group size is
+            // the smaller of the two snapped legs in group units.
+            let eff = (wb / scale_buy).min(ws / scale_sell);
+            let qb = buy_adapter
+                .wire_base_qty(&l.buy_symbol, eff * scale_buy)
+                .await
+                .map_err(|e| format!("{buy_vid} wire re-snap failed: {e}"))?;
+            let qs = sell_adapter
+                .wire_base_qty(&l.sell_symbol, eff * scale_sell)
+                .await
+                .map_err(|e| format!("{sell_vid} wire re-snap failed: {e}"))?;
+            if qb <= dec!(0) || qs <= dec!(0) {
+                return Err(format!(
+                    "{symbol} leg quantity re-snaps to zero on {buy_vid}/{sell_vid} wire grids"
+                ));
+            }
+            (eff, qb, qs)
+        }
+        None => {
+            let q = common_wire_qty(symbol, qty_dec, &buy_adapter, &sell_adapter).await?;
+            (q, q, q)
+        }
+    };
     let order_qty: f64 = qty_dec
         .to_string()
         .parse()
@@ -545,6 +701,14 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
     let sell_ref = book_sell
         .best_bid_price()
         .ok_or_else(|| format!("No bids on sell-side book for {}", symbol))?;
+    // Leg-native references for order bounds and signal intent — the raw
+    // instrument's own top-of-book, not the group-converted price.
+    let buy_ref_leg = book_buy_raw
+        .best_ask_price()
+        .ok_or_else(|| format!("No asks on buy-side book for {}", buy_order_sym))?;
+    let sell_ref_leg = book_sell_raw
+        .best_bid_price()
+        .ok_or_else(|| format!("No bids on sell-side book for {}", sell_order_sym))?;
     let buy_limit = router.calculate_bounded_price(Side::Buy, buy_ref);
     let sell_limit = router.calculate_bounded_price(Side::Sell, sell_ref);
 
@@ -814,21 +978,21 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
         // mapping is ambiguous — refuse rather than stack onto unmeasured
         // exposure. Spot skips this: base holdings ARE the sell-side
         // inventory, not unhedged exposure to refuse.
-        for (vname, adapter, acc) in [
-            (buy_venue, &buy_adapter, &acc_buy),
-            (sell_venue, &sell_adapter, &acc_sell),
+        for (vname, adapter, acc, leg_sym) in [
+            (buy_venue, &buy_adapter, &acc_buy, buy_order_sym),
+            (sell_venue, &sell_adapter, &acc_sell, sell_order_sym),
         ] {
-            match adapter.account_position_for(acc, symbol) {
+            match adapter.account_position_for(acc, leg_sym) {
                 Ok(Some(_)) => {
                     return Err(format!(
                         "An open position already exists for {} on {}; closing lifecycle is not implemented",
-                        symbol, vname
+                        leg_sym, vname
                     ));
                 }
                 Ok(None) => {}
                 Err(e) => {
                     return Err(format!(
-                        "Cannot verify {vname} position for {symbol} ({e}); refusing entry"
+                        "Cannot verify {vname} position for {leg_sym} ({e}); refusing entry"
                     ));
                 }
             }
@@ -854,10 +1018,13 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
     // operator reading "5x" while the venue kept 20x changes margin math.
     // Spot has no leverage concept — skip the calls entirely.
     if !is_spot {
-        for (vname, adapter) in [(buy_venue, &buy_adapter), (sell_venue, &sell_adapter)] {
-            if let Err(e) = adapter.set_leverage(symbol, target_leverage).await {
+        for (vname, adapter, leg_sym) in [
+            (buy_venue, &buy_adapter, buy_order_sym),
+            (sell_venue, &sell_adapter, sell_order_sym),
+        ] {
+            if let Err(e) = adapter.set_leverage(leg_sym, target_leverage).await {
                 tracing::warn!(
-                    "set_leverage {target_leverage}x on {vname} {symbol} failed: {e} — order will submit at the venue's existing leverage"
+                    "set_leverage {target_leverage}x on {vname} {leg_sym} failed: {e} — order will submit at the venue's existing leverage"
                 );
             }
         }
@@ -868,10 +1035,20 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
         Arc<dyn arbitrageur_core::exchange::ExchangeAdapter>,
     ) = (buy_adapter.clone(), sell_adapter.clone());
 
-    let order_buy =
-        router.build_ioc_order(buy_exec.venue_id(), symbol, Side::Buy, buy_ref, qty_dec);
-    let order_sell =
-        router.build_ioc_order(sell_exec.venue_id(), symbol, Side::Sell, sell_ref, qty_dec);
+    let order_buy = router.build_ioc_order(
+        buy_exec.venue_id(),
+        buy_order_sym,
+        Side::Buy,
+        buy_ref_leg,
+        qty_buy_leg,
+    );
+    let order_sell = router.build_ioc_order(
+        sell_exec.venue_id(),
+        sell_order_sym,
+        Side::Sell,
+        sell_ref_leg,
+        qty_sell_leg,
+    );
 
     // Pre-trade equity snapshot of the two traded venues — the baseline the
     // post-fill attribution refresh measures own-fill deltas against.
@@ -918,17 +1095,25 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
                         account_id: accounts.long,
                         venue: buy_vid.to_string(),
                         side: crate::state_store::LegSide::Long,
-                        symbol: None,
-                        intended_qty: order_qty,
-                        intended_price: buy_ref.to_string().parse::<f64>().ok(),
+                        // Cross-instrument legs persist their own venue
+                        // symbol + leg-unit qty so flatten/reconciliation
+                        // address the real instrument, never the group key.
+                        symbol: legs.map(|l| l.buy_symbol.clone()),
+                        intended_qty: qty_buy_leg.to_string().parse::<f64>().unwrap_or(order_qty),
+                        intended_price: buy_ref_leg.to_string().parse::<f64>().ok(),
+                        // The conversion the entry was sized under —
+                        // delta/exposure reads divide it back out to
+                        // compare legs in shared units.
+                        unit_scale: legs.map(|l| l.buy_scale),
                     },
                     crate::state_store::NewSignalLeg {
                         account_id: accounts.short,
                         venue: sell_vid.to_string(),
                         side: crate::state_store::LegSide::Short,
-                        symbol: None,
-                        intended_qty: order_qty,
-                        intended_price: sell_ref.to_string().parse::<f64>().ok(),
+                        symbol: legs.map(|l| l.sell_symbol.clone()),
+                        intended_qty: qty_sell_leg.to_string().parse::<f64>().unwrap_or(order_qty),
+                        intended_price: sell_ref_leg.to_string().parse::<f64>().ok(),
+                        unit_scale: legs.map(|l| l.sell_scale),
                     },
                 ],
             },
@@ -955,9 +1140,20 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
     }
 
     let started = std::time::Instant::now();
+    // Leg-unit → group-unit weights for the coordinator's matched-fill
+    // math: partial fills compare and trim in group units so a QQQ leg's
+    // ~40 units hedge 1 group unit, not 1 index unit. None = same-unit
+    // instruments (historical behavior).
+    let leg_unit_weights = legs.map(|_| (dec!(1) / scale_buy, dec!(1) / scale_sell));
     let res = state
         .coordinator
-        .execute_two_leg(&buy_exec, order_buy, &sell_exec, order_sell)
+        .execute_two_leg_scaled(
+            &buy_exec,
+            order_buy,
+            &sell_exec,
+            order_sell,
+            leg_unit_weights,
+        )
         .await;
     let latency_us = started.elapsed().as_micros() as u64;
 
@@ -1050,14 +1246,16 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
                 + leg_a_fill.fee.unwrap_or_default()
                 + leg_b_fill.fee.unwrap_or_default();
             entry_trim_usd = dec_to_f64(trim_slice, "entry trim realized").ok();
+            // `matched_qty` is in group units (leg-unit × weight); each
+            // leg's durable fill must read its own venue units.
             let mut a = leg_a_fill;
-            a.filled_qty = matched_qty;
+            a.filled_qty = matched_qty * scale_buy;
             a.remaining_qty = dec!(0);
-            a.original_qty = matched_qty;
+            a.original_qty = matched_qty * scale_buy;
             let mut b = leg_b_fill;
-            b.filled_qty = matched_qty;
+            b.filled_qty = matched_qty * scale_sell;
             b.remaining_qty = dec!(0);
-            b.original_qty = matched_qty;
+            b.original_qty = matched_qty * scale_sell;
             // Realized cash P&L stays fee outflow only (entry + trim fees are
             // already in paper equity); the matched pair itself is unrealized.
             ArbitrageExecutionResult::Success {
@@ -1077,18 +1275,32 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
         } => {
             let fees_dec = leg_a.fee.unwrap_or_default() + leg_b.fee.unwrap_or_default();
             let fee_f = fees_dec.to_string().parse::<f64>().unwrap_or(0.0);
+            // Lot bookkeeping is per-leg: fills and prices stay in each
+            // instrument's own units. The converted VWAPs are group-unit
+            // prices — dividing by the leg scale restores leg units, and
+            // each leg's persisted qty is its native filled quantity.
             let buy_px_f = leg_a
                 .avg_fill_price
-                .unwrap_or(buy_vwap)
+                .unwrap_or(buy_vwap / scale_buy)
                 .to_string()
                 .parse::<f64>()
                 .unwrap_or(0.0);
             let sell_px_f = leg_b
                 .avg_fill_price
-                .unwrap_or(sell_vwap)
+                .unwrap_or(sell_vwap / scale_sell)
                 .to_string()
                 .parse::<f64>()
                 .unwrap_or(0.0);
+            let long_lot_qty = leg_a
+                .filled_qty
+                .to_string()
+                .parse::<f64>()
+                .unwrap_or(open_qty);
+            let short_lot_qty = leg_b
+                .filled_qty
+                .to_string()
+                .parse::<f64>()
+                .unwrap_or(open_qty);
             let expected_capture_f = expected_net_usd;
 
             let cycle_id = format!("spatial-{}", cycle);
@@ -1101,9 +1313,9 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
                     buy_venue.to_string(),
                     sell_venue.to_string(),
                     net_bps_f,
-                    open_qty,
+                    long_lot_qty,
                     buy_px_f,
-                    open_qty,
+                    short_lot_qty,
                     sell_px_f,
                     fee_f,
                     state.env().as_str().to_string(),
@@ -1572,6 +1784,7 @@ pub async fn execute_spatial_candidates_impl(
                 win_probability: p,
                 expected_net_bps: None,
             }),
+            None,
             state,
         )
         .await;
@@ -3170,6 +3383,9 @@ async fn flatten_ticker_positions_scoped_impl(
         order_side: Side,
         leg_side: LegSide,
         qty: Decimal,
+        /// Parent leg's venue-units-per-parent-unit scale (v39) — the
+        /// child's own leg keeps it so family delta stays shared-unit.
+        unit_scale: f64,
     }
 
     let child_fills_on = |family: &[crate::state_store::SignalExecution],
@@ -3391,6 +3607,7 @@ async fn flatten_ticker_positions_scoped_impl(
                         },
                         leg_side: opposite(leg.side),
                         qty,
+                        unit_scale: leg.unit_scale,
                     });
                 }
             }
@@ -3470,6 +3687,9 @@ async fn flatten_ticker_positions_scoped_impl(
                     symbol: Some(t.exact_symbol.clone()),
                     intended_qty: intended,
                     intended_price: None,
+                    // Same instrument the parent leg fills in — inherit
+                    // its scale so family delta math stays in shared units.
+                    unit_scale: Some(t.unit_scale),
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
@@ -3760,6 +3980,7 @@ pub async fn execute_spatial_arbitrage(
             win_probability: p,
             expected_net_bps: None,
         }),
+        None,
         &state,
     )
     .await
@@ -4123,6 +4344,7 @@ async fn maybe_liq_trim_pair(
                 symbol: Some(leg.symbol.clone()),
                 intended_qty: qty,
                 intended_price: None,
+                unit_scale: Some(leg.unit_scale),
             })
             .collect();
             if let Err(e) = state.state_store.record_signal_execution(
@@ -4943,6 +5165,7 @@ mod account_read_tests {
                             symbol: Some("ETH-USDC".into()),
                             intended_qty: 0.5,
                             intended_price: Some(100.0),
+                            unit_scale: None,
                         },
                         crate::state_store::NewSignalLeg {
                             account_id: None,
@@ -4951,6 +5174,7 @@ mod account_read_tests {
                             symbol: Some("ETH-USDC".into()),
                             intended_qty: 0.5,
                             intended_price: Some(100.0),
+                            unit_scale: None,
                         },
                     ],
                 },

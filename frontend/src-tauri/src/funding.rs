@@ -2433,6 +2433,7 @@ pub async fn execute_funding_carry_impl(
                         symbol: Some(long_sym.clone()),
                         intended_qty: qty_f64,
                         intended_price: Some(long_ask_f),
+                        unit_scale: None,
                     },
                     NewSignalLeg {
                         account_id: account_for(short_canon),
@@ -2441,6 +2442,7 @@ pub async fn execute_funding_carry_impl(
                         symbol: Some(short_sym.clone()),
                         intended_qty: qty_f64,
                         intended_price: Some(short_bid_f),
+                        unit_scale: None,
                     },
                 ],
             },
@@ -2710,6 +2712,7 @@ pub async fn execute_funding_carry_impl(
                                     intended_price: Some(
                                         bound.to_string().parse::<f64>().unwrap_or(0.0),
                                     ),
+                                    unit_scale: None,
                                 })
                                 .collect(),
                         },
@@ -3532,6 +3535,7 @@ pub async fn execute_fixed_yield_exit_impl(
             symbol: Some(leg.symbol.clone()),
             intended_qty: q.open_qty,
             intended_price: q.exit_rate,
+            unit_scale: None,
         })
         .collect();
     state

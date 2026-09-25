@@ -853,6 +853,7 @@ pub async fn close_external_position_impl(
                     symbol: Some(live.symbol.clone()),
                     intended_qty: dec_f64(qty_dec),
                     intended_price: None,
+                    unit_scale: None,
                 }],
             },
             state.env().as_str(),

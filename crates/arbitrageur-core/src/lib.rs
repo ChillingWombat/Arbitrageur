@@ -5,6 +5,7 @@ pub mod order;
 pub mod position;
 pub mod quote;
 pub mod symbol;
+pub mod tracking;
 pub mod types;
 
 pub use exchange::*;
@@ -14,6 +15,7 @@ pub use order::*;
 pub use position::*;
 pub use quote::*;
 pub use symbol::*;
+pub use tracking::*;
 pub use types::*;
 
 #[cfg(test)]

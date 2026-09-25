@@ -2141,8 +2141,15 @@ impl AppEngineState {
                 let rem_long = (long_leg.filled_qty - closed_qty(long_v, LegSide::Short)).max(0.0);
                 let rem_short =
                     (short_leg.filled_qty - closed_qty(short_v, LegSide::Long)).max(0.0);
-                let matched = rem_long.min(rem_short);
-                if !(matched > 0.0 && long_px > 0.0 && short_px > 0.0) {
+                // Cross-instrument legs fill in their own venue units —
+                // match them in shared units (qty ÷ leg scale), then hand
+                // the lot each leg's own-unit remainder so its per-leg
+                // PnL and close-matching stay venue-true.
+                let matched_g =
+                    (rem_long / long_leg.unit_scale).min(rem_short / short_leg.unit_scale);
+                let rem_long = matched_g * long_leg.unit_scale;
+                let rem_short = matched_g * short_leg.unit_scale;
+                if !(matched_g > 0.0 && long_px > 0.0 && short_px > 0.0) {
                     continue;
                 }
                 let want_strategy = crate::attribution::ledger_strategy_id(&sig.strategy_id);
@@ -2169,9 +2176,9 @@ impl AppEngineState {
                     long_v.to_string(),
                     short_v.to_string(),
                     0.0,
-                    matched,
+                    rem_long,
                     long_px,
-                    matched,
+                    rem_short,
                     short_px,
                     entry_fees,
                     sig.environment.clone(),

@@ -31,9 +31,9 @@ use arbitrageur_math::pair_monitor::{
     reversion_stats, simulate_entry_outcomes, PairObservation, PAIR_BUCKET_MS,
 };
 use arbitrageur_math::session::{
-    apply_entry_adjust_bps, depth_mult, in_funding_mask, inverse_vol_mult, is_ondo_venue,
-    is_weekend, session_allow, session_of, us_cash_open, winsorized_median, FastVolEwma, SessionId,
-    FAST_VOL_HALT_MULT, SPREAD_STANDDOWN_MULT,
+    apply_entry_adjust_bps, depth_mult, in_funding_mask, inverse_vol_mult, is_equity_rails,
+    is_ondo_venue, is_weekend, session_allow, session_of, us_cash_open, winsorized_median,
+    FastVolEwma, SessionId, FAST_VOL_HALT_MULT, SPREAD_STANDDOWN_MULT,
 };
 use chrono::Utc;
 use parking_lot::Mutex;
@@ -280,6 +280,17 @@ pub struct MonitorRowDto {
     pub symbol: String,
     pub buy_venue: String,
     pub sell_venue: String,
+    /// Tracked-group legs: the instrument this venue actually trades for
+    /// the buy leg (e.g. "QQQ" serving a NAS100 group row). `None` on
+    /// same-instrument rows — both legs trade `symbol`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub buy_instrument: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sell_instrument: Option<String>,
+    /// Asset-class carry charged into friction for the expected hold
+    /// (dividend + borrow + expense drag on share legs), bps. Perp-vs-perp
+    /// rows carry venue funding only and read 0.
+    pub asset_carry_bps: Option<f64>,
     /// preparing | tracking | triggered | ready | no-data
     pub status: String,
     /// Executable current edge (sell bid vs buy ask), bps.
@@ -409,6 +420,9 @@ impl MonitorRowDto {
             symbol: symbol.to_string(),
             buy_venue: buy_venue.to_string(),
             sell_venue: sell_venue.to_string(),
+            buy_instrument: None,
+            sell_instrument: None,
+            asset_carry_bps: None,
             status: "ready".into(),
             current_edge_bps: Some(-10.0),
             baseline_bps: Some(-150.0),
@@ -714,6 +728,29 @@ pub(crate) const PAIR_ALIGN_GAP_MS: i64 = 30_000;
 /// edges open one TCP conn per in-flight request; keeping the burst small
 /// stays under per-IP connection limits and protects the WS lane.
 const MAX_INFLIGHT_BOOK_FETCHES: usize = 4;
+
+/// Tracked-group ratio learner: each sanity-banded co-observation moves
+/// the EWMA ~0.5% of the gap — a real tracking dislocation survives for
+/// dozens of samples before the conversion absorbs it, while the ratio
+/// still converges within a session on live cadence.
+const RATIO_EWMA_ALPHA: f64 = 0.005;
+/// A learned ratio older than this is unverifiable — the member lane
+/// stops emitting group samples rather than convert on stale truth.
+const RATIO_MAX_AGE: Duration = Duration::from_secs(6 * 3600);
+
+/// The lane through which a venue serves a tracking group — the member
+/// instrument it lists, the watchlist key that member's books and funding
+/// persist under, and the venue-facing symbol order dispatch resolves to.
+#[derive(Debug, Clone)]
+struct GroupLaneMember {
+    /// Canonical member base ("QQQ").
+    base: String,
+    /// Member's watchlist lane key — bare "QQQ" under merge modes,
+    /// "QQQ-USD" under `separate`. Keys funding-EMA and hub lookups.
+    key: String,
+    /// Venue-native symbol the adapter fetches and orders by.
+    venue_symbol: String,
+}
 
 /// Persisted pair lifecycle older than this does not rehydrate on startup.
 /// A `triggered`/`ready` row only proves the pair qualified at
@@ -1401,6 +1438,19 @@ pub struct SpreadMonitorEngine {
     watchlist: Mutex<Vec<String>>,
     /// All canonical bases per venue from the last market refresh.
     venue_symbols: Mutex<HashMap<String, Vec<String>>>,
+    /// Venue → group → the tracked member lane this venue serves the
+    /// group through (a venue listing several members maps to the group's
+    /// numéraire). Built at watchlist refresh; the group key joins that
+    /// venue's `venue_symbols` set so cross-member pairs evaluate, but
+    /// only the member's own lane is ever fetched.
+    group_member:
+        Mutex<HashMap<String, HashMap<arbitrageur_core::tracking::TrackGroup, GroupLaneMember>>>,
+    /// Learned group-ratio EWMA per member canonical base:
+    /// (numéraire price) / (member price). Updated from co-observations of
+    /// a fresh numéraire book and a fresh member book; sanity-banded by
+    /// `TrackGroup::ratio_band` so corrupt quotes never enter the state.
+    /// Seeds directly on the first observation.
+    ratio_ema: Mutex<HashMap<String, (f64, Instant)>>,
     last_watchlist_at: Mutex<Option<Instant>>,
     last_snapshot: Mutex<Option<MonitorSnapshotDto>>,
     /// In-memory EWMA fast vol per ordered pair (O(1)/tick). Durable
@@ -1447,6 +1497,8 @@ impl SpreadMonitorEngine {
             settlement_quotes: Mutex::new(HashMap::new()),
             watchlist: Mutex::new(Vec::new()),
             venue_symbols: Mutex::new(HashMap::new()),
+            group_member: Mutex::new(HashMap::new()),
+            ratio_ema: Mutex::new(HashMap::new()),
             last_watchlist_at: Mutex::new(None),
             last_snapshot: Mutex::new(None),
             fast_vol: Mutex::new(HashMap::new()),
@@ -1725,6 +1777,9 @@ impl SpreadMonitorEngine {
             self.fast_vol.lock().clear();
             self.vol_halt.lock().clear();
             self.funding_ema.lock().clear();
+            // Learned group ratios are env-learned too — a testnet NDX/QQQ
+            // ratio must never seed live-group conversions.
+            self.ratio_ema.lock().clear();
         }
         if !due {
             // Cheap path: still pick up newly-admitted venues between full
@@ -1845,7 +1900,46 @@ impl SpreadMonitorEngine {
                         fetch_symbol.insert(k.clone(), m.venue_symbol.clone());
                         quote_by_key.insert(k.clone(), m.symbol.quote.clone());
                     }
-                    venue_bases.insert(vid.to_string(), bases.clone());
+
+                    // Tracked-instrument groups (index↔ETF): a venue
+                    // listing any member serves the group's numéraire key
+                    // for pairing — the member's own lane already fetches
+                    // the raw book, and `maybe_group_write` converts it
+                    // into group units. The group key joins ONLY the
+                    // pairing set (venue_bases → watchlist), never the
+                    // lane's fetch list.
+                    let mut pairing_bases = bases.clone();
+                    let members = arbitrageur_core::tracking::group_members(by_key.keys().cloned());
+                    if members.is_empty() {
+                        self.group_member.lock().remove(vid);
+                    } else {
+                        let mut lane_map = HashMap::new();
+                        for (g, member_base) in members {
+                            // The member's lane key is the by_key entry
+                            // whose canonical base matches — resolves both
+                            // bare merge keys and "-QUOTE" separate keys.
+                            for (k, m) in &by_key {
+                                if canonical_base(k) == member_base {
+                                    lane_map.insert(
+                                        g,
+                                        GroupLaneMember {
+                                            base: member_base.clone(),
+                                            key: k.clone(),
+                                            venue_symbol: m.venue_symbol.clone(),
+                                        },
+                                    );
+                                    break;
+                                }
+                            }
+                            let gk = g.key();
+                            if !pairing_bases.iter().any(|b| b == gk) {
+                                pairing_bases.push(gk.to_string());
+                            }
+                        }
+                        pairing_bases.sort();
+                        self.group_member.lock().insert(vid.to_string(), lane_map);
+                    }
+                    venue_bases.insert(vid.to_string(), pairing_bases);
 
                     // Venue-local stablecoin rates for single-venue paths:
                     // the venue's own stable/stable markets are the honest
@@ -2098,6 +2192,218 @@ impl SpreadMonitorEngine {
         book_sample(book, venue, scale)
     }
 
+    /// Refresh the learned member→numéraire ratio for a tracking group
+    /// from fresh co-observations: for each member lane holding a live
+    /// book, ratio = (numéraire mid) / (member mid). Every observation is
+    /// sanity-banded by `TrackGroup::ratio_band` — a corrupt print never
+    /// enters the learner. Runs on member AND numéraire book arrivals so
+    /// the ratio tracks whichever side moves first.
+    fn refresh_group_ratios(
+        &self,
+        state: &AppEngineState,
+        group: arbitrageur_core::tracking::TrackGroup,
+    ) {
+        let gm = self.group_member.lock();
+        let mut num_mid_sum = 0.0f64;
+        let mut num_mid_n = 0usize;
+        let mut member_mids: Vec<(String, f64)> = Vec::new();
+        for (v, m) in gm.iter() {
+            let Some(ml) = m.get(&group) else { continue };
+            let mid = state
+                .market_data_hub
+                .get_valid_orderbook(
+                    &arbitrageur_core::types::VenueId(v.clone()),
+                    &ml.key,
+                    Some(Duration::from_secs(30)),
+                )
+                .and_then(|b| b.mid_price())
+                .and_then(|d| d.to_string().parse::<f64>().ok())
+                .filter(|p| p.is_finite() && *p > 0.0);
+            match (mid, ml.base == group.key()) {
+                (Some(p), true) => {
+                    num_mid_sum += p;
+                    num_mid_n += 1;
+                }
+                (Some(p), false) => member_mids.push((ml.base.clone(), p)),
+                _ => {}
+            }
+        }
+        if num_mid_n == 0 {
+            return;
+        }
+        let num_mid = num_mid_sum / num_mid_n as f64;
+        let mut ema = self.ratio_ema.lock();
+        for (member_base, mmid) in member_mids {
+            let Some((lo, hi)) = group.ratio_band(&member_base) else {
+                continue;
+            };
+            let obs = num_mid / mmid;
+            if !(obs.is_finite() && obs >= lo && obs <= hi) {
+                tracing::debug!(
+                    "monitor: {group:?} ratio obs {obs:.3} for {member_base} outside band \
+                     [{lo},{hi}] — corrupt print rejected"
+                );
+                continue;
+            }
+            match ema.get_mut(&member_base) {
+                Some((r, t)) => {
+                    *r += RATIO_EWMA_ALPHA * (obs - *r);
+                    *t = Instant::now();
+                }
+                None => {
+                    ema.insert(member_base, (obs, Instant::now()));
+                }
+            }
+        }
+    }
+
+    /// Convert a tracked-group member's freshly written book into the
+    /// group's numéraire units and republish it under the group key —
+    /// the "base-side FX" that lets an index perp and an ETF perp
+    /// evaluate as one pair. Fail-closed: without a sanity-banded learned
+    /// ratio the member lane emits no group samples at all.
+    #[allow(clippy::too_many_arguments)]
+    fn maybe_group_write(
+        &self,
+        state: &AppEngineState,
+        venue: &str,
+        native_key: &str,
+        book: &OrderBook,
+        merge_usd: bool,
+        now_ms: i64,
+        env: &str,
+    ) {
+        let member_base = canonical_base(native_key);
+        let Some(group) = arbitrageur_core::tracking::track_group(&member_base) else {
+            return;
+        };
+        // Only the venue's chosen member lane may serve the group — a
+        // venue listing several members serves it through the numéraire.
+        let chosen = self
+            .group_member
+            .lock()
+            .get(venue)
+            .and_then(|m| m.get(&group).map(|ml| ml.base.clone()));
+        if chosen.as_deref() != Some(member_base.as_str()) {
+            return;
+        }
+        self.refresh_group_ratios(state, group);
+
+        let write_group_book = |conv: OrderBook| {
+            state.market_data_hub.update_orderbook(conv.clone());
+            if let Some(e) = self.fx_sample(state, venue, group.key(), &conv) {
+                let _ = state.state_store.record_spread_samples_mode(
+                    group.key(),
+                    merge_usd,
+                    now_ms,
+                    &[e],
+                    env,
+                );
+            }
+        };
+
+        if member_base == group.key() {
+            // Numéraire lane: under `separate` the native book lives in a
+            // "-QUOTE" slot — mirror it into the bare group key so group
+            // rows resolve in both quote modes. Under merge the native
+            // write already landed in the same slot.
+            if !merge_usd {
+                let mut conv = book.clone();
+                conv.symbol = group.key().to_string();
+                write_group_book(conv);
+            }
+            return;
+        }
+
+        let scale = {
+            let ema = self.ratio_ema.lock();
+            ema.get(&member_base)
+                .filter(|(_, t)| t.elapsed() <= RATIO_MAX_AGE)
+                .map(|(r, _)| *r)
+        };
+        let Some(scale) = scale else {
+            // No verifiable fair ratio — the member lane contributes no
+            // group samples rather than convert on a fabricated constant.
+            return;
+        };
+        let Some(s) = Decimal::from_f64_retain(scale) else {
+            return;
+        };
+        let mut conv = book.clone();
+        conv.symbol = group.key().to_string();
+        for l in conv.bids.iter_mut().chain(conv.asks.iter_mut()) {
+            l.price *= s;
+            l.size /= s;
+        }
+        write_group_book(conv);
+    }
+
+    /// The instrument a venue actually trades for one row leg. On
+    /// tracked-group rows the venue may serve the group through an ETF
+    /// member ("QQQ" for the NAS100 lane) — returns the member base;
+    /// same-instrument rows return `symbol` unchanged.
+    pub(crate) fn leg_instrument(&self, symbol: &str, venue: &str) -> String {
+        let Some(g) = arbitrageur_core::tracking::track_group(symbol) else {
+            return symbol.to_string();
+        };
+        if g.key() != symbol {
+            return symbol.to_string();
+        }
+        self.group_member
+            .lock()
+            .get(venue)
+            .and_then(|m| m.get(&g).map(|ml| ml.base.clone()))
+            .unwrap_or_else(|| symbol.to_string())
+    }
+
+    /// Lane key for one leg — the member's own watchlist key so books,
+    /// funding, and dispatch all address the real instrument rather than
+    /// the shared group key.
+    pub(crate) fn leg_lane_key(&self, symbol: &str, venue: &str) -> String {
+        let Some(g) = arbitrageur_core::tracking::track_group(symbol) else {
+            return symbol.to_string();
+        };
+        if g.key() != symbol {
+            return symbol.to_string();
+        }
+        self.group_member
+            .lock()
+            .get(venue)
+            .and_then(|m| m.get(&g).map(|ml| ml.key.clone()))
+            .unwrap_or_else(|| symbol.to_string())
+    }
+
+    /// Converted group book scale for a leg instrument — group price per
+    /// instrument-unit price (numéraire = 1). `None` when the member's
+    /// ratio is unlearned/stale; dispatch must then refuse the row.
+    pub(crate) fn leg_group_scale(&self, symbol: &str, venue: &str) -> Option<f64> {
+        let instr = self.leg_instrument(symbol, venue);
+        let g = arbitrageur_core::tracking::track_group(&instr)?;
+        if g.key() != symbol {
+            return None;
+        }
+        if instr == g.key() {
+            return Some(1.0);
+        }
+        let ema = self.ratio_ema.lock();
+        ema.get(&instr)
+            .filter(|(_, t)| t.elapsed() <= RATIO_MAX_AGE)
+            .map(|(r, _)| *r)
+    }
+
+    /// Venue-facing fetch symbol for a row leg — resolves a member
+    /// instrument back to the adapter's own spelling ("QQQ-USD").
+    pub(crate) fn leg_venue_symbol(&self, symbol: &str, venue: &str) -> Option<String> {
+        let g = arbitrageur_core::tracking::track_group(symbol)?;
+        if g.key() != symbol {
+            return None;
+        }
+        self.group_member
+            .lock()
+            .get(venue)
+            .and_then(|m| m.get(&g).map(|ml| ml.venue_symbol.clone()))
+    }
+
     async fn poll_due_books(&self, state: &AppEngineState) {
         struct Job {
             venue: String,
@@ -2195,6 +2501,7 @@ impl SpreadMonitorEngine {
                     env,
                 );
             }
+            self.maybe_group_write(state, &venue, &symbol, &book, merge_usd, now_ms, env);
         }
         if jobs.is_empty() {
             return;
@@ -2241,7 +2548,7 @@ impl SpreadMonitorEngine {
                         lane.note_success();
                     }
                     let entry = self.fx_sample(state, &venue, &symbol, &book);
-                    state.market_data_hub.update_orderbook(book);
+                    state.market_data_hub.update_orderbook(book.clone());
                     if let Some(e) = entry {
                         let _ = state.state_store.record_spread_samples_mode(
                             &symbol,
@@ -2251,6 +2558,15 @@ impl SpreadMonitorEngine {
                             dispatch_env.as_str(),
                         );
                     }
+                    self.maybe_group_write(
+                        state,
+                        &venue,
+                        &symbol,
+                        &book,
+                        merge_usd,
+                        now_ms,
+                        dispatch_env.as_str(),
+                    );
                 }
                 Err(e) => {
                     tracing::debug!("monitor: book fetch failed {venue}/{symbol}: {e}");
@@ -2685,6 +3001,15 @@ impl SpreadMonitorEngine {
     )> {
         let key = (symbol.to_string(), buy_v.to_string(), sell_v.to_string());
 
+        // Tracked-group legs: on a group-keyed row each venue serves the
+        // pair through its own member instrument (index perp vs ETF perp).
+        // `buy_instr`/`sell_instr` are the canonical member bases the legs
+        // actually trade; funding and asset carry key off them, not the
+        // shared group key.
+        let buy_instr = self.leg_instrument(symbol, buy_v);
+        let sell_instr = self.leg_instrument(symbol, sell_v);
+        let is_group_row = buy_instr != symbol || sell_instr != symbol;
+
         // Session regime for this pair at this timestamp. Provisional or
         // missing aggregates degrade every multiplier below to neutral.
         let sess = session_context(state, symbol, buy_v, sell_v, now_ms);
@@ -2766,16 +3091,24 @@ impl SpreadMonitorEngine {
         // estimate for two-way). Book-walk slippage is inside the ladder.
         let fee_bps = fee_map.get(buy_v).copied().unwrap_or(4.0)
             + fee_map.get(sell_v).copied().unwrap_or(4.0);
+        // Funding is per-leg-instrument: an ETF leg pays ETF funding, not
+        // the index lane's rate (and vice versa). Equity-rails legs (cash
+        // shares) have no funding market — their carry is the asset-carry
+        // table below, so a missing EMA reads 0 rather than "unknown".
+        let buy_fkey = self.leg_lane_key(symbol, buy_v);
+        let sell_fkey = self.leg_lane_key(symbol, sell_v);
         let fr_a = self
             .funding_ema
             .lock()
-            .get(&(buy_v.to_string(), symbol.to_string()))
-            .map(|(r, _)| *r);
+            .get(&(buy_v.to_string(), buy_fkey.clone()))
+            .map(|(r, _)| *r)
+            .or_else(|| is_equity_rails(buy_v).then_some(0.0));
         let fr_b = self
             .funding_ema
             .lock()
-            .get(&(sell_v.to_string(), symbol.to_string()))
-            .map(|(r, _)| *r);
+            .get(&(sell_v.to_string(), sell_fkey.clone()))
+            .map(|(r, _)| *r)
+            .or_else(|| is_equity_rails(sell_v).then_some(0.0));
         // t_hold: OU half-life -> empirical median -> None.
         let stats_for_t = if let (Some(m), Some(s)) = (mu, sigma) {
             Some(reversion_stats(&series, m, s, 0.0, 2.0, 3.0, 1))
@@ -2807,7 +3140,20 @@ impl SpreadMonitorEngine {
             fee_bps,
         );
         let exit_uncostable = exit_est_opt.is_none();
-        let friction_bps = fee_bps + carry.unwrap_or(0.0).max(0.0) + exit_est_opt.unwrap_or(0.0);
+        // Asset-class carry beyond venue funding: dividends + borrow +
+        // expense drag on share legs (equity rails), projected over the
+        // expected hold. Perp legs contribute 0 — funding already carries
+        // their borrow/dividend economics; dividend income is never
+        // credited as edge.
+        let asset_carry = arbitrageur_core::tracking::pair_carry_bps(
+            &buy_instr,
+            &sell_instr,
+            is_equity_rails(buy_v),
+            is_equity_rails(sell_v),
+            t_hold_secs.unwrap_or(0.0),
+        );
+        let friction_bps =
+            fee_bps + carry.unwrap_or(0.0).max(0.0) + exit_est_opt.unwrap_or(0.0) + asset_carry;
 
         // --- current executable edge ------------------------------------
         let (edge_bps, dev_bps) = match (&buy_book, &sell_book, mu) {
@@ -3311,6 +3657,11 @@ impl SpreadMonitorEngine {
             symbol: symbol.to_string(),
             buy_venue: buy_v.to_string(),
             sell_venue: sell_v.to_string(),
+            // Cross-instrument legs on tracked-group rows only — a plain
+            // row leaves both None and both legs trade `symbol`.
+            buy_instrument: is_group_row.then(|| buy_instr.clone()),
+            sell_instrument: is_group_row.then(|| sell_instr.clone()),
+            asset_carry_bps: Some(asset_carry),
             status: status.as_str().to_string(),
             current_edge_bps: edge_bps,
             baseline_bps: mu,
@@ -4116,6 +4467,7 @@ mod tests {
                             symbol: Some("BTC-USDC".into()),
                             intended_qty: 0.01,
                             intended_price: Some(100_000.0),
+                            unit_scale: None,
                         },
                         NewSignalLeg {
                             account_id: None,
@@ -4124,6 +4476,7 @@ mod tests {
                             symbol: Some("BTC-USDC".into()),
                             intended_qty: 0.01,
                             intended_price: Some(100_000.0),
+                            unit_scale: None,
                         },
                     ],
                 },
@@ -4190,6 +4543,7 @@ mod tests {
                             symbol: Some("BTC-USDC".into()),
                             intended_qty: 0.01,
                             intended_price: Some(100_000.0),
+                            unit_scale: None,
                         },
                         NewSignalLeg {
                             account_id: None,
@@ -4198,6 +4552,7 @@ mod tests {
                             symbol: Some("BTC-USDC".into()),
                             intended_qty: 0.01,
                             intended_price: Some(100_000.0),
+                            unit_scale: None,
                         },
                     ],
                 },
@@ -5365,5 +5720,154 @@ mod tests {
         let got = engine_c.config();
         assert!((got.min_threshold_ratio - 1.0).abs() < 1e-9);
         assert!((got.min_coverage - 0.5).abs() < 1e-9);
+    }
+
+    /* -------------------- tracked-group machinery ---------------------- */
+
+    /// Two-venue group universe: the index venue lists US100-USDC (its
+    /// canonical NAS100 base joins pairing natively); the ETF venue lists
+    /// QQQ-USD only — the watchlist must still pair them on the group key.
+    async fn group_state() -> (AppEngineState, Arc<SpreadMonitorEngine>) {
+        let state = AppEngineState::new();
+        {
+            let mut s = state.settings.write();
+            s.hyperliquid_enabled = true;
+            s.arcus_enabled = true;
+        }
+        state.test_adapters.write().unwrap().insert(
+            "hyperliquid".to_string(),
+            Arc::new(QuoteMarketsAdapter {
+                venue: "hyperliquid",
+                markets: vec![
+                    scripted_market("hyperliquid", "US100-USDC", "US100", "USDC"),
+                    scripted_market("hyperliquid", "BTC-USDC", "BTC", "USDC"),
+                ],
+            }),
+        );
+        state.test_adapters.write().unwrap().insert(
+            "arcus".to_string(),
+            Arc::new(QuoteMarketsAdapter {
+                venue: "arcus",
+                markets: vec![
+                    scripted_market("arcus", "QQQ-USD", "QQQ", "USD"),
+                    scripted_market("arcus", "BTC-USD", "BTC", "USD"),
+                ],
+            }),
+        );
+        let engine = SpreadMonitorEngine::new(&state);
+        engine.maybe_refresh_watchlist(&state).await;
+        (state, engine)
+    }
+
+    #[tokio::test]
+    async fn group_membership_pairs_member_venues_on_numeraire_key() {
+        let (_state, engine) = group_state().await;
+        // The ETF venue serves the NAS100 group through its QQQ lane…
+        let gm = engine.group_member.lock();
+        assert_eq!(
+            gm.get("arcus")
+                .and_then(|m| m.get(&arbitrageur_core::tracking::TrackGroup::Ndx))
+                .map(|ml| ml.base.as_str()),
+            Some("QQQ")
+        );
+        // …while the index venue serves it natively through NAS100.
+        assert_eq!(
+            gm.get("hyperliquid")
+                .and_then(|m| m.get(&arbitrageur_core::tracking::TrackGroup::Ndx))
+                .map(|ml| ml.base.as_str()),
+            Some("NAS100")
+        );
+        drop(gm);
+        // Group key joined the ETF venue's pairing set and the watchlist…
+        assert!(engine
+            .venue_symbols
+            .lock()
+            .get("arcus")
+            .is_some_and(|b| b.iter().any(|x| x == "NAS100")));
+        assert!(engine.watchlist.lock().iter().any(|x| x == "NAS100"));
+        // …but never the ETF venue's fetch list — only QQQ is fetched.
+        let lanes = engine.lanes.lock();
+        let arcus = lanes.iter().find(|l| l.venue == "arcus").unwrap();
+        assert!(arcus.symbols.iter().any(|s| s == "QQQ"));
+        assert!(!arcus.symbols.iter().any(|s| s == "NAS100"));
+    }
+
+    #[tokio::test]
+    async fn group_write_converts_member_books_into_numeraire_units() {
+        let (state, engine) = group_state().await;
+        // Fresh numéraire book on the index venue (~29,272.5 mid).
+        state.market_data_hub.update_orderbook(book(
+            "hyperliquid",
+            "US100-USDC",
+            29_270.0,
+            29_275.0,
+            2,
+        ));
+        // A member book lands on the ETF venue (~744.00 mid) — the
+        // production hook runs after the native write, so mirror that.
+        let qqq = book("arcus", "QQQ-USD", 743.95, 744.05, 2);
+        state.market_data_hub.update_orderbook(qqq.clone());
+        engine.maybe_group_write(&state, "arcus", "QQQ", &qqq, true, 0, "testnet");
+        // The ratio must be learned in-band (~39.34).
+        let r = engine.ratio_ema.lock().get("QQQ").map(|(r, _)| *r);
+        let r = r.expect("co-observation must seed the ratio");
+        assert!((r - 39.35).abs() < 0.5, "learned ratio {r}");
+        // The converted book lands under the group key on that venue.
+        let conv = state
+            .market_data_hub
+            .get_valid_orderbook(&VenueId::new("arcus"), "NAS100", None)
+            .expect("converted group book must exist");
+        let conv_mid = conv
+            .mid_price()
+            .unwrap()
+            .to_string()
+            .parse::<f64>()
+            .unwrap();
+        assert!(
+            (conv_mid - 744.0 * r).abs() / (744.0 * r) < 0.001,
+            "converted mid {conv_mid} vs member mid × ratio {}",
+            744.0 * r
+        );
+        // Leg resolution: the ETF venue's row leg is QQQ, scale = ratio.
+        assert_eq!(engine.leg_instrument("NAS100", "arcus"), "QQQ");
+        assert_eq!(engine.leg_instrument("NAS100", "hyperliquid"), "NAS100");
+        assert_eq!(
+            engine.leg_group_scale("NAS100", "arcus").unwrap(),
+            engine.ratio_ema.lock().get("QQQ").unwrap().0
+        );
+        assert_eq!(engine.leg_group_scale("NAS100", "hyperliquid"), Some(1.0));
+        assert_eq!(
+            engine.leg_venue_symbol("NAS100", "arcus").as_deref(),
+            Some("QQQ-USD")
+        );
+    }
+
+    #[tokio::test]
+    async fn group_write_fails_closed_without_verifiable_ratio() {
+        let (state, engine) = group_state().await;
+        // No numéraire book anywhere — the member lane cannot convert.
+        let qqq = book("arcus", "QQQ-USD", 743.95, 744.05, 2);
+        engine.maybe_group_write(&state, "arcus", "QQQ", &qqq, true, 0, "testnet");
+        assert!(engine.ratio_ema.lock().get("QQQ").is_none());
+        assert!(state
+            .market_data_hub
+            .get_valid_orderbook(&VenueId::new("arcus"), "NAS100", None)
+            .is_none());
+        // A corrupt member print (~1/290 of fair) is sanity-band rejected —
+        // the learner refuses it instead of absorbing a poisoned ratio.
+        state.market_data_hub.update_orderbook(book(
+            "hyperliquid",
+            "US100-USDC",
+            29_270.0,
+            29_275.0,
+            2,
+        ));
+        let bad = book("arcus", "QQQ-USD", 99.0, 101.0, 1);
+        state.market_data_hub.update_orderbook(bad.clone());
+        engine.maybe_group_write(&state, "arcus", "QQQ", &bad, true, 0, "testnet");
+        assert!(
+            engine.ratio_ema.lock().get("QQQ").is_none(),
+            "corrupt ratio obs must not seed the learner"
+        );
     }
 }
