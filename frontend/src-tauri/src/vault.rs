@@ -20,7 +20,7 @@ type HmacSha256 = Hmac<Sha256>;
 const VAULT_MAGIC: &[u8; 8] = b"ARBVLT2\0";
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
-const MIN_PASSWORD_CHARS: usize = 12;
+const MIN_PASSWORD_CHARS: usize = 6;
 
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct ExchangeCredentials {
@@ -472,7 +472,7 @@ impl SecureVault {
             );
         }
         if password.chars().count() < MIN_PASSWORD_CHARS {
-            anyhow::bail!("Password must be at least 12 characters long");
+            anyhow::bail!("Password must be at least 6 characters long");
         }
 
         let empty_data = VaultData {
@@ -661,7 +661,7 @@ impl SecureVault {
             .unlock(current, totp_code)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         if new_password.chars().count() < MIN_PASSWORD_CHARS {
-            anyhow::bail!("New password must be at least 12 characters long");
+            anyhow::bail!("New password must be at least 6 characters long");
         }
 
         let data = self
@@ -1207,9 +1207,9 @@ mod tests {
         assert!(!vault.is_initialized());
 
         let err = vault.initialize("short").unwrap_err();
-        assert!(err.to_string().contains("at least 12 characters"));
+        assert!(err.to_string().contains("at least 6 characters"));
 
-        assert!(vault.initialize("a-valid-long-password").is_ok());
+        assert!(vault.initialize("valid6").is_ok());
         let err = vault.initialize("another-long-password").unwrap_err();
         assert!(err.to_string().contains("already initialized"));
 
@@ -1217,18 +1217,19 @@ mod tests {
     }
 
     #[test]
-    fn test_vault_accepts_twelve_character_passwords_without_composition_rules() {
+    fn test_vault_accepts_six_character_passwords_without_composition_rules() {
         let (dir, file) = temp_vault_path("too_short");
         let mut vault = SecureVault::new_with_path(file);
-        let err = vault.initialize("abcdef").unwrap_err();
-        assert!(err.to_string().contains("at least 12 characters"));
+        let err = vault.initialize("abcde").unwrap_err();
+        assert!(err.to_string().contains("at least 6 characters"));
         let _ = fs::remove_dir_all(dir);
 
         for (kind, password) in [
-            ("letters", "abcdefghijkl"),
-            ("numbers", "123456789012"),
-            ("symbols", "!@#$%^&*()_+"),
-            ("mixed", "a1!b2@c3#d4$"),
+            ("letters", "abcdef"),
+            ("numbers", "123456"),
+            ("symbols", "!@#$%^"),
+            ("mixed", "a1!b2@"),
+            ("longer", "abcdefghijkl"),
         ] {
             let (dir, file) = temp_vault_path(kind);
             let mut vault = SecureVault::new_with_path(file);
