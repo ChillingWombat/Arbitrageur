@@ -6,9 +6,11 @@
 use super::*;
 
 impl StateStore {
-    /// Append one margin-utilisation observation for a paper venue. The
-    /// writer enforces the cadence cap (see `MARGIN_SNAPSHOT_MIN_INTERVAL_MS`
-    /// in commands); this method validates and persists unconditionally.
+    /// Append one margin-utilisation observation for a paper venue under
+    /// `environment`. The writer enforces the cadence cap (see
+    /// `MARGIN_SNAPSHOT_MIN_INTERVAL_MS` in commands); this method validates
+    /// and persists unconditionally.
+    #[allow(clippy::too_many_arguments)]
     pub fn record_margin_snapshot(
         &self,
         venue: &str,
@@ -17,8 +19,10 @@ impl StateStore {
         equity: f64,
         used_margin: f64,
         rate_pct: f64,
+        environment: &str,
     ) -> anyhow::Result<()> {
         let venue = normalize_venue(venue)?;
+        let environment = normalize_environment(environment)?;
         let account_id = account_id.trim().to_lowercase();
         if account_id.len() > 128 {
             anyhow::bail!("margin snapshot account id must fit in 128 characters");
@@ -38,33 +42,44 @@ impl StateStore {
         let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO margin_snapshots
-                 (venue, account_id, ts_ms, equity, used_margin, rate_pct)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![venue, account_id, ts_ms, equity, used_margin, rate_pct],
+                 (venue, account_id, ts_ms, equity, used_margin, rate_pct, environment)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                venue,
+                account_id,
+                ts_ms,
+                equity,
+                used_margin,
+                rate_pct,
+                environment
+            ],
         )?;
         Ok(())
     }
 
-    /// `(ts_ms, rate_pct)` points for one venue at or after `since_ms`,
-    /// oldest first. Callers cap the window; the table itself is bounded by
-    /// the shared retention-days prune.
+    /// `(ts_ms, rate_pct)` points for one venue at or after `since_ms` in
+    /// one environment, oldest first. Callers cap the window; the table
+    /// itself is bounded by the shared retention-days prune.
     pub fn list_margin_snapshots(
         &self,
         venue: &str,
         since_ms: i64,
+        environment: &str,
     ) -> anyhow::Result<Vec<MarginSnapshot>> {
         let venue = normalize_venue(venue)?;
+        let environment = normalize_environment(environment)?;
         if since_ms < 0 {
             anyhow::bail!("margin snapshot window start must be non-negative");
         }
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
-            "SELECT venue, account_id, ts_ms, equity, used_margin, rate_pct
-             FROM margin_snapshots WHERE venue = ?1 AND ts_ms >= ?2
+            "SELECT venue, account_id, ts_ms, equity, used_margin, rate_pct, environment
+             FROM margin_snapshots
+             WHERE venue = ?1 AND ts_ms >= ?2 AND environment = ?3
              ORDER BY ts_ms ASC, id ASC",
         )?;
         let rows = stmt
-            .query_map(params![venue, since_ms], |r| {
+            .query_map(params![venue, since_ms, environment], |r| {
                 Ok(MarginSnapshot {
                     venue: r.get(0)?,
                     account_id: r.get(1)?,
@@ -72,6 +87,7 @@ impl StateStore {
                     equity: r.get(3)?,
                     used_margin: r.get(4)?,
                     rate_pct: r.get(5)?,
+                    environment: r.get(6)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;

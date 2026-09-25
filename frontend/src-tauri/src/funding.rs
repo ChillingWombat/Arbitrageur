@@ -574,13 +574,14 @@ fn carry_gap_history(
 ) -> Vec<(i64, f64)> {
     const WINDOW_MS: i64 = 7 * 24 * 3_600_000;
     let from = now_ms.saturating_sub(WINDOW_MS);
+    let env = state.env().as_str();
     let long_series = state
         .state_store
-        .funding_rate_series(long_venue_id, symbol, from, now_ms)
+        .funding_rate_series(long_venue_id, symbol, from, now_ms, env)
         .unwrap_or_default();
     let short_series = state
         .state_store
-        .funding_rate_series(short_venue_id, symbol, from, now_ms)
+        .funding_rate_series(short_venue_id, symbol, from, now_ms, env)
         .unwrap_or_default();
     if long_series.is_empty() || short_series.is_empty() {
         return Vec::new();
@@ -716,9 +717,10 @@ async fn scan_funding_opportunities_for_symbol(
                 ))
             })
             .collect();
-        let _ = state
-            .state_store
-            .record_funding_rate_samples(now_ms, &samples);
+        let _ =
+            state
+                .state_store
+                .record_funding_rate_samples(now_ms, &samples, state.env().as_str());
     }
 
     // Cross-exchange carry needs >= 2 funding prints; same-exchange basis
@@ -1284,6 +1286,7 @@ async fn scan_funding_opportunities_for_symbol(
                             symbol,
                             now_basis_ms.saturating_sub(7 * 24 * 3_600_000),
                             now_basis_ms,
+                            state.env().as_str(),
                         )
                         .unwrap_or_default()
                         .into_iter()
@@ -1551,7 +1554,7 @@ pub async fn get_funding_trend_impl(
     let map_funding = |venue: &str| -> Vec<(i64, f64)> {
         state
             .state_store
-            .funding_rate_series(venue, symbol, from_ms, now_ms)
+            .funding_rate_series(venue, symbol, from_ms, now_ms, state.env().as_str())
             .unwrap_or_default()
             .into_iter()
             .filter_map(|(ts, r8h, _)| {
@@ -1567,11 +1570,13 @@ pub async fn get_funding_trend_impl(
     // venue-neutral AND robust to a residual outlier surviving the store's
     // consistency filter (a mean lets one bad mid move the whole line).
     let mut buckets: HashMap<i64, Vec<f64>> = HashMap::new();
-    if let Ok(samples) =
-        state
-            .state_store
-            .spread_samples_mode(symbol, state.usd_merge_quotes(), from_ms, now_ms)
-    {
+    if let Ok(samples) = state.state_store.spread_samples_mode(
+        symbol,
+        state.usd_merge_quotes(),
+        from_ms,
+        now_ms,
+        state.env().as_str(),
+    ) {
         for s in samples {
             if !s.mid.is_finite() || s.mid <= 0.0 || s.ts_ms < 0 {
                 continue;

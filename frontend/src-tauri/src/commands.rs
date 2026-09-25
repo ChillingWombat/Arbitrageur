@@ -1697,10 +1697,13 @@ pub async fn fetch_orderbooks_impl(
     // a store failure must never break the market-data path.
     let now_ms = Utc::now().timestamp_millis();
     let merge_usd = state.usd_merge_quotes();
-    let _ =
-        state
-            .state_store
-            .record_spread_samples_mode(symbol, merge_usd, now_ms, &sample_entries);
+    let _ = state.state_store.record_spread_samples_mode(
+        symbol,
+        merge_usd,
+        now_ms,
+        &sample_entries,
+        state.env().as_str(),
+    );
 
     // Hourly retention pass: settings-driven time cutoff + GB budget.
     // Both unset -> no-op. Best-effort, never breaks ingestion.
@@ -1906,6 +1909,7 @@ pub async fn scan_spatial_opportunities_impl(
         state.usd_merge_quotes(),
         scan_history_from,
         now_ms,
+        state.env().as_str(),
     ) {
         for s in &samples {
             if s.mid.is_finite() && s.mid > 0.0 {
@@ -2798,6 +2802,8 @@ fn transition_environment(
         if !is_unlocked {
             state.set_environment(crate::state::TradingEnvironment::Testnet);
             state.market_data_hub.clear();
+            state.stablecoin_fx.clear_venue();
+            state.latency_ema.lock().clear();
             return Err("Cannot enable Live Trading while the secure credential vault is locked. Unlock the vault first.".into());
         }
         state.sync_vault_credentials_to_adapters();
@@ -2813,6 +2819,8 @@ fn transition_environment(
         if ready_count < 2 {
             state.set_environment(crate::state::TradingEnvironment::Testnet);
             state.market_data_hub.clear();
+            state.stablecoin_fx.clear_venue();
+            state.latency_ema.lock().clear();
             return Err(format!(
                 "Live Trading requires at least two venues with authenticated live credentials (currently {ready_count} ready: {}). Please configure and enable API keys in Settings.",
                 if ready_venues.is_empty() { "none".to_string() } else { ready_venues.join(", ") }
@@ -2838,6 +2846,9 @@ fn transition_environment(
         // from the new env's watchlist refresh. Global rates stay: the FX
         // table is venue-independent.
         state.stablecoin_fx.clear_venue();
+        // Latency EMAs are keyed by venue only — a testnet RTT must not
+        // seed the live venue's latency readout.
+        state.latency_ema.lock().clear();
     }
     Ok(target == crate::state::TradingEnvironment::Live)
 }
@@ -3510,9 +3521,13 @@ pub(crate) async fn cached_venue_volumes(
         let now_ms = chrono::Utc::now().timestamp_millis();
         let merge_usd = state.usd_merge_quotes();
         for (venue, vols) in &map {
-            let _ = state
-                .state_store
-                .record_venue_volume_samples_mode(venue, now_ms, vols, merge_usd);
+            let _ = state.state_store.record_venue_volume_samples_mode(
+                venue,
+                now_ms,
+                vols,
+                merge_usd,
+                state.env().as_str(),
+            );
         }
     }
     *state.volume_cache.lock() = Some((std::time::Instant::now(), map.clone()));
@@ -3586,9 +3601,10 @@ pub async fn get_signal_series_impl(
     let store = state.state_store.clone();
     let sym = symbol.to_string();
     let merge_usd = state.usd_merge_quotes();
+    let env = state.env().as_str();
     let (raw, earliest_ts_ms) = tokio::task::spawn_blocking(move || {
-        let rows = store.spread_samples_mode(&sym, merge_usd, since_ms, now_ms)?;
-        let earliest = store.earliest_spread_sample_ts_mode(&sym, merge_usd)?;
+        let rows = store.spread_samples_mode(&sym, merge_usd, since_ms, now_ms, env)?;
+        let earliest = store.earliest_spread_sample_ts_mode(&sym, merge_usd, env)?;
         Ok::<_, anyhow::Error>((rows, earliest))
     })
     .await
@@ -3895,10 +3911,11 @@ pub async fn get_matrix_baselines_impl(
     let store = state.state_store.clone();
     let sym = symbol.to_string();
     let mode_owned = mode.to_string();
+    let env = state.env().as_str();
     let snapshot = tokio::task::spawn_blocking(move || {
         let mut all = Vec::new();
         for k in &keys {
-            if let Ok(mut rows) = store.spread_samples_mode(k, merge_usd, since_ms, now_ms) {
+            if let Ok(mut rows) = store.spread_samples_mode(k, merge_usd, since_ms, now_ms, env) {
                 all.append(&mut rows);
             }
         }
@@ -4015,10 +4032,11 @@ pub async fn get_spread_analytics_impl(
     let since_ms = now_ms - (window_secs as i64) * 1000;
     let store = state.state_store.clone();
     let sym = symbol.to_string();
+    let env = state.env().as_str();
     tokio::task::spawn_blocking(move || {
         let mut all = Vec::new();
         for k in &keys {
-            if let Ok(mut rows) = store.spread_samples_mode(k, merge_usd, since_ms, now_ms) {
+            if let Ok(mut rows) = store.spread_samples_mode(k, merge_usd, since_ms, now_ms, env) {
                 all.append(&mut rows);
             }
         }
@@ -5127,7 +5145,7 @@ pub(crate) async fn maybe_record_margin_snapshots(state: &AppEngineState, now_ms
         let used = (equity - free).max(0.0);
         if state
             .state_store
-            .record_margin_snapshot(vid, vid, now_ms, equity, used, rate)
+            .record_margin_snapshot(vid, vid, now_ms, equity, used, rate, state.env().as_str())
             .is_ok()
         {
             state
@@ -5250,17 +5268,18 @@ pub(crate) fn get_session_profile_impl(
     // hourly masks apply inside the monitor evaluation itself.
     let mask = in_funding_mask(now_ms, &[8, 4]);
     let merge_usd = state.usd_merge_quotes();
+    let env = state.env().as_str();
     let rows = state
         .state_store
-        .session_profiles_mode(symbol, merge_usd)
+        .session_profiles_mode(symbol, merge_usd, env)
         .map_err(|e| e.to_string())?;
     let promotion_row = state
         .state_store
-        .phase2_promotion_state_mode(symbol, merge_usd)
+        .phase2_promotion_state_mode(symbol, merge_usd, env)
         .map_err(|e| e.to_string())?;
     let anchor_row = state
         .state_store
-        .phase2_har_anchor_mode(symbol, merge_usd)
+        .phase2_har_anchor_mode(symbol, merge_usd, env)
         .map_err(|e| e.to_string())?;
     let rescaled =
         crate::seasonality::promotion_active(promotion_row.as_ref(), anchor_row.as_ref(), now_ms);
@@ -6302,11 +6321,12 @@ mod tests {
                         ask_depth: None,
                     },
                 ],
+                state.env().as_str(),
             )
             .unwrap();
         state
             .state_store
-            .rollup_session_profiles("BTC", ts - 1_000, ts + 1_000, ts)
+            .rollup_session_profiles("BTC", ts - 1_000, ts + 1_000, ts, state.env().as_str())
             .unwrap();
         let prof = get_session_profile_impl("BTC-USDC", &state).unwrap();
         assert_eq!(prof.sessions.len(), 5);
@@ -6681,7 +6701,7 @@ mod tests {
         enforce_retention_pass(&state, now);
         let rows = state
             .state_store
-            .spread_samples("BTC-USDC", 0, i64::MAX)
+            .spread_samples("BTC-USDC", 0, i64::MAX, state.env().as_str())
             .expect("samples");
         assert_eq!(rows.len(), 4);
         assert!(rows.iter().all(|r| r.ts_ms >= now - 3 * 86_400_000));
@@ -6702,7 +6722,7 @@ mod tests {
         enforce_retention_pass(&state, now);
         let rows = state
             .state_store
-            .spread_samples("BTC-USDC", 0, i64::MAX)
+            .spread_samples("BTC-USDC", 0, i64::MAX, state.env().as_str())
             .expect("samples");
         assert_eq!(rows.len(), 4, "both unset must leave history alone");
     }
@@ -6733,7 +6753,7 @@ mod tests {
         if count > 0 {
             let rows = state
                 .state_store
-                .spread_samples("BTC-USDC", 0, i64::MAX)
+                .spread_samples("BTC-USDC", 0, i64::MAX, state.env().as_str())
                 .expect("samples");
             assert_eq!(
                 rows.last().unwrap().ts_ms,
@@ -6812,7 +6832,7 @@ mod tests {
         enforce_retention_pass(&state, now);
         let rows = state
             .state_store
-            .spread_samples("BTC-USDC", 0, i64::MAX)
+            .spread_samples("BTC-USDC", 0, i64::MAX, state.env().as_str())
             .expect("samples");
         assert!(
             rows.len() <= 3,
@@ -10317,7 +10337,12 @@ mod tests {
         let now_ms = Utc::now().timestamp_millis();
         let samples = state
             .state_store
-            .spread_samples("BTC-USDC", now_ms - 86_400_000, now_ms)
+            .spread_samples(
+                "BTC-USDC",
+                now_ms - 86_400_000,
+                now_ms,
+                state.env().as_str(),
+            )
             .expect("history");
         let mut mids: HashMap<String, Vec<(i64, f64)>> = HashMap::new();
         for s in &samples {
@@ -12594,7 +12619,7 @@ mod tests {
         assert_eq!(ran2, 0);
         let events = state
             .state_store
-            .recent_autotune_apply_events("BTC-USDC", 10)
+            .recent_autotune_apply_events("BTC-USDC", 10, state.env().as_str())
             .unwrap();
         assert_eq!(events.len(), 1, "one scheduler apply audited");
         assert!(
@@ -12607,7 +12632,7 @@ mod tests {
         // ETH-USDC manual → no audit events at all.
         assert!(state
             .state_store
-            .recent_autotune_apply_events("ETH-USDC", 10)
+            .recent_autotune_apply_events("ETH-USDC", 10, state.env().as_str())
             .unwrap()
             .is_empty());
     }
@@ -12756,7 +12781,7 @@ mod tests {
         assert_eq!(ticker.sliding_window, "12h");
         let events = state
             .state_store
-            .recent_autotune_apply_events("BTC-USDC", 10)
+            .recent_autotune_apply_events("BTC-USDC", 10, state.env().as_str())
             .expect("audit read");
         assert_eq!(events.len(), 1);
         let applied: serde_json::Value =
@@ -12791,7 +12816,7 @@ mod tests {
         );
         assert!(state
             .state_store
-            .recent_autotune_apply_events("BTC-USDC", 10)
+            .recent_autotune_apply_events("BTC-USDC", 10, state.env().as_str())
             .expect("audit read")
             .is_empty());
     }
@@ -12813,7 +12838,7 @@ mod tests {
         );
         assert!(state
             .state_store
-            .recent_autotune_apply_events("BTC-USDC", 10)
+            .recent_autotune_apply_events("BTC-USDC", 10, state.env().as_str())
             .expect("audit read")
             .is_empty());
         assert!(
@@ -12866,7 +12891,7 @@ mod tests {
         assert!((strategy.target_profit_bps - 8.5).abs() < 1e-12);
         let events = state
             .state_store
-            .recent_autotune_apply_events("BTC-USDC", 10)
+            .recent_autotune_apply_events("BTC-USDC", 10, state.env().as_str())
             .expect("audit read");
         assert_eq!(events.len(), 4, "every apply writes its own audit line");
     }
@@ -12918,12 +12943,12 @@ mod tests {
         let to = base_day + 86_400_000;
         let written = state
             .state_store
-            .rollup_session_profiles("BTC-USDC", from, to, to)
+            .rollup_session_profiles("BTC-USDC", from, to, to, state.env().as_str())
             .expect("rollup");
         assert_eq!(written, 5);
         let stored = state
             .state_store
-            .session_profiles("BTC-USDC")
+            .session_profiles("BTC-USDC", state.env().as_str())
             .expect("rows");
         assert!(
             stored.iter().any(|r| r.rv_bps.is_some()),
@@ -12933,6 +12958,7 @@ mod tests {
         state
             .state_store
             .phase2_upsert_har_anchor(&crate::state_store::HarAnchorRow {
+                environment: state.env().as_str().to_string(),
                 symbol: "BTC-USDC".to_string(),
                 intercept: 0.1,
                 b_daily: 0.5,
@@ -12948,6 +12974,7 @@ mod tests {
         state
             .state_store
             .phase2_upsert_promotion_state(&crate::state_store::PromotionStateRow {
+                environment: state.env().as_str().to_string(),
                 symbol: "BTC-USDC".to_string(),
                 status: "demoted".to_string(),
                 fit_delta_bps: 2.0,
@@ -12970,6 +12997,7 @@ mod tests {
         state
             .state_store
             .phase2_upsert_promotion_state(&crate::state_store::PromotionStateRow {
+                environment: state.env().as_str().to_string(),
                 symbol: "BTC-USDC".to_string(),
                 status: "promoted".to_string(),
                 fit_delta_bps: 2.0,
@@ -14396,7 +14424,7 @@ mod tests {
             .collect();
         state
             .state_store
-            .record_spread_samples(symbol, ts_ms, &entries)
+            .record_spread_samples(symbol, ts_ms, &entries, state.env().as_str())
             .expect("record samples");
     }
 
@@ -14616,7 +14644,7 @@ mod tests {
 
         let rows = state
             .state_store
-            .spread_samples("BTC-USDC", 0, i64::MAX)
+            .spread_samples("BTC-USDC", 0, i64::MAX, state.env().as_str())
             .expect("samples");
         assert_eq!(rows.len(), 3, "one row per reporting venue per poll");
         let hl = rows.iter().find(|r| r.venue_id == "hyperliquid").unwrap();
@@ -15031,7 +15059,7 @@ mod tests {
                 .map(|vid| {
                     state
                         .state_store
-                        .list_margin_snapshots(vid, 0)
+                        .list_margin_snapshots(vid, 0, state.env().as_str())
                         .expect("snapshots list")
                         .len()
                 })
@@ -15069,11 +15097,20 @@ mod tests {
                 10_000.0,
                 2_000.0,
                 20.0,
+                state.env().as_str(),
             )
             .expect("snapshot");
         state
             .state_store
-            .record_margin_snapshot("lighter", "lighter", now - hour, 10_000.0, 4_000.0, 40.0)
+            .record_margin_snapshot(
+                "lighter",
+                "lighter",
+                now - hour,
+                10_000.0,
+                4_000.0,
+                40.0,
+                state.env().as_str(),
+            )
             .expect("snapshot");
         let hist = get_utilisation_history_impl("lighter", Some(24), &state).expect("history");
         assert!(hist.avg_rate_pct.is_some());
@@ -15962,6 +15999,7 @@ mod tests {
                             ask_depth: None,
                         },
                     ],
+                    state.env().as_str(),
                 )
                 .expect("record");
         }

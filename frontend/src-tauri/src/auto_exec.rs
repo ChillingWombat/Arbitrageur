@@ -292,7 +292,7 @@ struct TrackedPosition {
 }
 
 impl TrackedPosition {
-    fn persist_row(&self, key: &PairKey) -> BotPositionRow {
+    fn persist_row(&self, key: &PairKey, environment: &str) -> BotPositionRow {
         BotPositionRow {
             symbol: key.symbol.clone(),
             buy_venue: key.buy_venue.clone(),
@@ -305,6 +305,7 @@ impl TrackedPosition {
             deadline_ms: self.deadline_ms,
             unwatched_since_ms: self.unwatched_since_ms,
             last_seen_ms: self.last_seen_ms,
+            environment: environment.to_string(),
         }
     }
 }
@@ -435,7 +436,7 @@ impl OpportunityExecutor {
 
         state
             .state_store
-            .upsert_bot_position(&pos.persist_row(&key))
+            .upsert_bot_position(&pos.persist_row(&key, state.env().as_str()))
             .map_err(|e| format!("upsert bot position: {e}"))?;
 
         self.open.lock().insert(key.clone(), pos.clone());
@@ -488,7 +489,10 @@ impl OpportunityExecutor {
     /// recent `bot_exit` audits. Never fabricates watchers.
     pub fn rehydrate(&self, state: &AppEngineState) {
         let now_ms = Utc::now().timestamp_millis();
-        let persisted = state.state_store.list_bot_positions().unwrap_or_default();
+        let persisted = state
+            .state_store
+            .list_bot_positions(state.env().as_str())
+            .unwrap_or_default();
         for row in persisted {
             let key = PairKey::new(&row.symbol, &row.buy_venue, &row.sell_venue);
             if Self::ledger_backs(state, &key) {
@@ -510,6 +514,7 @@ impl OpportunityExecutor {
                     &row.symbol,
                     &row.buy_venue,
                     &row.sell_venue,
+                    state.env().as_str(),
                 );
                 self.audit(
                     state,
@@ -530,11 +535,13 @@ impl OpportunityExecutor {
             }
         }
         // Cooldown rebuild: the newest bot_exit per pair within the scan.
-        if let Ok(events) =
-            state
-                .state_store
-                .recent_monitor_signal_events(None, None, None, REBUILD_SCAN_LIMIT)
-        {
+        if let Ok(events) = state.state_store.recent_monitor_signal_events(
+            None,
+            None,
+            None,
+            REBUILD_SCAN_LIMIT,
+            state.env().as_str(),
+        ) {
             let mut fresh: HashMap<PairKey, i64> = HashMap::new();
             for e in events {
                 if e.trigger == "bot_decision" && e.new_status == "bot_exit" {
@@ -592,6 +599,7 @@ impl OpportunityExecutor {
             p_win,
             Some(economics_json),
             "bot_decision",
+            state.env().as_str(),
         );
         if res.is_err() {
             self.audit_errors.fetch_add(1, Ordering::Relaxed);
@@ -801,7 +809,7 @@ impl OpportunityExecutor {
                         self.open.lock().insert(key.clone(), pos.clone());
                         let _ = state
                             .state_store
-                            .upsert_bot_position(&pos.persist_row(&key));
+                            .upsert_bot_position(&pos.persist_row(&key, state.env().as_str()));
                     }
                     ExitEval::Exit { trigger, reason } => {
                         self.exit_position(state, dispatch, &key, &pos, trigger, &reason, now_ms)
@@ -875,7 +883,7 @@ impl OpportunityExecutor {
                         self.open.lock().insert(key.clone(), pos.clone());
                         let _ = state
                             .state_store
-                            .upsert_bot_position(&pos.persist_row(&key));
+                            .upsert_bot_position(&pos.persist_row(&key, state.env().as_str()));
                         self.audit(
                             state,
                             &key,
@@ -926,6 +934,7 @@ impl OpportunityExecutor {
                     &key.symbol,
                     &key.buy_venue,
                     &key.sell_venue,
+                    state.env().as_str(),
                 );
                 let exit_json = serde_json::json!({
                     "trigger": trigger.as_str(),
@@ -990,7 +999,10 @@ impl OpportunityExecutor {
             .map(|t| t.and_utc().timestamp_millis())
             .unwrap_or(0);
         let (mut enters, mut exits, mut skips) = (0i64, 0i64, 0i64);
-        if let Ok(counts) = state.state_store.count_bot_decisions_since(day_start_ms) {
+        if let Ok(counts) = state
+            .state_store
+            .count_bot_decisions_since(day_start_ms, state.env().as_str())
+        {
             for (status, n) in counts {
                 match status.as_str() {
                     "bot_enter" => enters = n,
@@ -1278,7 +1290,7 @@ mod tests {
     ) -> Vec<crate::state_store::MonitorSignalEventRow> {
         state
             .state_store
-            .recent_monitor_signal_events(None, None, None, 10_000)
+            .recent_monitor_signal_events(None, None, None, 10_000, state.env().as_str())
             .unwrap_or_default()
             .into_iter()
             .filter(|e| e.trigger == "bot_decision" && e.new_status == decision)
@@ -1343,7 +1355,7 @@ mod tests {
         assert_eq!(
             state
                 .state_store
-                .list_bot_positions()
+                .list_bot_positions(state.env().as_str())
                 .unwrap_or_default()
                 .len(),
             1
@@ -1719,6 +1731,7 @@ mod tests {
         state
             .state_store
             .upsert_bot_position(&BotPositionRow {
+                environment: state.env().as_str().to_string(),
                 symbol: "BTC".to_string(),
                 buy_venue: "hyperliquid".to_string(),
                 sell_venue: "lighter".to_string(),
@@ -1736,6 +1749,7 @@ mod tests {
         state
             .state_store
             .upsert_bot_position(&BotPositionRow {
+                environment: state.env().as_str().to_string(),
                 symbol: "ETH".to_string(),
                 buy_venue: "hyperliquid".to_string(),
                 sell_venue: "lighter".to_string(),
@@ -1756,7 +1770,10 @@ mod tests {
             .open
             .lock()
             .contains_key(&PairKey::new("BTC", "hyperliquid", "lighter")));
-        let remaining = state.state_store.list_bot_positions().unwrap_or_default();
+        let remaining = state
+            .state_store
+            .list_bot_positions(state.env().as_str())
+            .unwrap_or_default();
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].symbol, "BTC");
         assert!(bot_events(&state, "bot_exit")
@@ -1851,7 +1868,7 @@ mod tests {
         // Verify persisted to DB
         let persisted = state
             .state_store
-            .list_bot_positions()
+            .list_bot_positions(state.env().as_str())
             .expect("list bot positions");
         assert_eq!(persisted.len(), 1);
         assert_eq!(persisted[0].symbol, "BTC");

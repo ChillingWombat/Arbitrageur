@@ -6,32 +6,43 @@
 use super::*;
 
 impl StateStore {
-    /// Read shrunk session aggregates for a symbol (alias-aware). Missing
-    /// sessions simply have no row — callers read that as neutral x1.0.
-    pub fn session_profiles(&self, symbol: &str) -> anyhow::Result<Vec<SessionProfileRow>> {
-        self.session_profiles_mode(symbol, true)
+    /// Read shrunk session aggregates for a symbol (alias-aware) in one
+    /// environment. Missing sessions simply have no row — callers read
+    /// that as neutral x1.0.
+    pub fn session_profiles(
+        &self,
+        symbol: &str,
+        environment: &str,
+    ) -> anyhow::Result<Vec<SessionProfileRow>> {
+        self.session_profiles_mode(symbol, true, environment)
     }
 
     /// Mode-aware variant: `merge_usd = false` (the `separate` policy) is
-    /// quote-strict — a pair key reads only its own series.
+    /// quote-strict — a pair key reads only its own series. Reads are
+    /// environment-strict: 'unknown' provenance rows never serve either
+    /// environment.
     pub fn session_profiles_mode(
         &self,
         symbol: &str,
         merge_usd: bool,
+        environment: &str,
     ) -> anyhow::Result<Vec<SessionProfileRow>> {
         let symbol = normalize_symbol(symbol)?;
+        let environment = normalize_environment(environment)?;
         let keys = crate::state_store::samples::sample_keys(&symbol, merge_usd);
         let placeholders = keys.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
             "SELECT symbol, session_id, n_episodes, med_abs_spread_bps, p90_spread_bps,
-                    rv_bps, win_rate, mean_hold_s, provisional, updated_ts
-             FROM session_profiles WHERE symbol IN ({placeholders})
+                    rv_bps, win_rate, mean_hold_s, provisional, updated_ts, environment
+             FROM session_profiles
+             WHERE symbol IN ({placeholders}) AND environment = ?
              ORDER BY session_id ASC"
         );
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(&sql)?;
-        let params: Vec<&dyn rusqlite::ToSql> =
+        let mut params: Vec<&dyn rusqlite::ToSql> =
             keys.iter().map(|k| k as &dyn rusqlite::ToSql).collect();
+        params.push(&environment);
         let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
             Ok(SessionProfileRow {
                 symbol: r.get(0)?,
@@ -44,14 +55,20 @@ impl StateStore {
                 mean_hold_s: r.get(7)?,
                 provisional: r.get::<_, i64>(8)? != 0,
                 updated_ts: r.get(9)?,
+                environment: r.get(10)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    /// Read hour-bin modulators for a symbol (alias-aware).
-    pub fn session_hour_bins(&self, symbol: &str) -> anyhow::Result<Vec<SessionHourBinRow>> {
-        self.session_hour_bins_mode(symbol, true)
+    /// Read hour-bin modulators for a symbol (alias-aware) in one
+    /// environment.
+    pub fn session_hour_bins(
+        &self,
+        symbol: &str,
+        environment: &str,
+    ) -> anyhow::Result<Vec<SessionHourBinRow>> {
+        self.session_hour_bins_mode(symbol, true, environment)
     }
 
     /// Mode-aware variant matching [`Self::session_profiles_mode`].
@@ -59,19 +76,24 @@ impl StateStore {
         &self,
         symbol: &str,
         merge_usd: bool,
+        environment: &str,
     ) -> anyhow::Result<Vec<SessionHourBinRow>> {
         let symbol = normalize_symbol(symbol)?;
+        let environment = normalize_environment(environment)?;
         let keys = crate::state_store::samples::sample_keys(&symbol, merge_usd);
         let placeholders = keys.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
-            "SELECT symbol, hour, n_obs, med_spread_bps, modulator, provisional, updated_ts
-             FROM session_hour_bins WHERE symbol IN ({placeholders})
+            "SELECT symbol, hour, n_obs, med_spread_bps, modulator, provisional, updated_ts,
+                    environment
+             FROM session_hour_bins
+             WHERE symbol IN ({placeholders}) AND environment = ?
              ORDER BY hour ASC"
         );
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(&sql)?;
-        let params: Vec<&dyn rusqlite::ToSql> =
+        let mut params: Vec<&dyn rusqlite::ToSql> =
             keys.iter().map(|k| k as &dyn rusqlite::ToSql).collect();
+        params.push(&environment);
         let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
             Ok(SessionHourBinRow {
                 symbol: r.get(0)?,
@@ -81,13 +103,16 @@ impl StateStore {
                 modulator: r.get(4)?,
                 provisional: r.get::<_, i64>(5)? != 0,
                 updated_ts: r.get(6)?,
+                environment: r.get(7)?,
             })
         })?;
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     /// Hourly rollup: rebuild one symbol's session aggregates plus 24h
-    /// hour-bin modulators from the trailing spread log. Pair spreads are
+    /// hour-bin modulators from the trailing spread log under
+    /// `environment` — inputs and outputs are env-strict, so a testnet
+    /// history can never calibrate a live profile. Pair spreads are
     /// aligned with the same 30s gap rule as the live monitor; gaps stay
     /// gaps (no interpolation). Returns profile rows written (0 when the
     /// history cannot support a single pair observation).
@@ -97,8 +122,9 @@ impl StateStore {
         from_ts_ms: i64,
         to_ts_ms: i64,
         now_ms: i64,
+        environment: &str,
     ) -> anyhow::Result<usize> {
-        self.rollup_session_profiles_mode(symbol, true, from_ts_ms, to_ts_ms, now_ms)
+        self.rollup_session_profiles_mode(symbol, true, from_ts_ms, to_ts_ms, now_ms, environment)
     }
 
     /// Mode-aware variant: under the `separate` USD-quote policy a quoted
@@ -110,6 +136,7 @@ impl StateStore {
         from_ts_ms: i64,
         to_ts_ms: i64,
         now_ms: i64,
+        environment: &str,
     ) -> anyhow::Result<usize> {
         use arbitrageur_math::pair_monitor::{build_pair_series, reversion_stats, PairObservation};
         use arbitrageur_math::session::{
@@ -124,7 +151,9 @@ impl StateStore {
         if canonical.is_empty() {
             anyhow::bail!("invalid symbol: expected 1-64 non-control characters");
         }
-        let samples = self.spread_samples_mode(symbol, merge_usd, from_ts_ms, to_ts_ms)?;
+        let environment = normalize_environment(environment)?;
+        let samples =
+            self.spread_samples_mode(symbol, merge_usd, from_ts_ms, to_ts_ms, &environment)?;
         let mut mids_by_venue: HashMap<String, Vec<(i64, f64)>> = HashMap::new();
         for s in &samples {
             if s.mid.is_finite() && s.mid > 0.0 {
@@ -197,8 +226,8 @@ impl StateStore {
             let mut upsert = tx.prepare(
                 "INSERT OR REPLACE INTO session_profiles
                  (symbol, session_id, n_episodes, med_abs_spread_bps, p90_spread_bps,
-                  rv_bps, win_rate, mean_hold_s, provisional, updated_ts)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                  rv_bps, win_rate, mean_hold_s, provisional, updated_ts, environment)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             )?;
             for sess in SessionId::all() {
                 let sub: Vec<PairObservation> = all_abs
@@ -220,7 +249,8 @@ impl StateStore {
                         Option::<f64>::None,
                         Option::<f64>::None,
                         1,
-                        now_ms
+                        now_ms,
+                        environment
                     ])?;
                     written += 1;
                     continue;
@@ -269,7 +299,8 @@ impl StateStore {
                     win_rate,
                     mean_hold_s,
                     if provisional { 1 } else { 0 },
-                    now_ms
+                    now_ms,
+                    environment
                 ])?;
                 written += 1;
             }
@@ -277,8 +308,9 @@ impl StateStore {
         {
             let mut upsert = tx.prepare(
                 "INSERT OR REPLACE INTO session_hour_bins
-                 (symbol, hour, n_obs, med_spread_bps, modulator, provisional, updated_ts)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                 (symbol, hour, n_obs, med_spread_bps, modulator, provisional, updated_ts,
+                  environment)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             )?;
             for hour in 0..24i64 {
                 let vals: Vec<f64> = all_abs
@@ -316,7 +348,8 @@ impl StateStore {
                     med,
                     modulator,
                     if provisional { 1 } else { 0 },
-                    now_ms
+                    now_ms,
+                    environment
                 ])?;
             }
         }
@@ -324,8 +357,12 @@ impl StateStore {
         Ok(written)
     }
 
-    pub fn phase2_har_anchor(&self, symbol: &str) -> anyhow::Result<Option<HarAnchorRow>> {
-        self.phase2_har_anchor_mode(symbol, true)
+    pub fn phase2_har_anchor(
+        &self,
+        symbol: &str,
+        environment: &str,
+    ) -> anyhow::Result<Option<HarAnchorRow>> {
+        self.phase2_har_anchor_mode(symbol, true, environment)
     }
 
     /// Mode-aware variant matching [`Self::session_profiles_mode`].
@@ -333,19 +370,23 @@ impl StateStore {
         &self,
         symbol: &str,
         merge_usd: bool,
+        environment: &str,
     ) -> anyhow::Result<Option<HarAnchorRow>> {
         let symbol = normalize_symbol(symbol)?;
+        let environment = normalize_environment(environment)?;
         let keys = crate::state_store::samples::sample_keys(&symbol, merge_usd);
         let placeholders = keys.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
             "SELECT symbol, intercept, b_daily, b_weekly, b_monthly, r2, n_days,
-                    forecast_rv_bps, trailing_mean_rv_bps, updated_ts
-             FROM har_anchors WHERE symbol IN ({placeholders}) LIMIT 1"
+                    forecast_rv_bps, trailing_mean_rv_bps, updated_ts, environment
+             FROM har_anchors
+             WHERE symbol IN ({placeholders}) AND environment = ? LIMIT 1"
         );
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(&sql)?;
-        let params: Vec<&dyn rusqlite::ToSql> =
+        let mut params: Vec<&dyn rusqlite::ToSql> =
             keys.iter().map(|k| k as &dyn rusqlite::ToSql).collect();
+        params.push(&environment);
         let row = stmt
             .query_map(rusqlite::params_from_iter(params), |r| {
                 Ok(HarAnchorRow {
@@ -359,6 +400,7 @@ impl StateStore {
                     forecast_rv_bps: r.get(7)?,
                     trailing_mean_rv_bps: r.get(8)?,
                     updated_ts: r.get(9)?,
+                    environment: r.get(10)?,
                 })
             })?
             .next()
@@ -371,7 +413,9 @@ impl StateStore {
     }
 
     /// Mode-aware variant: under `separate` the pair key is the row's
-    /// identity — sibling quotes never share an anchor row.
+    /// identity — sibling quotes never share an anchor row. The row's
+    /// `environment` is part of the conflict identity, so a testnet
+    /// anchor can never overwrite a live one.
     pub fn phase2_upsert_har_anchor_mode(
         &self,
         row: &HarAnchorRow,
@@ -381,6 +425,7 @@ impl StateStore {
         if symbol.is_empty() {
             anyhow::bail!("invalid symbol: expected 1-64 non-control characters");
         }
+        let environment = normalize_environment(&row.environment)?;
         for (name, v) in [
             ("intercept", row.intercept),
             ("b_daily", row.b_daily),
@@ -408,9 +453,9 @@ impl StateStore {
         conn.execute(
             "INSERT INTO har_anchors
                  (symbol, intercept, b_daily, b_weekly, b_monthly, r2, n_days,
-                  forecast_rv_bps, trailing_mean_rv_bps, updated_ts)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
-             ON CONFLICT(symbol) DO UPDATE SET
+                  forecast_rv_bps, trailing_mean_rv_bps, updated_ts, environment)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+             ON CONFLICT(symbol, environment) DO UPDATE SET
                  intercept = ?2, b_daily = ?3, b_weekly = ?4, b_monthly = ?5,
                  r2 = ?6, n_days = ?7, forecast_rv_bps = ?8,
                  trailing_mean_rv_bps = ?9, updated_ts = ?10",
@@ -424,7 +469,8 @@ impl StateStore {
                 row.n_days,
                 row.forecast_rv_bps,
                 row.trailing_mean_rv_bps,
-                row.updated_ts
+                row.updated_ts,
+                environment
             ],
         )?;
         Ok(())
@@ -433,8 +479,9 @@ impl StateStore {
     pub fn phase2_promotion_state(
         &self,
         symbol: &str,
+        environment: &str,
     ) -> anyhow::Result<Option<PromotionStateRow>> {
-        self.phase2_promotion_state_mode(symbol, true)
+        self.phase2_promotion_state_mode(symbol, true, environment)
     }
 
     /// Mode-aware variant matching [`Self::session_profiles_mode`].
@@ -442,18 +489,23 @@ impl StateStore {
         &self,
         symbol: &str,
         merge_usd: bool,
+        environment: &str,
     ) -> anyhow::Result<Option<PromotionStateRow>> {
         let symbol = normalize_symbol(symbol)?;
+        let environment = normalize_environment(environment)?;
         let keys = crate::state_store::samples::sample_keys(&symbol, merge_usd);
         let placeholders = keys.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
-            "SELECT symbol, status, fit_delta_bps, val_delta_bps, reason, updated_ts
-             FROM promotion_state WHERE symbol IN ({placeholders}) LIMIT 1"
+            "SELECT symbol, status, fit_delta_bps, val_delta_bps, reason, updated_ts,
+                    environment
+             FROM promotion_state
+             WHERE symbol IN ({placeholders}) AND environment = ? LIMIT 1"
         );
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(&sql)?;
-        let params: Vec<&dyn rusqlite::ToSql> =
+        let mut params: Vec<&dyn rusqlite::ToSql> =
             keys.iter().map(|k| k as &dyn rusqlite::ToSql).collect();
+        params.push(&environment);
         let row = stmt
             .query_map(rusqlite::params_from_iter(params), |r| {
                 Ok(PromotionStateRow {
@@ -463,6 +515,7 @@ impl StateStore {
                     val_delta_bps: r.get(3)?,
                     reason: r.get(4)?,
                     updated_ts: r.get(5)?,
+                    environment: r.get(6)?,
                 })
             })?
             .next()
@@ -475,7 +528,8 @@ impl StateStore {
     }
 
     /// Mode-aware variant: under `separate` the pair key is the row's
-    /// identity — sibling quotes never share a promotion row.
+    /// identity — sibling quotes never share a promotion row. The row's
+    /// `environment` is part of the conflict identity.
     pub fn phase2_upsert_promotion_state_mode(
         &self,
         row: &PromotionStateRow,
@@ -485,6 +539,7 @@ impl StateStore {
         if symbol.is_empty() {
             anyhow::bail!("invalid symbol: expected 1-64 non-control characters");
         }
+        let environment = normalize_environment(&row.environment)?;
         if !matches!(row.status.as_str(), "promoted" | "held" | "demoted") {
             anyhow::bail!("invalid promotion status '{}'", row.status);
         }
@@ -502,9 +557,10 @@ impl StateStore {
         let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO promotion_state
-                 (symbol, status, fit_delta_bps, val_delta_bps, reason, updated_ts)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT(symbol) DO UPDATE SET
+                 (symbol, status, fit_delta_bps, val_delta_bps, reason, updated_ts,
+                  environment)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT(symbol, environment) DO UPDATE SET
                  status = ?2, fit_delta_bps = ?3, val_delta_bps = ?4,
                  reason = ?5, updated_ts = ?6",
             params![
@@ -513,7 +569,8 @@ impl StateStore {
                 row.fit_delta_bps,
                 row.val_delta_bps,
                 row.reason,
-                row.updated_ts
+                row.updated_ts,
+                environment
             ],
         )?;
         Ok(())

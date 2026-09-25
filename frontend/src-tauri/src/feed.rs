@@ -194,6 +194,7 @@ fn ingest_book(state: &AppEngineState, book: &OrderBook, venue_id: &VenueId, sym
             state.usd_merge_quotes(),
             Utc::now().timestamp_millis(),
             &[entry],
+            state.env().as_str(),
         );
     }
 }
@@ -308,6 +309,10 @@ async fn run_hyperliquid(state: &AppEngineState) -> anyhow::Result<FeedOutcome> 
     let ws = ws_connect(&ws_url)
         .await
         .map_err(|e| anyhow::anyhow!("ws_connect: {e}"))?;
+    // Environment this socket was bound under: after a live/testnet flip
+    // the hub is cleared and re-admission is re-evaluated — frames from
+    // the old env's venue must stop, not repopulate it.
+    let connect_env = state.env();
     {
         use tokio_tungstenite::MaybeTlsStream;
         let peer = match ws.get_ref() {
@@ -350,6 +355,12 @@ async fn run_hyperliquid(state: &AppEngineState) -> anyhow::Result<FeedOutcome> 
         let Message::Text(text) = msg else {
             continue;
         };
+        if state.env() != connect_env {
+            tracing::info!(
+                "feed: hyperliquid env switched mid-connection; reconnecting under new env"
+            );
+            return Ok(FeedOutcome::Reconnect);
+        }
         let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) else {
             continue;
         };
@@ -453,6 +464,8 @@ async fn run_lighter_protocol(
         }
     };
     let ws = ws_connect(&ws_url).await?;
+    // Environment this socket was bound under — see run_hyperliquid.
+    let connect_env = state.env();
     let (mut write, mut read) = ws.split();
     for market_id in symbol_map.keys() {
         let frame = lighter_subscribe_message(*market_id).to_string();
@@ -494,6 +507,10 @@ async fn run_lighter_protocol(
                 let Message::Text(text) = msg else {
                     continue;
                 };
+                if state.env() != connect_env {
+                    tracing::info!("feed: {venue} env switched mid-connection; reconnecting under new env");
+                    return Ok(FeedOutcome::Reconnect);
+                }
                 handle_lighter_text(state, &venue_id, &mut lanes, &mut write, &text).await?;
             }
         }
@@ -601,6 +618,8 @@ async fn run_vanta(state: &AppEngineState) -> anyhow::Result<FeedOutcome> {
         anyhow::bail!("vanta lists no subscribable markets");
     }
     let ws = ws_connect(&ws_url).await?;
+    // Environment this socket was bound under — see run_hyperliquid.
+    let connect_env = state.env();
     let (mut write, mut read) = ws.split();
     for (sub_id, topic) in (1u64..).zip(topics.keys()) {
         let frame = vanta_subscribe_topic(sub_id, topic).to_string();
@@ -633,6 +652,10 @@ async fn run_vanta(state: &AppEngineState) -> anyhow::Result<FeedOutcome> {
         let Message::Text(text) = msg else {
             continue;
         };
+        if state.env() != connect_env {
+            tracing::info!("feed: vanta env switched mid-connection; reconnecting under new env");
+            return Ok(FeedOutcome::Reconnect);
+        }
         let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) else {
             continue;
         };

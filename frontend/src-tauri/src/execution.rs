@@ -3616,12 +3616,20 @@ async fn flatten_ticker_positions_scoped_impl(
             }
             if let Some(bot) = state.radar_bot.lock().clone() {
                 bot.forget_position(&sig.symbol, &venue_a, &venue_b);
-                let _ = state
-                    .state_store
-                    .delete_bot_position(&sig.symbol, &venue_a, &venue_b);
-                let _ = state
-                    .state_store
-                    .delete_bot_position(&sig.symbol, &venue_b, &venue_a);
+                // Scoped to the signal's own environment, not the current
+                // one — the tracker row lives where the position opened.
+                let _ = state.state_store.delete_bot_position(
+                    &sig.symbol,
+                    &venue_a,
+                    &venue_b,
+                    sig.environment.as_str(),
+                );
+                let _ = state.state_store.delete_bot_position(
+                    &sig.symbol,
+                    &venue_b,
+                    &venue_a,
+                    sig.environment.as_str(),
+                );
             }
         } else {
             state

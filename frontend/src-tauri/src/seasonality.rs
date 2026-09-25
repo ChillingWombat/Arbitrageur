@@ -74,7 +74,13 @@ fn daily_rv_series(
     }
     let samples = state
         .state_store
-        .spread_samples_mode(symbol, state.usd_merge_quotes(), start_ms, now_ms)
+        .spread_samples_mode(
+            symbol,
+            state.usd_merge_quotes(),
+            start_ms,
+            now_ms,
+            state.env().as_str(),
+        )
         .ok()?;
     let mut mids_by_venue: std::collections::HashMap<String, Vec<(i64, f64)>> =
         std::collections::HashMap::new();
@@ -170,6 +176,7 @@ fn run_one_symbol(
                 forecast_rv_bps: forecast,
                 trailing_mean_rv_bps: trailing,
                 updated_ts: now_ms,
+                environment: state.env().as_str().to_string(),
             };
             state
                 .state_store
@@ -208,6 +215,7 @@ fn run_one_symbol(
         val_delta_bps: decision.val_delta_bps,
         reason: decision.reason.clone(),
         updated_ts: now_ms,
+        environment: state.env().as_str().to_string(),
     };
     if state
         .state_store
@@ -228,7 +236,7 @@ pub fn run_seasonality_promotion(
     }
     let symbols = state
         .state_store
-        .distinct_sample_symbols_mode(state.usd_merge_quotes())
+        .distinct_sample_symbols_mode(state.usd_merge_quotes(), state.env().as_str())
         .map_err(|e| e.to_string())?;
     let stress_json = state
         .state_store
@@ -255,14 +263,15 @@ pub fn run_seasonality_promotion(
             PromotionStatus::Demoted => out.demoted += 1,
             PromotionStatus::Held => {
                 let merge_usd = state.usd_merge_quotes();
+                let env = state.env().as_str();
                 let has_anchor = state
                     .state_store
-                    .phase2_har_anchor_mode(symbol, merge_usd)
+                    .phase2_har_anchor_mode(symbol, merge_usd, env)
                     .map(|a| a.is_some())
                     .unwrap_or(false);
                 let has_promo = state
                     .state_store
-                    .phase2_promotion_state_mode(symbol, merge_usd)
+                    .phase2_promotion_state_mode(symbol, merge_usd, env)
                     .map(|p| p.is_some())
                     .unwrap_or(false);
                 if has_anchor || has_promo {
@@ -288,10 +297,11 @@ pub fn session_coupling_for(state: &AppEngineState, symbol: &str, now_ms: i64) -
     if now_ms <= 0 {
         return neutral;
     }
-    let profiles = match state
-        .state_store
-        .session_profiles_mode(symbol, state.usd_merge_quotes())
-    {
+    let profiles = match state.state_store.session_profiles_mode(
+        symbol,
+        state.usd_merge_quotes(),
+        state.env().as_str(),
+    ) {
         Ok(p) => p,
         Err(_) => return neutral,
     };
@@ -374,7 +384,13 @@ mod tests {
         }
     }
 
-    fn seed_two_venue_days(store: &StateStore, symbol: &str, days: i64, per_day: usize) {
+    fn seed_two_venue_days(
+        store: &StateStore,
+        symbol: &str,
+        days: i64,
+        per_day: usize,
+        environment: &str,
+    ) {
         let now = 90 * DAY_MS;
         for d in 0..days {
             let day_start = (now - days * DAY_MS) + d * DAY_MS;
@@ -397,6 +413,7 @@ mod tests {
                             sample("hyperliquid", 60_000.0 + wave),
                             sample("lighter", 60_000.0 - wave),
                         ],
+                        environment,
                     )
                     .unwrap();
             }
@@ -408,18 +425,18 @@ mod tests {
         let store = StateStore::open_in_memory().unwrap();
         let state = AppEngineState::new_inner_for_test(std::sync::Arc::new(store));
         let now = 90 * DAY_MS;
-        seed_two_venue_days(&state.state_store, "BTC-USDC", 60, 48);
+        seed_two_venue_days(&state.state_store, "BTC-USDC", 60, 48, state.env().as_str());
         let summary = run_seasonality_promotion(&state, now).unwrap();
         assert_eq!(summary.symbols_scanned, 1);
         assert_eq!(summary.anchors_written, 1);
         assert!(state
             .state_store
-            .phase2_har_anchor("BTC-USDC")
+            .phase2_har_anchor("BTC-USDC", state.env().as_str())
             .unwrap()
             .is_some());
         assert!(state
             .state_store
-            .phase2_promotion_state("BTC-USDC")
+            .phase2_promotion_state("BTC-USDC", state.env().as_str())
             .unwrap()
             .is_some());
         assert_eq!(
@@ -452,7 +469,7 @@ mod tests {
         let store = StateStore::open_in_memory().unwrap();
         let state = AppEngineState::new_inner_for_test(std::sync::Arc::new(store));
         let now = 90 * DAY_MS;
-        seed_two_venue_days(&state.state_store, "ETH-USDC", 60, 48);
+        seed_two_venue_days(&state.state_store, "ETH-USDC", 60, 48, state.env().as_str());
         let span_start = now - 60 * DAY_MS;
         let span_end = now - 20 * DAY_MS;
         state
@@ -484,6 +501,7 @@ mod tests {
     #[test]
     fn promotion_active_gates_display() {
         let promo = PromotionStateRow {
+            environment: "live".to_string(),
             symbol: "BTC".to_string(),
             status: "promoted".to_string(),
             fit_delta_bps: 2.0,
@@ -492,6 +510,7 @@ mod tests {
             updated_ts: 100,
         };
         let anchor = HarAnchorRow {
+            environment: "live".to_string(),
             symbol: "BTC".to_string(),
             intercept: 0.1,
             b_daily: 0.5,
