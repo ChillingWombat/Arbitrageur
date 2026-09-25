@@ -69,8 +69,8 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
     e.preventDefault();
     setError(null);
 
-    if ((isInitializing || isChanging) && Array.from(password).length < 12) {
-      setError("Password must be at least 12 characters long.");
+    if ((isInitializing || isChanging) && Array.from(password).length < 6) {
+      setError("Password must be at least 6 characters long.");
       return;
     }
 
@@ -172,7 +172,7 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
                 autoFocus={!isChanging}
                 placeholder={
                   isChanging || isInitializing
-                    ? "New master password (min 12 chars)..."
+                    ? "New master password (min 6 chars)..."
                     : "Enter master password..."
                 }
                 className="w-full bg-surface border border-surface-border rounded-lg px-3.5 py-2 text-xs font-mono text-slate-900 placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-primary/15 focus:border-primary transition-all shadow-2xs pr-10"
@@ -200,7 +200,7 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
                 className="w-full bg-surface border border-surface-border rounded-lg px-3.5 py-2 text-xs font-mono text-slate-900 placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-primary/15 focus:border-primary transition-all shadow-2xs"
               />
               <p className="mt-1.5 text-[11px] text-slate-500 font-sans leading-relaxed">
-                Use at least 12 characters. Letters, numbers, and symbols are supported. Remember this password — it cannot be recovered if lost.
+                Use at least 6 characters. Letters, numbers, and symbols are supported. Remember this password — it cannot be recovered if lost.
               </p>
             </div>
           )}
