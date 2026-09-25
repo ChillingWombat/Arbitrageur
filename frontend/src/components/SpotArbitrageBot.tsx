@@ -24,8 +24,8 @@ interface SpotArbitrageBotProps {
   isPaused?: boolean;
   hasApiConnectivity?: boolean;
   params: SpotStrategyParams;
-  /** Backend capability descriptor — spot is a permanent stub today, so the
-   *  whole execute surface is gated off when this says not-ready. */
+  /** Backend capability descriptor — gates the whole page off when the
+   *  backend reports the spot path unwired. */
   capability?: StrategyCapabilityDto;
 }
 
@@ -54,8 +54,13 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
   const [botStatus, setBotStatus] = useState<"idle" | "verifying" | "dispatching" | "filled" | "error">("idle");
   const [botMessage, setBotMessage] = useState<string>("");
 
-  const assets = ["BTC", "ETH", "SOL", "BNB", "SUI", "AVAX", "LINK", "NEAR"];
+  // Asset filter derives from what venues actually list — spot covers any
+  // asset class an admitted venue exposes (crypto, equities), not a fixed set.
   const assetBase = (sym: string) => sym.split(/[-_/]/)[0]?.toUpperCase() ?? sym;
+  const assets = React.useMemo(
+    () => Array.from(new Set(opportunities.map((o) => assetBase(o.symbol)))).sort(),
+    [opportunities],
+  );
   const filteredOpportunities =
     assetFilters.length === 0
       ? opportunities
@@ -153,9 +158,9 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
     }
   }, [bot.entriesAllowed, botStatus, filteredOpportunities, isPaused, minNetSpreadBps]);
 
-  const spotLogs = executionLogs.filter(
-    (l) => l.trade_type.toLowerCase().includes("spot") || l.direction?.toLowerCase().includes("spot")
-  );
+  // Spot executions attribute themselves under the "spot" strategy id —
+  // durable, unlike the shared two-leg path's "Spatial" trade-type label.
+  const spotLogs = executionLogs.filter((l) => l.strategy_id === "spot");
 
   const bestOpp = filteredOpportunities.length > 0 ? filteredOpportunities[0] : null;
   const totalSpotPnl = spotLogs.reduce((acc, l) => acc + (l.net_profit || 0), 0);

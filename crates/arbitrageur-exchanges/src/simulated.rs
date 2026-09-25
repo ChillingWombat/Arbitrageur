@@ -31,6 +31,9 @@ pub struct SimulatedExchange {
     /// above the cap is refused, so order-time min(strategy, account)
     /// holds even if a caller passes the raw strategy target.
     max_leverage_cap: RwLock<Option<u32>>,
+    /// Market class this sim advertises in `fetch_markets`. Default
+    /// `Perpetual`; spot sims report seeded books as `Symbol::spot`.
+    market_type: RwLock<arbitrageur_core::market::MarketType>,
 }
 
 impl SimulatedExchange {
@@ -72,6 +75,33 @@ impl SimulatedExchange {
             account: Arc::new(RwLock::new(account)),
             initial_equity: RwLock::new(initial_equity),
             max_leverage_cap: RwLock::new(None),
+            market_type: RwLock::new(arbitrageur_core::market::MarketType::Perpetual),
+        }
+    }
+
+    /// Set the market class reported by `fetch_markets` — tests install a
+    /// spot-emitting venue double with `MarketType::Spot`.
+    pub fn set_market_type(&self, market_type: arbitrageur_core::market::MarketType) {
+        *self.market_type.write() = market_type;
+    }
+
+    /// Seed or top up a free balance (e.g. base-coin inventory a spot sell
+    /// leg must draw from). Independent of the equity aggregates — real
+    /// spot venues report cash and coin rows separately.
+    pub fn seed_balance(&self, currency: &str, free: Decimal) {
+        let mut acc = self.account.write();
+        let ccy = currency.to_uppercase();
+        if let Some(b) = acc.balances.iter_mut().find(|b| b.currency == ccy) {
+            b.total += free;
+            b.free += free;
+        } else {
+            acc.balances.push(Balance {
+                venue: self.venue_id.clone(),
+                currency: ccy,
+                total: free,
+                free,
+                locked: dec!(0),
+            });
         }
     }
 
@@ -223,11 +253,16 @@ impl ExchangeAdapter for SimulatedExchange {
     }
 
     async fn fetch_markets(&self) -> anyhow::Result<Vec<MarketMetadata>> {
+        let market_type = *self.market_type.read();
         let mut markets = Vec::new();
         for item in self.books.iter() {
             let sym_str = item.key();
             let base = sym_str.split('-').next().unwrap_or(sym_str);
-            let symbol = Symbol::perp(base, "USDC");
+            let quote = sym_str.split('-').nth(1).unwrap_or("USDC");
+            let symbol = match market_type {
+                arbitrageur_core::market::MarketType::Spot => Symbol::spot(base, quote),
+                _ => Symbol::perp(base, "USDC"),
+            };
             markets.push(MarketMetadata {
                 symbol,
                 venue: self.venue_id.clone(),

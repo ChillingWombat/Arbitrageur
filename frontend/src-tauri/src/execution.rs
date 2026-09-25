@@ -445,14 +445,16 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
         ));
     }
     // Durable exits-only flag — an unreadable flag blocks rather than
-    // silently permitting an entry the operator marked reduce-only.
+    // silently permitting an entry the operator marked reduce-only. The
+    // flag namespace is the calling strategy's own id: a spot reduce-only
+    // must not read the futures flag (and vice versa).
     if state
         .state_store
-        .ticker_reduce_only(symbol, "futures", state.env().as_str())
+        .ticker_reduce_only(symbol, strategy_id, state.env().as_str())
         .map_err(|e| e.to_string())?
     {
         return Err(format!(
-            "Symbol {symbol} is reduce-only for futures — exits only, entry refused"
+            "Symbol {symbol} is reduce-only for {strategy_id} — exits only, entry refused"
         ));
     }
 
@@ -524,7 +526,9 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
         .parse()
         .map_err(|_| "Snapped order quantity is not finite".to_string())?;
 
-    let max_slippage_bps = strategy_slippage_bps(state, "futures");
+    // Slippage tolerance is the calling strategy's own parameter —
+    // spot reads `spot_max_slippage_bps`, not the futures gate.
+    let max_slippage_bps = strategy_slippage_bps(state, strategy_id);
     let min_depth_ratio = state.settings.read().min_depth_ratio;
     let max_slip_dec = Decimal::from_f64_retain(max_slippage_bps)
         .ok_or_else(|| "Invalid max slippage setting".to_string())?;
@@ -618,13 +622,27 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
         return Err("Requested quantity exceeds executable book depth within IOC limits".into());
     }
 
-    let target_profit_bps = state
-        .strategy_params
-        .read()
-        .get("futures")
-        .map(|p| p.target_profit_bps)
-        .filter(|v| v.is_finite() && *v >= 0.0)
-        .unwrap_or(1.0);
+    // Entry profit floor: each strategy reads its own configured hurdle —
+    // spot entries must clear `spot_min_net_spread_bps` (the page's Min Net
+    // param); the futures grid keeps its `target_profit_bps`.
+    let target_profit_bps = match strategy_id {
+        "spot" => state
+            .strategy_params
+            .read()
+            .get("spot")
+            .map(|p| p.spot_min_net_spread_bps)
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .unwrap_or_else(|| {
+                crate::state::StrategyParamsDto::defaults_for("spot").spot_min_net_spread_bps
+            }),
+        _ => state
+            .strategy_params
+            .read()
+            .get("futures")
+            .map(|p| p.target_profit_bps)
+            .filter(|v| v.is_finite() && *v >= 0.0)
+            .unwrap_or(1.0),
+    };
     let econ = compute_route_economics(
         &book_buy,
         &book_sell,
@@ -731,51 +749,88 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
     // then the per-symbol legacy fallback, then 5) lowered via min() by
     // each leg account's cap and the venue cap. Feeds both the IM
     // pre-checks below and the set_leverage calls after the books load.
-    let (target_leverage, _account_cap) = resolve_effective_leverage(
-        state,
-        "futures",
-        strategy_id,
-        symbol,
-        buy_venue,
-        sell_venue,
-        route_id,
-    )?;
-    let leverage = Decimal::from(target_leverage);
-    let im_buy = (buy_vwap * qty_dec) / leverage;
-    if im_buy > acc_buy.free_margin {
-        return Err(format!(
-            "Insufficient free margin on {}: required {} > available {}",
-            buy_venue, im_buy, acc_buy.free_margin
-        ));
-    }
-    let im_sell = (sell_vwap * qty_dec) / leverage;
-    if im_sell > acc_sell.free_margin {
-        return Err(format!(
-            "Insufficient free margin on {}: required {} > available {}",
-            sell_venue, im_sell, acc_sell.free_margin
-        ));
-    }
-    // Adapter-normalized position check — `get_position` compares raw venue
-    // symbol spellings, which miss scaled/native mappings (e.g. Kraken
-    // `PF_XBTUSD` vs engine `BTC-USD*`). `account_position_for` resolves
-    // through `normalize_account_position`; Err means the mapping is
-    // ambiguous — refuse rather than stack onto unmeasured exposure.
-    for (vname, adapter, acc) in [
-        (buy_venue, &buy_adapter, &acc_buy),
-        (sell_venue, &sell_adapter, &acc_sell),
-    ] {
-        match adapter.account_position_for(acc, symbol) {
-            Ok(Some(_)) => {
-                return Err(format!(
-                    "An open position already exists for {} on {}; closing lifecycle is not implemented",
-                    symbol, vname
-                ));
-            }
-            Ok(None) => {}
-            Err(e) => {
-                return Err(format!(
-                    "Cannot verify {vname} position for {symbol} ({e}); refusing entry"
-                ));
+    // Spot trades at 1x — no leverage negotiation applies.
+    let is_spot = strategy_id == "spot";
+    let (target_leverage, _account_cap) = if is_spot {
+        (1u32, None)
+    } else {
+        resolve_effective_leverage(
+            state,
+            "futures",
+            strategy_id,
+            symbol,
+            buy_venue,
+            sell_venue,
+            route_id,
+        )?
+    };
+    if is_spot {
+        // Spot cannot margin or short: the buy leg draws quote cash, the
+        // sell leg draws base inventory. `AccountSnapshot::get_balance` is
+        // venue-truthful free balance for both; a missing row reads as zero
+        // — refusing here is strictly better than a mid-cycle venue reject.
+        let (base_ccy, quote_ccy) = symbol
+            .split_once('-')
+            .ok_or_else(|| format!("Spot symbol {symbol} is not canonical BASE-QUOTE"))?;
+        let buy_notional = buy_vwap * qty_dec;
+        let buy_free = acc_buy
+            .get_balance(quote_ccy)
+            .map(|b| b.free)
+            .unwrap_or(dec!(0));
+        if buy_free < buy_notional {
+            return Err(format!(
+                "Insufficient free {quote_ccy} on {buy_venue} for the spot buy leg: required {buy_notional}, available {buy_free}"
+            ));
+        }
+        let sell_free = acc_sell
+            .get_balance(base_ccy)
+            .map(|b| b.free)
+            .unwrap_or(dec!(0));
+        if sell_free < qty_dec {
+            return Err(format!(
+                "Insufficient free {base_ccy} inventory on {sell_venue} for the spot sell leg: required {qty_dec}, available {sell_free}"
+            ));
+        }
+    } else {
+        let leverage = Decimal::from(target_leverage);
+        let im_buy = (buy_vwap * qty_dec) / leverage;
+        if im_buy > acc_buy.free_margin {
+            return Err(format!(
+                "Insufficient free margin on {}: required {} > available {}",
+                buy_venue, im_buy, acc_buy.free_margin
+            ));
+        }
+        let im_sell = (sell_vwap * qty_dec) / leverage;
+        if im_sell > acc_sell.free_margin {
+            return Err(format!(
+                "Insufficient free margin on {}: required {} > available {}",
+                sell_venue, im_sell, acc_sell.free_margin
+            ));
+        }
+        // Adapter-normalized position check — `get_position` compares raw
+        // venue symbol spellings, which miss scaled/native mappings (e.g.
+        // Kraken `PF_XBTUSD` vs engine `BTC-USD*`). `account_position_for`
+        // resolves through `normalize_account_position`; Err means the
+        // mapping is ambiguous — refuse rather than stack onto unmeasured
+        // exposure. Spot skips this: base holdings ARE the sell-side
+        // inventory, not unhedged exposure to refuse.
+        for (vname, adapter, acc) in [
+            (buy_venue, &buy_adapter, &acc_buy),
+            (sell_venue, &sell_adapter, &acc_sell),
+        ] {
+            match adapter.account_position_for(acc, symbol) {
+                Ok(Some(_)) => {
+                    return Err(format!(
+                        "An open position already exists for {} on {}; closing lifecycle is not implemented",
+                        symbol, vname
+                    ));
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    return Err(format!(
+                        "Cannot verify {vname} position for {symbol} ({e}); refusing entry"
+                    ));
+                }
             }
         }
     }
@@ -797,11 +852,14 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
     // no-op changes or cap at account level. A rejected change is NOT fatal
     // (the order submits at existing leverage) but must be visible — an
     // operator reading "5x" while the venue kept 20x changes margin math.
-    for (vname, adapter) in [(buy_venue, &buy_adapter), (sell_venue, &sell_adapter)] {
-        if let Err(e) = adapter.set_leverage(symbol, target_leverage).await {
-            tracing::warn!(
-                "set_leverage {target_leverage}x on {vname} {symbol} failed: {e} — order will submit at the venue's existing leverage"
-            );
+    // Spot has no leverage concept — skip the calls entirely.
+    if !is_spot {
+        for (vname, adapter) in [(buy_venue, &buy_adapter), (sell_venue, &sell_adapter)] {
+            if let Err(e) = adapter.set_leverage(symbol, target_leverage).await {
+                tracing::warn!(
+                    "set_leverage {target_leverage}x on {vname} {symbol} failed: {e} — order will submit at the venue's existing leverage"
+                );
+            }
         }
     }
 
@@ -1632,12 +1690,11 @@ pub fn get_strategy_capabilities_impl() -> Vec<StrategyCapabilityDto> {
         cap("radar", true, true, None),
         cap("funding", true, true, None),
         cap("triangle", true, true, None),
-        cap(
-            "spot",
-            false,
-            false,
-            Some("Spot arbitrage is not wired: no venue adapter implements the atomic dual-leg spot path"),
-        ),
+        // Spot rides the shared atomic two-leg path with spot semantics:
+        // venue-listed spot markets only, quote-cash + base-inventory
+        // preflights in place of margin/leverage, and the same durable
+        // signal ledger, slippage and hurdle gates as every other strategy.
+        cap("spot", true, true, None),
         cap(
             "prediction",
             false,
