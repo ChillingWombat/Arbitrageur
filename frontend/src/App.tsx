@@ -12,6 +12,7 @@ import { PortfolioMonitor } from "./components/PortfolioMonitor";
 import { SettingsModal } from "./components/SettingsModal";
 import { SpotArbitrageBot } from "./components/SpotArbitrageBot";
 import { TriangularArbitrage } from "./components/TriangularArbitrage";
+import { OptionsArbitrage } from "./components/OptionsArbitrage";
 import { TickerConfigModal } from "./components/TickerConfigModal";
 import { VaultUnlockModal } from "./components/VaultUnlockModal";
 import { api, describeCommandError, withTimeoutFallback } from "./services/api";
@@ -73,6 +74,7 @@ const TAB_STRATEGY: Record<ActiveTab, { id: string | null; label: string }> = {
   prediction: { id: "prediction", label: STRATEGY_DISPLAY_NAMES.prediction },
   statarb: { id: "stat_arb", label: STRATEGY_DISPLAY_NAMES.stat_arb },
   triangle: { id: "triangle", label: STRATEGY_DISPLAY_NAMES.triangle },
+  options: { id: "options_parity", label: STRATEGY_DISPLAY_NAMES.options_parity },
   portfolio_monitor: { id: null, label: "Portfolio" },
 };
 
@@ -1095,6 +1097,16 @@ export const App: React.FC = () => {
               isLive={systemStatus?.is_live_mode === true}
               hasApiConnectivity={activeVenueCodes.size >= 2}
               params={strategyParams.get("triangle")}
+            />
+          )}
+
+          {activeTab === "options" && (
+            <OptionsArbitrage
+              executionLogs={executionLogs}
+              onRefreshAll={refreshAllData}
+              isPaused={isPaused}
+              isLive={systemStatus?.is_live_mode === true}
+              deribitAvailable={activeVenueCodes.has("DBT")}
             />
           )}
 

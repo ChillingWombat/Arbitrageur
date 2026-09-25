@@ -48,6 +48,7 @@ export type ExchangeId =
   | "binance"
   | "coinbase"
   | "decibel"
+  | "deribit"
   | "hyperliquid"
   | "ibkr"
   | "ig"
@@ -165,6 +166,7 @@ export const EXCHANGES_ALPHABETICAL: ExchangeMetadata[] = [
   { id: "camelot", name: "Camelot V2", type: "Spot AMM — Arbitrum (Market Data)", feeBps: 30.0 , group: "EVM AMM — Arbitrum" },
   { id: "coinbase", name: "Coinbase", type: "CEX Spot & Perp", feeBps: 5.0 , group: "Primary" },
   { id: "decibel", name: "Decibel", type: "Aptos Perp DEX", feeBps: 5.0 , group: "Primary" },
+  { id: "deribit", name: "Deribit", type: "CEX Options & Perps", feeBps: 5.0 , group: "Primary" },
   { id: "derive", name: "Derive", type: "Perp DEX (Live)", feeBps: 2.0 , group: "Perp DEX — Long Tail" },
   { id: "dydx", name: "dYdX Chain", type: "Perp DEX (Live)", feeBps: 2.0 , group: "Perp DEX — Long Tail" },
   { id: "edgex", name: "edgeX", type: "Perp DEX (Live)", feeBps: 4.5 , group: "Perp DEX — Long Tail" },
@@ -334,6 +336,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   const [binanceEnabled, setBinanceEnabled] = useState(false);
   const [coinbaseEnabled, setCoinbaseEnabled] = useState(false);
   const [decibelEnabled, setDecibelEnabled] = useState(false);
+  const [deribitEnabled, setDeribitEnabled] = useState(false);
   const [ibkrEnabled, setIbkrEnabled] = useState(false);
   const [igEnabled, setIgEnabled] = useState(false);
   const [okxEnabled, setOkxEnabled] = useState(false);
@@ -451,6 +454,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
       case "binance": return binanceEnabled;
       case "coinbase": return coinbaseEnabled;
       case "decibel": return decibelEnabled;
+      case "deribit": return deribitEnabled;
       case "hyperliquid": return hlEnabled;
       case "ibkr": return ibkrEnabled;
       case "ig": return igEnabled;
@@ -473,6 +477,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
       case "binance": setBinanceEnabled(enabled); break;
       case "coinbase": setCoinbaseEnabled(enabled); break;
       case "decibel": setDecibelEnabled(enabled); break;
+      case "deribit": setDeribitEnabled(enabled); break;
       case "hyperliquid": setHlEnabled(enabled); break;
       case "ibkr": setIbkrEnabled(enabled); break;
       case "ig": setIgEnabled(enabled); break;
@@ -643,6 +648,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         setPolymarketEnabled(s.polymarket_enabled ?? false);
         setKalshiEnabled(s.kalshi_enabled ?? false);
         setDecibelEnabled(s.decibel_enabled ?? false);
+        setDeribitEnabled(s.deribit_enabled ?? false);
         setIbkrEnabled(s.ibkr_enabled ?? false);
         setIgEnabled(s.ig_enabled ?? false);
         setBinanceEnabled(s.binance_enabled ?? false);
@@ -806,6 +812,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
           polymarket_enabled: polymarketEnabled,
           kalshi_enabled: kalshiEnabled,
           decibel_enabled: decibelEnabled,
+          deribit_enabled: deribitEnabled,
           ibkr_enabled: ibkrEnabled,
           ig_enabled: igEnabled,
           binance_enabled: binanceEnabled,

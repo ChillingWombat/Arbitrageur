@@ -14,6 +14,9 @@ import type {
   SpotOpportunityDto,
   SpotExecutionParams,
   TriangleOpportunityDto,
+  OptionsParityOpportunityDto,
+  OptionsParityScanParams,
+  OptionsParityExecutionParams,
   TriangleExecutionParams,
   ConvergenceCheckDto,
   FundingOpportunityDto,
@@ -621,6 +624,14 @@ export const api = {
 
   async executeTriangleArbitrage(params: TriangleExecutionParams): Promise<SimStepResultDto> {
     return invokeDesktop<SimStepResultDto>("execute_triangle_arbitrage", { params }).then(requireExecuted);
+  },
+
+  async scanOptionsParity(params: OptionsParityScanParams): Promise<OptionsParityOpportunityDto[]> {
+    return invokeDesktop<OptionsParityOpportunityDto[]>("scan_options_parity", { params });
+  },
+
+  async executeOptionsParity(params: OptionsParityExecutionParams): Promise<SimStepResultDto> {
+    return invokeDesktop<SimStepResultDto>("execute_options_parity", { params }).then(requireExecuted);
   },
 
   async checkSpatialConvergence(

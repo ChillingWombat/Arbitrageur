@@ -14,6 +14,7 @@ mod funding;
 mod monitor;
 mod monitor_ipc;
 mod num;
+mod options_parity;
 mod performance;
 mod reconciliation;
 mod seasonality;
@@ -171,6 +172,8 @@ fn main() {
             commands::scan_spatial_opportunities,
             commands::scan_triangle_opportunities,
             commands::execute_triangle_arbitrage,
+            options_parity::scan_options_parity,
+            options_parity::execute_options_parity,
             commands::check_spatial_convergence,
             commands::scan_spot_opportunities,
             commands::execute_spot_arbitrage,

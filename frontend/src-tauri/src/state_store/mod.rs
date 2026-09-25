@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub const ALLOWED_STRATEGY_IDS: [&str; 8] = [
+pub const ALLOWED_STRATEGY_IDS: [&str; 9] = [
     "futures",
     "radar",
     "funding",
@@ -16,6 +16,7 @@ pub const ALLOWED_STRATEGY_IDS: [&str; 8] = [
     "prediction",
     "stat_arb",
     "triangle",
+    "options_parity",
     "external",
 ];
 
@@ -1595,6 +1596,46 @@ CREATE TABLE ticker_reduce_only (
 PRAGMA user_version = 35;
 COMMIT;";
 
+/// v36 admits 'options_parity' into the signal_executions strategy CHECK —
+/// the Deribit options-parity executor persists one leg-intent signal per
+/// dispatched leg. The rebuild mirrors v24 exactly, widened by one value
+/// and carrying the v32 `environment` column forward.
+const MIGRATION_V36_SQL: &str = "\
+PRAGMA foreign_keys = OFF;
+BEGIN IMMEDIATE;
+CREATE TABLE signal_executions_v36 (
+    id TEXT PRIMARY KEY NOT NULL CHECK(length(id) BETWEEN 1 AND 128),
+    strategy_id TEXT NOT NULL COLLATE NOCASE CHECK(strategy_id IN ('futures', 'radar', 'funding', 'spot', 'prediction', 'stat_arb', 'triangle', 'options_parity', 'external')),
+    symbol TEXT NOT NULL COLLATE NOCASE CHECK(length(symbol) BETWEEN 1 AND 64),
+    status TEXT NOT NULL CHECK(status IN ('in_flight', 'balanced', 'imbalanced', 'unresolved', 'closed', 'failed')),
+    route_id TEXT REFERENCES strategy_account_routes(id) ON DELETE SET NULL,
+    account_long_id TEXT REFERENCES exchange_accounts(id) ON DELETE RESTRICT,
+    account_short_id TEXT REFERENCES exchange_accounts(id) ON DELETE RESTRICT,
+    expected_net_usd REAL,
+    fees_usd REAL NOT NULL DEFAULT 0 CHECK(fees_usd >= 0),
+    note TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    closed_at TEXT,
+    environment TEXT NOT NULL DEFAULT 'unknown' CHECK(environment IN ('unknown', 'testnet', 'live'))
+);
+INSERT INTO signal_executions_v36
+    (id, strategy_id, symbol, status, route_id, account_long_id,
+     account_short_id, expected_net_usd, fees_usd, note,
+     created_at, updated_at, closed_at, environment)
+    SELECT id, strategy_id, symbol, status, route_id, account_long_id,
+           account_short_id, expected_net_usd, fees_usd, note,
+           created_at, updated_at, closed_at, environment
+    FROM signal_executions;
+DROP TABLE signal_executions;
+ALTER TABLE signal_executions_v36 RENAME TO signal_executions;
+CREATE INDEX ix_signal_executions_symbol_status
+    ON signal_executions(symbol, status);
+CREATE INDEX ix_signal_executions_env ON signal_executions(environment);
+PRAGMA user_version = 36;
+COMMIT;
+PRAGMA foreign_keys = ON;";
+
 const MIGRATION_V17_SQL: &str = "\
 BEGIN IMMEDIATE;
 CREATE TABLE strategy_params_v17 (
@@ -2157,7 +2198,7 @@ impl StateStore {
 
     fn migrate(conn: &Connection) -> anyhow::Result<()> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 35 {
+        if version > 36 {
             anyhow::bail!("unsupported state store schema version: {version}");
         }
         if version == 0 {
@@ -2366,6 +2407,12 @@ impl StateStore {
         }
         if version <= 34 {
             if let Err(err) = conn.execute_batch(MIGRATION_V35_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 35 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V36_SQL) {
                 let _ = conn.execute_batch("ROLLBACK;");
                 return Err(err.into());
             }

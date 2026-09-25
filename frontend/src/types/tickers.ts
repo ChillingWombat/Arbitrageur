@@ -81,6 +81,7 @@ export const STRATEGY_DISPLAY_NAMES: Record<string, string> = {
   prediction: "Prediction Market",
   stat_arb: "Statistical",
   triangle: "Triangle",
+  options_parity: "Options Parity",
   external: "External (manual)",
 };
 
@@ -101,6 +102,7 @@ export const VENUE_ID_TO_CODE: Record<string, string> = {
   okx: "OKX",
   coinbase: "CB",
   decibel: "DCB",
+  deribit: "DBT",
 };
 
 export const VENUE_CODE_TO_ID: Record<string, string> = {
@@ -116,6 +118,7 @@ export const VENUE_CODE_TO_ID: Record<string, string> = {
   OKX: "okx",
   CB: "coinbase",
   DCB: "decibel",
+  DBT: "deribit",
 };
 
 /**
@@ -148,6 +151,7 @@ export interface VenueSettingsFilter {
   okx_enabled?: boolean;
   coinbase_enabled?: boolean;
   decibel_enabled?: boolean;
+  deribit_enabled?: boolean;
   polymarket_enabled?: boolean;
   polymarket_api_key?: string;
   polymarket_secret?: string;
@@ -163,7 +167,7 @@ export interface VenueSettingsFilter {
  * in venues_for_env; venues without a demo endpoint (Robinhood, Aster,
  * Coinbase, long-tail perps, EVM AMMs) are live-only.
  */
-const TESTNET_CAPABLE_CODES = new Set(["HL", "LGT", "VNT", "POP", "BNB", "OKX", "KRK", "DCB"]);
+const TESTNET_CAPABLE_CODES = new Set(["HL", "LGT", "VNT", "POP", "BNB", "OKX", "KRK", "DCB", "DBT"]);
 
 /**
  * Venue IDs with public testnet/demo endpoints — mirrors the backend `tn_*`
@@ -181,6 +185,7 @@ export const TESTNET_CAPABLE_VENUE_IDS = new Set([
   "kraken",
   "kraken_futures",
   "decibel",
+  "deribit",
 ]);
 
 export function venueHasTestnet(venueId: string): boolean {
@@ -232,6 +237,7 @@ export function getEnabledConnectedVenueCodes(
       settings.kraken_spot_enabled === true
   );
   admit("DCB", settings.decibel_enabled);
+  admit("DBT", settings.deribit_enabled);
   return active;
 }
 

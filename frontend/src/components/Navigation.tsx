@@ -6,6 +6,7 @@ import {
   Target,
   Sigma,
   Radar,
+  Option,
 } from "lucide-react";
 import { SpreadGapIcon } from "./icons";
 
@@ -14,6 +15,7 @@ export type ActiveTab =
   | "funding"
   | "spot_arb"
   | "triangle"
+  | "options"
   | "prediction"
   | "statarb"
   | "radar"
@@ -68,6 +70,13 @@ export const Navigation: React.FC<NavigationProps> = ({
       icon: Triangle,
       badge: triangleCount > 0 ? triangleCount : undefined,
     },
+    // Options parity scans on demand inside the tab — no polled
+    // opportunity list exists to badge.
+    {
+      id: "options" as ActiveTab,
+      label: "Options",
+      icon: Option,
+    },
     {
       id: "prediction" as ActiveTab,
       label: "Prediction Market",
@@ -82,7 +91,7 @@ export const Navigation: React.FC<NavigationProps> = ({
   ];
 
   return (
-    <nav className="w-full h-full grid grid-cols-7 divide-x divide-surface-border select-none bg-surface">
+    <nav className="w-full h-full grid grid-cols-8 divide-x divide-surface-border select-none bg-surface">
       {tabs.map((t) => {
         const Icon = t.icon;
         const isActive = activeTab === t.id;

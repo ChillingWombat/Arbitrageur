@@ -11,6 +11,8 @@ pub enum MarketType {
     Perpetual,
     /// Dated Futures contracts (e.g. BTC quarterly)
     DatedFutures,
+    /// Crypto Option contract (e.g. BTC-27MAR26-100000-C on Deribit)
+    CryptoOption,
     /// Prediction Market Binary Option (e.g. Polymarket YES/NO outcome token, Kalshi contract)
     PredictionBinary,
     /// Prediction Market Categorical multi-outcome
@@ -27,7 +29,10 @@ impl MarketType {
     pub fn is_crypto(&self) -> bool {
         matches!(
             self,
-            MarketType::Spot | MarketType::Perpetual | MarketType::DatedFutures
+            MarketType::Spot
+                | MarketType::Perpetual
+                | MarketType::DatedFutures
+                | MarketType::CryptoOption
         )
     }
 
@@ -58,6 +63,7 @@ impl fmt::Display for MarketType {
             MarketType::Spot => write!(f, "SPOT"),
             MarketType::Perpetual => write!(f, "PERP"),
             MarketType::DatedFutures => write!(f, "FUTURES"),
+            MarketType::CryptoOption => write!(f, "OPTION"),
             MarketType::PredictionBinary => write!(f, "PREDICTION_BINARY"),
             MarketType::PredictionCategorical => write!(f, "PREDICTION_CATEGORICAL"),
             MarketType::TraditionalEquity => write!(f, "EQUITY"),
@@ -99,6 +105,20 @@ impl Symbol {
 
     pub fn prediction_binary(outcome: impl Into<String>, collateral: impl Into<String>) -> Self {
         Self::new(outcome, collateral, MarketType::PredictionBinary)
+    }
+
+    /// Crypto option where the venue's instrument name is canonical
+    /// (e.g. Deribit "BTC-27MAR26-100000-C"). Inverse-settled contracts are
+    /// quoted in the base coin, so quote == base.
+    pub fn crypto_option(instrument: impl Into<String>, base: impl Into<String>) -> Self {
+        let name = instrument.into().to_uppercase();
+        let b = base.into().to_uppercase();
+        Self {
+            base: b.clone(),
+            quote: b,
+            raw: name,
+            market_type: MarketType::CryptoOption,
+        }
     }
 
     pub fn canonical(&self) -> String {

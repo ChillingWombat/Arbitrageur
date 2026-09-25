@@ -759,6 +759,12 @@ export interface EngineSettingsDto {
   popdex_enabled?: boolean;
   popdex_network?: string;
   coinbase_enabled?: boolean;
+  deribit_enabled?: boolean;
+
+  // Deribit (OAuth2 client credentials pair — mint on test.deribit.com for
+  // testnet, www.deribit.com for live; never mix).
+  deribit_client_id?: string;
+  deribit_client_secret?: string;
 
   // Kraken Spot & Futures
   kraken_spot_api_key?: string;
@@ -1377,6 +1383,59 @@ export interface TriangleOpportunityDto {
   /** Per-size capacity curve from the depth-aware cycle evaluation —
    *  net fields only; atomic cycles carry no win-rate model. */
   depth_curve?: DepthCurvePointDto[];
+}
+
+export type ParityDirection = "conversion" | "reversal";
+
+export interface OptionsParityLegDto {
+  instrument: string;
+  role: "call" | "put" | "perp";
+  action: "buy" | "sell";
+  /** Venue-unit quote (BTC for options, USD for the perp). */
+  venue_price: number;
+  /** USD translation (option prices × index). */
+  usd_price: number;
+}
+
+export interface OptionsParityOpportunityDto {
+  id: string;
+  venue: string;
+  currency: string;
+  expiry_ms: number;
+  expiry_iso: string;
+  strike: number;
+  direction: ParityDirection;
+  call_leg: OptionsParityLegDto;
+  put_leg: OptionsParityLegDto;
+  perp_leg: OptionsParityLegDto;
+  synthetic_forward_usd: number;
+  perp_equiv_usd: number;
+  funding_8h: number;
+  funding_drain_usd: number;
+  gross_edge_usd: number;
+  est_fees_usd: number;
+  net_edge_usd: number;
+  edge_bps: number;
+  index_price_usd: number;
+  qty_base_suggested: number;
+  is_executable: boolean;
+  reason?: string;
+}
+
+export interface OptionsParityScanParams {
+  currency: string;
+  qty_base?: number;
+  min_hours_to_expiry?: number;
+  max_days_to_expiry?: number;
+  min_edge_bps?: number;
+}
+
+export interface OptionsParityExecutionParams {
+  id: string;
+  currency: string;
+  qty_base: number;
+  min_edge_bps?: number;
+  auto?: boolean;
 }
 
 export interface TriangleExecutionParams {

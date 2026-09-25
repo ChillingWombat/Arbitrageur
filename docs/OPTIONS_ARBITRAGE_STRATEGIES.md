@@ -317,6 +317,23 @@ When perpetual funding rates trade at a large premium to the option-implied forw
    $$\Delta_{\text{total}} = \Delta_{\text{perp}} (-1.0) + \Delta_{\text{options}} (+1.0) = 0$$
 4. Capture the clean divergence between the floating perpetual funding yield and the fixed options implied carry rate.
 
+> **Implemented (2026-09):** `frontend/src-tauri/src/options_parity.rs` +
+> `crates/arbitrageur-exchanges/src/deribit.rs` ship this strategy on
+> Deribit (BTC/ETH, testnet + live). The scanner pairs call/put quotes at
+> identical strike+expiry, builds the synthetic forward `K + (C − P)·index`,
+> and nets it against the perpetual's funding-adjusted price
+> (`perp ± funding_8h × hours/8 × mark`). Conversion = sell call / buy put /
+> buy perp when the synthetic is rich; Reversal = the mirror. Execution is
+> a 3-leg single-venue cycle with the triangle path's discipline:
+> persist-before-submit leg intents, bounded IOC orders (60 bps over VWAP),
+> venue-truth settle polling, cancel + re-poll for still-working orders,
+> and `imbalanced`/`unresolved` residual signals on any partial cycle.
+> Fees use Deribit's real schedule (options: min(0.03% of underlying,
+> 12.5% of premium); perp taker 0.05%). Premiums/fees are the only cash
+> booked at entry — the convergence edge stays unrealized until expiry.
+> Manual Execute is live-capable through `live_entry_gate`; autonomous
+> (`auto`) entry is testnet-only.
+
 ---
 
 ## 4. Operational Requirements & Pitfalls
