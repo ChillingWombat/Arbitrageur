@@ -16,7 +16,7 @@ arbitrageur-exchanges = { path = "../../crates/arbitrageur-exchanges" }
 arbitrageur-risk = { path = "../../crates/arbitrageur-risk" }
 arbitrageur-execution = { path = "../../crates/arbitrageur-execution" }
 arbitrageur-strategy = { path = "../../crates/arbitrageur-strategy" }
-priceretriver-client = { path = "../../../PriceRetriver/crates/priceretriver-client" }
+priceretriver-client = { path = "../../vendor/priceretriver-client" }
 tokio = { workspace = true }
 tokio-tungstenite = { workspace = true }
 futures = { workspace = true }

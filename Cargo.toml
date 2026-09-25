@@ -9,6 +9,7 @@ members = [
     "crates/arbitrageur-app",
     "frontend/src-tauri",
 ]
+exclude = ["vendor/priceretriver-client"]
 resolver = "2"
 
 [workspace.package]

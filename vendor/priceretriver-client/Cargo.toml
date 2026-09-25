@@ -1,0 +1,16 @@
+[package]
+name = "priceretriver-client"
+version = "0.1.0"
+edition = "2021"
+authors = ["David"]
+license = "MIT OR Apache-2.0"
+description = "Vendored HTTP client for a PriceRetriver node (see UPSTREAM.md)"
+
+# Standalone workspace root: vendored copy, not a member of the Arbitrageur
+# workspace and not coupled to the private PriceRetriever repo at build time.
+[workspace]
+
+[dependencies]
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde_json = "1.0"
+anyhow = "1.0"
