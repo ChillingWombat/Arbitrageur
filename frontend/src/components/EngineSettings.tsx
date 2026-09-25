@@ -2473,16 +2473,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
       before the close button). Shows on every tab — vault state is global. */}
   {headerActionsEl && api.isTauri && createPortal(
     <div className="flex items-center space-x-1.5">
-      {!isVaultLocked && (
-        <button
-          type="button"
-          onClick={() => setShowVaultChangeModal(true)}
-          className="px-2 py-1.5 rounded-lg border border-slate-200 bg-surface hover:bg-slate-100 text-slate-600 text-xs font-mono transition shadow-2xs cursor-pointer"
-          title="Rotate the master password — re-keys the vault and the shared EVM wallet atomically"
-        >
-          <span>Rotate Key</span>
-        </button>
-      )}
       <button
         type="button"
         onClick={isVaultLocked ? () => setShowVaultModal(true) : handleLockVault}
