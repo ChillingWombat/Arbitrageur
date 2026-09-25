@@ -1361,6 +1361,13 @@ pub struct AppEngineState {
     /// adapter is injected here rather than through the dyn registry.
     #[cfg(test)]
     pub test_deribit: std::sync::RwLock<Option<Arc<DeribitAdapter>>>,
+    /// Test-only concrete Boros override — the fixed-yield executor calls
+    /// `live_boros.market_by_id` (concrete) plus dyn order methods, so a
+    /// stub-backed `BorosAdapter` is injected here rather than through the
+    /// dyn registry. `get_adapter("boros")` admission still flows through
+    /// `test_sims`/`test_adapters` like every other venue.
+    #[cfg(test)]
+    pub test_boros: std::sync::RwLock<Option<Arc<BorosAdapter>>>,
     #[cfg(test)]
     pub test_sims: std::sync::RwLock<
         std::collections::HashMap<String, Arc<arbitrageur_exchanges::simulated::SimulatedExchange>>,
@@ -1488,6 +1495,41 @@ pub(crate) fn canonical_venue_id(input: &str) -> Option<&'static str> {
             .find(|v| *v == id),
         _ => None,
     }
+}
+
+/// Whether `AppEngineState` constructs a real adapter for `venue_id` in the
+/// active environment — independent of enablement. Named adapter fields are
+/// listed explicitly; the spec-driven DexPerp/EVM-AMM families delegate to
+/// their admitted rosters. A canonical venue id that fails this check can
+/// never be admitted by `get_venues`: its status is UNSUPPORTED regardless
+/// of flags, and credential material stored for it provisions nothing.
+///
+/// Drift discipline: adding a `live_*`/`tn_*` field without adding its id
+/// here makes the venue read UNSUPPORTED — visible, fail-closed. The
+/// reverse (an id here with no constructed adapter) is caught by the
+/// venue-status regression test, which asserts every UNADAPTED-status row
+/// has no adapter.
+pub(crate) fn venue_has_adapter(venue_id: &str) -> bool {
+    let Some(vid) = canonical_venue_id(venue_id) else {
+        return false;
+    };
+    matches!(
+        vid,
+        "hyperliquid"
+            | "lighter"
+            | "robinhood"
+            | "vanta"
+            | "aster"
+            | "popdex"
+            | "binance"
+            | "okx"
+            | "coinbase"
+            | "kraken"
+            | "deribit"
+            | "decibel"
+            | "boros"
+    ) || ADMITTED_DEX_PERP_VENUE_IDS.contains(&vid)
+        || ADMITTED_EVM_AMM_VENUE_IDS.contains(&vid)
 }
 
 pub(crate) fn load_strategy_params(
@@ -2142,6 +2184,8 @@ impl AppEngineState {
             test_adapters: std::sync::RwLock::new(std::collections::HashMap::new()),
             #[cfg(test)]
             test_deribit: std::sync::RwLock::new(None),
+            #[cfg(test)]
+            test_boros: std::sync::RwLock::new(None),
             #[cfg(test)]
             test_sims: std::sync::RwLock::new(std::collections::HashMap::new()),
             autotune_apply_lock: tokio::sync::Mutex::new(()),

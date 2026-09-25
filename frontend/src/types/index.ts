@@ -986,6 +986,38 @@ export interface CloseResultDto {
   note: string;
 }
 
+/** One row of the executor's venue taker-fee table (`get_venue_fees`). */
+export interface VenueFeeDto {
+  venue_id: string;
+  taker_bps: number;
+}
+
+/** A curated parameter bundle served by the backend preset table
+ *  (strategy_config.rs). `description` states the intended regime and risk
+ *  posture verbatim; `version` is recorded in the apply audit row so history
+ *  can distinguish which table revision was applied. */
+export interface StrategyPresetDto {
+  id: string;
+  label: string;
+  description: string;
+  version: number;
+  targetProfitBps: number;
+  windowPercentile: number;
+  slidingWindowSecs: number;
+  executionMode: ArbitrageExecutionMode;
+  stepSizeMult: number;
+  maxStepUsd: number;
+  maxTickerEquityPct: number;
+  userTargetLeverage: number;
+}
+
+export interface VenueFeesDto {
+  fees: VenueFeeDto[];
+  /** Executor fallback for ids absent from `fees` — UI lookups must use
+   *  this, not a local constant. */
+  default_bps: number;
+}
+
 export interface VenueBalanceInfo {
   venue: string;
   equity_usd: number;

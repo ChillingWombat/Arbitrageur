@@ -22,9 +22,9 @@ test("EVM Wallet entry exists and its group pins first in the sidebar", () => {
 });
 
 test("individual EVM AMM venues keep metadata but leave the sidebar group list", () => {
-  // The 11 AMM ids remain in EXCHANGES_ALPHABETICAL for fee/name lookups
-  // (TickerLogMonitor etc.) — they are filtered from visibleExchanges, not
-  // deleted here.
+  // The 11 AMM ids remain in EXCHANGES_ALPHABETICAL for name/type lookups
+  // — they are filtered from visibleExchanges, not deleted here. (Fees are
+  // not display metadata: every fee surface reads `get_venue_fees`.)
   for (const id of EVM_AMM_VENUE_IDS) {
     assert.ok(
       EXCHANGES_ALPHABETICAL.some((ex) => ex.id === id),

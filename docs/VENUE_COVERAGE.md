@@ -383,3 +383,6 @@ Every added adapter reports honest capability flags:
   eligibility — and venue sandbox evidence still distinguishes
   canary-proven routes from implemented-but-unproven ones; see
   `docs/CAPABILITIES.md`.
+- The manual credentialed sweep that graduates a venue from
+  "implemented" to "venue-proven" is documented in
+  `docs/TESTNET_SWEEP.md`.

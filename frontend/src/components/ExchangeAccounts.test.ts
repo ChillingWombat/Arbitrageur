@@ -10,6 +10,7 @@ import {
   EVM_AMM_VENUES,
   EVM_AMM_VENUE_IDS,
   ACCOUNT_CREDENTIAL_FIELDS,
+  UNSUPPORTED_VENUES,
 } from "./ExchangeAccounts.tsx";
 import type { VenueBalanceInfo, AccountDto } from "../types/index.ts";
 
@@ -137,6 +138,62 @@ test("AccountCard renders disabled banner when account.enabled is false", () => 
   // Ensure the live/paper balance panel numbers are not rendered when disabled
   assert.doesNotMatch(html, />Live</);
   assert.doesNotMatch(html, />Paper</);
+});
+
+/* ------------------------------------------------------------------ */
+/* Adapter-less venues — no credential collection (#27c)                */
+/* ------------------------------------------------------------------ */
+
+test("UNSUPPORTED_VENUES is exactly arcus/kalshi/polymarket with no credential schemas", () => {
+  assert.deepEqual([...UNSUPPORTED_VENUES].sort(), ["arcus", "kalshi", "polymarket"]);
+  for (const id of UNSUPPORTED_VENUES) {
+    assert.equal(
+      ACCOUNT_CREDENTIAL_FIELDS[id],
+      undefined,
+      `${id} still has a credential schema`
+    );
+  }
+});
+
+test("AccountCard for an adapter-less venue shows the notice, not credential fields", () => {
+  const arcus = makeMockAccount({
+    id: "arcus-1",
+    venue: "arcus",
+    label: "Arcus #1",
+    enabled: false,
+    credentialsConfigured: false,
+    hasApiKey: false,
+    hasPrivateKey: false,
+  });
+  const html = renderToStaticMarkup(
+    React.createElement(AccountCard, {
+      account: arcus,
+      ordinal: 1,
+      locked: false,
+      bal: null,
+      onChanged: () => {},
+    })
+  );
+  assert.match(html, /No Arcus adapter in this build/);
+  assert.match(html, /the backend refuses them/i);
+  assert.match(html, /unsupported-venue-arcus/);
+  // No credential inputs render — nothing to collect.
+  assert.doesNotMatch(html, /API Key|Private Key|Secret/);
+});
+
+test("AccountCard for a real venue still renders credential fields", () => {
+  const hl = makeMockAccount({ venue: "hyperliquid" });
+  const html = renderToStaticMarkup(
+    React.createElement(AccountCard, {
+      account: hl,
+      ordinal: 1,
+      locked: false,
+      bal: null,
+      onChanged: () => {},
+    })
+  );
+  assert.doesNotMatch(html, /unsupported-venue-/);
+  assert.match(html, /Trading EOA Wallet Address/);
 });
 
 /* ------------------------------------------------------------------ */

@@ -54,21 +54,27 @@ interface CredFieldSpec {
   options?: { value: string; label: string }[];
 }
 
+/**
+ * Venues that appear in the account roster but have NO adapter in the
+ * desktop engine (`state::venue_has_adapter` is the backend authority —
+ * it also hard-refuses credential writes for these ids). Their credential
+ * schemas were removed: an account row here is honest metadata only
+ * (enabled switch → the venue-status row reports UNSUPPORTED). Collecting
+ * keys that no code path can consume would silently warehouse secrets, so
+ * the form renders a notice instead of fields.
+ */
+export const UNSUPPORTED_VENUES: ReadonlySet<string> = new Set([
+  "arcus",
+  "kalshi",
+  "polymarket",
+]);
+
 export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
-  // Arcus: Ed25519 keypair generated + registered via the exchange (docs.arcus.xyz)
-  arcus: [
-    { key: "apiKey", label: "API Public Key (Ed25519)", placeholder: "arc_..." },
-    { key: "privateKey", label: "API Private Key (Ed25519)", secret: true },
-  ],
   // Hyperliquid: account/vault address + API wallet (agent) private key
   hyperliquid: [
     { key: "walletAddress", label: "Trading EOA Wallet Address", placeholder: "0x..." },
     { key: "privateKey", label: "API Wallet / Agent Private Key", secret: true, placeholder: "0x...", evmSigner: true },
     { key: "accountId", label: "Vault Address", optional: true, placeholder: "0x..." },
-  ],
-  kalshi: [
-    { key: "apiKey", label: "API Key ID", placeholder: "e.g. 550e8400-e29b-..." },
-    { key: "apiSecret", label: "RSA Private Key", secret: true, placeholder: "-----BEGIN RSA PRIVATE KEY-----" },
   ],
   kraken_spot: [
     { key: "apiKey", label: "Spot API Key", secret: true },
@@ -90,14 +96,6 @@ export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
     { key: "accountIndex", label: "Account Index", numeric: true, placeholder: "Exchange-assigned account ID, e.g. 746027" },
     { key: "apiKeyIndex", label: "API Key Index", numeric: true, placeholder: "2-254" },
     { key: "privateKey", label: "API Private Key", secret: true },
-  ],
-  // Polymarket: L1 Polygon key signs orders; L2 key/secret/passphrase authenticate the CLOB API
-  polymarket: [
-    { key: "walletAddress", label: "Polygon Wallet Address", placeholder: "0x..." },
-    { key: "privateKey", label: "Polygon Private Key (L1 Signing)", secret: true, placeholder: "0x...", evmSigner: true },
-    { key: "apiKey", label: "API Key", secret: true },
-    { key: "apiSecret", label: "API Secret", secret: true },
-    { key: "passphrase", label: "Passphrase", secret: true },
   ],
   // PopDEX (Morph Tachyon EVM, native API): main account address + delegated
   // agent key. One-time approveAgent runs externally per the official guide
@@ -898,6 +896,25 @@ export const VenueBalancePanel: React.FC<{
   );
 };
 
+/** Replaces the credential form for adapter-less venues. The account row
+ *  still works — label, enabled switch, environment badge — but there is
+ *  nothing to collect: the backend refuses credential writes for these
+ *  venues and the status surface reports UNSUPPORTED. */
+const UnsupportedVenueNotice: React.FC<{ venue: string }> = ({ venue }) => (
+  <div
+    data-testid={`unsupported-venue-${venue}`}
+    className="p-3 bg-slate-50/70 border border-surface-border rounded-lg text-xs font-mono text-slate-600 flex items-start gap-2"
+  >
+    <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5 text-slate-400" />
+    <span>
+      <strong className="text-slate-800">No {venueDisplay(venue)} adapter in this build.</strong>{" "}
+      The venue cannot stream markets or execute orders, so there are no credentials to store —
+      the backend refuses them. The account row exists for bookkeeping; enabling it marks the
+      venue UNSUPPORTED on the status surface.
+    </span>
+  </div>
+);
+
 /* ------------------------------------------------------------------ */
 /* Account card                                                        */
 /* ------------------------------------------------------------------ */
@@ -1197,10 +1214,13 @@ export const AccountCard: React.FC<AccountCardProps> = ({
   lane,
   onChanged,
 }) => {
-  const fields = ACCOUNT_CREDENTIAL_FIELDS[account.venue] ?? [
-    { key: "apiKey" as CredFieldKey, label: "API Key", secret: true },
-    { key: "apiSecret" as CredFieldKey, label: "API Secret", secret: true },
-  ];
+  const unsupported = UNSUPPORTED_VENUES.has(account.venue);
+  const fields: CredFieldSpec[] = unsupported
+    ? []
+    : ACCOUNT_CREDENTIAL_FIELDS[account.venue] ?? [
+        { key: "apiKey" as CredFieldKey, label: "API Key", secret: true },
+        { key: "apiSecret" as CredFieldKey, label: "API Secret", secret: true },
+      ];
   const [label, setLabel] = useState(account.label);
   const [tier, setTier] = useState(account.accountTier || "standard");
   // Per-account leverage ceiling as text; "" = unlimited (null over IPC).
@@ -1550,19 +1570,23 @@ export const AccountCard: React.FC<AccountCardProps> = ({
             className="w-28 shrink-0 px-2 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-xs font-mono text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
           />
         </div>
-        <CredentialGrid
-          fields={fields}
-          values={Object.fromEntries(fields.map((f) => [f.key, valueFor(f.key)]))}
-          setValue={setValue}
-          disabled={busy || locked}
-          account={account}
-          showSecrets={showSecrets}
-          toggleShow={(k) => {
-            const opening = !showSecrets[k];
-            setShowSecrets((st) => ({ ...st, [k]: !st[k] }));
-            if (opening) revealField(k as CredFieldKey);
-          }}
-        />
+        {unsupported ? (
+          <UnsupportedVenueNotice venue={account.venue} />
+        ) : (
+          <CredentialGrid
+            fields={fields}
+            values={Object.fromEntries(fields.map((f) => [f.key, valueFor(f.key)]))}
+            setValue={setValue}
+            disabled={busy || locked}
+            account={account}
+            showSecrets={showSecrets}
+            toggleShow={(k) => {
+              const opening = !showSecrets[k];
+              setShowSecrets((st) => ({ ...st, [k]: !st[k] }));
+              if (opening) revealField(k as CredFieldKey);
+            }}
+          />
+        )}
 
         <div className="flex items-center justify-between pt-1">
           <div className="text-xs font-mono text-muted">
@@ -1640,10 +1664,13 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({
   onDone,
   onCancel,
 }) => {
-  const fields = ACCOUNT_CREDENTIAL_FIELDS[venue] ?? [
-    { key: "apiKey" as CredFieldKey, label: "API Key", secret: true },
-    { key: "apiSecret" as CredFieldKey, label: "API Secret", secret: true },
-  ];
+  const unsupported = UNSUPPORTED_VENUES.has(venue);
+  const fields: CredFieldSpec[] = unsupported
+    ? []
+    : ACCOUNT_CREDENTIAL_FIELDS[venue] ?? [
+        { key: "apiKey" as CredFieldKey, label: "API Key", secret: true },
+        { key: "apiSecret" as CredFieldKey, label: "API Secret", secret: true },
+      ];
   const autoLabel = `${venueDisplay(venue)} Account ${nextOrdinal}`;
   const [label, setLabel] = useState("");
   const [drafts, setDrafts] = useState<Record<string, string>>({});
@@ -1748,16 +1775,20 @@ const AddAccountForm: React.FC<AddAccountFormProps> = ({
       </div>
 
       <div className="space-y-3 pt-1">
-        <CredentialGrid
-          fields={fields}
-          values={drafts}
-          setValue={(k, v) => setDrafts((d) => ({ ...d, [k]: v }))}
-          disabled={busy || locked}
-          account={null}
-          showSecrets={showSecrets}
-          toggleShow={(k) => setShowSecrets((s) => ({ ...s, [k]: !s[k] }))}
-        />
-        {locked && (
+        {unsupported ? (
+          <UnsupportedVenueNotice venue={venue} />
+        ) : (
+          <CredentialGrid
+            fields={fields}
+            values={drafts}
+            setValue={(k, v) => setDrafts((d) => ({ ...d, [k]: v }))}
+            disabled={busy || locked}
+            account={null}
+            showSecrets={showSecrets}
+            toggleShow={(k) => setShowSecrets((s) => ({ ...s, [k]: !s[k] }))}
+          />
+        )}
+        {locked && !unsupported && (
           <p className="text-xs font-mono text-warn-strong">
             Vault is locked: the account can be created now, but credentials require an unlocked vault.
           </p>

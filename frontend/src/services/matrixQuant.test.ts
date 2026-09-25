@@ -12,11 +12,25 @@ import {
   getVenueFeeBps,
   getVenueShortLabel,
   parseDuration,
+  setVenueFees,
   WINDOW_SECONDS,
   type TickerMarketQuote,
 } from "./matrixQuant.ts";
 import type { SpatialOpportunityDto, VenueOrderBookDto } from "../types/index.ts";
 import type { PerpTicker } from "../types/tickers.ts";
+
+// Hydrate the executor fee table the way production does — `getVenueFeeBps`
+// keeps no local copy (the values below mirror `venue_fee_bps` rows these
+// tests exercise).
+setVenueFees(
+  [
+    { venue_id: "hyperliquid", taker_bps: 4.5 },
+    { venue_id: "lighter", taker_bps: 1.5 },
+    { venue_id: "vanta", taker_bps: 4.0 },
+    { venue_id: "robinhood", taker_bps: 4.0 },
+  ],
+  4.0,
+);
 
 test("WINDOW_SECONDS and getVenueFeeBps return expected configurations", () => {
   assert.equal(WINDOW_SECONDS["10s"], 10);
@@ -29,6 +43,11 @@ test("WINDOW_SECONDS and getVenueFeeBps return expected configurations", () => {
   assert.equal(getVenueFeeBps("lighter"), 1.5);
   assert.equal(getVenueFeeBps("vanta"), 4.0);
   assert.equal(getVenueFeeBps("robinhood"), 4.0);
+  // Display-name aliases resolve to the same canonical fee.
+  assert.equal(getVenueFeeBps("hl"), 4.5);
+  assert.equal(getVenueFeeBps("LGT"), 1.5);
+  // Unknown ids fall back to the executor's default arm, never a stale copy.
+  assert.equal(getVenueFeeBps("no-such-venue"), 4.0);
 });
 
 test("RollingSpreadTracker tracks rolling observations and computes sliding window delta", () => {

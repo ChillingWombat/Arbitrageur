@@ -101,6 +101,35 @@ pub struct VenueStatusDto {
     pub can_enter_strategy: bool,
 }
 
+/// One row of the executor's taker-fee table, exposed over IPC so UI
+/// surfaces can never drift from executed cost.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct VenueFeeDto {
+    pub venue_id: String,
+    pub taker_bps: f64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct VenueFeesDto {
+    pub fees: Vec<VenueFeeDto>,
+    /// Fallback for venue ids absent from `fees` — equals the executor's
+    /// default arm. Frontend lookups must use this, not a local constant.
+    pub default_bps: f64,
+}
+
+pub(crate) fn get_venue_fees_impl() -> VenueFeesDto {
+    VenueFeesDto {
+        fees: VENUE_TAKER_FEE_BPS
+            .iter()
+            .map(|(id, bps)| VenueFeeDto {
+                venue_id: (*id).to_string(),
+                taker_bps: *bps,
+            })
+            .collect(),
+        default_bps: DEFAULT_TAKER_FEE_BPS,
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct VenueVolumesDto {
     pub venue_id: String,
@@ -378,63 +407,101 @@ pub struct TickerMarketQuoteDto {
 /// the table previously assumed ~2bps for most venues while real
 /// standard-tier takers run 4–5bps on Binance/OKX/Kraken/Coinbase-class
 /// venues and 4.5bps on Hyperliquid.
-pub(crate) fn venue_fee_bps(vid: &str) -> Decimal {
-    match vid.to_lowercase().as_str() {
-        "hyperliquid" => dec!(4.5),
-        "lighter" => dec!(1.5),
-        "vanta" => dec!(4.0),
-        "robinhood" => dec!(4.0),
-        "arcus" => dec!(4.0),
-        "aster" => dec!(4.0),
-        "binance" => dec!(5.0),
-        "okx" => dec!(5.0),
-        // Deribit perp/future taker is 0.05%; options charge
-        // min(0.03% of underlying, 12.5% of premium) — the options-parity
-        // scanner prices that per-instrument; this row covers status
-        // display and the perp leg's generic fee lookups.
-        "deribit" => dec!(5.0),
-        "kraken" => dec!(5.0),
-        "coinbase" => dec!(5.0),
-        "decibel" => dec!(5.0),
-        "popdex" => dec!(10.0),
-        "polymarket" => dec!(0.0),
-        "kalshi" => dec!(10.0),
-        // DexPerp family — mirrors each venue's spec-published taker.
-        "pacifica" => dec!(2.0),
-        "standx" => dec!(2.0),
-        "ondoperps" => dec!(3.0),
-        "grvt" => dec!(5.0),
-        "derive" => dec!(2.0),
-        "aevo" => dec!(2.0),
-        // Vest charges a flat 1bp on API transactions (crypto perps;
-        // equity/forex symbols currently carry takerFee 0 — the market
-        // parser uses the per-symbol rate when it matters).
-        "vest" => dec!(1.0),
-        // Nado base taker tier is 3.5bps (verified from the live symbols
-        // query); per-symbol rates ride market metadata when they differ.
-        "nado" => dec!(3.5),
-        "qfex" => dec!(4.0),
-        // EVEDEX verified /api/market fee schedule: taker 4.5bps, maker 1.5bps.
-        "evedex" => dec!(4.5),
-        // Paradex spec-published taker.
-        "paradex" => dec!(2.0),
-        // edgeX v2 defaultTakerFeeRate (per-contract — BTC 4.5bps).
-        "edgex" => dec!(4.5),
-        // Extended standard taker tier.
-        "extended" => dec!(2.0),
-        // dYdX base-tier taker.
-        "dydx" => dec!(2.0),
-        // Injective derivative markets: taker_fee_rate 0.000001 = 0.01bps.
-        "helix" => dec!(0.01),
-        // Pendle Boros YU taker fee: 5bps of notional (market `takerFee`
-        // field; the scanner also reads it per-market).
-        "boros" => dec!(5.0),
-        _ => dec!(4.0),
-    }
+/// Standard-tier taker fee (bps) per venue — the executor's authoritative
+/// fee table and the single source of truth for every displayed fee.
+/// `get_venue_fees` serves this verbatim over IPC; frontend surfaces must
+/// look it up there rather than keeping copies (two hand-maintained
+/// frontend tables drifted from this one before — phantom net edge).
+///
+/// EVM spot AMMs price fees per-pair on-chain; their rows here are the
+/// documented display defaults (PancakeSwap V2 charges 25bp; Solidly-style
+/// volatile pools ~30bp; UniV3 pairs span 5–100bp so the conservative tier
+/// is the default).
+const VENUE_TAKER_FEE_BPS: &[(&str, f64)] = &[
+    ("hyperliquid", 4.5),
+    ("lighter", 1.5),
+    ("vanta", 4.0),
+    ("robinhood", 4.0),
+    ("arcus", 4.0),
+    ("aster", 4.0),
+    ("binance", 5.0),
+    ("okx", 5.0),
+    // Deribit perp/future taker is 0.05%; options charge
+    // min(0.03% of underlying, 12.5% of premium) — the options-parity
+    // scanner prices that per-instrument; this row covers status
+    // display and the perp leg's generic fee lookups.
+    ("deribit", 5.0),
+    ("kraken", 5.0),
+    ("coinbase", 5.0),
+    ("decibel", 5.0),
+    ("popdex", 10.0),
+    ("polymarket", 0.0),
+    ("kalshi", 10.0),
+    // DexPerp family — mirrors each venue's spec-published taker.
+    ("pacifica", 2.0),
+    ("standx", 2.0),
+    ("ondoperps", 3.0),
+    ("grvt", 5.0),
+    ("derive", 2.0),
+    ("aevo", 2.0),
+    // Vest charges a flat 1bp on API transactions (crypto perps;
+    // equity/forex symbols currently carry takerFee 0 — the market
+    // parser uses the per-symbol rate when it matters).
+    ("vest", 1.0),
+    // Nado base taker tier is 3.5bps (verified from the live symbols
+    // query); per-symbol rates ride market metadata when they differ.
+    ("nado", 3.5),
+    ("qfex", 4.0),
+    // EVEDEX verified /api/market fee schedule: taker 4.5bps, maker 1.5bps.
+    ("evedex", 4.5),
+    // Paradex spec-published taker.
+    ("paradex", 2.0),
+    // edgeX v2 defaultTakerFeeRate (per-contract — BTC 4.5bps).
+    ("edgex", 4.5),
+    // Extended standard taker tier.
+    ("extended", 2.0),
+    // dYdX base-tier taker.
+    ("dydx", 2.0),
+    // Injective derivative markets: taker_fee_rate 0.000001 = 0.01bps.
+    ("helix", 0.01),
+    // Pendle Boros YU taker fee: 5bps of notional (market `takerFee`
+    // field; the scanner also reads it per-market).
+    ("boros", 5.0),
+    // GMX V2 open/close fee ≈ 0.05% of position.
+    ("gmx", 5.0),
+    // EVM spot AMM display defaults (per-pair truth rides pool metadata).
+    ("uniswap", 30.0),
+    ("uniswap_v2", 30.0),
+    ("pancakeswap", 25.0),
+    ("pancakeswap_v3", 25.0),
+    ("sushiswap", 30.0),
+    ("quickswap", 30.0),
+    ("camelot", 30.0),
+    ("aerodrome", 30.0),
+    ("velodrome", 30.0),
+    ("ramses", 30.0),
+    ("pharaoh", 30.0),
+    // TradFi broker display defaults.
+    ("ibkr", 1.0),
+    ("ig", 5.0),
+];
+
+/// Default taker fee for venues absent from `VENUE_TAKER_FEE_BPS` —
+/// surfaced in `get_venue_fees` so the frontend fallback can never
+/// diverge from the executor's.
+pub(crate) const DEFAULT_TAKER_FEE_BPS: f64 = 4.0;
+
+pub(crate) fn venue_fee_bps(vid: &str) -> f64 {
+    let v = vid.to_lowercase();
+    VENUE_TAKER_FEE_BPS
+        .iter()
+        .find(|(id, _)| *id == v)
+        .map(|(_, f)| *f)
+        .unwrap_or(DEFAULT_TAKER_FEE_BPS)
 }
 
 pub(crate) fn effective_venue_fee_bps(state: &AppEngineState, venue: &str) -> f64 {
-    let base: f64 = venue_fee_bps(venue).to_string().parse().unwrap_or(2.0);
+    let base: f64 = venue_fee_bps(venue);
     let plus = matches!(venue.to_ascii_lowercase().as_str(), "lighter" | "robinhood")
         && state
             .state_store
@@ -895,7 +962,11 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
     let admitted_map: HashMap<&str, &Arc<dyn ExchangeAdapter>> =
         admitted.iter().map(|(vid, _, a)| (*vid, a)).collect();
     let venue_status = |vid: &str, enabled: bool| -> &str {
-        if !enabled {
+        if !crate::state::venue_has_adapter(vid) {
+            // No constructed adapter exists — enablement can never admit
+            // the venue, so report UNSUPPORTED even when the row is off.
+            "UNSUPPORTED"
+        } else if !enabled {
             "OFFLINE"
         } else if admitted_map.contains_key(vid) {
             "READ_ONLY"
@@ -1673,10 +1744,7 @@ pub async fn fetch_multi_market_quotes_impl(
             if found_any && best_bid > 0.0 && best_ask < f64::INFINITY {
                 let m = (best_bid + best_ask) / 2.0;
                 let sp = best_buy_spread_bps.max(0.0);
-                let f = venue_fee_bps(&best_ask_venue)
-                    .to_string()
-                    .parse::<f64>()
-                    .unwrap_or(2.0);
+                let f = venue_fee_bps(&best_ask_venue);
                 (best_bid, best_ask, m, sp, best_ask_venue, best_bid_venue, f)
             } else {
                 (0.0, 0.0, 0.0, 0.0, "-".to_string(), "-".to_string(), 0.0)
@@ -2535,6 +2603,12 @@ pub fn save_engine_settings_impl(
         );
     }
     let submitted = settings.submitted_credentials();
+    // Legacy flat credential fields can name venues with no constructed
+    // adapter (arcus/polymarket/kalshi). Storing their secrets would
+    // warehouse material nothing can consume — skip the write and report
+    // it in the returned message rather than silently dropping or
+    // silently keeping.
+    let mut skipped_cred_venues: Vec<String> = Vec::new();
     if !submitted.is_empty() {
         // Bind any pre-account-model records to `{venue}-default` profiles
         // before writing so every exchange credential lands on a profile.
@@ -2547,6 +2621,10 @@ pub fn save_engine_settings_impl(
                 vault
                     .upsert_credentials(vec![cred])
                     .map_err(|e| e.to_string())?;
+                continue;
+            }
+            if !crate::state::venue_has_adapter(&venue_key) {
+                skipped_cred_venues.push(venue_key);
                 continue;
             }
             let profile = ensure_default_profile(state, &venue_key, cred.enabled)?;
@@ -2924,7 +3002,16 @@ pub fn save_engine_settings_impl(
             != crate::stablecoin_fx::USD_QUOTE_MODE_SEPARATE,
     );
     *state.settings.write() = sanitized;
-    Ok("Configuration applied to the current session".into())
+    if skipped_cred_venues.is_empty() {
+        Ok("Configuration applied to the current session".into())
+    } else {
+        Ok(format!(
+            "Configuration applied to the current session — credentials for {} \
+             were ignored: no adapter exists for that venue, so stored keys \
+             could never be used",
+            skipped_cred_venues.join(", ")
+        ))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3000,6 +3087,13 @@ pub(crate) async fn cached_venue_volumes(
     }
     *state.volume_cache.lock() = Some((std::time::Instant::now(), map.clone()));
     map
+}
+
+/// The executor's venue taker-fee table — single source for every UI fee
+/// display. Stateless; no environment or admission dependence.
+#[tauri::command]
+pub async fn get_venue_fees() -> Result<VenueFeesDto, String> {
+    Ok(get_venue_fees_impl())
 }
 
 #[tauri::command]
@@ -4589,10 +4683,18 @@ mod tests {
         assert!(!status.circuit_breaker_tripped);
         assert_eq!(status.circuit_breaker_status, "ACTIVE");
         // 17 primary venues + 26 DexPerpAdapter venues + 11 EvmAmmAdapter
-        // venues (all OFFLINE — nothing enabled, no credentials).
+        // venues (nothing enabled, no credentials).
         assert_eq!(status.active_venues.len(), 54);
         for v in &status.active_venues {
-            assert_eq!(v.status, "OFFLINE");
+            // Adapter-less venues (arcus/polymarket/kalshi) report
+            // UNSUPPORTED unconditionally — enablement can never admit
+            // them, so OFFLINE would falsely imply a working switch.
+            let expected = if crate::state::venue_has_adapter(&v.id) {
+                "OFFLINE"
+            } else {
+                "UNSUPPORTED"
+            };
+            assert_eq!(v.status, expected, "venue {}", v.id);
             assert_eq!(v.latency_ms, None);
         }
         assert!(!status.is_paused);
@@ -4605,9 +4707,15 @@ mod tests {
         // account-level enablement for them is only visible under Live.
         state.set_environment(crate::state::TradingEnvironment::Live);
 
-        // No flags, no accounts: everything OFFLINE.
+        // No flags, no accounts: everything OFFLINE except the adapter-less
+        // venues, which report UNSUPPORTED even while disabled.
         let status = get_system_status_impl(&state).await.expect("status");
-        assert!(status.active_venues.iter().all(|v| v.status == "OFFLINE"));
+        assert!(status.active_venues.iter().all(|v| v.status
+            == if crate::state::venue_has_adapter(&v.id) {
+                "OFFLINE"
+            } else {
+                "UNSUPPORTED"
+            }));
 
         // An enabled account profile admits the venue even with the engine
         // flag unset — status must match what get_venues actually admits.
@@ -4638,7 +4746,7 @@ mod tests {
             status
                 .active_venues
                 .iter()
-                .filter(|v| v.status != "OFFLINE")
+                .filter(|v| v.status == "READ_ONLY")
                 .count(),
             1
         );
@@ -4720,6 +4828,119 @@ mod tests {
             .find(|v| v.id == "ibkr")
             .expect("ibkr row");
         assert_eq!(ibkr.status, "UNSUPPORTED");
+
+        // Arcus/polymarket/kalshi have account rows and engine flags but no
+        // constructed adapter — UNSUPPORTED must hold even before the flag
+        // or account enables them (OFFLINE would imply a working switch).
+        for dead in ["arcus", "polymarket", "kalshi"] {
+            let row = status
+                .active_venues
+                .iter()
+                .find(|v| v.id == dead)
+                .unwrap_or_else(|| panic!("{dead} row"));
+            assert_eq!(row.status, "UNSUPPORTED", "{dead} while disabled");
+            assert!(!row.can_submit);
+            assert!(!row.can_enter_strategy);
+        }
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// #27c: credential material for an adapter-less venue can never be
+    /// consumed — the upsert must refuse it instead of warehousing secrets
+    /// that provision nothing. The account row itself still saves.
+    #[tokio::test]
+    async fn test_upsert_account_refuses_credentials_for_unadapted_venue() {
+        let (state, dir) = test_state_with_vault("unadapted-creds");
+        initialize_vault_impl("test password", &state).expect("init vault");
+
+        // Credential-bearing create on arcus → refused, no row persisted.
+        let err = upsert_account_impl(
+            AccountUpsertInput {
+                environment: None,
+                account_tier: None,
+                max_leverage: None,
+                id: None,
+                venue: "arcus".into(),
+                label: "arc".into(),
+                enabled: false,
+                make_default: false,
+                credentials: Some(AccountCredentialInput {
+                    api_key: "pk_live".into(),
+                    api_secret: "sk_live".into(),
+                    ..Default::default()
+                }),
+            },
+            &state,
+        )
+        .expect_err("credentials on an adapter-less venue must be refused");
+        assert!(err.contains("no arcus adapter"), "unexpected error: {err}");
+        assert!(state
+            .state_store
+            .list_accounts(None)
+            .unwrap_or_default()
+            .iter()
+            .all(|a| a.venue != "arcus"));
+
+        // The same venue without credential material saves fine — the row
+        // is honest metadata; only the secrets are refused.
+        let ok = upsert_account_impl(
+            AccountUpsertInput {
+                environment: None,
+                account_tier: None,
+                max_leverage: None,
+                id: None,
+                venue: "kalshi".into(),
+                label: "k".into(),
+                enabled: true,
+                make_default: false,
+                credentials: None,
+            },
+            &state,
+        )
+        .expect("credential-less account on a dead venue must save");
+        assert_eq!(ok.venue, "kalshi");
+
+        // An all-empty Some(credentials) payload is the patch no-op — not
+        // material, so it must not trip the refuse.
+        let ok2 = upsert_account_impl(
+            AccountUpsertInput {
+                environment: None,
+                account_tier: None,
+                max_leverage: None,
+                id: Some(ok.id.clone()),
+                venue: "kalshi".into(),
+                label: "k".into(),
+                enabled: true,
+                make_default: false,
+                credentials: Some(AccountCredentialInput::default()),
+            },
+            &state,
+        )
+        .expect("empty credentials payload is a no-op, not a refuse");
+        assert_eq!(ok2.id, ok.id);
+
+        // A real venue with an adapter still accepts credentials (gate is
+        // venue-scoped, not a blanket refuse).
+        let hl = upsert_account_impl(
+            AccountUpsertInput {
+                environment: None,
+                account_tier: None,
+                max_leverage: None,
+                id: None,
+                venue: "hyperliquid".into(),
+                label: "hl".into(),
+                enabled: false,
+                make_default: false,
+                credentials: Some(AccountCredentialInput {
+                    wallet_address: Some("0x0000000000000000000000000000000000000001".into()),
+                    ..Default::default()
+                }),
+            },
+            &state,
+        )
+        .expect("hyperliquid credentials must save");
+        assert_eq!(hl.venue, "hyperliquid");
 
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -8398,6 +8619,75 @@ mod tests {
         .expect("create account");
         assert_eq!(effective_venue_fee_bps(&state, "lighter"), 2.0);
         assert_eq!(effective_venue_fee_bps(&state, "hyperliquid"), 4.5);
+    }
+
+    /// The IPC payload must be executor-identical — a UI that shows fees
+    /// the executor doesn't charge recreates the drift this command exists
+    /// to retire.
+    #[test]
+    fn test_get_venue_fees_matches_executor_table() {
+        let dto = get_venue_fees_impl();
+        assert_eq!(dto.default_bps, DEFAULT_TAKER_FEE_BPS);
+        assert!(dto.fees.len() >= 30, "fee table shrank unexpectedly");
+        for row in &dto.fees {
+            assert_eq!(
+                venue_fee_bps(&row.venue_id),
+                row.taker_bps,
+                "IPC fee diverges from executor table for {}",
+                row.venue_id
+            );
+        }
+        // Unknown ids resolve to the same default the IPC advertises.
+        assert_eq!(venue_fee_bps("no-such-venue"), dto.default_bps);
+        // Spot-check rows whose frontend copies previously drifted.
+        assert_eq!(venue_fee_bps("deribit"), 5.0);
+        assert_eq!(venue_fee_bps("gmx"), 5.0);
+        assert_eq!(venue_fee_bps("pancakeswap"), 25.0);
+    }
+
+    /// End-to-end rotation: a vault password change must keep `vault.hold`
+    /// on the same password generation — the wallet address survives and
+    /// the old password opens neither file.
+    #[test]
+    fn test_change_vault_password_rekeys_stronghold() {
+        let (state, dir) = test_state_with_vault("pwrotate-e2e");
+        initialize_vault_impl("old-password-1234", &state).expect("init vault");
+        // Provision the shared EVM key so vault.hold exists on disk.
+        {
+            let guard = state.evm_stronghold.read();
+            let sh = guard.as_ref().expect("stronghold opens on unlock");
+            sh.store_key(zeroize::Zeroizing::new([0x42u8; 32]))
+                .expect("store evm key");
+        }
+        let addr_before = state
+            .evm_stronghold
+            .read()
+            .as_ref()
+            .expect("stronghold")
+            .evm_address()
+            .expect("address");
+        assert!(dir.join("vault.hold").exists());
+
+        // Wrong current password: rejected, nothing rotated.
+        assert!(
+            change_vault_password_impl("not-the-password", "new-password-5678", &state).is_err()
+        );
+
+        change_vault_password_impl("old-password-1234", "new-password-5678", &state)
+            .expect("rotate");
+
+        // Old password rejected, new password opens the vault.
+        let mut probe = crate::vault::SecureVault::new_with_path(dir.join("vault.enc"));
+        assert!(probe.unlock("old-password-1234").is_err());
+        assert!(probe.unlock("new-password-5678").is_ok());
+        drop(probe);
+
+        // The live stronghold was reopened under the NEW snapshot key —
+        // same wallet key, same address (no re-provisioned orphan).
+        let guard = state.evm_stronghold.read();
+        let sh = guard.as_ref().expect("stronghold reopened post-rotation");
+        assert_eq!(sh.evm_address().expect("address"), addr_before);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]

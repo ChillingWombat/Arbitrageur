@@ -6,6 +6,9 @@ import type { VaultStatus } from "../types";
 interface VaultUnlockModalProps {
   isOpen: boolean;
   vaultStatus: VaultStatus | null;
+  /** "change" collects the current password plus a new one and rotates the
+   *  vault + Stronghold snapshot atomically (backend `change_vault_password`). */
+  mode?: "unlock" | "change";
   onClose?: () => void;
   onSuccess: (status: VaultStatus) => void;
   dismissible?: boolean;
@@ -14,12 +17,14 @@ interface VaultUnlockModalProps {
 export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
   isOpen,
   vaultStatus,
+  mode = "unlock",
   onClose,
   onSuccess,
   dismissible = false,
 }) => {
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [currentPassword, setCurrentPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -29,6 +34,7 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
     if (isOpen) {
       setPassword("");
       setConfirmPassword("");
+      setCurrentPassword("");
       setError(null);
       setShowPassword(false);
     }
@@ -49,17 +55,18 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
   if (!isOpen) return null;
 
   const isInitializing = vaultStatus ? !vaultStatus.is_initialized : false;
+  const isChanging = mode === "change";
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError(null);
 
-    if (isInitializing && Array.from(password).length < 12) {
+    if ((isInitializing || isChanging) && Array.from(password).length < 12) {
       setError("Password must be at least 12 characters long.");
       return;
     }
 
-    if (isInitializing && password !== confirmPassword) {
+    if ((isInitializing || isChanging) && password !== confirmPassword) {
       setError("Passwords do not match. Please re-enter.");
       return;
     }
@@ -67,13 +74,16 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
     setLoading(true);
     try {
       let updatedStatus: VaultStatus;
-      if (isInitializing) {
+      if (isChanging) {
+        updatedStatus = await api.changeVaultPassword(currentPassword, password);
+      } else if (isInitializing) {
         updatedStatus = await api.initializeVault(password);
       } else {
         updatedStatus = await api.unlockVault(password);
       }
       setPassword("");
       setConfirmPassword("");
+      setCurrentPassword("");
       onSuccess(updatedStatus);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -100,12 +110,18 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
             </div>
             <div>
               <h3 className="text-base font-bold font-sans tracking-tight text-slate-900 leading-snug">
-                {isInitializing ? "Create Master Password" : "Unlock Workspace"}
+                {isChanging
+                  ? "Change Master Password"
+                  : isInitializing
+                    ? "Create Master Password"
+                    : "Unlock Workspace"}
               </h3>
               <p className="text-xs text-slate-500 font-sans mt-0.5">
-                {isInitializing
-                  ? "Set a master password to encrypt and protect your credential vault"
-                  : "Enter your master password to unlock trading and credentials"}
+                {isChanging
+                  ? "Rotates the vault key and re-encrypts the shared EVM wallet atomically"
+                  : isInitializing
+                    ? "Set a master password to encrypt and protect your credential vault"
+                    : "Enter your master password to unlock trading and credentials"}
               </p>
             </div>
           </div>
@@ -119,17 +135,36 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
         )}
 
         <form onSubmit={handleSubmit} className="space-y-4">
+          {isChanging && (
+            <div>
+              <label className="block text-xs font-sans font-semibold text-slate-700 mb-1">
+                Current Password
+              </label>
+              <input
+                type={showPassword ? "text" : "password"}
+                value={currentPassword}
+                onChange={(e) => setCurrentPassword(e.target.value)}
+                autoFocus
+                placeholder="Enter current master password..."
+                className="w-full bg-surface border border-surface-border rounded-lg px-3.5 py-2 text-xs font-mono text-slate-900 placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-primary/15 focus:border-primary transition-all shadow-2xs"
+              />
+            </div>
+          )}
           <div>
             <label className="block text-xs font-sans font-semibold text-slate-700 mb-1">
-              Master Password
+              {isChanging ? "New Password" : "Master Password"}
             </label>
             <div className="relative">
               <input
                 type={showPassword ? "text" : "password"}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
-                autoFocus
-                placeholder={isInitializing ? "Create master password (min 12 chars)..." : "Enter master password..."}
+                autoFocus={!isChanging}
+                placeholder={
+                  isChanging || isInitializing
+                    ? "New master password (min 12 chars)..."
+                    : "Enter master password..."
+                }
                 className="w-full bg-surface border border-surface-border rounded-lg px-3.5 py-2 text-xs font-mono text-slate-900 placeholder:text-muted focus:outline-none focus:ring-2 focus:ring-primary/15 focus:border-primary transition-all shadow-2xs pr-10"
               />
               <button
@@ -142,7 +177,7 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
             </div>
           </div>
 
-          {isInitializing && (
+          {(isInitializing || isChanging) && (
             <div>
               <label className="block text-xs font-sans font-semibold text-slate-700 mb-1">
                 Confirm Password
@@ -171,13 +206,26 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
           <div className="pt-2 border-t border-surface-border">
             <button
               type="submit"
-              disabled={loading || password.length === 0 || (isInitializing && confirmPassword.length === 0)}
+              disabled={
+                loading ||
+                password.length === 0 ||
+                ((isInitializing || isChanging) && confirmPassword.length === 0) ||
+                (isChanging && currentPassword.length === 0)
+              }
               className="w-full btn-primary px-2.5 py-2.5 text-xs font-semibold shadow-xs flex items-center justify-center space-x-1.5 cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {loading ? (
-                <span className="animate-pulse">Processing...</span>
+                <span className="animate-pulse">
+                  {isChanging ? "Rotating keys..." : "Processing..."}
+                </span>
               ) : (
-                <span>{isInitializing ? "Create Master Password & Enter" : "Unlock Workspace"}</span>
+                <span>
+                  {isChanging
+                    ? "Change Password"
+                    : isInitializing
+                      ? "Create Master Password & Enter"
+                      : "Unlock Workspace"}
+                </span>
               )}
             </button>
             {dismissible && onClose && (

@@ -143,6 +143,84 @@ pub fn lock_vault_impl(state: &AppEngineState) -> Result<VaultStatus, String> {
     Ok(status)
 }
 
+/// Rotate the vault master password while keeping the Stronghold snapshot
+/// on the same password generation. Ordering is the whole point:
+///
+/// 1. `prepare_password_rotation` verifies the current password and
+///    produces the rotated ciphertext (no writes yet).
+/// 2. `vault.hold` is re-encrypted under the NEW snapshot key — before
+///    `vault.enc` is committed — so the two files can never end up on
+///    different password generations with a "successful" status.
+/// 3. `vault.enc` commits atomically; on write failure the snapshot is
+///    rolled back to the old key. If the rollback itself fails, the
+///    snapshot is deleted outright — the wallet is then explicitly
+///    unprovisioned (status shows no custody) rather than silently
+///    orphaned under a key nothing can derive.
+/// 4. The open stronghold is reopened under the new key (its wrapper
+///    otherwise carries the stale keyprovider and would re-encrypt the
+///    file under the OLD key on the next `save()`), and signer clients
+///    are re-provisioned through the normal credential sync.
+pub fn change_vault_password_impl(
+    current: &str,
+    new_password: &str,
+    state: &AppEngineState,
+) -> Result<VaultStatus, String> {
+    let mut vault = state.vault.write();
+    let rotation = vault
+        .prepare_password_rotation(current, new_password)
+        .map_err(|e| e.to_string())?;
+    let hold_path = vault.stronghold_snapshot_path();
+    let hold_exists = hold_path.exists();
+    let old_snap_key = if hold_exists {
+        Some(
+            rotation
+                .old_snapshot_key
+                .clone()
+                .ok_or("vault session key unavailable for snapshot re-key")?,
+        )
+    } else {
+        None
+    };
+    let new_snap_key = rotation.new_snapshot_key.clone();
+
+    if let Some(old_key) = &old_snap_key {
+        crate::stronghold::EvmStronghold::rekey_snapshot_file(&hold_path, old_key, &new_snap_key)
+            .map_err(|e| format!("Password unchanged — wallet snapshot re-key failed: {e}"))?;
+    }
+
+    if let Err(e) = vault.commit_password_rotation(rotation) {
+        if let Some(old_key) = &old_snap_key {
+            match crate::stronghold::EvmStronghold::rekey_snapshot_file(
+                &hold_path,
+                &new_snap_key,
+                old_key,
+            ) {
+                Ok(()) => {}
+                Err(rb) => {
+                    // Neither file generation is recoverable as a pair —
+                    // remove the snapshot so the wallet is visibly
+                    // unprovisioned instead of silently unreadable.
+                    let _ = std::fs::remove_file(&hold_path);
+                    tracing::error!(
+                        "vault rotation aborted and snapshot rollback failed ({rb}); \
+                         vault.hold removed — EVM wallet is unprovisioned"
+                    );
+                }
+            }
+        }
+        return Err(format!("Password unchanged — vault write failed: {e}"));
+    }
+    let status = vault.get_status();
+    drop(vault);
+
+    // Reopen under the new snapshot key (drops the stale-keyprovider
+    // wrapper) and re-provision every external signer through the normal
+    // sync — adapter `Client` handles into the dropped engine are replaced.
+    state.open_evm_stronghold();
+    state.sync_vault_credentials_to_adapters();
+    Ok(status)
+}
+
 const DELETABLE_CREDENTIAL_VENUES: &[&str] = &[
     "remote_hsm",
     "hyperliquid",
@@ -278,6 +356,24 @@ pub struct AccountCredentialInput {
 }
 
 impl AccountCredentialInput {
+    /// True when the payload carries any material that would land in the
+    /// vault — non-empty secrets, wallet/index fields, or a base-URL
+    /// override. An all-empty `Some` payload is the patch-protocol no-op
+    /// and does not count.
+    fn has_credential_material(&self) -> bool {
+        let non_empty = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.trim().is_empty());
+        !self.api_key.trim().is_empty()
+            || !self.api_secret.trim().is_empty()
+            || non_empty(&self.passphrase)
+            || non_empty(&self.account_id)
+            || non_empty(&self.wallet_address)
+            || non_empty(&self.private_key)
+            || non_empty(&self.base_url)
+            || self.account_index.is_some()
+            || self.subaccount_index.is_some()
+            || self.api_key_index.is_some()
+    }
+
     fn into_record(self, venue: &str, profile_id: &str, enabled: bool) -> ExchangeCredentials {
         let trimmed_opt = |v: &Option<String>| {
             v.as_ref()
@@ -588,13 +684,44 @@ pub fn upsert_account_impl(
 ) -> Result<AccountDto, String> {
     ensure_credential_migration(state)?;
 
-    let profile = match &input.id {
-        Some(id) => {
-            let existing = state
+    // Resolve the venue this write targets before anything persists —
+    // credential material for an adapter-less venue must refuse the whole
+    // upsert, not leave a committed account row behind.
+    let existing = match &input.id {
+        Some(id) => Some(
+            state
                 .state_store
                 .get_account(id)
                 .map_err(|e| e.to_string())?
-                .ok_or_else(|| format!("account {id} does not exist"))?;
+                .ok_or_else(|| format!("account {id} does not exist"))?,
+        ),
+        None => None,
+    };
+    let target_venue = existing
+        .as_ref()
+        .map(|e| e.venue.clone())
+        .unwrap_or_else(|| input.venue.trim().to_lowercase());
+    // Venues with no constructed adapter (e.g. arcus/polymarket/kalshi)
+    // can never consume stored material: refuse the write instead of
+    // silently warehousing secrets that provision nothing. Credential-less
+    // account rows still save — presence flags and the enabled switch are
+    // meaningful metadata on an UNSUPPORTED venue.
+    if input
+        .credentials
+        .as_ref()
+        .is_some_and(|c| c.has_credential_material())
+        && !crate::state::venue_has_adapter(&target_venue)
+    {
+        return Err(format!(
+            "Refusing credentials for venue '{target_venue}' — this build has no \
+             {target_venue} adapter, so stored keys could never be used. The \
+             account row itself is fine."
+        ));
+    }
+
+    let profile = match &input.id {
+        Some(id) => {
+            let existing = existing.expect("checked above");
             if !input.venue.trim().is_empty()
                 && !input.venue.trim().eq_ignore_ascii_case(&existing.venue)
             {
@@ -1612,6 +1739,15 @@ pub async fn unlock_vault(
 #[tauri::command]
 pub async fn lock_vault(state: State<'_, Arc<AppEngineState>>) -> Result<VaultStatus, String> {
     lock_vault_impl(&state)
+}
+
+#[tauri::command]
+pub async fn change_vault_password(
+    current: String,
+    new_password: String,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<VaultStatus, String> {
+    change_vault_password_impl(&current, &new_password, &state)
 }
 
 #[tauri::command]

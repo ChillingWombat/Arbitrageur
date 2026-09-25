@@ -171,6 +171,20 @@ pub struct SecureVault {
     kdf_salt: Option<[u8; SALT_LEN]>,
 }
 
+/// Artifacts of `SecureVault::prepare_password_rotation` — consumed by
+/// `commit_password_rotation` only after the Stronghold snapshot has been
+/// re-keyed. Carries both snapshot-key generations so a commit failure can
+/// roll `vault.hold` back to the old key.
+pub struct VaultPasswordRotation {
+    encrypted_bytes: Vec<u8>,
+    new_key: Zeroizing<[u8; 32]>,
+    new_salt: [u8; SALT_LEN],
+    /// Snapshot key derived from the post-rotation session key.
+    pub new_snapshot_key: Zeroizing<[u8; 32]>,
+    /// Snapshot key derived from the pre-rotation session key.
+    pub old_snapshot_key: Option<Zeroizing<[u8; 32]>>,
+}
+
 impl SecureVault {
     pub fn new_with_path(path: PathBuf) -> Self {
         Self {
@@ -269,13 +283,20 @@ impl SecureVault {
     /// recover the vault key.
     pub fn stronghold_session_key(&self) -> Option<Zeroizing<[u8; 32]>> {
         let key = self.encryption_key.as_ref()?;
+        Some(Self::stronghold_key_for(key))
+    }
+
+    /// Domain-separated Stronghold snapshot key for a given vault session
+    /// key — shared by `stronghold_session_key` and password rotation, so
+    /// the `.hold` file's key always tracks the vault's active session key.
+    fn stronghold_key_for(session_key: &[u8; 32]) -> Zeroizing<[u8; 32]> {
         let mut hasher = Sha256::new();
         hasher.update(b"arbitrageur/stronghold-snapshot/v1");
-        hasher.update(key.as_slice());
+        hasher.update(session_key.as_slice());
         let digest = hasher.finalize();
         let mut out = Zeroizing::new([0u8; 32]);
         out.copy_from_slice(&digest);
-        Some(out)
+        out
     }
 
     /// Derive the v2 32-byte encryption key using Argon2id
@@ -551,6 +572,66 @@ impl SecureVault {
         self.decrypted_cache = Some(data.clone());
         self.encryption_key = Some(key);
         self.kdf_salt = Some(salt);
+        self.auto_locked = false;
+        self.unlocked_until = Some(Utc::now() + chrono::Duration::minutes(15));
+        Ok(())
+    }
+
+    /// Verify `current` against the on-disk vault and prepare the rotated
+    /// ciphertext — nothing is written yet. The caller re-keys `vault.hold`
+    /// under `rotation.new_snapshot_key` BEFORE calling
+    /// `commit_password_rotation`, so the vault file and the Stronghold
+    /// snapshot never sit on different password generations (a rotated
+    /// vault + stale snapshot silently orphans every AMM signer).
+    ///
+    /// Password verification runs against the file bytes, not the session
+    /// key — a legacy (PBKDF2) vault's session key is not the Argon2 key,
+    /// so comparing derived keys would false-reject a correct password.
+    pub fn prepare_password_rotation(
+        &mut self,
+        current: &str,
+        new_password: &str,
+    ) -> anyhow::Result<VaultPasswordRotation> {
+        if !self.is_unlocked() {
+            anyhow::bail!("Vault is locked — unlock before changing the password");
+        }
+        let mut check = SecureVault::new_with_path(self.storage_path.clone());
+        check
+            .unlock(current)
+            .map_err(|_| anyhow::anyhow!("Current password is incorrect"))?;
+        if new_password.chars().count() < MIN_PASSWORD_CHARS {
+            anyhow::bail!("New password must be at least 12 characters long");
+        }
+
+        let data = self
+            .decrypted_cache
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("Decrypted vault cache is empty"))?;
+        let mut new_salt = [0u8; SALT_LEN];
+        rand::thread_rng().fill_bytes(&mut new_salt);
+        let new_key = Self::derive_v2_key(new_password, &new_salt)?;
+        let encrypted_bytes = Self::encrypt_v2(&data, &new_key, &new_salt)?;
+        let new_snapshot_key = Self::stronghold_key_for(&new_key);
+        let old_snapshot_key = self.stronghold_session_key();
+        Ok(VaultPasswordRotation {
+            encrypted_bytes,
+            new_key,
+            new_salt,
+            new_snapshot_key,
+            old_snapshot_key,
+        })
+    }
+
+    /// Commit a prepared rotation: atomic vault-file write, then the
+    /// session-key swap. Only called after the `.hold` snapshot has been
+    /// re-keyed under `rotation.new_snapshot_key` (or confirmed absent).
+    pub fn commit_password_rotation(
+        &mut self,
+        rotation: VaultPasswordRotation,
+    ) -> anyhow::Result<()> {
+        Self::write_file_atomic(&self.storage_path, &rotation.encrypted_bytes)?;
+        self.encryption_key = Some(rotation.new_key);
+        self.kdf_salt = Some(rotation.new_salt);
         self.auto_locked = false;
         self.unlocked_until = Some(Utc::now() + chrono::Duration::minutes(15));
         Ok(())
@@ -938,6 +1019,68 @@ mod tests {
         ));
         let file = dir.join("vault.enc");
         (dir, file)
+    }
+
+    #[test]
+    fn test_password_rotation_two_phase() {
+        let (dir, file) = temp_vault_path("pwrotate");
+        let mut vault = SecureVault::new_with_path(file.clone());
+        vault.initialize("old-password-1234").expect("init");
+        let old_snap = vault
+            .stronghold_session_key()
+            .expect("unlocked session key");
+
+        // Wrong current password must not prepare anything.
+        assert!(vault
+            .prepare_password_rotation("wrong-password", "new-password-5678")
+            .is_err());
+        // Short new password rejected before any key material is produced.
+        assert!(vault
+            .prepare_password_rotation("old-password-1234", "short")
+            .is_err());
+        // A locked vault refuses rotation outright.
+        let mut locked = SecureVault::new_with_path(file.clone());
+        assert!(locked
+            .prepare_password_rotation("old-password-1234", "new-password-5678")
+            .is_err());
+
+        let rotation = vault
+            .prepare_password_rotation("old-password-1234", "new-password-5678")
+            .expect("prepare");
+        // The snapshot key must track the session-key generation.
+        assert_eq!(
+            rotation
+                .old_snapshot_key
+                .as_ref()
+                .expect("old snapshot key")
+                .as_slice(),
+            old_snap.as_slice()
+        );
+        assert_ne!(
+            rotation.new_snapshot_key.as_slice(),
+            old_snap.as_slice(),
+            "rotation must produce a new snapshot key"
+        );
+        // Nothing committed yet — old password still opens the file.
+        let mut probe = SecureVault::new_with_path(file.clone());
+        assert!(probe.unlock("old-password-1234").is_ok());
+        drop(probe);
+
+        vault.commit_password_rotation(rotation).expect("commit");
+
+        let mut old_probe = SecureVault::new_with_path(file.clone());
+        assert!(old_probe.unlock("old-password-1234").is_err());
+        let mut new_probe = SecureVault::new_with_path(file);
+        assert!(new_probe.unlock("new-password-5678").is_ok());
+        // Session key swapped — the live vault now derives the new snapshot key.
+        assert_ne!(
+            vault
+                .stronghold_session_key()
+                .expect("session key")
+                .as_slice(),
+            old_snap.as_slice()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

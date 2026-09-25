@@ -108,7 +108,6 @@ export interface ExchangeMetadata {
   id: ExchangeId;
   name: string;
   type: string;
-  feeBps: number;
   /** Sidebar grouping — EVM AMMs cluster by chain (they share the chain's
    *  RPC endpoint; the account's baseUrl override is per-chain). */
   group: string;
@@ -153,64 +152,64 @@ export function groupExchangesBySection(
 }
 
 export const EXCHANGES_ALPHABETICAL: ExchangeMetadata[] = [
-  { id: "aerodrome", name: "Aerodrome", type: "Spot AMM — Base (Market Data)", feeBps: 30.0 , group: "EVM AMM — Base" },
-  { id: "aevo", name: "Aevo", type: "Perp DEX (Live)", feeBps: 2.0 , group: "Perp DEX — Long Tail" },
-  { id: "alphax", name: "AlphaX", type: "Perp DEX (Market Data)", feeBps: 4.0 , group: "Perp DEX — Long Tail" },
-  { id: "antarctic", name: "Antarctic", type: "Perp DEX (Market Data)", feeBps: 4.0 , group: "Perp DEX — Long Tail" },
-  { id: "apex", name: "ApeX Omni", type: "Perp DEX (Market Data)", feeBps: 4.0 , group: "Perp DEX — Long Tail" },
-  { id: "arcus", name: "Arcus", type: "CLOB DEX", feeBps: 4.0 , group: "Primary" },
-  { id: "aster", name: "Aster", type: "Multi-Chain Perp DEX", feeBps: 4.0 , group: "Primary" },
-  { id: "astros", name: "Astros", type: "Perp DEX (Market Data)", feeBps: 4.0 , group: "Perp DEX — Long Tail" },
-  { id: "binance", name: "Binance", type: "CEX Spot & Perp", feeBps: 5.0 , group: "Primary" },
-  { id: "bulk", name: "BULK", type: "Perp DEX (Market Data)", feeBps: 4.0 , group: "Perp DEX — Long Tail" },
-  { id: "camelot", name: "Camelot V2", type: "Spot AMM — Arbitrum (Market Data)", feeBps: 30.0 , group: "EVM AMM — Arbitrum" },
-  { id: "coinbase", name: "Coinbase", type: "CEX Spot & Perp", feeBps: 5.0 , group: "Primary" },
-  { id: "decibel", name: "Decibel", type: "Aptos Perp DEX", feeBps: 5.0 , group: "Primary" },
-  { id: "deribit", name: "Deribit", type: "CEX Options & Perps", feeBps: 5.0 , group: "Primary" },
-  { id: "derive", name: "Derive", type: "Perp DEX (Live)", feeBps: 2.0 , group: "Perp DEX — Long Tail" },
-  { id: "dydx", name: "dYdX Chain", type: "Perp DEX (Live)", feeBps: 2.0 , group: "Perp DEX — Long Tail" },
-  { id: "edgex", name: "edgeX", type: "Perp DEX (Live)", feeBps: 4.5 , group: "Perp DEX — Long Tail" },
-  { id: "evedex", name: "EVEDEX", type: "Perp DEX (Live)", feeBps: 4.5 , group: "Perp DEX — Long Tail" },
+  { id: "aerodrome", name: "Aerodrome", type: "Spot AMM — Base (Market Data)", group: "EVM AMM — Base" },
+  { id: "aevo", name: "Aevo", type: "Perp DEX (Live)", group: "Perp DEX — Long Tail" },
+  { id: "alphax", name: "AlphaX", type: "Perp DEX (Market Data)", group: "Perp DEX — Long Tail" },
+  { id: "antarctic", name: "Antarctic", type: "Perp DEX (Market Data)", group: "Perp DEX — Long Tail" },
+  { id: "apex", name: "ApeX Omni", type: "Perp DEX (Market Data)", group: "Perp DEX — Long Tail" },
+  { id: "arcus", name: "Arcus", type: "CLOB DEX", group: "Primary" },
+  { id: "aster", name: "Aster", type: "Multi-Chain Perp DEX", group: "Primary" },
+  { id: "astros", name: "Astros", type: "Perp DEX (Market Data)", group: "Perp DEX — Long Tail" },
+  { id: "binance", name: "Binance", type: "CEX Spot & Perp", group: "Primary" },
+  { id: "bulk", name: "BULK", type: "Perp DEX (Market Data)", group: "Perp DEX — Long Tail" },
+  { id: "camelot", name: "Camelot V2", type: "Spot AMM — Arbitrum (Market Data)", group: "EVM AMM — Arbitrum" },
+  { id: "coinbase", name: "Coinbase", type: "CEX Spot & Perp", group: "Primary" },
+  { id: "decibel", name: "Decibel", type: "Aptos Perp DEX", group: "Primary" },
+  { id: "deribit", name: "Deribit", type: "CEX Options & Perps", group: "Primary" },
+  { id: "derive", name: "Derive", type: "Perp DEX (Live)", group: "Perp DEX — Long Tail" },
+  { id: "dydx", name: "dYdX Chain", type: "Perp DEX (Live)", group: "Perp DEX — Long Tail" },
+  { id: "edgex", name: "edgeX", type: "Perp DEX (Live)", group: "Perp DEX — Long Tail" },
+  { id: "evedex", name: "EVEDEX", type: "Perp DEX (Live)", group: "Perp DEX — Long Tail" },
   // Pseudo-venue for the sidebar: one shared signer fanned out to every EVM
   // AMM venue (the individual AMM entries stay in this list for fee/name
   // lookups but are hidden from the selector — see visibleExchanges).
-  { id: "evm_wallet", name: "EVM Wallet", type: "Shared EVM Signer", feeBps: 0.0 , group: "EVM Wallet" },
-  { id: "extended", name: "Extended", type: "Perp DEX (Live)", feeBps: 2.0 , group: "Perp DEX — Long Tail" },
-  { id: "gatedex", name: "Gate DEX", type: "Perp DEX (Market Data)", feeBps: 4.0 , group: "Perp DEX — Long Tail" },
-  { id: "gmx", name: "GMX V2", type: "Perp AMM (Market Data)", feeBps: 5.0 , group: "Perp DEX — Long Tail" },
-  { id: "grvt", name: "GRVT", type: "Perp DEX (Live)", feeBps: 5.0 , group: "Perp DEX — Long Tail" },
-  { id: "helix", name: "Helix", type: "Perp DEX (Live)", feeBps: 0.01 , group: "Perp DEX — Long Tail" },
-  { id: "hyperliquid", name: "Hyperliquid", type: "L1 Perp DEX", feeBps: 4.5 , group: "Primary" },
-  { id: "ibkr", name: "Interactive Brokers", type: "TradFi Broker", feeBps: 1.0 , group: "TradFi" },
-  { id: "ig", name: "IG Trading", type: "TradFi Broker", feeBps: 5.0 , group: "TradFi" },
-  { id: "iotrader", name: "IO Trader", type: "Perp DEX (Market Data)", feeBps: 4.0 , group: "Perp DEX — Long Tail" },
-  { id: "kalshi", name: "Kalshi", type: "CFTC Regulated", feeBps: 10.0 , group: "Primary" },
-  { id: "kraken", name: "Kraken", type: "CEX Spot & Perp", feeBps: 5.0 , group: "Primary" },
-  { id: "lighter", name: "Lighter", type: "zkDEX Rollup", feeBps: 1.5 , group: "Primary" },
-  { id: "nado", name: "Nado", type: "Perp DEX (Live)", feeBps: 3.5 , group: "Perp DEX — Long Tail" },
-  { id: "niza", name: "Niza", type: "Perp DEX (Market Data)", feeBps: 4.0 , group: "Perp DEX — Long Tail" },
-  { id: "okx", name: "OKX", type: "CEX Spot & Perp", feeBps: 5.0 , group: "Primary" },
-  { id: "ondoperps", name: "Ondo Perps", type: "Perp DEX (Live)", feeBps: 3.0 , group: "Perp DEX — Long Tail" },
-  { id: "ostium", name: "Ostium", type: "Perp DEX (Market Data)", feeBps: 4.0 , group: "Perp DEX — Long Tail" },
-  { id: "pacifica", name: "Pacifica", type: "Perp DEX (Live)", feeBps: 2.0 , group: "Perp DEX — Long Tail" },
-  { id: "pancakeswap", name: "PancakeSwap V2", type: "Spot AMM — BSC (Live)", feeBps: 25.0 , group: "EVM AMM — BSC" },
-  { id: "pancakeswap_v3", name: "PancakeSwap V3", type: "Spot AMM — BSC (Live)", feeBps: 25.0 , group: "EVM AMM — BSC" },
-  { id: "paradex", name: "Paradex", type: "Perp DEX (Live)", feeBps: 2.0 , group: "Perp DEX — Long Tail" },
-  { id: "pharaoh", name: "Pharaoh", type: "Spot AMM — Avalanche (Market Data)", feeBps: 30.0 , group: "EVM AMM — Avalanche" },
-  { id: "polymarket", name: "Polymarket", type: "CTF Binary Market", feeBps: 0.0 , group: "Primary" },
-  { id: "popdex", name: "PopDEX", type: "EVM Perp DEX", feeBps: 10.0 , group: "Primary" },
-  { id: "qfex", name: "QFEX", type: "Perp DEX (Live)", feeBps: 4.0 , group: "Perp DEX — Long Tail" },
-  { id: "quickswap", name: "QuickSwap", type: "Spot AMM — Polygon (Live)", feeBps: 30.0 , group: "EVM AMM — Polygon" },
-  { id: "ramses", name: "Ramses", type: "Spot AMM — Arbitrum (Market Data)", feeBps: 30.0 , group: "EVM AMM — Arbitrum" },
-  { id: "robinhood", name: "Robinhood Lighter", type: "EVM DEX Aggregator", feeBps: 4.0 , group: "Primary" },
-  { id: "sodex", name: "SoDEX", type: "Perp DEX (Market Data)", feeBps: 4.0 , group: "Perp DEX — Long Tail" },
-  { id: "standx", name: "StandX", type: "Perp DEX (Live)", feeBps: 2.0 , group: "Perp DEX — Long Tail" },
-  { id: "sushiswap", name: "SushiSwap", type: "Spot AMM — Ethereum (Live)", feeBps: 30.0 , group: "EVM AMM — Ethereum" },
-  { id: "uniswap", name: "Uniswap V3", type: "Spot AMM — Ethereum (Live)", feeBps: 30.0 , group: "EVM AMM — Ethereum" },
-  { id: "uniswap_v2", name: "Uniswap V2", type: "Spot AMM — Ethereum (Live)", feeBps: 30.0 , group: "EVM AMM — Ethereum" },
-  { id: "vanta", name: "Vanta", type: "Omnichain Perps", feeBps: 4.0 , group: "Primary" },
-  { id: "velodrome", name: "Velodrome", type: "Spot AMM — Optimism (Market Data)", feeBps: 30.0 , group: "EVM AMM — Optimism" },
-  { id: "vest", name: "Vest", type: "Perp DEX (Live)", feeBps: 1.0 , group: "Perp DEX — Long Tail" },
+  { id: "evm_wallet", name: "EVM Wallet", type: "Shared EVM Signer", group: "EVM Wallet" },
+  { id: "extended", name: "Extended", type: "Perp DEX (Live)", group: "Perp DEX — Long Tail" },
+  { id: "gatedex", name: "Gate DEX", type: "Perp DEX (Market Data)", group: "Perp DEX — Long Tail" },
+  { id: "gmx", name: "GMX V2", type: "Perp AMM (Market Data)", group: "Perp DEX — Long Tail" },
+  { id: "grvt", name: "GRVT", type: "Perp DEX (Live)", group: "Perp DEX — Long Tail" },
+  { id: "helix", name: "Helix", type: "Perp DEX (Live)", group: "Perp DEX — Long Tail" },
+  { id: "hyperliquid", name: "Hyperliquid", type: "L1 Perp DEX", group: "Primary" },
+  { id: "ibkr", name: "Interactive Brokers", type: "TradFi Broker", group: "TradFi" },
+  { id: "ig", name: "IG Trading", type: "TradFi Broker", group: "TradFi" },
+  { id: "iotrader", name: "IO Trader", type: "Perp DEX (Market Data)", group: "Perp DEX — Long Tail" },
+  { id: "kalshi", name: "Kalshi", type: "CFTC Regulated", group: "Primary" },
+  { id: "kraken", name: "Kraken", type: "CEX Spot & Perp", group: "Primary" },
+  { id: "lighter", name: "Lighter", type: "zkDEX Rollup", group: "Primary" },
+  { id: "nado", name: "Nado", type: "Perp DEX (Live)", group: "Perp DEX — Long Tail" },
+  { id: "niza", name: "Niza", type: "Perp DEX (Market Data)", group: "Perp DEX — Long Tail" },
+  { id: "okx", name: "OKX", type: "CEX Spot & Perp", group: "Primary" },
+  { id: "ondoperps", name: "Ondo Perps", type: "Perp DEX (Live)", group: "Perp DEX — Long Tail" },
+  { id: "ostium", name: "Ostium", type: "Perp DEX (Market Data)", group: "Perp DEX — Long Tail" },
+  { id: "pacifica", name: "Pacifica", type: "Perp DEX (Live)", group: "Perp DEX — Long Tail" },
+  { id: "pancakeswap", name: "PancakeSwap V2", type: "Spot AMM — BSC (Live)", group: "EVM AMM — BSC" },
+  { id: "pancakeswap_v3", name: "PancakeSwap V3", type: "Spot AMM — BSC (Live)", group: "EVM AMM — BSC" },
+  { id: "paradex", name: "Paradex", type: "Perp DEX (Live)", group: "Perp DEX — Long Tail" },
+  { id: "pharaoh", name: "Pharaoh", type: "Spot AMM — Avalanche (Market Data)", group: "EVM AMM — Avalanche" },
+  { id: "polymarket", name: "Polymarket", type: "CTF Binary Market", group: "Primary" },
+  { id: "popdex", name: "PopDEX", type: "EVM Perp DEX", group: "Primary" },
+  { id: "qfex", name: "QFEX", type: "Perp DEX (Live)", group: "Perp DEX — Long Tail" },
+  { id: "quickswap", name: "QuickSwap", type: "Spot AMM — Polygon (Live)", group: "EVM AMM — Polygon" },
+  { id: "ramses", name: "Ramses", type: "Spot AMM — Arbitrum (Market Data)", group: "EVM AMM — Arbitrum" },
+  { id: "robinhood", name: "Robinhood Lighter", type: "EVM DEX Aggregator", group: "Primary" },
+  { id: "sodex", name: "SoDEX", type: "Perp DEX (Market Data)", group: "Perp DEX — Long Tail" },
+  { id: "standx", name: "StandX", type: "Perp DEX (Live)", group: "Perp DEX — Long Tail" },
+  { id: "sushiswap", name: "SushiSwap", type: "Spot AMM — Ethereum (Live)", group: "EVM AMM — Ethereum" },
+  { id: "uniswap", name: "Uniswap V3", type: "Spot AMM — Ethereum (Live)", group: "EVM AMM — Ethereum" },
+  { id: "uniswap_v2", name: "Uniswap V2", type: "Spot AMM — Ethereum (Live)", group: "EVM AMM — Ethereum" },
+  { id: "vanta", name: "Vanta", type: "Omnichain Perps", group: "Primary" },
+  { id: "velodrome", name: "Velodrome", type: "Spot AMM — Optimism (Market Data)", group: "EVM AMM — Optimism" },
+  { id: "vest", name: "Vest", type: "Perp DEX (Live)", group: "Perp DEX — Long Tail" },
 ];
 
 interface EngineSettingsProps {
@@ -420,6 +419,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   // Vault state
   const [vaultStatus, setVaultStatus] = useState<VaultStatus | null>(null);
   const [showVaultModal, setShowVaultModal] = useState(false);
+  const [showVaultChangeModal, setShowVaultChangeModal] = useState(false);
   const [configuredVenues, setConfiguredVenues] = useState<string[]>([]);
 
   // Venue execution capabilities & live trading risk gating
@@ -2101,24 +2101,36 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   {/* Vault lock/unlock hoisted into the modal header (right of the title,
       before the close button). Shows on every tab — vault state is global. */}
   {headerActionsEl && api.isTauri && createPortal(
-    <button
-      type="button"
-      onClick={isVaultLocked ? () => setShowVaultModal(true) : handleLockVault}
-      className="px-2 py-1.5 rounded-lg border border-slate-200 bg-surface hover:bg-slate-100 text-slate-600 text-xs font-mono flex items-center space-x-1.5 transition shadow-2xs cursor-pointer"
-      title={isVaultLocked ? "Unlock vault credentials" : "Lock sensitive exchange credentials now"}
-    >
-      {isVaultLocked ? (
-        <>
-          <Unlock className="w-3.5 h-3.5 text-warn-strong" />
-          <span className="font-semibold text-slate-700">Unlock Vault</span>
-        </>
-      ) : (
-        <>
-          <Lock className="w-3.5 h-3.5 text-slate-500" />
-          <span>Lock Vault</span>
-        </>
+    <div className="flex items-center space-x-1.5">
+      {!isVaultLocked && (
+        <button
+          type="button"
+          onClick={() => setShowVaultChangeModal(true)}
+          className="px-2 py-1.5 rounded-lg border border-slate-200 bg-surface hover:bg-slate-100 text-slate-600 text-xs font-mono transition shadow-2xs cursor-pointer"
+          title="Rotate the master password — re-keys the vault and the shared EVM wallet atomically"
+        >
+          <span>Rotate Key</span>
+        </button>
       )}
-    </button>,
+      <button
+        type="button"
+        onClick={isVaultLocked ? () => setShowVaultModal(true) : handleLockVault}
+        className="px-2 py-1.5 rounded-lg border border-slate-200 bg-surface hover:bg-slate-100 text-slate-600 text-xs font-mono flex items-center space-x-1.5 transition shadow-2xs cursor-pointer"
+        title={isVaultLocked ? "Unlock vault credentials" : "Lock sensitive exchange credentials now"}
+      >
+        {isVaultLocked ? (
+          <>
+            <Unlock className="w-3.5 h-3.5 text-warn-strong" />
+            <span className="font-semibold text-slate-700">Unlock Vault</span>
+          </>
+        ) : (
+          <>
+            <Lock className="w-3.5 h-3.5 text-slate-500" />
+            <span>Lock Vault</span>
+          </>
+        )}
+      </button>
+    </div>,
     headerActionsEl,
   )}
 
@@ -2142,6 +2154,21 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
       } catch (err) {
         console.warn("Failed to refresh settings after vault unlock:", err);
       }
+    }}
+  />
+
+  {/* Master-password rotation — re-keys vault.enc and vault.hold
+      atomically; always dismissible since it's operator-initiated. */}
+  <VaultUnlockModal
+    isOpen={showVaultChangeModal && api.isTauri}
+    vaultStatus={vaultStatus}
+    mode="change"
+    dismissible
+    onClose={() => setShowVaultChangeModal(false)}
+    onSuccess={(status) => {
+      setVaultStatus(status);
+      setShowVaultChangeModal(false);
+      setAccountsEpoch((prev) => prev + 1);
     }}
   />
 

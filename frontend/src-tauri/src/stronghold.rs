@@ -217,6 +217,50 @@ impl EvmStronghold {
             chain_id,
         }))
     }
+
+    /// Re-encrypt the snapshot at `path` under `new_key` — used by vault
+    /// password rotation, which must keep `vault.hold` on the same password
+    /// generation as `vault.enc`. A throwaway engine loads under `old_key`
+    /// and `commit_with_keyprovider` writes the identical client state
+    /// encrypted under `new_key`: key material never enters process memory.
+    /// The result is verified by reopening under `new_key` before
+    /// returning — a file the new key can't read is reported here, not
+    /// discovered as a signer failure at next unlock.
+    ///
+    /// Callers holding a live `EvmStronghold` for `path` must re-open it
+    /// afterwards — the open wrapper still carries the old keyprovider and
+    /// a later `save()` would silently regress the file to the old key.
+    pub fn rekey_snapshot_file(
+        path: &Path,
+        old_key: &[u8; 32],
+        new_key: &[u8; 32],
+    ) -> anyhow::Result<()> {
+        use iota_stronghold::{KeyProvider, SnapshotPath};
+        let snapshot_path = SnapshotPath::from_path(path);
+        if !snapshot_path.exists() {
+            anyhow::bail!("no stronghold snapshot to re-key");
+        }
+        let old_kp = KeyProvider::try_from(Zeroizing::new(old_key.to_vec()))
+            .map_err(|e| anyhow::anyhow!("old snapshot key rejected: {e}"))?;
+        let new_kp = KeyProvider::try_from(Zeroizing::new(new_key.to_vec()))
+            .map_err(|e| anyhow::anyhow!("new snapshot key rejected: {e}"))?;
+
+        let engine = iota_stronghold::Stronghold::default();
+        engine
+            .load_snapshot(&old_kp, &snapshot_path)
+            .map_err(|e| anyhow::anyhow!("snapshot unlock under old key failed: {e}"))?;
+        engine
+            .commit_with_keyprovider(&snapshot_path, &new_kp)
+            .map_err(|e| anyhow::anyhow!("snapshot re-key write failed: {e}"))?;
+        Self::harden_snapshot_permissions(path);
+
+        // Fail-closed verification: the file must open under the new key.
+        let verify = iota_stronghold::Stronghold::default();
+        verify
+            .load_snapshot(&new_kp, &snapshot_path)
+            .map_err(|e| anyhow::anyhow!("re-keyed snapshot failed verification: {e}"))?;
+        Ok(())
+    }
 }
 
 /// Load the EVM client from snapshot data, create it on a fresh
@@ -432,5 +476,45 @@ mod tests {
             0o700
         );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rekey_snapshot_rotates_password_and_preserves_key() {
+        let dir =
+            std::env::temp_dir().join(format!("arbitrageur_rekey_test_{}", rand::random::<u64>()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let hold = dir.join("vault.hold");
+        let key_a: [u8; 32] = [0xAA; 32];
+        let key_b: [u8; 32] = [0xBB; 32];
+
+        // Provision a real snapshot-backed stronghold under key A.
+        let sh = EvmStronghold::open(&hold, &key_a).expect("open under A");
+        sh.store_key(Zeroizing::new(TEST_KEY)).expect("store key");
+        let addr = sh.evm_address().expect("address under A");
+        drop(sh);
+        assert!(hold.exists());
+
+        // A wrong "old" key must leave the file untouched.
+        let wrong: [u8; 32] = [0xCC; 32];
+        assert!(EvmStronghold::rekey_snapshot_file(&hold, &wrong, &key_b).is_err());
+        let still_a = EvmStronghold::open(&hold, &key_a).expect("still opens under A");
+        assert!(still_a.has_key());
+        drop(still_a);
+
+        // Rotate A → B: new key opens it, old key must not.
+        EvmStronghold::rekey_snapshot_file(&hold, &key_a, &key_b).expect("rekey A→B");
+        let reopened = EvmStronghold::open(&hold, &key_b).expect("open under B");
+        assert!(reopened.has_key());
+        assert_eq!(reopened.evm_address().expect("address under B"), addr);
+        drop(reopened);
+        assert!(
+            EvmStronghold::open(&hold, &key_a).is_err(),
+            "old snapshot key must not open a re-keyed file"
+        );
+
+        // Missing snapshot is a loud error, not a silent no-op.
+        let _ = std::fs::remove_dir_all(&dir);
+        let gone = dir.join("vault.hold");
+        assert!(EvmStronghold::rekey_snapshot_file(&gone, &key_a, &key_b).is_err());
     }
 }
