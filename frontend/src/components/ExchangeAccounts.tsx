@@ -266,10 +266,9 @@ export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
   // Variational Omni: the public API is a single stats document — no keys
   // exist yet (trading API not yet public per docs.variational.io).
   variational: [],
-  // Arcus: market data is unauthenticated today; the account model is a
-  // master Ethereum address plus a registered Ed25519 API key (docs
-  // arcus.xyz). Order signing is not yet implemented — stored material
-  // provisions the adapter but nothing submits.
+  // Arcus: market data and account/order reads are public (wallet +
+  // subaccount scope them); order routing signs each request with the
+  // Ed25519 API key registered against the master address (docs.arcus.xyz).
   arcus: [
     { key: "walletAddress", label: "Master Wallet Address", placeholder: "0x… Arcus account address" },
     { key: "apiKey", label: "API Public Key", placeholder: "Ed25519 key registered via Arcus" },

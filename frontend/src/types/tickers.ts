@@ -234,7 +234,9 @@ export function getEnabledConnectedVenueCodes(
 
   admit("HL", settings.hyperliquid_enabled);
   admit("LGT", settings.lighter_enabled);
+  admit("RH", settings.robinhood_enabled);
   admit("VNT", settings.vanta_enabled);
+  admit("ARC", settings.arcus_enabled);
   admit("POP", settings.popdex_enabled);
   admit("BNB", settings.binance_enabled);
   admit("OKX", settings.okx_enabled);
