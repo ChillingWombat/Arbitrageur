@@ -362,14 +362,13 @@ export const App: React.FC = () => {
     universeTickers.length > 0,
   );
 
-  // Selection is only ever an explicit user click in the explorer — never
-  // auto-pick a ticker. A stale selection is cleared once real alternatives
-  // exist; when nothing is available, keep it (the remaining venue's book is
-  // still real data).
   // Keep a live selection so the per-ticker data loop (orderbooks, venue
   // deviation samples, opportunity scan — all keyed on selectedSymbol) runs
   // continuously from boot instead of idling until a manual click. Prefer
   // BTC-USDC (densest cross-venue coverage); fall back to the first listing.
+  // When nothing is available the existing selection is kept (a surviving
+  // venue's book is still real data) — the dead-symbol release below bounds
+  // how long that latch may hold.
   useEffect(() => {
     if (availableTickers.length === 0) return;
     if (
@@ -384,6 +383,30 @@ export const App: React.FC = () => {
       availableTickers[0];
     setSelectedSymbol(fallback.symbol);
   }, [availableTickers, selectedSymbol]);
+
+  // Release a dead selection. The latch above keeps a symbol through an
+  // emptied universe so a surviving venue's book stays on screen — but when
+  // every venue has stopped quoting it, the stage would otherwise keep
+  // rendering recorded history under a ticker the explorer no longer lists,
+  // which reads as phantom data. Three consecutive bookless polls (~9s of the
+  // refresh cadence) means nothing is left worth showing: collapse to the
+  // honest "No Ticker Selected" state.
+  const deadSymbolPollsRef = useRef(0);
+  useEffect(() => {
+    if (
+      selectedSymbol === null ||
+      availableTickers.some((t: PerpTicker) => t.symbol === selectedSymbol) ||
+      orderbooks.length > 0
+    ) {
+      deadSymbolPollsRef.current = 0;
+      return;
+    }
+    deadSymbolPollsRef.current += 1;
+    if (deadSymbolPollsRef.current >= 3) {
+      deadSymbolPollsRef.current = 0;
+      setSelectedSymbol(null);
+    }
+  }, [orderbooks, availableTickers, selectedSymbol]);
 
   // Per-ticker gating was removed with the explorer toggle: every available
   // ticker is enabled so bots can run without manual per-ticker activation.
