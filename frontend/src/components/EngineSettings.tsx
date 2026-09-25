@@ -2375,6 +2375,17 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                 MFA gates the unlock path in this app — an operator needs the code, not just the password. The TOTP secret is stored inside the encrypted vault; it does not add encryption strength against theft of the vault file itself.
               </p>
             </div>
+
+            {/* Security declaration */}
+            <div className="bg-surface border border-surface-border rounded-lg p-3.5 shadow-2xs space-y-2">
+              <div className="flex items-center space-x-1.5 font-bold text-slate-800 text-xs font-mono">
+                <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+                <span>Security Model</span>
+              </div>
+              <p className="text-xs font-mono text-slate-600 leading-relaxed">
+                No private keys or seed phrases are stored remotely or accessed by any third party; all credentials remain encrypted locally on your system using AES-256-GCM with Argon2id key derivation.
+              </p>
+            </div>
           </div>
         )}
 
@@ -2462,7 +2473,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   This software is provided for research, simulation, and educational quantitative finance purposes. Cross-market arbitrage and algorithmic trading involve inherent execution risks, including market volatility, network latency spikes, smart contract bugs, API rate limits, and liquidity slippage. Past simulation performance does not guarantee future financial returns.
                 </p>
                 <p>
-                  No private keys or seed phrases are stored remotely or accessed by any third party; all credentials remain encrypted locally on your system using AES-256-GCM with Argon2id key derivation. Users are solely responsible for compliance with their local jurisdiction regulations and exchange terms of service.
+                  Users are solely responsible for compliance with their local jurisdiction regulations and exchange terms of service.
                 </p>
               </div>
             </div>
