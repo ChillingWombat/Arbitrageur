@@ -675,7 +675,7 @@ fn session_context(
 /// persistent fast-vol breach. `None` means no session block.
 fn session_standdown(
     funding_mask: bool,
-    ondo_closed: bool,
+    equity_closed: bool,
     dev_abs_bps: Option<f64>,
     session_med_bps: Option<f64>,
     fast_vol_halted: bool,
@@ -683,8 +683,8 @@ fn session_standdown(
     if funding_mask {
         return Some("funding window stand-down".into());
     }
-    if ondo_closed {
-        return Some("ondo equity market closed".into());
+    if equity_closed {
+        return Some("equity market closed (cash session)".into());
     }
     if let (Some(dev), Some(med)) = (dev_abs_bps, session_med_bps) {
         if dev.is_finite() && med.is_finite() && med > 0.0 && dev > med * SPREAD_STANDDOWN_MULT {
@@ -3035,7 +3035,7 @@ impl SpreadMonitorEngine {
         // equity legs refuse IOC outside US market hours; crypto pairs on
         // the same rails trade 24/7. The venue's own adapter classifies
         // the leg's lane symbol — never assumed by venue name alone.
-        let ondo_closed = (self.leg_cash_session_bound(symbol, buy_v)
+        let equity_closed = (self.leg_cash_session_bound(symbol, buy_v)
             || self.leg_cash_session_bound(symbol, sell_v))
             && !us_cash_open(now_ms);
 
@@ -3407,7 +3407,7 @@ impl SpreadMonitorEngine {
         let exp_usd = scale_opt(exp_usd);
         let session_block = session_standdown(
             sess.funding_mask,
-            ondo_closed,
+            equity_closed,
             dev_abs_bps,
             sess.session_med,
             fast_halted,
@@ -4765,7 +4765,7 @@ mod tests {
         );
         assert_eq!(
             session_standdown(false, true, Some(999.0), Some(1.0), true),
-            Some("ondo equity market closed".into())
+            Some("equity market closed (cash session)".into())
         );
         assert_eq!(
             session_standdown(false, false, Some(9.0), Some(2.0), true),
