@@ -1532,16 +1532,6 @@ export const AccountCard: React.FC<AccountCardProps> = ({
             title="Account label used in strategy routing"
             className="w-48 px-2 py-1 bg-surface-raised border border-surface-border rounded-lg text-xs font-mono text-slate-900 placeholder:text-muted focus:outline-none focus:ring-1 focus:ring-accent"
           />
-          <span
-            className={`px-1.5 py-0.5 rounded-md text-[10px] font-mono font-bold tracking-wide shrink-0 border ${
-              account.environment === "live"
-                ? "bg-loss-dim/40 text-loss border-loss-border/60"
-                : "bg-accent/10 text-accent-strong border-accent/30"
-            }`}
-            title={`This account's credentials bind to the ${account.environment === "live" ? "live production" : "testnet/demo"} environment`}
-          >
-            {account.environment === "live" ? "LIVE" : "TESTNET"}
-          </span>
           {account.isDefault ? (
             <span className="px-1.5 py-0.5 rounded-md text-xs font-mono font-bold bg-warn-dim text-warn-strong border border-warn-border tracking-wide shrink-0">
               Default Account
