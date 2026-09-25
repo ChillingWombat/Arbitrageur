@@ -328,7 +328,7 @@ const SubstrategyRail: React.FC<{
           className={`w-full text-left px-2.5 py-2 rounded-lg border transition cursor-pointer ${
             selected === "all"
               ? "border-accent-line bg-accent-dim text-accent-strong"
-              : "border-transparent hover:bg-slate-50 text-slate-700"
+              : "border-surface-border hover:bg-slate-50 text-slate-700"
           }`}
         >
           <div className="flex items-center justify-between gap-2">
@@ -359,7 +359,7 @@ const SubstrategyRail: React.FC<{
                   className={`w-full text-left px-2.5 py-1.5 rounded-lg border transition cursor-pointer ${
                     active
                       ? "border-accent-line bg-accent-dim"
-                      : "border-transparent hover:bg-slate-50"
+                      : "border-surface-border hover:bg-slate-50"
                   }`}
                 >
                   <div className="flex items-center justify-between gap-2">
