@@ -514,15 +514,6 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
             </span>
             {parityVisible && (
               <>
-                <div className="ribbon-pill" title="Options underlying (Deribit lists BTC/ETH today)">
-                  <span className="text-muted">Underlying</span>
-                  <span className="font-bold text-slate-900">{currency}</span>
-                </div>
-                <div className="ribbon-pill" title="Notional per parity cycle — edit in the scanner card">
-                  <span className="text-muted">Qty</span>
-                  <span className="font-bold text-slate-900 tabular-nums">{qtyBase}</span>
-                  <span className="text-muted">{currency}</span>
-                </div>
                 <div className="ribbon-pill" title="Net-edge hurdle for reported setups">
                   <span className="text-muted">Min Edge</span>
                   <span className="font-bold text-slate-900 tabular-nums">{minEdgeBps}</span>
