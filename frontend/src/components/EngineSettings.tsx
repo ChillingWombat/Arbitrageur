@@ -2477,10 +2477,10 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         {/* Relocated Trading Mode Indicator on bottom-left */}
         <div
           className="px-2.5 py-1.5 rounded-lg border border-surface-border bg-surface text-slate-700 text-xs font-mono flex items-center space-x-1.5 shadow-2xs"
-          title={`Execution mode: ${tradingMode.toUpperCase()}`}
+          title={`Execution mode: ${tradingMode === "live" ? "Live Trading (Mainnet)" : "Paper Trading (Testnet)"}`}
         >
           <span className="text-muted font-normal">Mode:</span>
-          <span className="font-bold text-accent-strong">{tradingMode.charAt(0).toUpperCase() + tradingMode.slice(1)}</span>
+          <span className="font-bold text-accent-strong">{tradingMode === "live" ? "Live" : "Paper"}</span>
         </div>
 
         <div className="flex items-center space-x-2.5">
