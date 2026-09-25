@@ -4,7 +4,7 @@ import { TickerExplorer } from "./components/TickerExplorer";
 import { PositionsPanel } from "./components/PositionsPanel";
 import type { ActiveTab } from "./components/Navigation";
 import { LiveMatrix } from "./components/LiveMatrix";
-import { FundingRadar } from "./components/FundingRadar";
+import { FundingRadar, fundingAutoEligible } from "./components/FundingRadar";
 import { OpportunityRadar } from "./components/OpportunityRadar";
 import { PredictionHub } from "./components/PredictionHub";
 import { StatArbLab } from "./components/StatArbLab";
@@ -187,6 +187,13 @@ export const App: React.FC = () => {
       minAprPct: fundingParamsDto?.fundingMinAprPct ?? 8.0,
     }),
     [fundingParamsDto?.fundingMinAprPct],
+  );
+  // Nav badge counts what the auto-carry loop would actually pick — opps
+  // meeting the bot's Min APR hurdle — not every scanned row.
+  const fundingAutoCount = useMemo(
+    () =>
+      fundingOpps.filter((o) => fundingAutoEligible(o, fundingParams.minAprPct)).length,
+    [fundingOpps, fundingParams.minAprPct],
   );
   const spotParams = useMemo(
     () => ({
@@ -911,7 +918,7 @@ export const App: React.FC = () => {
         activeTab={activeTab}
         onSelectTab={handleSelectTab}
         spatialCount={spatialOpps.filter((o) => o.is_executable).length}
-        fundingCount={fundingOpps.length}
+        fundingCount={fundingAutoCount}
         spotCount={spotOpps.filter((o) => o.is_executable).length}
         triangleCount={triangleOpps.filter((t) => t.is_executable).length}
         predictionCount={predictionOpps.filter((p) => p.has_arbitrage).length}

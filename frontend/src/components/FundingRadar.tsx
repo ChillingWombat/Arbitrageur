@@ -1076,6 +1076,16 @@ export const FixedYieldPanel: React.FC<{ isLive?: boolean }> = ({ isLive = false
   );
 };
 
+/** Opportunities the auto-carry loop would consider entering: net APR meets
+ *  the bot's Min APR hurdle and the row is not a fixed-yield pair (auto
+ *  carry is testnet-only and Boros has no testnet — the backend refuses
+ *  `auto` dispatches on fixed rows anyway). Shared by the execution loop
+ *  and the nav-tab badge so "what the bot would run" has one definition. */
+export const fundingAutoEligible = (
+  o: FundingOpportunityDto,
+  minAprPct: number,
+): boolean => o.net_apr_pct >= minAprPct && o.kind !== "fixed_yield";
+
 export const FundingRadar: React.FC<FundingRadarProps> = ({
   opportunities,
   availableTickers: _availableTickers,
@@ -1101,22 +1111,21 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
   // multi-select, min net 8h edge (BPS), min win probability (%). None of
   // these reach the engine — execution and the auto loop use the full list.
   const [venueFilters, setVenueFilters] = useState<string[]>([]);
-  // Default mirrors the auto-carry bot's entry hurdle (Min APR %) converted
-  // to 8h BPS: APR/100/365/3*10000 — the same 365d×3 convention the backend
-  // uses both ways. Tracks the live minAprPct until the user overrides it.
-  // Min Win has no bot-side gate (measured win rate never gates execution),
-  // so it defaults to off.
   // Filter inputs show at most 2 decimal places (bot-mirrored defaults are
   // normalized; user typing is never reformatted mid-edit).
   const to2dp = (n: number): string =>
     Number.isFinite(n) ? String(parseFloat(n.toFixed(2))) : "";
   const aprToBps8h = (aprPct: number) =>
     Number.isFinite(aprPct) && aprPct > 0 ? to2dp((aprPct * 10000) / 100 / 365 / 3) : "";
-  const [minExpBps, setMinExpBps] = useState(() => aprToBps8h(minAprPct));
-  const minExpTouched = useRef(false);
-  useEffect(() => {
-    if (!minExpTouched.current) setMinExpBps(aprToBps8h(minAprPct));
-  }, [minAprPct]);
+  // Min Exp is an override-only field: empty inherits the auto-carry bot's
+  // Min APR hurdle (APR/100/365/3*10000 — the same 365d×3 convention the
+  // backend uses both ways) and tracks it live, so the default is always
+  // the bot's parameter by construction. Typing a number overrides;
+  // Reset restores inheritance. Min Win has no bot-side gate (measured win
+  // rate never gates execution), so it defaults to off.
+  const botMinExpBps = aprToBps8h(minAprPct);
+  const [minExpBpsOverride, setMinExpBpsOverride] = useState("");
+  const minExpBps = minExpBpsOverride !== "" ? minExpBpsOverride : botMinExpBps;
   const [minWinPct, setMinWinPct] = useState("");
   const [showVenueMenu, setShowVenueMenu] = useState(false);
   const venueMenuRef = useRef<HTMLDivElement>(null);
@@ -1145,10 +1154,9 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
       out = out.filter((o) => ((o.backtest_win_rate ?? -Infinity) * 100) >= mp);
     return out;
   }, [opportunities, venueFilters, minExpBps, minWinPct]);
-  const clearFilters = () => {
+  const resetFilters = () => {
     setVenueFilters([]);
-    minExpTouched.current = false;
-    setMinExpBps(aprToBps8h(minAprPct));
+    setMinExpBpsOverride(""); // empty = inherit the bot's Min APR hurdle
     setMinWinPct("");
   };
   const fundingPositions = useMemo(
@@ -1223,7 +1231,7 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
     // loop is testnet-only — exclude them here so the bot never picks a
     // row the backend must refuse.
     const topOpp = opportunities
-      .filter((o) => o.net_apr_pct >= minAprPct && o.kind !== "fixed_yield")
+      .filter((o) => fundingAutoEligible(o, minAprPct))
       .sort((a, b) => hourlyUsd(b) - hourlyUsd(a))[0];
     if (topOpp) {
       lastAutoCarryExecRef.current = now;
@@ -1376,17 +1384,14 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
             </div>
             <div
               className="flex items-center gap-1.5 bg-surface border border-surface-border rounded-lg px-2.5 py-1.5 shadow-2xs hover:border-slate-300 focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/15 transition-all"
-              title="Display filter — minimum net 8h funding edge. Defaults to the bot's Min APR hurdle (converted to BPS). Does not affect execution"
+              title="Display filter — minimum net 8h funding edge. Empty inherits the bot's Min APR hurdle (shown as placeholder); type 0 to scan below it. Does not affect execution"
             >
               <span className="text-muted font-medium">Min Exp</span>
               <input
-                value={minExpBps}
-                onChange={(e) => {
-                  minExpTouched.current = true;
-                  setMinExpBps(e.target.value);
-                }}
-                placeholder="0"
-                className="bg-transparent w-14 outline-none text-right font-bold text-slate-900 font-mono text-xs"
+                value={minExpBpsOverride}
+                onChange={(e) => setMinExpBpsOverride(e.target.value)}
+                placeholder={botMinExpBps !== "" ? `Bot ${botMinExpBps}` : "0"}
+                className="bg-transparent w-14 outline-none text-right font-bold text-slate-900 font-mono text-xs placeholder:font-normal placeholder:text-muted"
               />
               <span className="text-muted text-[11px] font-medium">BPS</span>
             </div>
@@ -1417,10 +1422,10 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
                 </span>
                 <button
                   type="button"
-                  onClick={clearFilters}
+                  onClick={resetFilters}
                   className="text-accent-strong font-semibold underline underline-offset-2 cursor-pointer"
                 >
-                  Clear filters
+                  Reset filters
                 </button>
               </div>
             )}
