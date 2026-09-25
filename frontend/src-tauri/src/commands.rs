@@ -7734,6 +7734,143 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_strategy_route_rejects_accounts_outside_active_env() {
+        // Test states run Testnet; a live-bound account can never be
+        // admitted here, so routing it must refuse at upsert time rather
+        // than persist a pair that can never be eligible.
+        let (state, dir) = test_state_with_vault("routes_env");
+        initialize_vault_impl("test password", &state).expect("init vault");
+        assert_eq!(
+            state.env(),
+            crate::state::TradingEnvironment::Testnet,
+            "fixture must start in Testnet"
+        );
+
+        let tn_account = upsert_account_impl(
+            AccountUpsertInput {
+                environment: None, // binds to the active environment (testnet)
+                account_tier: None,
+                max_leverage: None,
+                id: None,
+                venue: "hyperliquid".into(),
+                label: "HL Test".into(),
+                enabled: true,
+                make_default: false,
+                credentials: None,
+            },
+            &state,
+        )
+        .expect("testnet account");
+        assert_eq!(tn_account.environment, "testnet");
+        let live_account = upsert_account_impl(
+            AccountUpsertInput {
+                environment: Some("live".into()),
+                account_tier: None,
+                max_leverage: None,
+                id: None,
+                venue: "lighter".into(),
+                label: "LT Live".into(),
+                enabled: true,
+                make_default: false,
+                credentials: None,
+            },
+            &state,
+        )
+        .expect("live account");
+        assert_eq!(live_account.environment, "live");
+
+        // Mixed-env pair is refused and names the offending account.
+        let err = upsert_strategy_route_impl(
+            StrategyRouteUpsertInput {
+                id: None,
+                strategy_id: "futures".into(),
+                label: "Cross-Env".into(),
+                account_a_id: tn_account.id.clone(),
+                account_b_id: live_account.id.clone(),
+                enabled: true,
+            },
+            &state,
+        )
+        .expect_err("mixed-env route must refuse");
+        assert!(err.contains("live"), "err: {err}");
+        assert!(err.contains(&live_account.id), "err: {err}");
+
+        // Even an all-live pair refuses while the engine runs testnet.
+        let live_account2 = upsert_account_impl(
+            AccountUpsertInput {
+                environment: Some("live".into()),
+                account_tier: None,
+                max_leverage: None,
+                id: None,
+                venue: "okx".into(),
+                label: "OKX Live".into(),
+                enabled: true,
+                make_default: false,
+                credentials: None,
+            },
+            &state,
+        )
+        .expect("second live account");
+        assert!(upsert_strategy_route_impl(
+            StrategyRouteUpsertInput {
+                id: None,
+                strategy_id: "futures".into(),
+                label: "Live Pair".into(),
+                account_a_id: live_account.id.clone(),
+                account_b_id: live_account2.id.clone(),
+                enabled: true,
+            },
+            &state,
+        )
+        .is_err());
+
+        // Same-env pair routes fine.
+        let tn_account2 = upsert_account_impl(
+            AccountUpsertInput {
+                environment: None,
+                account_tier: None,
+                max_leverage: None,
+                id: None,
+                venue: "decibel".into(),
+                label: "DCB Test".into(),
+                enabled: true,
+                make_default: false,
+                credentials: None,
+            },
+            &state,
+        )
+        .expect("second testnet account");
+        let route = upsert_strategy_route_impl(
+            StrategyRouteUpsertInput {
+                id: None,
+                strategy_id: "futures".into(),
+                label: "TN Route".into(),
+                account_a_id: tn_account.id.clone(),
+                account_b_id: tn_account2.id.clone(),
+                enabled: true,
+            },
+            &state,
+        )
+        .expect("same-env route");
+        // Toggle-only update with unchanged legs is bookkeeping, allowed even
+        // though the pair is re-submitted.
+        upsert_strategy_route_impl(
+            StrategyRouteUpsertInput {
+                id: Some(route.id.clone()),
+                strategy_id: "futures".into(),
+                label: String::new(),
+                account_a_id: tn_account.id.clone(),
+                account_b_id: tn_account2.id.clone(),
+                enabled: false,
+            },
+            &state,
+        )
+        .expect("toggle update");
+
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
     async fn test_account_delete_requires_unlock_and_listing_is_lock_safe() {
         let (state, dir) = test_state_with_vault("del_locked");
         initialize_vault_impl("test password", &state).expect("init vault");

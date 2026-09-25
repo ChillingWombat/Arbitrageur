@@ -29,6 +29,7 @@ import {
 } from "../services/retention";
 import type { EngineSettingsDto, SystemStatusDto, VenueStatusDto, VaultStatus, VenueBalanceInfo, AccountDto, VenueLaneStatusDto, VenueCapabilityDto, PassiveUnwindDto, StorageStatsDto, StablecoinHealthDto, MfaEnrollment } from "../types";
 import { DEFAULT_PASSIVE_UNWIND } from "../types";
+import { venueHasTestnet } from "../types/tickers";
 import { VaultUnlockModal } from "./VaultUnlockModal";
 import { InfoTooltip } from "./InfoTooltip";
 import { SaveButton, useSaveButton } from "./SaveButton";
@@ -159,6 +160,31 @@ export function groupExchangesBySection(
     if (!EXCHANGE_GROUP_ORDER.includes(g)) ordered.push({ group: g, venues });
   }
   return ordered;
+}
+
+/** Sidebar visibility filter: individual EVM AMM venues leave the list (the
+ *  pinned "EVM Wallet" entry manages their shared signer); the wallet is a
+ *  credential store, not a venue, so it stays visible under the favorites
+ *  filter. In Testnet mode only venues with a real demo endpoint appear —
+ *  a live-only venue can never be admitted in that environment, so listing
+ *  it would offer credential controls that cannot take effect. */
+export function filterSidebarExchanges(
+  list: ExchangeMetadata[],
+  opts: {
+    tradingMode: "testnet" | "live";
+    exchangeFilter: "all" | "favorites";
+    favoriteExchanges: string[];
+  },
+): ExchangeMetadata[] {
+  const { tradingMode, exchangeFilter, favoriteExchanges } = opts;
+  return list.filter(
+    (ex) =>
+      !EVM_AMM_VENUE_IDS.has(ex.id) &&
+      (tradingMode !== "testnet" || venueHasTestnet(ex.id)) &&
+      (ex.id === "evm_wallet" ||
+        exchangeFilter === "all" ||
+        favoriteExchanges.includes(ex.id)),
+  );
 }
 
 export const EXCHANGES_ALPHABETICAL: ExchangeMetadata[] = [
@@ -411,23 +437,25 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
       }
       return next;
     });
-  // Individual EVM AMM venues leave the sidebar — the pinned "EVM Wallet"
-  // entry manages their shared signer. The wallet is a credential store,
-  // not a venue, so it stays visible even under the favorites filter.
-  const visibleExchanges = EXCHANGES_ALPHABETICAL.filter(
-    (ex) =>
-      !EVM_AMM_VENUE_IDS.has(ex.id) &&
-      (ex.id === "evm_wallet" ||
-        exchangeFilter === "all" ||
-        favoriteExchanges.includes(ex.id)),
-  );
+  const visibleExchanges = filterSidebarExchanges(EXCHANGES_ALPHABETICAL, {
+    tradingMode,
+    exchangeFilter,
+    favoriteExchanges,
+  });
+  // Live-only venues hidden by the current environment (sidebar count note).
+  const liveOnlyHiddenCount =
+    tradingMode === "testnet"
+      ? EXCHANGES_ALPHABETICAL.filter(
+          (ex) => !EVM_AMM_VENUE_IDS.has(ex.id) && !venueHasTestnet(ex.id),
+        ).length
+      : 0;
   // Keep the selection visible: if the active tab is filtered out, fall back
   // to the first visible exchange (or keep it when the filter empties).
   useEffect(() => {
     if (!visibleExchanges.some((ex) => ex.id === selectedExchange) && visibleExchanges.length > 0) {
       setSelectedExchange(visibleExchanges[0].id);
     }
-  }, [exchangeFilter, favoriteExchanges]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [exchangeFilter, favoriteExchanges, tradingMode]); // eslint-disable-line react-hooks/exhaustive-deps
   const [loading, setLoading] = useState(true);
   const saveBtn = useSaveButton();
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -1461,6 +1489,12 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                       })}
                     </div>
                   ))}
+                  {liveOnlyHiddenCount > 0 && (
+                    <p className="px-3 pt-2 text-[10px] font-mono text-muted leading-snug">
+                      {liveOnlyHiddenCount} live-only venues hidden in Testnet mode — they have no
+                      demo endpoint. Switch to Live Trading to manage them.
+                    </p>
+                  )}
                 </div>
 
               </div>

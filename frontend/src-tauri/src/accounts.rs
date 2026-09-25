@@ -1574,6 +1574,40 @@ pub fn upsert_strategy_route_impl(
             candidate
         }
     };
+    // Route legs must reference accounts bound to the ACTIVE environment —
+    // testnet and live credentials are disjoint sets, so a pair from the
+    // other environment (or a mixed pair) could never be eligible anyway.
+    // Toggle-only updates keep working: when the stored leg ids are
+    // unchanged the pair was already validated at create time.
+    let stored_pair = input.id.as_ref().and_then(|id| {
+        state
+            .state_store
+            .list_strategy_routes(None)
+            .ok()?
+            .into_iter()
+            .find(|r| &r.id == id)
+            .map(|r| (r.account_a_id, r.account_b_id))
+    });
+    let legs_changed = stored_pair
+        .as_ref()
+        .map(|(a, b)| a != &input.account_a_id || b != &input.account_b_id)
+        .unwrap_or(true);
+    if legs_changed {
+        let env = state.env().as_str();
+        for aid in [&input.account_a_id, &input.account_b_id] {
+            let acc = state
+                .state_store
+                .get_account(aid)
+                .map_err(|e| e.to_string())?
+                .ok_or_else(|| format!("route account {aid} does not exist"))?;
+            if acc.environment != env {
+                return Err(format!(
+                    "route account {aid} binds to the {} environment — routes may only reference accounts bound to the active environment ({env})",
+                    acc.environment
+                ));
+            }
+        }
+    }
     // Labels are required by the store; an omitted label preserves the
     // existing route's label on update, or derives a readable default.
     let label = if input.label.trim().is_empty() {
