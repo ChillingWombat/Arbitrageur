@@ -31,8 +31,8 @@ test("getEnabledConnectedVenueCodes returns enabled testnet-capable venues and i
     lighter_api_key: "", // connectivity is never inferred from key strings
     vanta_enabled: true,
     vanta_orderly_key: "ed25519:validkey",
-    robinhood_enabled: true, // no public testnet — live-only venue
-    arcus_enabled: true, // scaffold only, unsupported
+    robinhood_enabled: true, // testnet via Lighter-protocol adapter
+    arcus_enabled: true, // testnet-admitted (real public /v1 API)
     aster_enabled: true, // no public testnet — live-only venue
     popdex_enabled: true,
     kraken_enabled: true,
@@ -42,7 +42,16 @@ test("getEnabledConnectedVenueCodes returns enabled testnet-capable venues and i
     decibel_enabled: true,
   };
   const codes = getEnabledConnectedVenueCodes(settings, false);
-  assert.deepStrictEqual(Array.from(codes).sort(), ["DCB", "HL", "KRK", "LGT", "POP", "VNT"]);
+  assert.deepStrictEqual(Array.from(codes).sort(), [
+    "ARC",
+    "DCB",
+    "HL",
+    "KRK",
+    "LGT",
+    "POP",
+    "RH",
+    "VNT",
+  ]);
 });
 
 test("getEnabledConnectedVenueCodes returns newly added supported venues (BNB, OKX, DCB)", () => {
