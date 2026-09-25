@@ -1348,11 +1348,12 @@ impl ExchangeAdapter for HyperliquidAdapter {
             | "siblingFilledCanceled"
             | "triggered"
             | "scheduledCancel" => {
-                if filled_qty > dec!(0) && filled_qty < orig_sz {
-                    OrderStatus::PartiallyFilled
-                } else {
-                    OrderStatus::Cancelled
-                }
+                // These are all terminal on the venue — a partial fill does
+                // not keep the order working. `filled_qty`/`remaining_qty`
+                // already carry the partial truth; `PartiallyFilled` here
+                // would classify as Working and deadlock resolution until
+                // the reconciler's deadline.
+                OrderStatus::Cancelled
             }
             "rejected" if filled_qty == dec!(0) => OrderStatus::Rejected,
             other => anyhow::bail!("Hyperliquid orderStatus unknown status '{other}': {v}"),
