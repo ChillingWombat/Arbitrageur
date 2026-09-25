@@ -1411,6 +1411,9 @@ pub struct SpreadMonitorEngine {
     /// verdicts). At most one pass per 24h; manual IPC shares the same
     /// runner — never a second code path.
     last_promotion_at: Mutex<Option<Instant>>,
+    /// Fixed-yield maturity sweep cadence: unresolved `-yu` locks are
+    /// checked against Boros venue truth at most once per 60s.
+    last_maturity_check: Mutex<Option<Instant>>,
     /// Dedup guard for durable signal writes (only persist transitions).
     #[allow(clippy::type_complexity)]
     persisted: Mutex<HashMap<(String, String, String), (PairStatus, i64, i64)>>,
@@ -1444,6 +1447,7 @@ impl SpreadMonitorEngine {
             last_funding_exit_check: Mutex::new(None),
             last_rollup_at: Mutex::new(None),
             last_promotion_at: Mutex::new(None),
+            last_maturity_check: Mutex::new(None),
             persisted: Mutex::new(HashMap::new()),
             shutdown: Mutex::new(false),
         });
@@ -1673,6 +1677,7 @@ impl SpreadMonitorEngine {
             self.poll_funding(&state).await;
             self.maybe_rollup_sessions(&state);
             self.maybe_promote_sessions(&state);
+            self.maybe_check_fixed_yield_maturities(&state).await;
 
             if eval_at <= Instant::now() {
                 self.evaluate(&state).await;
@@ -1993,6 +1998,22 @@ impl SpreadMonitorEngine {
                 tracing::warn!("session rollup failed for {symbol}: {e}");
             }
         }
+    }
+
+    /// Fixed-yield maturity sweep (issue #25). Cadence 60s; the state
+    /// machine itself lives in `funding::check_fixed_yield_maturities`
+    /// (same code path the tests drive).
+    async fn maybe_check_fixed_yield_maturities(&self, state: &AppEngineState) {
+        let due = self
+            .last_maturity_check
+            .lock()
+            .map(|t| t.elapsed() >= Duration::from_secs(60))
+            .unwrap_or(true);
+        if !due {
+            return;
+        }
+        *self.last_maturity_check.lock() = Some(Instant::now());
+        crate::funding::check_fixed_yield_maturities(state).await;
     }
 
     fn maybe_promote_sessions(&self, state: &AppEngineState) {

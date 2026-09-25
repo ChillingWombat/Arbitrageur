@@ -941,6 +941,166 @@ impl StateStore {
         )? == 1)
     }
 
+    /// Persist the maturity tracker for a `-yu` sibling signal at entry.
+    /// `lock_until_ms` comes from the opportunity DTO (venue-derived), the
+    /// market ids let settlement detection survive the market's delisting
+    /// from active feeds. Rows start `locked` — nothing here asserts
+    /// settlement from wall-clock time alone.
+    pub fn record_fixed_yield_maturity(
+        &self,
+        signal_id: &str,
+        parent_signal_id: &str,
+        lock_until_ms: i64,
+        yu_market_ids: &[u64],
+    ) -> anyhow::Result<()> {
+        let signal_id = normalize_id(signal_id)?;
+        let parent_signal_id = normalize_id(parent_signal_id)?;
+        if lock_until_ms < 0 {
+            anyhow::bail!("lock_until_ms must be non-negative");
+        }
+        let ids = yu_market_ids
+            .iter()
+            .map(|m| m.to_string())
+            .collect::<Vec<_>>()
+            .join(",");
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO fixed_yield_maturities
+                 (signal_id, parent_signal_id, lock_until_ms, yu_market_ids,
+                  maturity_state, created_at, updated_at)
+             VALUES (?1, ?2, ?3, ?4, 'locked', ?5, ?5)
+             ON CONFLICT(signal_id) DO UPDATE SET
+                 parent_signal_id = excluded.parent_signal_id,
+                 lock_until_ms = excluded.lock_until_ms,
+                 yu_market_ids = excluded.yu_market_ids,
+                 updated_at = excluded.updated_at",
+            rusqlite::params![signal_id, parent_signal_id, lock_until_ms, ids, now],
+        )?;
+        Ok(())
+    }
+
+    /// All fixed-yield maturity rows, newest first.
+    pub fn list_fixed_yield_maturities(&self) -> anyhow::Result<Vec<FixedYieldMaturity>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT signal_id, parent_signal_id, lock_until_ms, yu_market_ids,
+                    maturity_state, resolved_action, venue_observation,
+                    created_at, updated_at, resolved_at
+             FROM fixed_yield_maturities ORDER BY lock_until_ms",
+        )?;
+        let rows = stmt
+            .query_map([], |r| {
+                let ids: String = r.get(3)?;
+                Ok(FixedYieldMaturity {
+                    signal_id: r.get(0)?,
+                    parent_signal_id: r.get(1)?,
+                    lock_until_ms: r.get(2)?,
+                    yu_market_ids: ids
+                        .split(',')
+                        .filter(|s| !s.is_empty())
+                        .filter_map(|s| s.parse::<u64>().ok())
+                        .collect(),
+                    maturity_state: r.get(4)?,
+                    resolved_action: r.get(5)?,
+                    venue_observation: r.get(6)?,
+                    created_at: r.get(7)?,
+                    updated_at: r.get(8)?,
+                    resolved_at: r.get(9)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
+    /// Venue-truth state transition. `observation` records what the venue
+    /// reported (or the read error) — never cleared by a later transition
+    /// unless a new observation replaces it.
+    pub fn update_fixed_yield_maturity_state(
+        &self,
+        signal_id: &str,
+        state: &str,
+        observation: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let signal_id = normalize_id(signal_id)?;
+        match state {
+            "locked" | "due" | "settled" | "settlement_unverified" | "closed_early" => {}
+            other => anyhow::bail!("invalid maturity state '{other}'"),
+        }
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE fixed_yield_maturities
+             SET maturity_state = ?2,
+                 venue_observation = COALESCE(?3, venue_observation),
+                 updated_at = ?4
+             WHERE signal_id = ?1",
+            rusqlite::params![signal_id, state, observation, now],
+        )?;
+        Ok(())
+    }
+
+    /// Record the operator's explicit resolution. Only a venue-confirmed
+    /// `settled` row may resolve — acting on `due`/`settlement_unverified`
+    /// would pretend settlement that the venue has not reported.
+    pub fn resolve_fixed_yield_maturity(
+        &self,
+        signal_id: &str,
+        action: &str,
+    ) -> anyhow::Result<()> {
+        let signal_id = normalize_id(signal_id)?;
+        match action {
+            "close_pair" | "keep_carry" => {}
+            other => anyhow::bail!("invalid maturity action '{other}'"),
+        }
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock();
+        let changed = conn.execute(
+            "UPDATE fixed_yield_maturities
+             SET resolved_action = ?2, resolved_at = ?3, updated_at = ?3
+             WHERE signal_id = ?1
+               AND maturity_state = 'settled'
+               AND resolved_action IS NULL",
+            rusqlite::params![signal_id, action, now],
+        )?;
+        if changed == 0 {
+            anyhow::bail!(
+                "maturity row for {signal_id} is not venue-confirmed settled or already resolved"
+            );
+        }
+        Ok(())
+    }
+
+    /// Terminal marker for a completed priced early exit: the YU legs
+    /// closed before maturity, so settlement no longer needs venue
+    /// confirmation. Records `close_pair` as the resolution — the exit
+    /// path always unwinds the hedged perp pair too.
+    pub fn mark_fixed_yield_closed_early(
+        &self,
+        signal_id: &str,
+        observation: &str,
+    ) -> anyhow::Result<()> {
+        let signal_id = normalize_id(signal_id)?;
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock();
+        let changed = conn.execute(
+            "UPDATE fixed_yield_maturities
+             SET maturity_state = 'closed_early',
+                 resolved_action = 'close_pair',
+                 venue_observation = ?2,
+                 resolved_at = ?3,
+                 updated_at = ?3
+             WHERE signal_id = ?1
+               AND maturity_state IN ('locked','due','settlement_unverified')
+               AND resolved_action IS NULL",
+            rusqlite::params![signal_id, observation, now],
+        )?;
+        if changed == 0 {
+            anyhow::bail!("maturity row for {signal_id} is already terminal or resolved");
+        }
+        Ok(())
+    }
+
     fn legs_for(conn: &Connection, signal_id: &str) -> rusqlite::Result<Vec<SignalLeg>> {
         let mut stmt = conn.prepare(
             "SELECT id, signal_id, account_id, venue, side, intended_qty,

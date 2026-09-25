@@ -841,6 +841,14 @@ export interface EngineSettingsDto {
    * still-open futures pair position, regardless of the live edge.
    * Backend-validated 60–604800; default 86400 (24h). */
   auto_exit_max_hold_secs?: number;
+  /** Opt-in autonomous fixed-yield entries (Boros YU locks, live-only).
+   * Default off — gates additionally on approval validity, gas treasury,
+   * margin, lock term, and post-cost return. */
+  auto_fixed_yield_enabled?: boolean;
+  /** Minimum lock term (days) for an autonomous fixed-yield entry. */
+  auto_fixed_yield_min_lock_days?: number;
+  /** Minimum Boros gas-treasury USD for an autonomous fixed-yield entry. */
+  auto_fixed_yield_min_gas_usd?: number;
   balance_stale_warn_secs?: number;
 
   // Subaccount mappings
@@ -1343,6 +1351,62 @@ export interface FlattenResultDto {
   /** Signals still holding residual exposure — ticker remains blocked. */
   residualSignals: number;
   notes: string[];
+}
+
+/** One Boros YU lock's maturity tracker. `maturityState` is
+ *  venue-truth-derived: `locked` → `due` → `settled` |
+ *  `settlement_unverified`; `closed_early` = exited via the priced path.
+ *  `resolvedAction` records the operator's explicit choice. */
+export interface FixedYieldMaturityDto {
+  signalId: string;
+  parentSignalId: string | null;
+  parentStatus: string | null;
+  symbol: string;
+  lockUntilMs: number;
+  maturityState: "locked" | "due" | "settled" | "settlement_unverified" | "closed_early";
+  resolvedAction: "close_pair" | "keep_carry" | null;
+  venueObservation: string | null;
+  resolvedAt: string | null;
+}
+
+export interface FixedYieldExitQuoteLegDto {
+  legSide: "long" | "short";
+  yuSymbol: string;
+  marketId: number;
+  openQty: number;
+  entryRate: number;
+  /** `null` = no executable rate on the book — the leg cannot be priced. */
+  exitRate: number | null;
+  estExitPnlUsd: number | null;
+}
+
+export interface FixedYieldExitQuoteDto {
+  signalId: string;
+  parentSignalId: string | null;
+  maturityState: string;
+  lockUntilMs: number;
+  yearsRemaining: number;
+  legs: FixedYieldExitQuoteLegDto[];
+  /** `null` when any leg is unquotable — never a partial sum. */
+  estTotalPnlUsd: number | null;
+  notes: string[];
+}
+
+/** Boros account ops status for the Exchange Accounts card — every field
+ *  is venue-read or honestly `null`/`unknown`, never fabricated. */
+export interface BorosStatusDto {
+  /** False when no Boros credentials are configured at all. */
+  configured: boolean;
+  /** Whether the agent key is approved AND unexpired right now. */
+  agentApproved: boolean;
+  /** Agent-approval expiry (unix seconds) — null when unreadable. */
+  agentExpiryUnix: number | null;
+  /** Sponsored-gas treasury in USD — null when the venue doesn't report. */
+  gasTreasuryUsd: number | null;
+  /** Named reason when approval is absent/expired, for UI remediation. */
+  approvalNote: string | null;
+  /** Named reason when the gas read failed, for UI remediation. */
+  gasNote: string | null;
 }
 
 export interface StrategyMetrics {

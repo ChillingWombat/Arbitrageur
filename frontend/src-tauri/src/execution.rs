@@ -2165,7 +2165,7 @@ pub struct FlattenResultDto {
     pub notes: Vec<String>,
 }
 
-fn ledger_qty_to_dec(value: f64, what: &str) -> Result<Decimal, String> {
+pub(crate) fn ledger_qty_to_dec(value: f64, what: &str) -> Result<Decimal, String> {
     if !value.is_finite() || value < 0.0 {
         return Err(format!(
             "{what} must be finite and nonnegative, got {value}"
@@ -2996,6 +2996,46 @@ pub async fn flatten_ticker_positions_with_type_impl(
     close_status: CycleStatus,
     state: &AppEngineState,
 ) -> Result<FlattenResultDto, String> {
+    flatten_ticker_positions_scoped_impl(
+        symbol,
+        strategy_id,
+        execution_type,
+        close_status,
+        state,
+        None,
+    )
+    .await
+}
+
+/// Flatten one specific root signal family — used by fixed-yield maturity
+/// resolution where only the hedged carry pair may close, never every
+/// open signal sharing the symbol.
+pub async fn flatten_signal_positions_impl(
+    signal_id: &str,
+    strategy_id: &str,
+    execution_type: Option<&str>,
+    close_status: CycleStatus,
+    state: &AppEngineState,
+) -> Result<FlattenResultDto, String> {
+    flatten_ticker_positions_scoped_impl(
+        None,
+        strategy_id,
+        execution_type,
+        close_status,
+        state,
+        Some(signal_id),
+    )
+    .await
+}
+
+async fn flatten_ticker_positions_scoped_impl(
+    symbol: Option<&str>,
+    strategy_id: &str,
+    execution_type: Option<&str>,
+    close_status: CycleStatus,
+    state: &AppEngineState,
+    only_signal_id: Option<&str>,
+) -> Result<FlattenResultDto, String> {
     use crate::state_store::{LegSide, NewSignalExecution, NewSignalLeg, SignalStatus};
 
     let sid = crate::state_store::normalize_strategy_id(strategy_id).map_err(|e| e.to_string())?;
@@ -3019,7 +3059,8 @@ pub async fn flatten_ticker_positions_with_type_impl(
     let roots: Vec<crate::state_store::SignalExecution> = all_signals
         .iter()
         .filter(|s| {
-            !s.id.starts_with("flat-")
+            (only_signal_id.is_none() || only_signal_id == Some(s.id.as_str()))
+                && !s.id.starts_with("flat-")
                 && !s.id.starts_with("trim-")
                 && s.strategy_id.eq_ignore_ascii_case(&sid)
                 && s.status.counts_as_open()
@@ -3586,7 +3627,11 @@ pub async fn flatten_ticker_positions_with_type_impl(
         .map_err(|e| e.to_string())?
         .into_iter()
         .filter(|s| {
-            !s.id.starts_with("flat-")
+            // A signal-scoped flatten measures residual against that
+            // family only — unrelated open carries must not keep the
+            // scoped row "actionable" forever.
+            (only_signal_id.is_none() || only_signal_id == Some(s.id.as_str()))
+                && !s.id.starts_with("flat-")
                 && !s.id.starts_with("trim-")
                 && s.strategy_id.eq_ignore_ascii_case(&sid)
                 && s.status.counts_as_open()

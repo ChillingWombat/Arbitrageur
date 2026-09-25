@@ -510,6 +510,12 @@ fn default_max_leverage() -> u32 {
 fn default_auto_exit_max_hold_secs() -> u64 {
     86_400
 }
+fn default_auto_fixed_yield_min_lock_days() -> u32 {
+    7
+}
+fn default_auto_fixed_yield_min_gas_usd() -> f64 {
+    25.0
+}
 fn default_referral_lighter() -> String {
     "https://app.lighter.xyz/?referral=SOLO&source=none".into()
 }
@@ -679,6 +685,23 @@ pub struct EngineSettingsDto {
     /// >= 60. Radar-bot positions keep their own per-bot `holdTimeoutMult`.
     #[serde(default = "default_auto_exit_max_hold_secs")]
     pub auto_exit_max_hold_secs: u64,
+    /// Opt-in: allow AUTONOMOUS fixed-yield entries (Boros YU locks on
+    /// Arbitrum mainnet). Default OFF — a live four-leg entry that locks
+    /// collateral to maturity must never fire from an implicit default.
+    /// Manual Execute stays available regardless; this flag only admits
+    /// the `auto` path, which additionally gates on agent-approval
+    /// validity, gas treasury, Boros margin, lock term, and post-cost
+    /// return before dispatch.
+    #[serde(default)]
+    pub auto_fixed_yield_enabled: bool,
+    /// Autonomous fixed-yield entries require at least this lock term —
+    /// a sub-week lock's entry/exit costs dominate the carry.
+    #[serde(default = "default_auto_fixed_yield_min_lock_days")]
+    pub auto_fixed_yield_min_lock_days: u32,
+    /// Autonomous fixed-yield entries require the Boros gas treasury to
+    /// hold at least this USD balance — the venue sponsors tx gas from it.
+    #[serde(default = "default_auto_fixed_yield_min_gas_usd")]
+    pub auto_fixed_yield_min_gas_usd: f64,
 
     // Exchange Enablement Toggles
     #[serde(default = "default_true")]
@@ -868,6 +891,9 @@ impl Default for EngineSettingsDto {
             max_leverage: default_max_leverage(),
             passive_unwind: default_passive_unwind_policy(),
             auto_exit_max_hold_secs: default_auto_exit_max_hold_secs(),
+            auto_fixed_yield_enabled: false,
+            auto_fixed_yield_min_lock_days: default_auto_fixed_yield_min_lock_days(),
+            auto_fixed_yield_min_gas_usd: default_auto_fixed_yield_min_gas_usd(),
             hyperliquid_enabled: false,
             lighter_enabled: false,
             vanta_enabled: false,
@@ -1705,6 +1731,20 @@ impl AppEngineState {
             if let Some(v) = get_u("engine.auto_exit_max_hold_secs") {
                 if (60..=604_800).contains(&v) {
                     initial_settings.auto_exit_max_hold_secs = v as u64;
+                }
+            }
+            // Autonomous fixed-yield opt-in + its safety bounds.
+            if let Ok(Some(v)) = state_store.kv_get("engine.auto_fixed_yield_enabled") {
+                initial_settings.auto_fixed_yield_enabled = v == "1";
+            }
+            if let Some(v) = get_u("engine.auto_fixed_yield_min_lock_days") {
+                if (1..=365).contains(&v) {
+                    initial_settings.auto_fixed_yield_min_lock_days = v;
+                }
+            }
+            if let Some(v) = get_f("engine.auto_fixed_yield_min_gas_usd") {
+                if v.is_finite() && (0.0..=10_000.0).contains(&v) {
+                    initial_settings.auto_fixed_yield_min_gas_usd = v;
                 }
             }
             // USD-quote policy + depeg thresholds (Execution tab). Unknown

@@ -63,6 +63,9 @@ import type {
   OpenPositionDto,
   TickerPositionState,
   FlattenResultDto,
+  FixedYieldMaturityDto,
+  FixedYieldExitQuoteDto,
+  BorosStatusDto,
   CalibrationReportDto,
   MonitorSnapshotDto,
   MonitorSignalEventDto,
@@ -205,6 +208,11 @@ const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   "run_seasonality_promotion",
   "get_session_profile",
   "get_vault_status",
+  "list_fixed_yield_maturities",
+  "resolve_fixed_yield_maturity",
+  "quote_fixed_yield_exit",
+  "execute_fixed_yield_exit",
+  "get_boros_status",
   "initialize_vault",
   "unlock_vault",
   "lock_vault",
@@ -835,6 +843,36 @@ export const api = {
 
   async reconcileOrdersNow(): Promise<ReconcileSummaryDto> {
     return invokeDesktop<ReconcileSummaryDto>("reconcile_orders_now");
+  },
+
+  async listFixedYieldMaturities(): Promise<FixedYieldMaturityDto[]> {
+    return invokeDesktop<FixedYieldMaturityDto[]>("list_fixed_yield_maturities");
+  },
+
+  async resolveFixedYieldMaturity(
+    yuSignalId: string,
+    action: "close_pair" | "keep_carry",
+  ): Promise<FlattenResultDto> {
+    return invokeDesktop<FlattenResultDto>("resolve_fixed_yield_maturity", {
+      yuSignalId,
+      action,
+    });
+  },
+
+  async quoteFixedYieldExit(yuSignalId: string): Promise<FixedYieldExitQuoteDto> {
+    return invokeDesktop<FixedYieldExitQuoteDto>("quote_fixed_yield_exit", {
+      yuSignalId,
+    });
+  },
+
+  async executeFixedYieldExit(yuSignalId: string): Promise<FlattenResultDto> {
+    return invokeDesktop<FlattenResultDto>("execute_fixed_yield_exit", {
+      yuSignalId,
+    });
+  },
+
+  async getBorosStatus(): Promise<BorosStatusDto> {
+    return invokeDesktop<BorosStatusDto>("get_boros_status");
   },
 
   async cancelVenueOrder(
