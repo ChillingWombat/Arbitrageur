@@ -377,17 +377,25 @@ function medianPositive(prices: number[]): number | undefined {
  * allowlist. Any active perpetual listed by at least 2 admitted venues is
  * admitted, including symbols absent from the catalog.
  *
- * Exact `BASE-QUOTE` equality is intentional: USDC and USDT listings remain
- * distinct instruments unless a future canonicalisation layer explicitly
- * models the cross-stablecoin basis and venue symbol mapping.
+ * `mergeUsdQuotes` mirrors the engine's `usd_quote_mode` (backend
+ * `pair_key`): under `separate` each `BASE-QUOTE` stays a distinct
+ * instrument; under the merged modes (`parity`, `fx_adjusted`) all quote
+ * variants of a base collapse into one instrument keyed by the bare base —
+ * the merged row reports quote "USD" so cards render "BTC-USD".
  */
 export function applyMarketUniverse(
   catalog: PerpTicker[],
-  universe: VenueMarketUniverseDto[]
+  universe: VenueMarketUniverseDto[],
+  mergeUsdQuotes = false
 ): PerpTicker[] {
   const catalogBySymbol = new Map(
     catalog.map((ticker) => [ticker.symbol.toUpperCase(), ticker])
   );
+  const catalogByBase = new Map<string, PerpTicker>();
+  for (const ticker of catalog) {
+    const base = ticker.base.toUpperCase();
+    if (!catalogByBase.has(base)) catalogByBase.set(base, ticker);
+  }
   const symbolVenues = new Map<string, Set<string>>();
   const symbolPrices = new Map<string, number[]>();
 
@@ -398,31 +406,34 @@ export function applyMarketUniverse(
     for (const rawSymbol of entry.symbols) {
       const parts = canonicalMarketParts(rawSymbol);
       if (!parts) continue;
+      const key = mergeUsdQuotes ? parts.base : parts.symbol;
 
-      const venues = symbolVenues.get(parts.symbol) ?? new Set<string>();
+      const venues = symbolVenues.get(key) ?? new Set<string>();
       venues.add(code);
-      symbolVenues.set(parts.symbol, venues);
+      symbolVenues.set(key, venues);
 
       const rawPrice = entry.base_prices?.[rawSymbol] ?? entry.base_prices?.[parts.symbol];
       const price = Number(rawPrice);
       if (Number.isFinite(price) && price > 0) {
-        const prices = symbolPrices.get(parts.symbol) ?? [];
+        const prices = symbolPrices.get(key) ?? [];
         prices.push(price);
-        symbolPrices.set(parts.symbol, prices);
+        symbolPrices.set(key, prices);
       }
     }
   }
 
   const discovered: PerpTicker[] = [];
-  for (const [symbol, venues] of symbolVenues) {
+  for (const [key, venues] of symbolVenues) {
     if (venues.size < 2) continue;
-    const parts = canonicalMarketParts(symbol);
+    const parts = mergeUsdQuotes
+      ? { symbol: key, base: key, quote: "USD" }
+      : canonicalMarketParts(key);
     if (!parts) continue;
-    const known = catalogBySymbol.get(symbol);
-    const livePrice = medianPositive(symbolPrices.get(symbol) ?? []);
+    const known = catalogBySymbol.get(key) ?? catalogByBase.get(key);
+    const livePrice = medianPositive(symbolPrices.get(key) ?? []);
     const fallbackPrice = known?.basePrice && known.basePrice > 0 ? known.basePrice : 0;
     discovered.push({
-      symbol,
+      symbol: parts.symbol,
       base: parts.base,
       quote: parts.quote,
       name: known?.name ?? parts.base,

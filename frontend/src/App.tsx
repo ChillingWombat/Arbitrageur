@@ -110,7 +110,7 @@ export const App: React.FC = () => {
     });
   }, []);
   const [systemStatus, setSystemStatus] = useState<SystemStatusDto | null>(null);
-  const [, setEngineSettings] = useState<EngineSettingsDto | null>(null);
+  const [engineSettings, setEngineSettings] = useState<EngineSettingsDto | null>(null);
   const [orderbooks, setOrderbooks] = useState<VenueOrderBookDto[]>([]);
   const [tickerVolumes, setTickerVolumes] = useState<VenueVolumesDto[]>([]);
   const [marketUniverse, setMarketUniverse] = useState<VenueMarketUniverseDto[]>([]);
@@ -339,11 +339,16 @@ export const App: React.FC = () => {
     };
   }, [filterStrategyId, strategyParamsVersion]);
 
+  // USD-quote merge mirrors the engine's pair_key: under "Same ticker"
+  // modes the explorer lists one instrument per base (BTC-USD) instead of
+  // per-quote rows. Backend default is fx_adjusted, so an unloaded settings
+  // read defaults to merged.
+  const mergeUsdQuotes = (engineSettings?.usd_quote_mode ?? "").trim().toLowerCase() !== "separate";
   // Pre-exemption live universe — needed so the empty-state copy can tell
   // "no overlapping markets" apart from "everything hidden".
   const universeTickers: PerpTicker[] = useMemo(
-    () => applyMarketUniverse(PERP_TICKERS, marketUniverse),
-    [marketUniverse],
+    () => applyMarketUniverse(PERP_TICKERS, marketUniverse, mergeUsdQuotes),
+    [marketUniverse, mergeUsdQuotes],
   );
 
   const availableTickers: PerpTicker[] = useMemo(() => {
@@ -375,6 +380,7 @@ export const App: React.FC = () => {
     }
     const fallback =
       availableTickers.find((t: PerpTicker) => t.symbol === "BTC-USDC") ??
+      availableTickers.find((t: PerpTicker) => t.symbol === "BTC") ??
       availableTickers[0];
     setSelectedSymbol(fallback.symbol);
   }, [availableTickers, selectedSymbol]);
