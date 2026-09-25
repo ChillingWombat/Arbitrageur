@@ -589,23 +589,11 @@ const SignerAddressHint: React.FC<{
   typedKey: string;
   accountId: string | null;
   stored: boolean;
-  venue: string | null;
-  isDefault: boolean;
-  activeVersion: string;
-}> = ({ typedKey, accountId, stored, venue, isDefault, activeVersion }) => {
+}> = ({ typedKey, accountId, stored }) => {
   const [addr, setAddr] = useState<string | null>(null);
   const [invalid, setInvalid] = useState(false);
-  const [active, setActive] = useState<string | null>(null);
-  const [activeLoaded, setActiveLoaded] = useState(false);
-  const [activeError, setActiveError] = useState(false);
   const trimmed = typedKey.trim();
   const looksComplete = /^(0x)?[0-9a-fA-F]{64}$/.test(trimmed);
-  // get_active_signer_address is implemented for Hyperliquid and the
-  // swap-capable EVM AMM adapters — other venues keep the typed/stored
-  // derivation and never show an active line.
-  const activeSupported =
-    venue === "hyperliquid" ||
-    (venue != null && EVM_AMM_VENUES.some((v) => v.id === venue && v.execution));
 
   useEffect(() => {
     setAddr(null);
@@ -631,95 +619,17 @@ const SignerAddressHint: React.FC<{
     };
   }, [trimmed, looksComplete, stored, accountId]);
 
-  // The signer the live adapter holds right now — independent of vault
-  // lock state. Only the default account's credentials are provisioned;
-  // re-query on save/reprovision and lock transitions via activeVersion.
-  useEffect(() => {
-    setActive(null);
-    setActiveLoaded(false);
-    setActiveError(false);
-    let dead = false;
-    if (activeSupported && venue && isDefault && api.isTauri) {
-      api
-        .getActiveSignerAddress(venue)
-        .then((a) => {
-          if (!dead) {
-            setActive(a);
-            setActiveLoaded(true);
-          }
-        })
-        .catch(() => {
-          if (!dead) {
-            setActiveError(true);
-            setActiveLoaded(true);
-          }
-        });
-    }
-    return () => {
-      dead = true;
-    };
-  }, [venue, isDefault, activeVersion]);
-
-  const typedAddr = trimmed && !invalid ? addr : null;
-  const storedAddr = !trimmed && stored ? addr : null;
-  const compareAddr = typedAddr ?? storedAddr;
-  let activeLine: { text: string; cls: string } | null = null;
-  if (activeLoaded) {
-    if (activeError) {
-      activeLine = {
-        text: "unable to read live adapter signer",
-        cls: "text-amber-700",
-      };
-    } else if (!active) {
-      activeLine = {
-        text: "live adapter has no signing key loaded",
-        cls: "text-loss",
-      };
-    } else if (compareAddr && compareAddr.toLowerCase() === active.toLowerCase()) {
-      activeLine = {
-        text: `live adapter signs as ${active} (matches)`,
-        cls: "text-profit",
-      };
-    } else if (typedAddr) {
-      activeLine = {
-        text: `live adapter still signs as ${active} — save this key before trading`,
-        cls: "text-amber-700",
-      };
-    } else if (storedAddr) {
-      activeLine = {
-        text: `LIVE SIGNER MISMATCH: adapter signs as ${active} — save or re-unlock before trading`,
-        cls: "text-loss",
-      };
-    } else {
-      activeLine = {
-        text: `live adapter currently signs as ${active}`,
-        cls: "text-slate-500",
-      };
-    }
-  }
-
-  if (!addr && !invalid && !activeLine) return null;
+  if (!addr && !invalid) return null;
   return (
-    <>
-      {(addr || invalid) && (
-        <p
-          className={`text-[10px] mt-1 leading-tight font-mono break-all ${
-            invalid ? "text-amber-700" : "text-slate-500"
-          }`}
-        >
-          {addr
-            ? `${trimmed ? "typed key signs as" : "stored key signs as"} ${addr}`
-            : "not a valid EVM private key"}
-        </p>
-      )}
-      {activeLine && (
-        <p
-          className={`text-[10px] mt-1 leading-tight font-mono break-all ${activeLine.cls}`}
-        >
-          {activeLine.text}
-        </p>
-      )}
-    </>
+    <p
+      className={`text-[10px] mt-1 leading-tight font-mono break-all ${
+        invalid ? "text-amber-700" : "text-slate-500"
+      }`}
+    >
+      {addr
+        ? `${trimmed ? "typed key signs as" : "stored key signs as"} ${addr}`
+        : "not a valid EVM private key"}
+    </p>
   );
 };
 
@@ -800,9 +710,6 @@ const CredentialGrid: React.FC<CredGridProps> = ({
               typedKey={values[f.key] ?? ""}
               accountId={account?.id ?? null}
               stored={stored}
-              venue={account?.venue ?? null}
-              isDefault={account?.isDefault ?? false}
-              activeVersion={`${account?.updatedAt ?? ""}:${disabled ? "disabled" : "enabled"}`}
             />
           )}
         </div>
