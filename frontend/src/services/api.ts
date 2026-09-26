@@ -18,6 +18,9 @@ import type {
   OptionsParityOpportunityDto,
   OptionsParityScanParams,
   OptionsParityExecutionParams,
+  OptionsPackageOpportunityDto,
+  OptionsPackageScanParams,
+  OptionsPackageExecutionParams,
   OptionsBotConfigDto,
   TriangleExecutionParams,
   ConvergenceCheckDto,
@@ -671,6 +674,18 @@ export const api = {
 
   async executeOptionsParity(params: OptionsParityExecutionParams): Promise<SimStepResultDto> {
     return invokeDesktop<SimStepResultDto>("execute_options_parity", { params }).then(requireExecuted);
+  },
+
+  async scanOptionsPackages(
+    params: OptionsPackageScanParams,
+  ): Promise<OptionsPackageOpportunityDto[]> {
+    return invokeDesktop<OptionsPackageOpportunityDto[]>("scan_options_packages", { params });
+  },
+
+  async executeOptionsPackage(params: OptionsPackageExecutionParams): Promise<SimStepResultDto> {
+    return invokeDesktop<SimStepResultDto>("execute_options_package", { params }).then(
+      requireExecuted,
+    );
   },
 
   async checkSpatialConvergence(

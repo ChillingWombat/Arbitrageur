@@ -1651,6 +1651,60 @@ export interface OptionsParityExecutionParams {
   auto?: boolean;
 }
 
+/** One leg of a multi-leg options package (box spread, jelly roll,
+ *  convexity butterfly). `qty_mult` is the contract multiplier — 2 for a
+ *  butterfly body, 1 otherwise. Prices are base-coin / USD-at-index. */
+export interface OptionsPackageLegDto {
+  instrument: string;
+  side: "buy" | "sell" | string;
+  qty_mult: number;
+  venue_price: number;
+  usd_price: number;
+}
+
+export interface OptionsPackageOpportunityDto {
+  id: string;
+  substrategy_id: string;
+  venue: string;
+  currency: string;
+  /** Trade descriptor — "LONG BOX", "SHORT JELLY", "SELL CALL FLY"… */
+  label: string;
+  expiry_ms: number;
+  expiry_iso: string;
+  expiry2_ms?: number;
+  expiry2_iso?: string;
+  strikes: number[];
+  legs: OptionsPackageLegDto[];
+  implied_rate_pct?: number;
+  benchmark_rate_pct?: number;
+  gross_edge_usd: number;
+  est_fees_usd: number;
+  net_edge_usd: number;
+  edge_bps: number;
+  index_price_usd: number;
+  qty_base_suggested: number;
+  is_executable: boolean;
+  reason?: string;
+}
+
+export interface OptionsPackageScanParams {
+  substrategy_id: string;
+  currency: string;
+  qty_base?: number;
+  min_hours_to_expiry?: number;
+  max_days_to_expiry?: number;
+  min_edge_bps?: number;
+}
+
+export interface OptionsPackageExecutionParams {
+  id: string;
+  substrategy_id: string;
+  currency: string;
+  qty_base: number;
+  min_edge_bps?: number;
+  auto?: boolean;
+}
+
 /** Per-substrategy options bot config — one row per (environment,
  *  substrategy). `mode` is the backend BotMode string; `enabled` is a
  *  display mirror of mode==="auto" (the backend derives it). */

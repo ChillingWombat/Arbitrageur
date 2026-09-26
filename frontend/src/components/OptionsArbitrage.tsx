@@ -13,6 +13,8 @@ import { api } from "../services/api";
 import type {
   OptionsParityOpportunityDto,
   OptionsParityExecutionParams,
+  OptionsPackageOpportunityDto,
+  OptionsPackageExecutionParams,
   OptionsBotConfigDto,
   ExecutionLogEntry,
 } from "../types";
@@ -71,9 +73,8 @@ export const OPTIONS_SUBSTRATEGIES: OptionsSubstrategy[] = [
     description:
       "A four-leg package (bull call spread + bear put spread across two strikes) paying a fixed amount at expiry — a synthetic zero-coupon bond. Arbitrage when its implied interest rate diverges from the real funding/borrow rate on the same underlying.",
     family: "Rate Structures",
-    universe: "European index & equity options",
-    status: "pending",
-    requires: "IBKR options (or Deribit multi-leg books)",
+    universe: "Crypto options (Deribit) — equities once IBKR options land",
+    status: "live",
   },
   {
     id: "jelly_roll",
@@ -83,21 +84,19 @@ export const OPTIONS_SUBSTRATEGIES: OptionsSubstrategy[] = [
     description:
       "Two box spreads across different expiries — a calendar box. Arbitrage when the implied term structure of rates between expiries diverges from actual funding and carry.",
     family: "Rate Structures",
-    universe: "Index & equity options across expiries",
-    status: "pending",
-    requires: "IBKR options chain depth across expiries",
+    universe: "Crypto options across expiries (Deribit)",
+    status: "live",
   },
   {
     id: "convexity",
     logStrategyId: "options_convexity",
     name: "Convexity Boundary",
-    tagline: "Butterfly/condor upper-bound violations",
+    tagline: "Butterfly upper-bound violations",
     description:
-      "A butterfly or condor's price can never exceed its maximum payoff bounds. A book quoting above the convexity upper bound is a locked-in arbitrage sell.",
+      "A butterfly's price can never exceed its maximum payoff bounds. A book quoting above the convexity upper bound is a locked-in arbitrage sell — buy the wings, sell twice the body.",
     family: "Boundary & Convexity",
-    universe: "Any listed option chain with a wing quote",
-    status: "pending",
-    requires: "multi-strike book snapshot (Deribit or IBKR)",
+    universe: "Crypto option chains (Deribit)",
+    status: "live",
   },
   {
     id: "dividend_play",
@@ -203,13 +202,19 @@ const fmtPx = (v: number): string =>
 const legLabel = (action: string, role: string): string =>
   `${action.toUpperCase()} ${role.toUpperCase()}`;
 
-/** Substrategy id an opportunity belongs to — the parity scanner is the
- *  only emitter today, so `opar-*` ids (and anything without an explicit
- *  tag) map to `parity`. Future scanners tag their own id on the DTO. */
-export const substrategyOfOpp = (_o: OptionsParityOpportunityDto): string => "parity";
+/** One scanned setup — parity opportunities carry no substrategy tag, so
+ *  the scan results are a discriminated union; package DTOs tag their own
+ *  `substrategy_id`. */
+export type OptionsScannedOpp =
+  | { kind: "parity"; p: OptionsParityOpportunityDto }
+  | { kind: "package"; p: OptionsPackageOpportunityDto };
+
+/** Substrategy id an opportunity belongs to. */
+export const substrategyOfOpp = (o: OptionsScannedOpp): string =>
+  o.kind === "parity" ? "parity" : o.p.substrategy_id;
 
 /** Filter scan results by the rail selection ("all" passes everything). */
-export const filterOptionsOpps = <T extends OptionsParityOpportunityDto>(
+export const filterOptionsOpps = <T extends OptionsScannedOpp>(
   opps: T[],
   selected: string,
 ): T[] =>
@@ -323,6 +328,93 @@ export const OptionsParityCard: React.FC<OptionsParityCardProps> = ({
     </div>
   </div>
 );
+
+interface OptionsPackageCardProps {
+  opp: OptionsPackageOpportunityDto;
+  executing: boolean;
+  executed: boolean;
+  disabled: boolean;
+  onExecute: () => void;
+}
+
+/** One package opportunity row (box / jelly roll / convexity butterfly) —
+ *  pure render, no IPC. Legs print side + contract multiplier + exact
+ *  instrument so the operator sees precisely what dispatches. */
+export const OptionsPackageCard: React.FC<OptionsPackageCardProps> = ({
+  opp: o,
+  executing,
+  executed,
+  disabled,
+  onExecute,
+}) => {
+  const expiry = o.expiry2_iso
+    ? `exp ${o.expiry_iso} → ${o.expiry2_iso}`
+    : `exp ${o.expiry_iso}`;
+  return (
+    <div className="panel p-4">
+      <div className="flex items-start justify-between gap-4 flex-wrap">
+        <div>
+          <div className="flex items-center gap-2">
+            <span className="text-xs font-bold uppercase px-1.5 py-0.5 rounded bg-accent/10 text-accent">
+              {o.label}
+            </span>
+            <span className="font-mono text-sm">
+              {o.currency} {o.strikes.map((k) => k.toLocaleString()).join("–")} · {expiry}
+            </span>
+          </div>
+          <div className="mt-2 grid grid-cols-2 gap-x-6 gap-y-1 text-xs font-mono">
+            {o.legs.map((l, i) => (
+              <div key={`${l.instrument}-${i}`}>
+                <span className={l.side === "buy" ? "text-profit" : "text-loss"}>
+                  {l.side.toUpperCase()}
+                  {l.qty_mult > 1 ? ` ×${l.qty_mult}` : ""}
+                </span>{" "}
+                {l.instrument} @ {fmtPx(l.venue_price)}
+                <span className="text-slate-500"> (≈{fmtUsd(l.usd_price)})</span>
+              </div>
+            ))}
+          </div>
+        </div>
+        <DetailSection title="">
+          <div className="grid grid-cols-2 gap-x-6">
+            {o.implied_rate_pct != null && (
+              <DetailField label="Implied rate" value={`${o.implied_rate_pct.toFixed(2)}%`} />
+            )}
+            {o.benchmark_rate_pct != null && (
+              <DetailField
+                label="Benchmark"
+                value={`${o.benchmark_rate_pct.toFixed(2)}%`}
+              />
+            )}
+            <DetailField label="Gross edge" value={fmtUsd(o.gross_edge_usd)} />
+            <DetailField label="Est. fees" value={fmtUsd(o.est_fees_usd)} />
+            <DetailField
+              label="Net edge"
+              value={
+                <span className={o.net_edge_usd > 0 ? "text-profit" : "text-loss"}>
+                  {fmtUsd(o.net_edge_usd)} ({o.edge_bps.toFixed(1)} bps)
+                </span>
+              }
+            />
+          </div>
+        </DetailSection>
+        <div className="shrink-0 self-center">
+          <ExecuteButton
+            executing={executing}
+            executed={executed}
+            disabled={disabled}
+            title={
+              o.is_executable
+                ? `Execute ${o.label} on Deribit`
+                : o.reason ?? "Not executable"
+            }
+            onClick={onExecute}
+          />
+        </div>
+      </div>
+    </div>
+  );
+};
 
 /** Left-rail substrategy selector — the Options-page analogue of the
  *  TickerExplorer sidebar: overall view plus one row per substrategy. */
@@ -451,14 +543,14 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
 }) => {
   const [selected, setSelected] = useState<string>("all");
   const [dirFilter, setDirFilter] = useState<"all" | "conversion" | "reversal">("all");
-  const [opps, setOpps] = useState<OptionsParityOpportunityDto[]>([]);
+  const [opps, setOpps] = useState<OptionsScannedOpp[]>([]);
   const [scanning, setScanning] = useState(false);
   const [scanned, setScanned] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [executing, setExecuting] = useState<string | null>(null);
   const [executed, setExecuted] = useState<Set<string>>(new Set());
   const [message, setMessage] = useState<string | null>(null);
-  const [confirmOpp, setConfirmOpp] = useState<OptionsParityOpportunityDto | null>(null);
+  const [confirmOpp, setConfirmOpp] = useState<OptionsScannedOpp | null>(null);
   const [botCfg, setBotCfg] = useState<OptionsBotConfigDto | null>(null);
   const [botError, setBotError] = useState<string | null>(null);
   const [openPositions, setOpenPositions] = useState(0);
@@ -467,7 +559,11 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
   const [showBotConfig, setShowBotConfig] = useState(false);
 
   const selDef = OPTIONS_SUBSTRATEGIES.find((s) => s.id === selected);
+  /** Parity-specific chrome (conversion/reversal direction filter). */
   const parityVisible = selected === "all" || selected === "parity";
+  /** Any live scanner is selected (or the combined "all" view) — gates the
+   *  scan button, summary pills and the venue-capability warning. */
+  const liveVisible = selected === "all" || selDef?.status === "live";
   /** A bot exists only for live scanners — the "All" view is monitor-only
    *  and pending substrategies have no executor to configure. */
   const botSubstrategy = selDef && selDef.status === "live" ? selDef : null;
@@ -588,7 +684,8 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
   const filteredOpps = useMemo(
     () =>
       filterOptionsOpps(opps, selected).filter(
-        (o) => dirFilter === "all" || o.direction === dirFilter,
+        (o) =>
+          dirFilter === "all" || o.kind !== "parity" || o.p.direction === dirFilter,
       ),
     [opps, selected, dirFilter],
   );
@@ -604,9 +701,9 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
     () => filterOptionsLogs(executionLogs, selected),
     [executionLogs, selected],
   );
-  const executableCount = filteredOpps.filter((o) => o.is_executable).length;
+  const executableCount = filteredOpps.filter((o) => o.p.is_executable).length;
   const bestEdge = filteredOpps.reduce(
-    (m, o) => Math.max(m, o.net_edge_usd),
+    (m, o) => Math.max(m, o.p.net_edge_usd),
     -Infinity,
   );
   const realizedPnl = filteredLogs.reduce((acc, l) => acc + (l.net_profit || 0), 0);
@@ -616,20 +713,42 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
     setError(null);
     setMessage(null);
     try {
-      const settled = await Promise.allSettled(
-        SCAN_CURRENCIES.map((currency) =>
-          api.scanOptionsParity({
+      // Substrategies in scope: the selection's own scanner, or every live
+      // scanner in the combined view — each swept over both underlyings.
+      const subs = (
+        selected === "all"
+          ? OPTIONS_SUBSTRATEGIES.filter((s) => s.status === "live").map((s) => s.id)
+          : selDef?.status === "live"
+            ? [selDef.id]
+            : []
+      ) as string[];
+      const jobs = subs.flatMap((sub) =>
+        SCAN_CURRENCIES.map(async (currency): Promise<OptionsScannedOpp[]> => {
+          if (sub === "parity") {
+            const v = await api.scanOptionsParity({
+              currency,
+              qty_base: scanQty,
+              min_edge_bps: scanEdge,
+              min_hours_to_expiry: botCfg?.minHoursToExpiry,
+              max_days_to_expiry: botCfg?.maxDaysToExpiry,
+            });
+            return v.map((p) => ({ kind: "parity" as const, p }));
+          }
+          const v = await api.scanOptionsPackages({
+            substrategy_id: sub,
             currency,
             qty_base: scanQty,
             min_edge_bps: scanEdge,
             min_hours_to_expiry: botCfg?.minHoursToExpiry,
             max_days_to_expiry: botCfg?.maxDaysToExpiry,
-          }),
-        ),
+          });
+          return v.map((p) => ({ kind: "package" as const, p }));
+        }),
       );
+      const settled = await Promise.allSettled(jobs);
       const res = settled.flatMap((s) => (s.status === "fulfilled" ? s.value : []));
       const rejected = settled.filter((s) => s.status === "rejected");
-      if (rejected.length === settled.length) {
+      if (rejected.length === settled.length && settled.length > 0) {
         const reason = (rejected[0] as PromiseRejectedResult).reason;
         throw reason instanceof Error ? reason : new Error(String(reason));
       }
@@ -650,22 +769,30 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
     } finally {
       setScanning(false);
     }
-  }, [scanQty, scanEdge, botCfg]);
+  }, [scanQty, scanEdge, botCfg, selected, selDef]);
 
   const runExecute = useCallback(
-    async (opp: OptionsParityOpportunityDto) => {
-      setExecuting(opp.id);
+    async (opp: OptionsScannedOpp) => {
+      setExecuting(opp.p.id);
       setError(null);
       setMessage(null);
       try {
-        const params: OptionsParityExecutionParams = {
-          id: opp.id,
-          currency: opp.currency,
-          qty_base: opp.qty_base_suggested,
-          min_edge_bps: scanEdge,
-        };
-        const res = await api.executeOptionsParity(params);
-        setExecuted((s) => new Set(s).add(opp.id));
+        const res =
+          opp.kind === "parity"
+            ? await api.executeOptionsParity({
+                id: opp.p.id,
+                currency: opp.p.currency,
+                qty_base: opp.p.qty_base_suggested,
+                min_edge_bps: scanEdge,
+              } satisfies OptionsParityExecutionParams)
+            : await api.executeOptionsPackage({
+                id: opp.p.id,
+                substrategy_id: opp.p.substrategy_id,
+                currency: opp.p.currency,
+                qty_base: opp.p.qty_base_suggested,
+                min_edge_bps: scanEdge,
+              } satisfies OptionsPackageExecutionParams);
+        setExecuted((s) => new Set(s).add(opp.p.id));
         setMessage(res.message);
         await onRefreshAll();
       } catch (e) {
@@ -698,7 +825,7 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
               {selDef ? selDef.name : "Options Strategies"}
             </span>
             {botSubstrategy && <BotPhaseBadge phase={botPhase} />}
-            {parityVisible && (
+            {liveVisible && (
               <>
                 <div className="ribbon-pill" title="Net-edge hurdle for reported setups">
                   <span className="text-muted">Min Edge</span>
@@ -755,7 +882,7 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
                 <span>Configurator</span>
               </button>
             )}
-            {parityVisible && (
+            {liveVisible && (
               <button
                 type="button"
                 onClick={() => void scan()}
@@ -832,13 +959,13 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
           </div>
         </div>
 
-        {/* Venue capability warning — parity scanning is the only live
-            scanner today and it requires an options venue. */}
-        {parityVisible && !optionsVenueAvailable && (
+        {/* Venue capability warning — every live scanner quotes Deribit
+            today; the warning names the missing capability honestly. */}
+        {liveVisible && !optionsVenueAvailable && (
           <div className="p-2.5 rounded-lg border border-amber-500/40 bg-amber-500/10 text-amber-300 text-xs flex items-center gap-2">
             <AlertCircle className="w-4 h-4 shrink-0" />
             <span>
-              No options-capable venue is enabled — parity scanning currently
+              No options-capable venue is enabled — options scanning currently
               requires Deribit. Enable it under Engine Settings → Exchanges and
               add Client ID + Secret in Exchange Accounts (test.deribit.com
               credentials in Testnet mode). IBKR and other options venues will
@@ -912,24 +1039,41 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
               icon={Option}
               plain
               title={
-                dirFilter === "all"
-                  ? "No parity edge right now"
-                  : `No ${dirFilter} edge right now`
+                selDef && selected !== "all"
+                  ? `No ${selDef.name.toLowerCase()} edge right now`
+                  : dirFilter === "all"
+                    ? "No options edge right now"
+                    : `No ${dirFilter} edge right now`
               }
-              hint="Synthetic forward ≈ funding-adjusted perp within fees on every quoted strike/expiry pair."
+              hint={
+                selDef && selected !== "all"
+                  ? selDef.tagline
+                  : "Every live scanner sits inside fees on the quoted chains."
+              }
             />
           )}
 
-          {filteredOpps.map((o) => (
-            <OptionsParityCard
-              key={o.id}
-              opp={o}
-              executing={executing === o.id}
-              executed={executed.has(o.id)}
-              disabled={!o.is_executable || isPaused || scanning}
-              onExecute={() => setConfirmOpp(o)}
-            />
-          ))}
+          {filteredOpps.map((o) =>
+            o.kind === "parity" ? (
+              <OptionsParityCard
+                key={o.p.id}
+                opp={o.p}
+                executing={executing === o.p.id}
+                executed={executed.has(o.p.id)}
+                disabled={!o.p.is_executable || isPaused || scanning}
+                onExecute={() => setConfirmOpp(o)}
+              />
+            ) : (
+              <OptionsPackageCard
+                key={o.p.id}
+                opp={o.p}
+                executing={executing === o.p.id}
+                executed={executed.has(o.p.id)}
+                disabled={!o.p.is_executable || isPaused || scanning}
+                onExecute={() => setConfirmOpp(o)}
+              />
+            ),
+          )}
         </div>
 
         {/* Execution monitor — filtered by the same substrategy selection. */}
@@ -946,12 +1090,24 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
       <ConfirmActionModal
         spec={
           confirmOpp
-            ? {
-                title: `Execute ${confirmOpp.direction} on Deribit?`,
-                subtitle: isLive ? "Live funds at risk" : "Testnet dispatch",
-                body: `This dispatches three bounded IOC orders on Deribit: ${confirmOpp.call_leg.action} ${confirmOpp.call_leg.instrument}, ${confirmOpp.put_leg.action} ${confirmOpp.put_leg.instrument}, ${confirmOpp.perp_leg.action} ${confirmOpp.perp_leg.instrument}. A partially-filled cycle leaves residual exposure that must be flattened manually.`,
-                confirmLabel: "Execute",
-              }
+            ? confirmOpp.kind === "parity"
+              ? {
+                  title: `Execute ${confirmOpp.p.direction} on Deribit?`,
+                  subtitle: isLive ? "Live funds at risk" : "Testnet dispatch",
+                  body: `This dispatches three bounded IOC orders on Deribit: ${confirmOpp.p.call_leg.action} ${confirmOpp.p.call_leg.instrument}, ${confirmOpp.p.put_leg.action} ${confirmOpp.p.put_leg.instrument}, ${confirmOpp.p.perp_leg.action} ${confirmOpp.p.perp_leg.instrument}. A partially-filled cycle leaves residual exposure that must be flattened manually.`,
+                  confirmLabel: "Execute",
+                }
+              : {
+                  title: `Execute ${confirmOpp.p.label} on Deribit?`,
+                  subtitle: isLive ? "Live funds at risk" : "Testnet dispatch",
+                  body: `This dispatches ${confirmOpp.p.legs.length} bounded IOC orders on Deribit: ${confirmOpp.p.legs
+                    .map(
+                      (l) =>
+                        `${l.side} ${l.qty_mult > 1 ? `×${l.qty_mult} ` : ""}${l.instrument}`,
+                    )
+                    .join(", ")}. A partially-filled package leaves residual exposure that must be flattened manually.`,
+                  confirmLabel: "Execute",
+                }
             : null
         }
         onConfirm={() => (confirmOpp ? runExecute(confirmOpp) : undefined)}

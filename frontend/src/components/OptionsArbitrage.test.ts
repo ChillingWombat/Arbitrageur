@@ -5,6 +5,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
   OptionsArbitrage,
   OptionsParityCard,
+  OptionsPackageCard,
   OPTIONS_SUBSTRATEGIES,
   filterOptionsLogs,
   filterOptionsOpps,
@@ -12,6 +13,7 @@ import {
 import type {
   ExecutionLogEntry,
   OptionsParityOpportunityDto,
+  OptionsPackageOpportunityDto,
 } from "../types/index.ts";
 
 const noop = async () => {};
@@ -102,24 +104,67 @@ test("selector: rail renders All Strategies plus every catalogued substrategy", 
   // The catalog is broader than crypto perps — pending rows carry their
   // unblock requirement on the row tooltip, live rows carry a LIVE badge.
   assert.match(html, />LIVE</);
-  assert.match(html, /IBKR options/);
+  assert.match(html, /IBKR/);
 });
 
-test("selector: pending substrategy selection swaps the scanner for an honest placeholder", () => {
-  // React SSR renders initial state only — the placeholder branch is covered
-  // by the pure catalog + a direct render check on a pending entry's fields.
-  const pending = OPTIONS_SUBSTRATEGIES.find((s) => s.id === "box_spread");
-  assert.ok(pending);
-  assert.equal(pending.status, "pending");
-  assert.match(pending.requires ?? "", /IBKR|Deribit/);
-  assert.match(pending.universe, /equity|index/i);
+test("catalog: Deribit packages are live; equity-dependent rows stay pending with requirements", () => {
+  for (const id of ["parity", "box_spread", "jelly_roll", "convexity"]) {
+    const s = OPTIONS_SUBSTRATEGIES.find((x) => x.id === id);
+    assert.equal(s?.status, "live", `${id} must be a live scanner`);
+  }
+  for (const id of [
+    "dividend_play",
+    "htb_rebate",
+    "merger_pin",
+    "occ_adjusted",
+    "late_exercise",
+    "odd_lot",
+  ]) {
+    const s = OPTIONS_SUBSTRATEGIES.find((x) => x.id === id);
+    assert.equal(s?.status, "pending", `${id} needs an equity venue — stays pending`);
+    assert.ok(s?.requires, `${id} names its unblock requirement`);
+  }
+  const pending = OPTIONS_SUBSTRATEGIES.find((s) => s.id === "occ_adjusted");
+  assert.match(pending?.requires ?? "", /IBKR|OCC/);
 });
 
-test("filter: substrategy 'all' passes every opp; 'parity' keeps parity rows only", () => {
-  const list = [opp(), opp({ id: "opar-ETH-1-3000-reversal", direction: "reversal" })];
-  assert.equal(filterOptionsOpps(list, "all").length, 2);
+const pkgOpp = (over: Partial<OptionsPackageOpportunityDto> = {}): OptionsPackageOpportunityDto => ({
+  id: "obox-BTC-1800000000000-80000-85000-long",
+  substrategy_id: "box_spread",
+  venue: "deribit",
+  currency: "BTC",
+  label: "LONG BOX",
+  expiry_ms: 1_800_000_000_000,
+  expiry_iso: "2026-06-27",
+  strikes: [80000, 85000],
+  legs: [
+    { instrument: "BTC-27JUN26-80000-C", side: "buy", qty_mult: 1, venue_price: 0.09, usd_price: 7605 },
+    { instrument: "BTC-27JUN26-85000-C", side: "sell", qty_mult: 1, venue_price: 0.05, usd_price: 4225 },
+    { instrument: "BTC-27JUN26-80000-P", side: "sell", qty_mult: 1, venue_price: 0.02, usd_price: 1690 },
+    { instrument: "BTC-27JUN26-85000-P", side: "buy", qty_mult: 1, venue_price: 0.031, usd_price: 2619.5 },
+  ],
+  implied_rate_pct: 12.4,
+  benchmark_rate_pct: 36.5,
+  gross_edge_usd: 41.0,
+  est_fees_usd: 9.8,
+  net_edge_usd: 31.2,
+  edge_bps: 3.7,
+  index_price_usd: 84500,
+  qty_base_suggested: 0.1,
+  is_executable: true,
+  ...over,
+});
+
+test("filter: substrategy 'all' passes every opp; each keeps its own rows", () => {
+  const list = [
+    { kind: "parity" as const, p: opp() },
+    { kind: "parity" as const, p: opp({ id: "opar-ETH-1-3000-reversal", direction: "reversal" }) },
+    { kind: "package" as const, p: pkgOpp() },
+  ];
+  assert.equal(filterOptionsOpps(list, "all").length, 3);
   assert.equal(filterOptionsOpps(list, "parity").length, 2);
-  assert.equal(filterOptionsOpps(list, "box_spread").length, 0);
+  assert.equal(filterOptionsOpps(list, "box_spread").length, 1);
+  assert.equal(filterOptionsOpps(list, "jelly_roll").length, 0);
 });
 
 const logRow = (over: Partial<ExecutionLogEntry> = {}): ExecutionLogEntry => ({
@@ -209,6 +254,52 @@ test("card: reversal direction labels buy-call / sell-put / sell-perp", () => {
   assert.match(html, /SELL PERP/);
 });
 
+test("card: package renders label, legs, and implied-vs-benchmark rates", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(OptionsPackageCard, {
+      opp: pkgOpp(),
+      executing: false,
+      executed: false,
+      disabled: false,
+      onExecute: () => {},
+    })
+  );
+  assert.match(html, /LONG BOX/);
+  assert.match(html, /BUY<\/span>\s*BTC-27JUN26-80000-C/);
+  assert.match(html, /SELL<\/span>\s*BTC-27JUN26-85000-C/);
+  assert.match(html, /12\.40%/); // implied rate
+  assert.match(html, /36\.50%/); // benchmark
+  assert.match(html, /\$31\.20/); // net edge
+  assert.match(html, /Execute LONG BOX on Deribit/);
+});
+
+test("card: butterfly body prints the ×2 contract multiplier", () => {
+  const fly = pkgOpp({
+    id: "ocvx-BTC-1-80000-85000-90000-call",
+    substrategy_id: "convexity",
+    label: "SELL CALL FLY",
+    strikes: [80000, 85000, 90000],
+    legs: [
+      { instrument: "BTC-27JUN26-80000-C", side: "buy", qty_mult: 1, venue_price: 0.09, usd_price: 7605 },
+      { instrument: "BTC-27JUN26-85000-C", side: "sell", qty_mult: 2, venue_price: 0.05, usd_price: 4225 },
+      { instrument: "BTC-27JUN26-90000-C", side: "buy", qty_mult: 1, venue_price: 0.02, usd_price: 1690 },
+    ],
+    implied_rate_pct: undefined,
+    benchmark_rate_pct: undefined,
+  });
+  const html = renderToStaticMarkup(
+    React.createElement(OptionsPackageCard, {
+      opp: fly,
+      executing: false,
+      executed: false,
+      disabled: false,
+      onExecute: () => {},
+    })
+  );
+  assert.match(html, /SELL CALL FLY/);
+  assert.match(html, /SELL ×2<\/span>\s*BTC-27JUN26-85000-C/);
+});
+
 test("substrategy bot controls live only on the selected live scanner (interactive DOM)", async (t) => {
   await t.test("all-view monitor-only → parity view controls", () => {
     const { execFileSync } = require("node:child_process");
@@ -249,6 +340,7 @@ async function runInteractiveChild() {
     defaultOptionsBotConfig(id);
   (api as Record<string, unknown>).listSignalExecutions = async () => [];
   (api as Record<string, unknown>).scanOptionsParity = async () => [];
+  (api as Record<string, unknown>).scanOptionsPackages = async () => [];
 
   const container = window.document.createElement("div");
   window.document.body.appendChild(container);
@@ -289,9 +381,9 @@ async function runInteractiveChild() {
 
   // Pending substrategies expose no bot controls.
   const pending = Array.from(container.querySelectorAll("button")).find((b) =>
-    ((b as unknown as HTMLElement).textContent ?? "").includes("Box Spread"),
+    ((b as unknown as HTMLElement).textContent ?? "").includes("Dividend Assignment"),
   );
-  if (!pending) throw new Error("box_spread rail row missing");
+  if (!pending) throw new Error("dividend_play rail row missing");
   await act(async () => {
     pending.dispatchEvent(new window.MouseEvent("click", { bubbles: true, cancelable: true }));
     await new Promise((r) => setTimeout(r, 50));

@@ -1,0 +1,1755 @@
+//! Multi-leg options arbitrage packages on Deribit — the scanners and
+//! executor for the non-parity live substrategies:
+//!
+//! - `box_spread`: 4-leg synthetic zero-coupon bond. Its implied interest
+//!   rate should track the venue's carry benchmark (perp funding
+//!   annualized); divergence is capturable by buying or shorting the box.
+//! - `jelly_roll`: two box spreads across expiries T1<T2 — a synthetic
+//!   term-structure loan. The implied T1→T2 rate is compared against the
+//!   dated-futures basis (preferred) or funding carry, and the package is
+//!   traded when the two disagree.
+//! - `convexity`: butterfly convexity bound. For equidistant strikes the
+//!   body can never price above the wing mean — a book quoting above the
+//!   bound is a riskless sell (buy the wings, sell twice the body).
+//!
+//! All rate math is continuous-compounding in f64; leg prices stay Decimal
+//! for venue fidelity. Execution re-scans fresh, re-validates every quote
+//! side, and dispatches bounded IOC legs through the same guards as the
+//! parity path (circuit breaker, engine pause, execution lock, per-leg
+//! blocking signals, reduce-only flags, margin and account-position
+//! checks). Autonomous entries remain testnet-only via `auto` + `is_live()`
+//! — identical to parity.
+//!
+//! Unpriced risk: these packages lock a deterministic payoff at expiry —
+//! realized P&L at entry is premium cashflow minus fees only; the locked
+//! edge is unrealized until expiry/flatten, same convention as parity.
+
+use crate::commands::{
+    live_entry_gate, margin_monitor_from_settings, record_execution_log, SimStepResultDto,
+};
+use crate::options_parity::{
+    deribit_for_env, options_leg_bound_px, record_options_leg_intent, summary_px,
+    OPTIONS_SETTLE_INTERVAL, OPTIONS_SETTLE_POLLS, OPTION_FEE_PREMIUM_CAP, OPTION_TAKER_FEE_RATE,
+};
+use crate::state::{AppEngineState, ExecutionLogEntry};
+use crate::state_store::{LegSide, SignalStatus};
+use arbitrageur_core::exchange::ExchangeAdapter;
+use arbitrageur_core::types::{dec, Decimal, OrderStatus, Side, VenueId};
+use arbitrageur_exchanges::deribit::DeribitBookSummary;
+use arbitrageur_risk::margin_monitor::MarginHealthStatus;
+use chrono::{TimeZone, Utc};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
+use tauri::State;
+
+/// Live package scanners — parity stays on its own implementation.
+pub const LIVE_PACKAGE_SUBSTRATEGIES: [&str; 3] = ["box_spread", "jelly_roll", "convexity"];
+
+const MAX_RESULTS: usize = 12;
+/// Widest strike gap, in strike-step multiples, a package candidate may
+/// span — bound checks wider than this rarely quote and waste scan time.
+const MAX_STRIKE_GAP_MULT: usize = 8;
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct OptionsPackageScanParams {
+    pub substrategy_id: String,
+    pub currency: String,
+    pub qty_base: Option<f64>,
+    pub min_hours_to_expiry: Option<f64>,
+    pub max_days_to_expiry: Option<f64>,
+    pub min_edge_bps: Option<f64>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct OptionsPackageExecutionParams {
+    pub id: String,
+    pub substrategy_id: String,
+    pub currency: String,
+    pub qty_base: f64,
+    pub min_edge_bps: Option<f64>,
+    #[serde(default)]
+    pub auto: bool,
+}
+
+/// One leg of a package — instrument, execution side, and contract
+/// multiplier (2 for a butterfly body, 1 otherwise).
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct OptionsPackageLegDto {
+    pub instrument: String,
+    pub side: String,
+    pub qty_mult: u32,
+    /// Venue price used for edge pricing (base coin).
+    pub venue_price: f64,
+    /// Same leg priced in USD at index.
+    pub usd_price: f64,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct OptionsPackageOpportunityDto {
+    pub id: String,
+    pub substrategy_id: String,
+    pub venue: String,
+    pub currency: String,
+    /// Trade descriptor — "LONG BOX", "SHORT JELLY", "SELL CALL FLY"…
+    pub label: String,
+    pub expiry_ms: i64,
+    pub expiry_iso: String,
+    /// Far expiry for term-structure packages (jelly roll only).
+    pub expiry2_ms: Option<i64>,
+    pub expiry2_iso: Option<String>,
+    pub strikes: Vec<f64>,
+    pub legs: Vec<OptionsPackageLegDto>,
+    /// Implied package rate (rate structures) — percent, annualized.
+    pub implied_rate_pct: Option<f64>,
+    /// Benchmark rate it diverged from — percent, annualized.
+    pub benchmark_rate_pct: Option<f64>,
+    pub gross_edge_usd: f64,
+    pub est_fees_usd: f64,
+    pub net_edge_usd: f64,
+    /// Net edge as bps of per-unit underlying notional (qty×index) — the
+    /// same yardstick parity uses, so one hurdle fits every substrategy.
+    pub edge_bps: f64,
+    pub index_price_usd: f64,
+    pub qty_base_suggested: f64,
+    pub is_executable: bool,
+    pub reason: Option<String>,
+}
+
+/// One option instrument's executable-side quotes.
+#[derive(Clone, Debug)]
+pub struct OptQuote {
+    pub name: String,
+    pub is_call: bool,
+    pub bid: Option<Decimal>,
+    pub ask: Option<Decimal>,
+}
+
+/// One strike row: (call quote, put quote).
+type StrikeRow = (Option<OptQuote>, Option<OptQuote>);
+/// expiry_ms → strike → quotes.
+type OptionGrid = BTreeMap<i64, BTreeMap<Decimal, StrikeRow>>;
+
+/// The chain snapshot every package scanner reads — fetched once per
+/// currency so evaluators stay pure over the same books.
+pub struct ChainSnapshot {
+    /// expiry_ms → strike → (call quote, put quote)
+    pub grid: OptionGrid,
+    /// Dated futures marks by expiry_ms — the term-structure benchmark.
+    pub futures_mark: BTreeMap<i64, f64>,
+    pub index: Decimal,
+    pub funding_8h: Decimal,
+    pub now_ms: i64,
+}
+
+async fn fetch_chain_snapshot(ccy: &str, state: &AppEngineState) -> Result<ChainSnapshot, String> {
+    let adapter = deribit_for_env(state)?;
+    let perp_name = format!("{ccy}-PERPETUAL");
+    let (chain, summaries, index, funding, futures) = tokio::try_join!(
+        adapter.option_chain(ccy),
+        adapter.book_summaries(ccy),
+        adapter.index_price_usd(ccy),
+        adapter.fetch_funding_rate(&perp_name),
+        adapter.dated_futures(ccy),
+    )
+    .map_err(|e| format!("Deribit package scan inputs failed: {e}"))?;
+    if index <= dec!(0) {
+        return Err(format!("Deribit {ccy} index price unavailable"));
+    }
+    let summary_map: HashMap<String, &DeribitBookSummary> =
+        summaries.iter().map(|s| (s.name.clone(), s)).collect();
+    let mut grid: OptionGrid = BTreeMap::new();
+    let mut futures_mark: BTreeMap<i64, f64> = BTreeMap::new();
+    for inst in &chain {
+        if inst.settlement_currency != ccy {
+            continue;
+        }
+        let Some(summary) = summary_map.get(&inst.name) else {
+            continue;
+        };
+        let (bid, ask) = summary_px(summary);
+        let q = OptQuote {
+            name: inst.name.clone(),
+            is_call: matches!(
+                inst.option_type,
+                arbitrageur_exchanges::deribit::DeribitOptionType::Call
+            ),
+            bid,
+            ask,
+        };
+        let slot = grid
+            .entry(inst.expiration_ms)
+            .or_default()
+            .entry(inst.strike)
+            .or_default();
+        if q.is_call {
+            slot.0 = Some(q);
+        } else {
+            slot.1 = Some(q);
+        }
+    }
+    // Dated futures marks — the honest term benchmark for jelly rolls.
+    // Names map to expiries via the shared instruments cache (dated_futures).
+    let fut_expiry: HashMap<String, i64> = futures.into_iter().collect();
+    for (name, s) in &summary_map {
+        if !matches!(s.kind, arbitrageur_exchanges::deribit::DeribitKind::Future) {
+            continue;
+        }
+        if name.ends_with("-PERPETUAL") {
+            continue;
+        }
+        let Some(expiry_ms) = fut_expiry.get(name.as_str()).copied() else {
+            continue;
+        };
+        if let Some(m) = s.mark.filter(|m| *m > dec!(0)) {
+            let f = m.to_string().parse::<f64>().unwrap_or(0.0);
+            if f.is_finite() && f > 0.0 {
+                futures_mark.insert(expiry_ms, f);
+            }
+        }
+    }
+    Ok(ChainSnapshot {
+        grid,
+        futures_mark,
+        index,
+        funding_8h: funding.rate,
+        now_ms: Utc::now().timestamp_millis(),
+    })
+}
+
+fn to_f64(d: Decimal) -> f64 {
+    d.to_string().parse::<f64>().unwrap_or(0.0)
+}
+
+/// Deribit option taker fee per contract traded: min(0.03% of underlying,
+/// 12.5% of premium) — the parity fee model, shared across packages.
+fn option_fee_usd(px_usd: f64, index_usd: f64, qty: f64) -> Option<f64> {
+    if !px_usd.is_finite() || px_usd <= 0.0 || !qty.is_finite() || qty <= 0.0 {
+        return None;
+    }
+    Some((OPTION_TAKER_FEE_RATE * index_usd).min(OPTION_FEE_PREMIUM_CAP * px_usd) * qty)
+}
+
+/// Annualized continuous carry benchmark from the perp funding print —
+/// the venue's own price of term money. Funding is a simple-rate print
+/// per 8h; at crypto magnitudes ln(1+f·1095) ≈ f·1095 — the same linear
+/// convention parity uses for its funding drain.
+fn funding_benchmark_rate(funding_8h: Decimal) -> f64 {
+    to_f64(funding_8h) * 1095.0
+}
+
+/// Quote on the exact side a leg executes — fails closed when that side
+/// is unquoted, matching parity's executable-side discipline.
+fn side_px(q: &OptQuote, buy: bool) -> Option<f64> {
+    (if buy { q.ask } else { q.bid })
+        .map(to_f64)
+        .filter(|p| p.is_finite() && *p > 0.0)
+}
+
+/// Long-box cost in base coin per contract at executable-side prices:
+/// buy C(K1) + buy P(K2) − sell C(K2) − sell P(K1).
+fn long_box_cost(c1: &OptQuote, c2: &OptQuote, p1: &OptQuote, p2: &OptQuote) -> Option<f64> {
+    Some(side_px(c1, true)? - side_px(c2, false)? - side_px(p1, false)? + side_px(p2, true)?)
+}
+
+/// Short-box proceeds in base coin per contract at executable-side prices.
+fn short_box_proceeds(c1: &OptQuote, c2: &OptQuote, p1: &OptQuote, p2: &OptQuote) -> Option<f64> {
+    Some(side_px(c1, false)? - side_px(c2, true)? - side_px(p1, true)? + side_px(p2, false)?)
+}
+
+/// One (K1<K2) box window — the four instruments a box trades, at any
+/// expiry. Grouped so evaluators stay under the arg-count budget and
+/// callers build it straight off the strike row.
+#[derive(Clone, Copy)]
+pub struct BoxWindow<'a> {
+    /// Call at the lower strike.
+    pub c1: &'a OptQuote,
+    /// Call at the higher strike.
+    pub c2: &'a OptQuote,
+    /// Put at the lower strike.
+    pub p1: &'a OptQuote,
+    /// Put at the higher strike.
+    pub p2: &'a OptQuote,
+}
+
+/// Shared evaluator context — USD strike gap, contract quantity, and the
+/// index price that converts coin-denominated premiums to USD.
+#[derive(Clone, Copy)]
+pub struct EvalCtx {
+    pub strike_gap_usd: f64,
+    pub qty: f64,
+    pub index_usd: f64,
+}
+
+/// One evaluated box-spread candidate — pure over quotes so tests drive it
+/// without a venue.
+pub struct BoxEval {
+    pub label: &'static str,
+    /// [C(K1), C(K2), P(K1), P(K2)] with sides in the executed direction.
+    pub legs: [(bool, f64); 4],
+    pub gross_edge_usd: f64,
+    pub est_fees_usd: f64,
+    pub net_edge_usd: f64,
+    /// ln(X / PV) / T — the annualized rate this window's books imply.
+    pub implied_rate: f64,
+    pub benchmark_rate: f64,
+}
+
+/// Evaluate one (expiry, K1<K2) box window. `t_years` > 0, `bench` =
+/// annualized continuous benchmark rate. Both directions are priced at
+/// executable sides and the better survives — `None` when neither clears
+/// fees or a side is unquoted.
+pub fn evaluate_box(w: &BoxWindow<'_>, ctx: &EvalCtx, t_years: f64, bench: f64) -> Option<BoxEval> {
+    let (c1, c2, p1, p2) = (w.c1, w.c2, w.p1, w.p2);
+    let (strike_gap_usd, qty, index_usd) = (ctx.strike_gap_usd, ctx.qty, ctx.index_usd);
+    if !qty.is_finite()
+        || qty <= 0.0
+        || !index_usd.is_finite()
+        || index_usd <= 0.0
+        || !strike_gap_usd.is_finite()
+        || strike_gap_usd <= 0.0
+        || !t_years.is_finite()
+        || t_years <= 0.0
+    {
+        return None;
+    }
+    let fair_pv = strike_gap_usd * (-bench * t_years).exp();
+    let mk = |long: bool| -> Option<BoxEval> {
+        let coin_val = if long {
+            long_box_cost(c1, c2, p1, p2)?
+        } else {
+            short_box_proceeds(c1, c2, p1, p2)?
+        };
+        let usd_val = coin_val * index_usd;
+        // A box worth ≤0 or ≥2× payoff on executable sides is degenerate —
+        // never an arb, usually a crossed/dead book.
+        if usd_val <= 0.0 || usd_val >= strike_gap_usd * 2.0 {
+            return None;
+        }
+        let gross = (if long {
+            fair_pv - usd_val
+        } else {
+            usd_val - fair_pv
+        }) * qty;
+        if !gross.is_finite() || gross <= 0.0 {
+            return None;
+        }
+        let implied = (strike_gap_usd / usd_val).ln() / t_years;
+        let leg_pxs: [(bool, f64); 4] = if long {
+            [
+                (true, side_px(c1, true)?),
+                (false, side_px(c2, false)?),
+                (false, side_px(p1, false)?),
+                (true, side_px(p2, true)?),
+            ]
+        } else {
+            [
+                (false, side_px(c1, false)?),
+                (true, side_px(c2, true)?),
+                (true, side_px(p1, true)?),
+                (false, side_px(p2, false)?),
+            ]
+        };
+        let fees = leg_pxs
+            .iter()
+            .map(|(_, px)| option_fee_usd(px * index_usd, index_usd, qty))
+            .collect::<Option<Vec<_>>>()?
+            .into_iter()
+            .sum::<f64>();
+        let net = gross - fees;
+        if !net.is_finite() || net <= 0.0 {
+            return None;
+        }
+        Some(BoxEval {
+            label: if long { "LONG BOX" } else { "SHORT BOX" },
+            legs: leg_pxs,
+            gross_edge_usd: gross,
+            est_fees_usd: fees,
+            net_edge_usd: net,
+            implied_rate: implied,
+            benchmark_rate: bench,
+        })
+    };
+    [mk(true), mk(false)]
+        .into_iter()
+        .flatten()
+        .max_by(|a, b| a.net_edge_usd.total_cmp(&b.net_edge_usd))
+}
+
+/// One evaluated jelly-roll candidate — a term-structure loan between
+/// expiries T1<T2 at strikes K1<K2.
+pub struct JellyEval {
+    pub label: &'static str,
+    /// Executed leg prices: [C1(K1),C1(K2),P1(K1),P1(K2), C2(K1),C2(K2),P2(K1),P2(K2)]
+    /// — near box legs first, then far box.
+    pub legs: [(bool, f64); 8],
+    pub gross_edge_usd: f64,
+    pub est_fees_usd: f64,
+    pub net_edge_usd: f64,
+    /// ln(far_pv / near_pv) / (T2−T1) — the implied T1→T2 term rate.
+    pub implied_rate: f64,
+    pub benchmark_rate: f64,
+}
+
+/// Evaluate one jelly roll — two same-strike box windows across expiries.
+/// `bench` = annualized continuous term benchmark for the T1→T2 window.
+pub fn evaluate_jelly(
+    near: &BoxWindow<'_>,
+    far: &BoxWindow<'_>,
+    ctx: &EvalCtx,
+    t1_years: f64,
+    t2_years: f64,
+    bench: f64,
+) -> Option<JellyEval> {
+    let (c1t, c2t, p1t, p2t) = (near.c1, near.c2, near.p1, near.p2);
+    let (c1f, c2f, p1f, p2f) = (far.c1, far.c2, far.p1, far.p2);
+    let (strike_gap_usd, qty, index_usd) = (ctx.strike_gap_usd, ctx.qty, ctx.index_usd);
+    if !qty.is_finite()
+        || qty <= 0.0
+        || !index_usd.is_finite()
+        || index_usd <= 0.0
+        || !strike_gap_usd.is_finite()
+        || strike_gap_usd <= 0.0
+        || !t1_years.is_finite()
+        || t1_years <= 0.0
+        || !t2_years.is_finite()
+        || t2_years <= t1_years
+    {
+        return None;
+    }
+    let fair = strike_gap_usd * ((-bench * t1_years).exp() - (-bench * t2_years).exp());
+    if !fair.is_finite() || fair <= 0.0 {
+        return None; // negative/degenerate term benchmark — no arb claim
+    }
+    let near_cost = long_box_cost(c1t, c2t, p1t, p2t)?;
+    let near_proceeds = short_box_proceeds(c1t, c2t, p1t, p2t)?;
+    let far_cost = long_box_cost(c1f, c2f, p1f, p2f)?;
+    let far_proceeds = short_box_proceeds(c1f, c2f, p1f, p2f)?;
+    let mk = |long: bool| -> Option<JellyEval> {
+        // Long jelly = long near box + short far box: pay near_cost −
+        // far_proceeds, receive X at T1 and pay X at T2.
+        let net_cost_coin = if long {
+            near_cost - far_proceeds
+        } else {
+            far_cost - near_proceeds
+        };
+        let net_cost = net_cost_coin * index_usd;
+        let gross = (if long {
+            fair - net_cost
+        } else {
+            net_cost - fair
+        }) * qty;
+        if !gross.is_finite() || gross <= 0.0 {
+            return None;
+        }
+        // Implied term rate from the two market-priced boxes:
+        // r_impl = ln(far_pv / near_pv) / (T2−T1), pv = the traded side's
+        // box value — long jelly pays near cost, receives far proceeds.
+        let (near_pv, far_pv) = if long {
+            (near_cost * index_usd, far_proceeds * index_usd)
+        } else {
+            (near_proceeds * index_usd, far_cost * index_usd)
+        };
+        if near_pv <= 0.0 || far_pv <= 0.0 {
+            return None;
+        }
+        let implied = (far_pv / near_pv).ln() / (t2_years - t1_years);
+        let leg_pxs: [(bool, f64); 8] = if long {
+            [
+                (true, side_px(c1t, true)?),
+                (false, side_px(c2t, false)?),
+                (false, side_px(p1t, false)?),
+                (true, side_px(p2t, true)?),
+                (false, side_px(c1f, false)?),
+                (true, side_px(c2f, true)?),
+                (true, side_px(p1f, true)?),
+                (false, side_px(p2f, false)?),
+            ]
+        } else {
+            [
+                (false, side_px(c1t, false)?),
+                (true, side_px(c2t, true)?),
+                (true, side_px(p1t, true)?),
+                (false, side_px(p2t, false)?),
+                (true, side_px(c1f, true)?),
+                (false, side_px(c2f, false)?),
+                (false, side_px(p1f, false)?),
+                (true, side_px(p2f, true)?),
+            ]
+        };
+        let fees = leg_pxs
+            .iter()
+            .map(|(_, px)| option_fee_usd(px * index_usd, index_usd, qty))
+            .collect::<Option<Vec<_>>>()?
+            .into_iter()
+            .sum::<f64>();
+        let net = gross - fees;
+        if !net.is_finite() || net <= 0.0 {
+            return None;
+        }
+        Some(JellyEval {
+            label: if long { "LONG JELLY" } else { "SHORT JELLY" },
+            legs: leg_pxs,
+            gross_edge_usd: gross,
+            est_fees_usd: fees,
+            net_edge_usd: net,
+            implied_rate: implied,
+            benchmark_rate: bench,
+        })
+    };
+    [mk(true), mk(false)]
+        .into_iter()
+        .flatten()
+        .max_by(|a, b| a.net_edge_usd.total_cmp(&b.net_edge_usd))
+}
+
+/// One convexity-boundary candidate — sell the overpriced body, buy the
+/// wings. Equidistant strikes only so the 1/2/1 contract ratio hedges
+/// exactly.
+pub struct ConvexityEval {
+    pub label: &'static str,
+    /// [wing K1 buy ×1, body K2 sell ×2, wing K3 buy ×1] executed prices.
+    pub legs: [(bool, f64); 3],
+    pub is_call: bool,
+    pub gross_edge_usd: f64,
+    pub est_fees_usd: f64,
+    pub net_edge_usd: f64,
+}
+
+/// Evaluate one equidistant strike triple at one expiry. Convexity bound:
+/// C(K2) ≤ (C(K1)+C(K3))/2 — violation ⇒ riskless sell of the body.
+/// Only the buy-wings/sell-body direction is riskless; the inverse is a
+/// short butterfly whose payoff can go negative, so it is never emitted.
+pub fn evaluate_convexity(
+    k1: (&OptQuote, &OptQuote),
+    k2: (&OptQuote, &OptQuote),
+    k3: (&OptQuote, &OptQuote),
+    qty: f64,
+    index_usd: f64,
+) -> Option<ConvexityEval> {
+    if !qty.is_finite() || qty <= 0.0 || !index_usd.is_finite() || index_usd <= 0.0 {
+        return None;
+    }
+    let mk = |is_call: bool| -> Option<ConvexityEval> {
+        let (w1, body, w3) = if is_call {
+            (k1.0, k2.0, k3.0)
+        } else {
+            (k1.1, k2.1, k3.1)
+        };
+        let w1_ask = side_px(w1, true)?;
+        let w3_ask = side_px(w3, true)?;
+        let body_bid = side_px(body, false)?;
+        let edge_unit = 2.0 * body_bid - w1_ask - w3_ask;
+        if !edge_unit.is_finite() || edge_unit <= 0.0 {
+            return None;
+        }
+        let gross = edge_unit * qty * index_usd;
+        // Wings trade qty, the body trades 2×qty — per-contract fee on
+        // each leg's traded premium.
+        let fees = option_fee_usd(w1_ask * index_usd, index_usd, qty)?
+            + option_fee_usd(body_bid * index_usd, index_usd, qty * 2.0)?
+            + option_fee_usd(w3_ask * index_usd, index_usd, qty)?;
+        let net = gross - fees;
+        if !net.is_finite() || net <= 0.0 {
+            return None;
+        }
+        Some(ConvexityEval {
+            label: if is_call {
+                "SELL CALL FLY"
+            } else {
+                "SELL PUT FLY"
+            },
+            legs: [(true, w1_ask), (false, body_bid), (true, w3_ask)],
+            is_call,
+            gross_edge_usd: gross,
+            est_fees_usd: fees,
+            net_edge_usd: net,
+        })
+    };
+    [mk(true), mk(false)]
+        .into_iter()
+        .flatten()
+        .max_by(|a, b| a.net_edge_usd.total_cmp(&b.net_edge_usd))
+}
+
+fn expiry_iso(expiry_ms: i64) -> String {
+    Utc.timestamp_millis_opt(expiry_ms)
+        .single()
+        .map(|t| t.format("%Y-%m-%d").to_string())
+        .unwrap_or_default()
+}
+
+fn leg_dto(name: &str, buy: bool, px: f64, qty_mult: u32, index: Decimal) -> OptionsPackageLegDto {
+    OptionsPackageLegDto {
+        instrument: name.to_string(),
+        side: if buy { "buy" } else { "sell" }.to_string(),
+        qty_mult,
+        venue_price: px,
+        usd_price: px * to_f64(index),
+    }
+}
+
+/// Scan one package substrategy over the chain snapshot.
+pub async fn scan_options_packages_impl(
+    params: &OptionsPackageScanParams,
+    state: &AppEngineState,
+) -> Result<Vec<OptionsPackageOpportunityDto>, String> {
+    let sub = params.substrategy_id.trim().to_lowercase();
+    if !LIVE_PACKAGE_SUBSTRATEGIES.contains(&sub.as_str()) {
+        return Err(format!("no live package scanner for substrategy '{sub}'"));
+    }
+    let ccy = params.currency.trim().to_ascii_uppercase();
+    if !matches!(ccy.as_str(), "BTC" | "ETH") {
+        return Err("options packages support BTC or ETH".into());
+    }
+    let qty_base = params.qty_base.unwrap_or(0.1);
+    if !qty_base.is_finite() || qty_base <= 0.0 {
+        return Err("qty_base must be a finite positive number".into());
+    }
+    let min_hours = params.min_hours_to_expiry.unwrap_or(48.0).max(0.0);
+    let max_days = params.max_days_to_expiry.unwrap_or(60.0).max(0.0);
+    let min_edge_bps = params.min_edge_bps.unwrap_or(0.0);
+
+    let snap = fetch_chain_snapshot(&ccy, state).await?;
+    let funding_bench = funding_benchmark_rate(snap.funding_8h);
+    let index_usd = to_f64(snap.index);
+    let notional = qty_base * index_usd;
+    let mut out: Vec<OptionsPackageOpportunityDto> = Vec::new();
+
+    let in_window = |expiry_ms: i64| -> bool {
+        let hours = (expiry_ms - snap.now_ms) as f64 / 3_600_000.0;
+        hours >= min_hours && hours <= max_days * 24.0
+    };
+    let years_of = |expiry_ms: i64| (expiry_ms - snap.now_ms) as f64 / (3_600_000.0 * 24.0 * 365.0);
+    let mut push = |o: OptionsPackageOpportunityDto| {
+        if o.edge_bps >= min_edge_bps {
+            out.push(o);
+        }
+    };
+
+    match sub.as_str() {
+        "box_spread" => {
+            for (expiry_ms, strikes) in &snap.grid {
+                if !in_window(*expiry_ms) {
+                    continue;
+                }
+                let t_years = years_of(*expiry_ms);
+                let strike_list: Vec<Decimal> = strikes.keys().cloned().collect();
+                for i in 0..strike_list.len() {
+                    let hi = strike_list.len().min(i + 1 + MAX_STRIKE_GAP_MULT);
+                    for j in (i + 1)..hi {
+                        let (k1, k2) = (strike_list[i], strike_list[j]);
+                        let Some((Some(c1), Some(p1))) = strikes.get(&k1) else {
+                            continue;
+                        };
+                        let Some((Some(c2), Some(p2))) = strikes.get(&k2) else {
+                            continue;
+                        };
+                        let Some(ev) = evaluate_box(
+                            &BoxWindow { c1, c2, p1, p2 },
+                            &EvalCtx {
+                                strike_gap_usd: to_f64(k2 - k1),
+                                qty: qty_base,
+                                index_usd,
+                            },
+                            t_years,
+                            funding_bench,
+                        ) else {
+                            continue;
+                        };
+                        let edge_bps = if notional > 0.0 {
+                            ev.net_edge_usd / notional * 10_000.0
+                        } else {
+                            0.0
+                        };
+                        let [l0, l1, l2, l3] = ev.legs;
+                        push(OptionsPackageOpportunityDto {
+                            id: format!(
+                                "obox-{ccy}-{expiry_ms}-{k1}-{k2}-{}",
+                                if ev.label.starts_with("LONG") {
+                                    "long"
+                                } else {
+                                    "short"
+                                }
+                            ),
+                            substrategy_id: "box_spread".into(),
+                            venue: "deribit".into(),
+                            currency: ccy.clone(),
+                            label: ev.label.to_string(),
+                            expiry_ms: *expiry_ms,
+                            expiry_iso: expiry_iso(*expiry_ms),
+                            expiry2_ms: None,
+                            expiry2_iso: None,
+                            strikes: vec![to_f64(k1), to_f64(k2)],
+                            legs: vec![
+                                leg_dto(&c1.name, l0.0, l0.1, 1, snap.index),
+                                leg_dto(&c2.name, l1.0, l1.1, 1, snap.index),
+                                leg_dto(&p1.name, l2.0, l2.1, 1, snap.index),
+                                leg_dto(&p2.name, l3.0, l3.1, 1, snap.index),
+                            ],
+                            implied_rate_pct: Some(ev.implied_rate * 100.0),
+                            benchmark_rate_pct: Some(ev.benchmark_rate * 100.0),
+                            gross_edge_usd: ev.gross_edge_usd,
+                            est_fees_usd: ev.est_fees_usd,
+                            net_edge_usd: ev.net_edge_usd,
+                            edge_bps,
+                            index_price_usd: index_usd,
+                            qty_base_suggested: qty_base,
+                            is_executable: true,
+                            reason: None,
+                        });
+                    }
+                }
+            }
+        }
+        "jelly_roll" => {
+            let expiries: Vec<i64> = snap.grid.keys().cloned().collect();
+            for i in 0..expiries.len() {
+                for j in (i + 1)..expiries.len() {
+                    let (t1_ms, t2_ms) = (expiries[i], expiries[j]);
+                    if !in_window(t1_ms) || !in_window(t2_ms) {
+                        continue;
+                    }
+                    // Benchmark for the T1→T2 window: dated-futures basis at
+                    // the same expiries when the venue lists both, else the
+                    // funding carry. The futures print is the venue's own
+                    // term price — preferred when quoted.
+                    let bench = match (snap.futures_mark.get(&t1_ms), snap.futures_mark.get(&t2_ms))
+                    {
+                        (Some(f1), Some(f2)) if *f1 > 0.0 && *f2 > 0.0 => {
+                            let dt = years_of(t2_ms) - years_of(t1_ms);
+                            if dt > 0.0 {
+                                (f2 / f1).ln() / dt
+                            } else {
+                                funding_bench
+                            }
+                        }
+                        _ => funding_bench,
+                    };
+                    let strikes_near = &snap.grid[&t1_ms];
+                    let strikes_far = &snap.grid[&t2_ms];
+                    let shared: Vec<Decimal> = strikes_near
+                        .keys()
+                        .filter(|k| strikes_far.contains_key(*k))
+                        .cloned()
+                        .collect();
+                    for a in 0..shared.len() {
+                        let hi = shared.len().min(a + 1 + MAX_STRIKE_GAP_MULT);
+                        for b in (a + 1)..hi {
+                            let (k1, k2) = (shared[a], shared[b]);
+                            let (Some((Some(c1t), Some(p1t))), Some((Some(c2t), Some(p2t)))) =
+                                (strikes_near.get(&k1), strikes_near.get(&k2))
+                            else {
+                                continue;
+                            };
+                            let (Some((Some(c1f), Some(p1f))), Some((Some(c2f), Some(p2f)))) =
+                                (strikes_far.get(&k1), strikes_far.get(&k2))
+                            else {
+                                continue;
+                            };
+                            let Some(ev) = evaluate_jelly(
+                                &BoxWindow {
+                                    c1: c1t,
+                                    c2: c2t,
+                                    p1: p1t,
+                                    p2: p2t,
+                                },
+                                &BoxWindow {
+                                    c1: c1f,
+                                    c2: c2f,
+                                    p1: p1f,
+                                    p2: p2f,
+                                },
+                                &EvalCtx {
+                                    strike_gap_usd: to_f64(k2 - k1),
+                                    qty: qty_base,
+                                    index_usd,
+                                },
+                                years_of(t1_ms),
+                                years_of(t2_ms),
+                                bench,
+                            ) else {
+                                continue;
+                            };
+                            let edge_bps = if notional > 0.0 {
+                                ev.net_edge_usd / notional * 10_000.0
+                            } else {
+                                0.0
+                            };
+                            let [n0, n1, n2, n3, f0, f1, f2, f3] = ev.legs;
+                            push(OptionsPackageOpportunityDto {
+                                id: format!(
+                                    "ojel-{ccy}-{t1_ms}-{t2_ms}-{k1}-{k2}-{}",
+                                    if ev.label.starts_with("LONG") {
+                                        "long"
+                                    } else {
+                                        "short"
+                                    }
+                                ),
+                                substrategy_id: "jelly_roll".into(),
+                                venue: "deribit".into(),
+                                currency: ccy.clone(),
+                                label: ev.label.to_string(),
+                                expiry_ms: t1_ms,
+                                expiry_iso: expiry_iso(t1_ms),
+                                expiry2_ms: Some(t2_ms),
+                                expiry2_iso: Some(expiry_iso(t2_ms)),
+                                strikes: vec![to_f64(k1), to_f64(k2)],
+                                legs: vec![
+                                    leg_dto(&c1t.name, n0.0, n0.1, 1, snap.index),
+                                    leg_dto(&c2t.name, n1.0, n1.1, 1, snap.index),
+                                    leg_dto(&p1t.name, n2.0, n2.1, 1, snap.index),
+                                    leg_dto(&p2t.name, n3.0, n3.1, 1, snap.index),
+                                    leg_dto(&c1f.name, f0.0, f0.1, 1, snap.index),
+                                    leg_dto(&c2f.name, f1.0, f1.1, 1, snap.index),
+                                    leg_dto(&p1f.name, f2.0, f2.1, 1, snap.index),
+                                    leg_dto(&p2f.name, f3.0, f3.1, 1, snap.index),
+                                ],
+                                implied_rate_pct: Some(ev.implied_rate * 100.0),
+                                benchmark_rate_pct: Some(ev.benchmark_rate * 100.0),
+                                gross_edge_usd: ev.gross_edge_usd,
+                                est_fees_usd: ev.est_fees_usd,
+                                net_edge_usd: ev.net_edge_usd,
+                                edge_bps,
+                                index_price_usd: index_usd,
+                                qty_base_suggested: qty_base,
+                                is_executable: true,
+                                reason: None,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        "convexity" => {
+            for (expiry_ms, strikes) in &snap.grid {
+                if !in_window(*expiry_ms) {
+                    continue;
+                }
+                let strike_list: Vec<Decimal> = strikes.keys().cloned().collect();
+                for i in 0..strike_list.len().saturating_sub(2) {
+                    let (k1, k2, k3) = (strike_list[i], strike_list[i + 1], strike_list[i + 2]);
+                    // Equidistant only — the 1/2/1 contract ratio hedges
+                    // exactly. Non-uniform spacings need fractional legs the
+                    // venue grid can't take.
+                    if (k2 - k1) != (k3 - k2) {
+                        continue;
+                    }
+                    let (
+                        Some((Some(c1), Some(p1))),
+                        Some((Some(c2), Some(p2))),
+                        Some((Some(c3), Some(p3))),
+                    ) = (strikes.get(&k1), strikes.get(&k2), strikes.get(&k3))
+                    else {
+                        continue;
+                    };
+                    let Some(ev) =
+                        evaluate_convexity((c1, p1), (c2, p2), (c3, p3), qty_base, index_usd)
+                    else {
+                        continue;
+                    };
+                    let edge_bps = if notional > 0.0 {
+                        ev.net_edge_usd / notional * 10_000.0
+                    } else {
+                        0.0
+                    };
+                    let [w1l, bd, w3l] = ev.legs;
+                    let body = if ev.is_call { c2 } else { p2 };
+                    push(OptionsPackageOpportunityDto {
+                        id: format!(
+                            "ocvx-{ccy}-{expiry_ms}-{k1}-{k2}-{k3}-{}",
+                            if ev.is_call { "call" } else { "put" }
+                        ),
+                        substrategy_id: "convexity".into(),
+                        venue: "deribit".into(),
+                        currency: ccy.clone(),
+                        label: ev.label.to_string(),
+                        expiry_ms: *expiry_ms,
+                        expiry_iso: expiry_iso(*expiry_ms),
+                        expiry2_ms: None,
+                        expiry2_iso: None,
+                        strikes: vec![to_f64(k1), to_f64(k2), to_f64(k3)],
+                        legs: vec![
+                            leg_dto(
+                                &(if ev.is_call { c1 } else { p1 }).name,
+                                w1l.0,
+                                w1l.1,
+                                1,
+                                snap.index,
+                            ),
+                            leg_dto(&body.name, bd.0, bd.1, 2, snap.index),
+                            leg_dto(
+                                &(if ev.is_call { c3 } else { p3 }).name,
+                                w3l.0,
+                                w3l.1,
+                                1,
+                                snap.index,
+                            ),
+                        ],
+                        implied_rate_pct: None,
+                        benchmark_rate_pct: None,
+                        gross_edge_usd: ev.gross_edge_usd,
+                        est_fees_usd: ev.est_fees_usd,
+                        net_edge_usd: ev.net_edge_usd,
+                        edge_bps,
+                        index_price_usd: index_usd,
+                        qty_base_suggested: qty_base,
+                        is_executable: true,
+                        reason: None,
+                    });
+                }
+            }
+        }
+        _ => unreachable!(),
+    }
+
+    out.sort_by(|a, b| b.net_edge_usd.total_cmp(&a.net_edge_usd));
+    out.truncate(MAX_RESULTS);
+    Ok(out)
+}
+
+/// The package signal-ledger strategy id — uniform `options_{sub}`
+/// naming so the open-book counter and flatten scoping stay mechanical.
+pub fn package_strategy_id(substrategy_id: &str) -> String {
+    format!("options_{}", substrategy_id.trim().to_lowercase())
+}
+
+/// Execute one scanned package — every leg re-validated against a fresh
+/// scan, then N bounded IOC dispatches with the parity cycle's discipline:
+/// per-leg signal intents, settle polling, cancel-on-linger, per-leg
+/// terminal status derivation, balanced marks only on verified positions.
+pub async fn execute_options_package_impl(
+    params: &OptionsPackageExecutionParams,
+    state: &AppEngineState,
+) -> Result<SimStepResultDto, String> {
+    if params.id.trim().is_empty() || params.id.len() > 200 {
+        return Err("options package opportunity id must be 1-200 characters".into());
+    }
+    if !params.qty_base.is_finite() || params.qty_base <= 0.0 {
+        return Err("qty_base must be a finite positive number".into());
+    }
+    if params.auto && state.is_live() {
+        return Err(
+            "autonomous options entries are testnet-only — run a manual Execute for live".into(),
+        );
+    }
+    if let Err(reason) = state.circuit_breaker.is_trading_allowed() {
+        return Err(format!(
+            "Execution halted by Risk Circuit Breaker: {reason}"
+        ));
+    }
+    if *state.is_paused.read() {
+        return Err(
+            "Trading engine is PAUSED. Positions are preserved, but new executions are suspended."
+                .into(),
+        );
+    }
+    let adapter = deribit_for_env(state)?;
+    let vid = VenueId::new("deribit");
+    let strategy_id = package_strategy_id(&params.substrategy_id);
+
+    // Re-scan fresh — the caller's edge is never trusted.
+    let scan = scan_options_packages_impl(
+        &OptionsPackageScanParams {
+            substrategy_id: params.substrategy_id.clone(),
+            currency: params.currency.clone(),
+            qty_base: Some(params.qty_base),
+            min_hours_to_expiry: Some(0.0),
+            max_days_to_expiry: Some(365.0),
+            min_edge_bps: params.min_edge_bps,
+        },
+        state,
+    )
+    .await?;
+    let opp = scan
+        .into_iter()
+        .find(|o| o.id == params.id)
+        .ok_or_else(|| {
+            "options package opportunity is no longer available (stale books)".to_string()
+        })?;
+    if !opp.is_executable {
+        return Err(format!(
+            "options package opportunity {} is not executable: {}",
+            opp.id,
+            opp.reason.clone().unwrap_or_default()
+        ));
+    }
+
+    let _execution_guard = state.execution_lock.lock().await;
+    if let Err(reason) = state.circuit_breaker.is_trading_allowed() {
+        return Err(format!(
+            "Execution halted by Risk Circuit Breaker: {reason}"
+        ));
+    }
+    if *state.is_paused.read() {
+        return Err(
+            "Trading engine is PAUSED. Positions are preserved, but new executions are suspended."
+                .into(),
+        );
+    }
+    if state.is_live() {
+        live_entry_gate(state, &[vid.as_str()])?;
+    }
+
+    for leg in &opp.legs {
+        let sym = &leg.instrument;
+        if let Some(blocker) = state
+            .state_store
+            .blocking_signals(sym, Some(state.env().as_str()))
+            .map_err(|e| e.to_string())?
+            .into_iter()
+            .next()
+        {
+            return Err(format!(
+                "Instrument {sym} is blocked by signal {} (status {}): awaiting reconciliation",
+                blocker.id,
+                blocker.status.as_str()
+            ));
+        }
+        if state
+            .state_store
+            .ticker_reduce_only(sym, &strategy_id, state.env().as_str())
+            .map_err(|e| e.to_string())?
+        {
+            return Err(format!(
+                "Instrument {sym} is reduce-only for {strategy_id} — exits only, entry refused"
+            ));
+        }
+    }
+
+    let pre_acc = adapter
+        .fetch_account()
+        .await
+        .map_err(|e| format!("account read on deribit failed: {e}"))?;
+    for leg in &opp.legs {
+        if adapter
+            .account_position_for(&pre_acc, &leg.instrument)
+            .ok()
+            .flatten()
+            .is_some_and(|p| p.quantity > dec!(0))
+        {
+            return Err(format!(
+                "An open position already exists for {}; flatten it before cycling",
+                leg.instrument
+            ));
+        }
+    }
+
+    let index = Decimal::from_f64_retain(opp.index_price_usd)
+        .ok_or_else(|| "invalid index price".to_string())?;
+    let qty_dec =
+        Decimal::from_f64_retain(params.qty_base).ok_or_else(|| "invalid qty_base".to_string())?;
+    let notional = qty_dec * index;
+    if notional * dec!(2) > pre_acc.free_margin {
+        return Err(format!(
+            "Insufficient free margin on deribit: need ~{} > available {}",
+            notional * dec!(2),
+            pre_acc.free_margin
+        ));
+    }
+    let margin_monitor = margin_monitor_from_settings(state);
+    match margin_monitor.evaluate_account(&pre_acc) {
+        MarginHealthStatus::Empty => {
+            return Err("Account deribit has no funds; execution refused".into())
+        }
+        MarginHealthStatus::Critical | MarginHealthStatus::Breached => {
+            return Err(
+                "Account deribit margin status is critical/breached; execution refused".into(),
+            )
+        }
+        _ => {}
+    }
+
+    let mut equity_before_by_venue = HashMap::new();
+    let env_str = state.env().as_str();
+    if let Ok(f) = pre_acc.equity.to_string().parse::<f64>() {
+        if f.is_finite() {
+            equity_before_by_venue.insert(format!("{env_str}-{vid}"), f);
+        }
+    }
+
+    let n_legs = opp.legs.len();
+    let mut books = Vec::with_capacity(n_legs);
+    for leg in &opp.legs {
+        let sym = &leg.instrument;
+        let book = adapter
+            .fetch_orderbook(sym)
+            .await
+            .map_err(|e| format!("dispatch book for {sym} failed: {e}"))?;
+        if !book.symbol.eq_ignore_ascii_case(sym) {
+            return Err(format!(
+                "dispatch book symbol '{}' does not match requested '{sym}'",
+                book.symbol
+            ));
+        }
+        book.validate_for_execution()
+            .map_err(|e| format!("dispatch book for {sym}: {e}"))?;
+        books.push(book);
+    }
+
+    let cycle = state.next_sim_step();
+    let tag = match params.substrategy_id.as_str() {
+        "box_spread" => "obox",
+        "jelly_roll" => "ojel",
+        _ => "ocvx",
+    };
+    let cycle_tag = format!(
+        "{tag}-{}-{:08x}",
+        Utc::now().timestamp_millis(),
+        rand::random::<u32>()
+    );
+    let started = std::time::Instant::now();
+
+    let mark_failed = |sid: &str, why: &str| {
+        let _ = state
+            .state_store
+            .update_signal_status(sid, SignalStatus::Failed, Some(why));
+    };
+
+    let mut fills: Vec<(usize, arbitrageur_core::order::OrderResponse)> = Vec::new();
+    let mut leg_signal_ids: Vec<(usize, String, LegSide)> = Vec::new();
+    let mut leg_error: Option<String> = None;
+
+    for (idx, leg) in opp.legs.iter().enumerate() {
+        let sym = &leg.instrument;
+        let side = if leg.side == "buy" {
+            Side::Buy
+        } else {
+            Side::Sell
+        };
+        let leg_qty = qty_dec * Decimal::from(leg.qty_mult);
+        let Some(bound_px) = options_leg_bound_px(&books[idx], side, leg_qty) else {
+            leg_error = Some(format!(
+                "leg {} ({sym}) cannot be priced on the dispatch book — refusing unpriced dispatch",
+                idx + 1
+            ));
+            break;
+        };
+        let qty = match adapter.wire_base_qty(sym, leg_qty).await {
+            Ok(w) if w > dec!(0) => w,
+            Ok(_) => {
+                leg_error = Some(format!(
+                    "leg {} ({sym}) snaps to zero on the venue wire grid",
+                    idx + 1
+                ));
+                break;
+            }
+            Err(e) => {
+                leg_error = Some(format!(
+                    "leg {} ({sym}) not representable on the venue wire grid: {e}",
+                    idx + 1
+                ));
+                break;
+            }
+        };
+        let qty_f64 = qty.to_string().parse::<f64>().unwrap_or(0.0);
+        let leg_side = match side {
+            Side::Buy => LegSide::Long,
+            Side::Sell => LegSide::Short,
+        };
+        let leg_signal_id = format!("{cycle_tag}-leg{idx}");
+        let intent_note = format!(
+            "{} leg {}/{} {:?} {} {sym}",
+            opp.label,
+            idx + 1,
+            n_legs,
+            side,
+            qty
+        );
+        if let Err(e) = record_options_leg_intent(
+            state,
+            &leg_signal_id,
+            &strategy_id,
+            vid.as_str(),
+            sym,
+            side,
+            qty_f64,
+            &intent_note,
+            (idx == 0).then_some(opp.net_edge_usd),
+        ) {
+            leg_error = Some(format!("leg {} intent persist failed: {e}", idx + 1));
+            break;
+        }
+        leg_signal_ids.push((idx, leg_signal_id.clone(), leg_side));
+        let order =
+            arbitrageur_core::order::OrderRequest::new_ioc(vid.clone(), sym, side, bound_px, qty);
+        let client_oid = order.client_order_id.clone();
+        let mut resp = match adapter.place_order(order).await {
+            Ok(r) => r,
+            Err(e) => {
+                mark_failed(&leg_signal_id, &format!("submit rejected: {e}"));
+                leg_error = Some(format!("leg {} ({sym}) failed: {e}", idx + 1));
+                break;
+            }
+        };
+        if !resp.order_id.trim().is_empty() {
+            if let Err(e) = state.state_store.record_leg_order_id(
+                &leg_signal_id,
+                leg_side,
+                resp.order_id.trim(),
+                Some(&client_oid),
+            ) {
+                tracing::warn!("options package leg {idx} order-id persist failed: {e}");
+            }
+        }
+        if !resp.status.is_final() && !resp.order_id.trim().is_empty() {
+            for _ in 0..OPTIONS_SETTLE_POLLS {
+                tokio::time::sleep(OPTIONS_SETTLE_INTERVAL).await;
+                match adapter
+                    .fetch_order(sym, &resp.order_id, Some(&client_oid))
+                    .await
+                {
+                    Ok(polled) => {
+                        resp = polled;
+                        if resp.status.is_final() {
+                            break;
+                        }
+                    }
+                    Err(_) => continue,
+                }
+            }
+            if !resp.status.is_final() {
+                let _ = adapter
+                    .cancel_order(arbitrageur_core::order::CancelRequest {
+                        venue: vid.clone(),
+                        symbol: sym.clone(),
+                        order_id: Some(resp.order_id.clone()),
+                        client_order_id: Some(client_oid.clone()),
+                    })
+                    .await;
+                tokio::time::sleep(OPTIONS_SETTLE_INTERVAL).await;
+                if let Ok(polled) = adapter
+                    .fetch_order(sym, &resp.order_id, Some(&client_oid))
+                    .await
+                {
+                    resp = polled;
+                }
+            }
+        }
+        let px_ok = resp.avg_fill_price.is_some_and(|p| p > dec!(0));
+        let covers = qty > dec!(0) && resp.filled_qty >= qty * dec!(0.98);
+        if resp.status == OrderStatus::Filled
+            && covers
+            && resp.remaining_qty <= qty * dec!(0.02)
+            && px_ok
+        {
+            fills.push((idx, resp));
+            continue;
+        }
+        match (resp.status.is_final(), resp.filled_qty > dec!(0)) {
+            (true, true) => {
+                fills.push((idx, resp));
+                leg_error = Some(format!(
+                    "leg {} ({sym}) terminated partially filled",
+                    idx + 1
+                ));
+            }
+            (true, false) => {
+                mark_failed(&leg_signal_id, "terminated without a fill");
+                leg_error = Some(format!("leg {} ({sym}) terminated unfilled", idx + 1));
+            }
+            _ => {
+                leg_error = Some(format!(
+                    "leg {} ({sym}) state unresolved after poll/cancel",
+                    idx + 1
+                ));
+            }
+        }
+        break;
+    }
+
+    // Persist fills and derive per-leg terminal states.
+    let mut record_errors: Vec<String> = Vec::new();
+    for (idx, resp) in &fills {
+        let Some((_, sid, side)) = leg_signal_ids.iter().find(|(i, _, _)| i == idx) else {
+            continue;
+        };
+        let (qty_f64, px_f64) = match (resp.filled_qty, resp.avg_fill_price) {
+            (q, Some(p)) if q > dec!(0) && p > dec!(0) => (
+                q.to_string().parse::<f64>().unwrap_or(0.0),
+                p.to_string().parse::<f64>().unwrap_or(0.0),
+            ),
+            _ => {
+                record_errors.push(format!("leg {} fill lacks qty/px", idx + 1));
+                continue;
+            }
+        };
+        let fee_f = resp
+            .fee
+            .map(|f| crate::execution::dec_to_f64(f, "options package fill fee").unwrap_or(0.0))
+            .unwrap_or(0.0);
+        if let Err(e) = state.state_store.apply_leg_fill(
+            sid,
+            *side,
+            qty_f64,
+            px_f64,
+            fee_f,
+            Some(resp.order_id.as_str()),
+        ) {
+            record_errors.push(format!("leg {} fill persist failed: {e}", idx + 1));
+        }
+    }
+
+    let cycle_complete = fills.len() == n_legs && leg_error.is_none();
+    let leg_symbols: Vec<String> = opp.legs.iter().map(|l| l.instrument.clone()).collect();
+    let mut positions_open = false;
+    if cycle_complete {
+        match adapter.fetch_account().await {
+            Ok(acc) => {
+                for sym in &leg_symbols {
+                    match adapter.account_position_for(&acc, sym) {
+                        Ok(Some(_)) => positions_open = true,
+                        Ok(None) => {}
+                        Err(_) => positions_open = true,
+                    }
+                }
+            }
+            Err(_) => positions_open = true,
+        }
+    }
+    for (idx, sid, _) in &leg_signal_ids {
+        let filled = fills.iter().any(|(i, _)| i == idx);
+        let current = state
+            .state_store
+            .get_signal(sid)
+            .ok()
+            .flatten()
+            .map(|s| s.status);
+        if current != Some(SignalStatus::InFlight) {
+            continue;
+        }
+        if cycle_complete {
+            let status = if positions_open {
+                SignalStatus::Balanced
+            } else {
+                SignalStatus::Closed
+            };
+            let note = if positions_open {
+                "options package cycle completed — legs remain open until expiry/flatten"
+            } else {
+                "options package cycle completed — no open positions detected"
+            };
+            let _ = state
+                .state_store
+                .update_signal_status(sid, status, Some(note));
+        } else if filled {
+            let _ = state.state_store.update_signal_status(
+                sid,
+                SignalStatus::Imbalanced,
+                Some("options package partial — residual leg; flatten the instrument to unwind"),
+            );
+        } else {
+            let _ = state.state_store.update_signal_status(
+                sid,
+                SignalStatus::Failed,
+                Some("cycle aborted before this leg dispatched"),
+            );
+        }
+    }
+
+    // Premium cashflow at entry: option buys are cash out, sells cash in;
+    // the locked payoff is unrealized until expiry — same convention as
+    // parity. Option fills print in base coin → USD at index.
+    let mut premium_pnl = Decimal::ZERO;
+    let mut fee_total = Decimal::ZERO;
+    for (idx, resp) in &fills {
+        if let Some(f) = resp.fee.filter(|f| *f > dec!(0)) {
+            fee_total += f;
+        }
+        let Some(px) = resp.avg_fill_price.filter(|p| *p > dec!(0)) else {
+            continue;
+        };
+        let q = resp.filled_qty;
+        let usd = px * q * index;
+        match opp.legs[*idx].side.as_str() {
+            "buy" => premium_pnl -= usd,
+            _ => premium_pnl += usd,
+        }
+    }
+    let attempt_pnl_f = to_f64(premium_pnl - fee_total * index);
+    let fee_total_f = to_f64(fee_total * index);
+    let total_f =
+        crate::execution::accumulate_realized_profit(state, state.is_live(), attempt_pnl_f);
+    let latency_us = started.elapsed().as_micros() as u64;
+    let direction = opp.label.clone();
+    let attributed = crate::attribution::attribute_strategy_id(&strategy_id);
+
+    if !record_errors.is_empty() {
+        record_execution_log(
+            state,
+            ExecutionLogEntry {
+                id: format!("exec-opkg-{cycle}"),
+                timestamp: Utc::now().to_rfc3339(),
+                trade_type: format!("OptionsPackage:{}", params.substrategy_id),
+                strategy_id: attributed.clone(),
+                symbol: direction.clone(),
+                venue_a: "deribit".into(),
+                venue_b: "deribit".into(),
+                leg_a_status: format!("{}/{} legs filled", fills.len(), n_legs),
+                leg_b_status: "record errors".into(),
+                success: false,
+                gross_profit: 0.0,
+                fees: fee_total_f,
+                net_profit: attempt_pnl_f,
+                latency_us,
+                note: format!(
+                    "Options package {tag} record errors: {}",
+                    record_errors.join("; ")
+                ),
+                direction: Some(direction),
+                trigger_spread_bps: Some(opp.edge_bps),
+                baseline_mean_spread_bps: None,
+                position_step: None,
+                max_units: None,
+                nominal_hurdle_bps: params.min_edge_bps,
+                is_live: state.is_live(),
+            },
+        );
+        return Err(format!(
+            "Options package {tag} fill record incomplete: {}",
+            record_errors.join("; ")
+        ));
+    }
+
+    if !cycle_complete {
+        record_execution_log(state, ExecutionLogEntry {
+            id: format!("exec-opkg-{cycle}"),
+            timestamp: Utc::now().to_rfc3339(),
+            trade_type: format!("OptionsPackage:{}", params.substrategy_id),
+            strategy_id: attributed.clone(),
+            symbol: direction.clone(),
+            venue_a: "deribit".into(),
+            venue_b: "deribit".into(),
+            leg_a_status: format!("{}/{} legs filled", fills.len(), n_legs),
+            leg_b_status: leg_error.clone().unwrap_or_default(),
+            success: false,
+            gross_profit: 0.0,
+            fees: fee_total_f,
+            net_profit: attempt_pnl_f,
+            latency_us,
+            note: format!(
+                "Options package {tag} PARTIAL: {}. Residual legs recorded as imbalanced '{strategy_id}' signals — flatten each instrument to unwind.",
+                leg_error.clone().unwrap_or_default()
+            ),
+            direction: Some(direction.clone()),
+            trigger_spread_bps: Some(opp.edge_bps),
+            baseline_mean_spread_bps: None,
+            position_step: None,
+            max_units: None,
+            nominal_hurdle_bps: params.min_edge_bps,
+            is_live: state.is_live(),
+        });
+        return Err(format!(
+            "Options package {tag} PARTIAL ({}/{} legs): {}; residuals recorded — flatten leg instruments to unwind",
+            fills.len(),
+            n_legs,
+            leg_error.unwrap_or_default()
+        ));
+    }
+
+    record_execution_log(state, ExecutionLogEntry {
+        id: format!("exec-opkg-{cycle}"),
+        timestamp: Utc::now().to_rfc3339(),
+        trade_type: format!("OptionsPackage:{}", params.substrategy_id),
+        strategy_id: attributed,
+        symbol: direction.clone(),
+        venue_a: "deribit".into(),
+        venue_b: "deribit".into(),
+        leg_a_status: "FILLED".into(),
+        leg_b_status: "FILLED".into(),
+        success: true,
+        gross_profit: 0.0,
+        fees: fee_total_f,
+        net_profit: attempt_pnl_f,
+        latency_us,
+        note: format!(
+            "Options package {tag} {} completed {}/{} legs; premium cashflow ${attempt_pnl_f:.2} booked, locked edge unrealized until expiry.",
+            opp.label,
+            fills.len(),
+            n_legs
+        ),
+        direction: Some(direction),
+        trigger_spread_bps: Some(opp.edge_bps),
+        baseline_mean_spread_bps: None,
+        position_step: None,
+        max_units: None,
+        nominal_hurdle_bps: params.min_edge_bps,
+        is_live: state.is_live(),
+    });
+
+    let _ = equity_before_by_venue;
+    Ok(SimStepResultDto {
+        cycle,
+        opportunity_found: true,
+        execution_success: true,
+        trade_type: format!("OptionsPackage:{}", params.substrategy_id),
+        direction: opp.label.clone(),
+        venue_a: "deribit".into(),
+        venue_b: "deribit".into(),
+        spread_bps: opp.edge_bps,
+        realized_profit_usd: attempt_pnl_f,
+        total_cumulative_pnl_usd: total_f,
+        message: format!(
+            "Options package {tag} {} — {}/{} legs filled; premium ${attempt_pnl_f:.2} booked, locked edge unrealized until expiry",
+            opp.label,
+            fills.len(),
+            n_legs
+        ),
+    })
+}
+
+#[tauri::command]
+pub async fn scan_options_packages(
+    params: OptionsPackageScanParams,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<Vec<OptionsPackageOpportunityDto>, String> {
+    scan_options_packages_impl(&params, &state).await
+}
+
+#[tauri::command]
+pub async fn execute_options_package(
+    params: OptionsPackageExecutionParams,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<SimStepResultDto, String> {
+    execute_options_package_impl(&params, &state).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn q(name: &str, bid: f64, ask: f64) -> OptQuote {
+        OptQuote {
+            name: name.to_string(),
+            is_call: name.ends_with("-C"),
+            bid: Some(Decimal::from_f64_retain(bid).unwrap()),
+            ask: Some(Decimal::from_f64_retain(ask).unwrap()),
+        }
+    }
+
+    const IDX: f64 = 100_000.0;
+
+    /// A box window where the executable long cost is 0.04 (=$4000 at
+    /// index) and the short proceeds are 0.032 (=$3200) — with a $5000
+    /// strike gap and a 0% benchmark the long box underprices its payoff.
+    fn box_window_long_edge() -> BoxWindow<'static> {
+        BoxWindow {
+            c1: Box::leak(Box::new(q("C-K1", 0.048, 0.050))),
+            c2: Box::leak(Box::new(q("C-K2", 0.030, 0.032))),
+            p1: Box::leak(Box::new(q("P-K1", 0.020, 0.022))),
+            p2: Box::leak(Box::new(q("P-K2", 0.038, 0.040))),
+        }
+    }
+
+    #[test]
+    fn box_long_when_implied_rate_undershoots_benchmark() {
+        let w = box_window_long_edge();
+        let ev = evaluate_box(
+            &w,
+            &EvalCtx {
+                strike_gap_usd: 5_000.0,
+                qty: 1.0,
+                index_usd: IDX,
+            },
+            0.1,
+            0.0, // 0% benchmark → fair PV = 5000
+        )
+        .expect("long edge clears fees");
+        assert_eq!(ev.label, "LONG BOX");
+        // cost = 0.05 − 0.03 − 0.02 + 0.04 = 0.04 → $4000 PV
+        assert!((ev.gross_edge_usd - 1_000.0).abs() < 1e-6);
+        assert!(ev.net_edge_usd < ev.gross_edge_usd); // fees deducted
+        assert!((ev.implied_rate - (5_000.0 / 4_000.0_f64).ln() / 0.1).abs() < 1e-9);
+        // Executed sides: buy c1 & p2, sell c2 & p1.
+        assert_eq!(ev.legs.map(|(buy, _)| buy), [true, false, false, true]);
+    }
+
+    #[test]
+    fn box_short_when_market_overpays_the_bond() {
+        // Quotes price the box at $4900 proceeds while a 100% benchmark
+        // only justifies PV = 5000·e^{-0.1} ≈ $4524 — sell it.
+        let w = BoxWindow {
+            c1: Box::leak(Box::new(q("C-K1", 0.050, 0.052))),
+            c2: Box::leak(Box::new(q("C-K2", 0.027, 0.028))),
+            p1: Box::leak(Box::new(q("P-K1", 0.019, 0.020))),
+            p2: Box::leak(Box::new(q("P-K2", 0.047, 0.049))),
+        };
+        let ev = evaluate_box(
+            &w,
+            &EvalCtx {
+                strike_gap_usd: 5_000.0,
+                qty: 1.0,
+                index_usd: IDX,
+            },
+            0.1,
+            1.0,
+        )
+        .expect("short edge clears fees");
+        assert_eq!(ev.label, "SHORT BOX");
+        // proceeds = 0.05 − 0.028 − 0.02 + 0.047 = 0.049 → $4900
+        let expected = 4_900.0 - 5_000.0 * (-0.1_f64).exp();
+        assert!((ev.gross_edge_usd - expected).abs() < 1e-6);
+        assert_eq!(ev.legs.map(|(buy, _)| buy), [false, true, true, false]);
+    }
+
+    #[test]
+    fn box_rejects_when_fees_eat_the_edge() {
+        // Cost $4950 vs $5000 fair → $5 gross < $12 fees → nothing left.
+        let w = BoxWindow {
+            c1: Box::leak(Box::new(q("C-K1", 0.048, 0.059))),
+            c2: Box::leak(Box::new(q("C-K2", 0.030, 0.031))),
+            p1: Box::leak(Box::new(q("P-K1", 0.020, 0.021))),
+            p2: Box::leak(Box::new(q("P-K2", 0.039, 0.0405))),
+        };
+        assert!(evaluate_box(
+            &w,
+            &EvalCtx {
+                strike_gap_usd: 5_000.0,
+                qty: 0.1,
+                index_usd: IDX,
+            },
+            0.1,
+            0.0,
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn box_rejects_unquoted_side() {
+        let w = box_window_long_edge();
+        let mut dead = q("C-K1", 0.048, 0.050);
+        dead.ask = None;
+        let w = BoxWindow { c1: &dead, ..w };
+        assert!(evaluate_box(
+            &w,
+            &EvalCtx {
+                strike_gap_usd: 5_000.0,
+                qty: 1.0,
+                index_usd: IDX,
+            },
+            0.1,
+            0.0,
+        )
+        .is_none());
+    }
+
+    /// Jelly fixture — near box costs 0.005 coin ($500) to buy; shorting
+    /// it yields −0.002 (negative proceeds → the short direction's near PV
+    /// fails its own check and never emits). The far box yields 0.010
+    /// ($1000) shorted. Long jelly = pay $500 near + collect $1000 far =
+    /// −$500 net cost; a 5% benchmark prices the T1→T2 loan at ≈$198.
+    fn jelly_fixture() -> (BoxWindow<'static>, BoxWindow<'static>) {
+        (
+            BoxWindow {
+                c1: Box::leak(Box::new(q("C1-K1", 0.039, 0.041))),
+                c2: Box::leak(Box::new(q("C1-K2", 0.030, 0.032))),
+                p1: Box::leak(Box::new(q("P1-K1", 0.019, 0.021))),
+                p2: Box::leak(Box::new(q("P1-K2", 0.012, 0.013))),
+            },
+            BoxWindow {
+                c1: Box::leak(Box::new(q("C2-K1", 0.098, 0.102))),
+                c2: Box::leak(Box::new(q("C2-K2", 0.058, 0.060))),
+                p1: Box::leak(Box::new(q("P2-K1", 0.050, 0.052))),
+                p2: Box::leak(Box::new(q("P2-K2", 0.024, 0.026))),
+            },
+        )
+    }
+
+    #[test]
+    fn jelly_long_when_term_books_price_below_carry() {
+        let (near, far) = jelly_fixture();
+        let ev = evaluate_jelly(
+            &near,
+            &far,
+            &EvalCtx {
+                strike_gap_usd: 20_000.0,
+                qty: 1.0,
+                index_usd: IDX,
+            },
+            0.1,
+            0.3,
+            0.05,
+        )
+        .expect("long jelly clears fees");
+        assert_eq!(ev.label, "LONG JELLY");
+        // fair = 20000·(e^{-0.005} − e^{-0.015}) ≈ 198.05; net_cost = −500.
+        let fair = 20_000.0 * ((-0.05 * 0.1_f64).exp() - (-0.05 * 0.3_f64).exp());
+        assert!((ev.gross_edge_usd - (fair + 500.0)).abs() < 1e-6);
+        // implied term rate = ln(1000/500)/(0.3−0.1)
+        assert!((ev.implied_rate - (1_000.0_f64 / 500.0).ln() / 0.2).abs() < 1e-9);
+        // Long jelly = long near box + short far box.
+        assert_eq!(
+            ev.legs.map(|(buy, _)| buy),
+            [true, false, false, true, false, true, true, false]
+        );
+    }
+
+    #[test]
+    fn jelly_rejects_when_both_directions_lose() {
+        // Symmetric windows: near cost/proceeds ≈ far's → the roll nets ~0
+        // while the loan is worth ≈$198 — long wins; flip the fair rate
+        // negative and nothing survives.
+        let (near, far) = jelly_fixture();
+        assert!(evaluate_jelly(
+            &near,
+            &far,
+            &EvalCtx {
+                strike_gap_usd: 20_000.0,
+                qty: 1.0,
+                index_usd: IDX,
+            },
+            0.1,
+            0.3,
+            -0.05, // negative carry → fair ≤ 0 → refused upstream
+        )
+        .is_none());
+    }
+
+    /// Convexity fixture — calls at K1/K2/K3 equidistant. The body bid
+    /// (0.032) exceeds the wing-ask mean ((0.05+0.01)/2 = 0.030): sell the
+    /// fly for 0.004/unit gross.
+    fn convexity_fixture() -> (
+        (OptQuote, OptQuote),
+        (OptQuote, OptQuote),
+        (OptQuote, OptQuote),
+    ) {
+        (
+            (q("C-K1", 0.048, 0.050), q("P-K1", 0.050, 0.052)),
+            (q("C-K2", 0.032, 0.034), q("P-K2", 0.028, 0.030)),
+            (q("C-K3", 0.009, 0.010), q("P-K3", 0.009, 0.010)),
+        )
+    }
+
+    #[test]
+    fn convexity_sells_the_overpriced_body() {
+        let (k1, k2, k3) = convexity_fixture();
+        let ev = evaluate_convexity((&k1.0, &k1.1), (&k2.0, &k2.1), (&k3.0, &k3.1), 1.0, IDX)
+            .expect("call fly violation clears fees");
+        assert_eq!(ev.label, "SELL CALL FLY");
+        assert!(ev.is_call);
+        // gross = (2·0.032 − 0.050 − 0.010)·1·100000 = $400
+        assert!((ev.gross_edge_usd - 400.0).abs() < 1e-6);
+        // Fees: wings 30+30, body 2×30 → net = 400 − 120 = 280.
+        assert!((ev.net_edge_usd - 280.0).abs() < 1e-6);
+        assert_eq!(ev.legs.map(|(buy, _)| buy), [true, false, true]);
+    }
+
+    #[test]
+    fn convexity_passes_inside_the_bound() {
+        // Body bid ≤ wing-ask mean → no riskless sell exists.
+        let (k1, mut k2, k3) = convexity_fixture();
+        k2.0 = q("C-K2", 0.029, 0.034); // 0.029 ≤ (0.050+0.010)/2 = 0.030
+        assert!(
+            evaluate_convexity((&k1.0, &k1.1), (&k2.0, &k2.1), (&k3.0, &k3.1), 1.0, IDX,).is_none()
+        );
+    }
+
+    #[test]
+    fn convexity_rejects_unpriced_wing() {
+        let (k1, mut k2, k3) = convexity_fixture();
+        k2.0.bid = None; // body's executable side missing
+        assert!(
+            evaluate_convexity((&k1.0, &k1.1), (&k2.0, &k2.1), (&k3.0, &k3.1), 1.0, IDX,).is_none()
+        );
+    }
+}

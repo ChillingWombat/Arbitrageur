@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub const ALLOWED_STRATEGY_IDS: [&str; 9] = [
+pub const ALLOWED_STRATEGY_IDS: [&str; 12] = [
     "futures",
     "radar",
     "funding",
@@ -17,6 +17,9 @@ pub const ALLOWED_STRATEGY_IDS: [&str; 9] = [
     "stat_arb",
     "triangle",
     "options_parity",
+    "options_box_spread",
+    "options_jelly_roll",
+    "options_convexity",
     "external",
 ];
 
@@ -1781,6 +1784,47 @@ CREATE TABLE options_bot_config (
 PRAGMA user_version = 40;
 COMMIT;";
 
+/// v41 admits the three options-package strategy ids ('options_box_spread',
+/// 'options_jelly_roll', 'options_convexity') into the signal_executions
+/// strategy CHECK — the Deribit package executor persists one leg-intent
+/// signal per dispatched leg under `options_{sub}`. The rebuild mirrors
+/// v36 exactly, widened by three values and carrying the same columns.
+const MIGRATION_V41_SQL: &str = "\
+PRAGMA foreign_keys = OFF;
+BEGIN IMMEDIATE;
+CREATE TABLE signal_executions_v41 (
+    id TEXT PRIMARY KEY NOT NULL CHECK(length(id) BETWEEN 1 AND 128),
+    strategy_id TEXT NOT NULL COLLATE NOCASE CHECK(strategy_id IN ('futures', 'radar', 'funding', 'spot', 'prediction', 'stat_arb', 'triangle', 'options_parity', 'options_box_spread', 'options_jelly_roll', 'options_convexity', 'external')),
+    symbol TEXT NOT NULL COLLATE NOCASE CHECK(length(symbol) BETWEEN 1 AND 64),
+    status TEXT NOT NULL CHECK(status IN ('in_flight', 'balanced', 'imbalanced', 'unresolved', 'closed', 'failed')),
+    route_id TEXT REFERENCES strategy_account_routes(id) ON DELETE SET NULL,
+    account_long_id TEXT REFERENCES exchange_accounts(id) ON DELETE RESTRICT,
+    account_short_id TEXT REFERENCES exchange_accounts(id) ON DELETE RESTRICT,
+    expected_net_usd REAL,
+    fees_usd REAL NOT NULL DEFAULT 0 CHECK(fees_usd >= 0),
+    note TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    closed_at TEXT,
+    environment TEXT NOT NULL DEFAULT 'unknown' CHECK(environment IN ('unknown', 'testnet', 'live'))
+);
+INSERT INTO signal_executions_v41
+    (id, strategy_id, symbol, status, route_id, account_long_id,
+     account_short_id, expected_net_usd, fees_usd, note,
+     created_at, updated_at, closed_at, environment)
+    SELECT id, strategy_id, symbol, status, route_id, account_long_id,
+           account_short_id, expected_net_usd, fees_usd, note,
+           created_at, updated_at, closed_at, environment
+    FROM signal_executions;
+DROP TABLE signal_executions;
+ALTER TABLE signal_executions_v41 RENAME TO signal_executions;
+CREATE INDEX ix_signal_executions_symbol_status
+    ON signal_executions(symbol, status);
+CREATE INDEX ix_signal_executions_env ON signal_executions(environment);
+PRAGMA user_version = 41;
+COMMIT;
+PRAGMA foreign_keys = ON;";
+
 const MIGRATION_V38_SQL: &str = "\
 PRAGMA foreign_keys = OFF;
 BEGIN IMMEDIATE;
@@ -2556,7 +2600,7 @@ impl StateStore {
 
     fn migrate(conn: &Connection) -> anyhow::Result<()> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 40 {
+        if version > 41 {
             anyhow::bail!("unsupported state store schema version: {version}");
         }
         if version == 0 {
@@ -2795,6 +2839,12 @@ impl StateStore {
         }
         if version <= 39 {
             if let Err(err) = conn.execute_batch(MIGRATION_V40_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 40 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V41_SQL) {
                 let _ = conn.execute_batch("ROLLBACK;");
                 return Err(err.into());
             }
