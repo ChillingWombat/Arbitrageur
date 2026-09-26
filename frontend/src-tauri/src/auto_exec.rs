@@ -431,7 +431,7 @@ impl OpportunityExecutor {
         expected_converge_secs: Option<f64>,
     ) -> Result<(), String> {
         let now_ms = Utc::now().timestamp_millis();
-        let (cfg, mode) = Self::load_config(state);
+        let (cfg, _mode) = Self::load_config(state);
 
         let friction_band = friction_band_bps
             .filter(|b| b.is_finite() && *b >= 0.0)
@@ -463,7 +463,11 @@ impl OpportunityExecutor {
 
         self.open.lock().insert(key.clone(), pos.clone());
 
-        if mode == BotMode::Off {
+        // Reload the mode after claiming the slot: a concurrent flat-book
+        // retire may have flipped the persisted config to Off between the
+        // earlier load and this insert — the exit watcher must be re-armed.
+        let (_, mode_now) = Self::load_config(state);
+        if mode_now == BotMode::Off {
             let next_dto = RadarBotConfigDto {
                 enabled: false,
                 mode: "reduce_only".to_string(),
@@ -770,6 +774,29 @@ impl OpportunityExecutor {
             // Fully inert: no entries, no exit maintenance. The manual
             // flatten path remains the kill switch.
             return cfg.poll_interval_secs.max(1);
+        }
+        // Reduce-only retires to Off once the book is flat: nothing remains
+        // to drain, so the persisted mode drops to Off and the loop goes
+        // inert until a manual adoption re-arms it. The open-map lock spans
+        // the empty-check and the persist so `adopt_manual_position` cannot
+        // slip an unwatched position into an Off bot between the two.
+        if mode == BotMode::ReduceOnly {
+            let open = self.open.lock();
+            if open.is_empty() {
+                let (_, mode_now) = Self::load_config(state);
+                if mode_now == BotMode::ReduceOnly {
+                    let next = RadarBotConfigDto {
+                        enabled: false,
+                        mode: BotMode::Off.as_str().to_string(),
+                        ..RadarBotConfigDto::from_policy(&cfg, BotMode::Off)
+                    };
+                    if let Err(e) = Self::save_config(state, &next) {
+                        tracing::warn!("radar bot: flat-book retire to Off failed: {e}");
+                    }
+                }
+                drop(open);
+                return cfg.poll_interval_secs.max(1);
+            }
         }
         // Bound auxiliary maps every tick: pairs churn over weeks, and both
         // maps are keyed by pair.
@@ -1765,6 +1792,42 @@ mod tests {
         bot2.tick_once(&state2, &dispatch2).await;
         assert_eq!(dispatch2.enter_calls(), 0);
         let _ = bot;
+    }
+
+    #[tokio::test]
+    async fn reduce_only_retires_to_off_once_flat() {
+        // Persisted reduce_only with nothing left to drain must wind the
+        // bot down — exit-watching was its only job.
+        let (state, bot) = harness(vec![]);
+        let mut dto = armed_config();
+        dto.mode = "reduce_only".to_string();
+        dto.enabled = false;
+        OpportunityExecutor::save_config(&state, &dto).expect("save reduce_only");
+        let dispatch = MockDispatch::ok();
+        bot.tick_once(&state, &dispatch).await;
+        let (_, mode) = OpportunityExecutor::load_config(&state);
+        assert_eq!(mode, BotMode::Off);
+
+        // A tracked position keeps the mode armed until it drains.
+        let (state, bot) = harness(vec![]);
+        OpportunityExecutor::save_config(&state, &dto).expect("save reduce_only");
+        bot.open.lock().insert(
+            PairKey::new("BTC", "hyperliquid", "lighter"),
+            TrackedPosition {
+                entry_ts_ms: 0,
+                entry_dev_bps: 10.0,
+                baseline_bps: Some(2.0),
+                friction_band_bps: 4.0,
+                size_usd: 100.0,
+                deadline_ms: i64::MAX / 2,
+                unwatched_since_ms: None,
+                last_seen_ms: 0,
+            },
+        );
+        let dispatch = MockDispatch::ok();
+        bot.tick_once(&state, &dispatch).await;
+        let (_, mode) = OpportunityExecutor::load_config(&state);
+        assert_eq!(mode, BotMode::ReduceOnly);
     }
 
     #[tokio::test]
