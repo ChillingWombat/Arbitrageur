@@ -1025,8 +1025,7 @@ CREATE TABLE IF NOT EXISTS spread_samples (
     environment TEXT NOT NULL DEFAULT 'unknown'
         CHECK(environment IN ('unknown','testnet','live'))
 );
-CREATE INDEX IF NOT EXISTS ix_spread_samples_symbol_ts ON spread_samples(symbol, ts_ms);
-CREATE INDEX IF NOT EXISTS ix_spread_samples_env_ts ON spread_samples(environment, ts_ms);";
+CREATE INDEX IF NOT EXISTS ix_spread_samples_symbol_ts ON spread_samples(symbol, ts_ms);";
 
 /// v3 adds the durable venue mid-price sample log feeding the dislocation
 /// signal series. One row per venue per observed poll; timestamps are epoch
@@ -2530,6 +2529,10 @@ impl StateStore {
         // idempotently (no version chain exists on this sidecar db).
         // Pre-existing rows stay 'unknown' — env-filtered reads exclude
         // them rather than attribute provenance that was never recorded.
+        // The env index is built HERE, after the column is guaranteed —
+        // keeping it in TELEMETRY_SCHEMA_SQL made every pre-v38 telemetry
+        // file fail to open (CREATE INDEX on a missing column), which
+        // silently routed per-frame spread writes onto the main connection.
         let has_env: bool = tconn
             .prepare(
                 "SELECT 1 FROM pragma_table_info('spread_samples') WHERE name = 'environment'",
@@ -2539,11 +2542,13 @@ impl StateStore {
             tconn.execute_batch(
                 "ALTER TABLE spread_samples ADD COLUMN environment
                      TEXT NOT NULL DEFAULT 'unknown'
-                     CHECK(environment IN ('unknown','testnet','live'));
-                 CREATE INDEX IF NOT EXISTS ix_spread_samples_env_ts
-                     ON spread_samples(environment, ts_ms);",
+                     CHECK(environment IN ('unknown','testnet','live'));",
             )?;
         }
+        tconn.execute_batch(
+            "CREATE INDEX IF NOT EXISTS ix_spread_samples_env_ts
+                 ON spread_samples(environment, ts_ms);",
+        )?;
         if let Err(e) = Self::drain_legacy_samples(&tconn, main_path) {
             tracing::warn!("state_store: legacy spread_samples drain failed ({e}); leftover rows stay in the main db");
         }

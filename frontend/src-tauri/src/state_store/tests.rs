@@ -4812,3 +4812,75 @@ fn test_environment_isolation_unknown_rows_fail_closed() {
     assert_eq!(wrote, 0, "live rollup sees no testnet samples");
     assert!(store.session_profiles("SOL", "live").unwrap().is_empty());
 }
+
+#[test]
+fn pre_v38_telemetry_file_opens_and_gets_env_column() {
+    // Regression: a telemetry sidecar whose spread_samples predates the
+    // v38 `environment` column used to fail open_telemetry outright —
+    // TELEMETRY_SCHEMA_SQL created ix_spread_samples_env_ts before the
+    // column existed, so every per-frame sample fell back onto the main
+    // ledger connection (request-storm write amplification on the book of
+    // record). The index must be created only after the column is ensured.
+    let (dir, file) = temp_store_path("telemetry_premain");
+    std::fs::create_dir_all(&dir).unwrap();
+    {
+        // Build a legacy telemetry db: spread_samples WITHOUT environment.
+        let tpath = file.with_extension("telemetry.db");
+        let c = rusqlite::Connection::open(&tpath).unwrap();
+        c.execute_batch(
+            "CREATE TABLE spread_samples (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                symbol TEXT NOT NULL,
+                venue_id TEXT NOT NULL,
+                ts_ms INTEGER NOT NULL,
+                mid REAL NOT NULL,
+                best_bid REAL NOT NULL,
+                best_ask REAL NOT NULL,
+                bid_depth REAL,
+                ask_depth REAL
+            );",
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO spread_samples (symbol, venue_id, ts_ms, mid, best_bid, best_ask)
+             VALUES ('BTC', 'hyperliquid', 1000, 100.0, 99.9, 100.1)",
+            [],
+        )
+        .unwrap();
+    }
+    let store = StateStore::open(&file).expect("store opens with legacy telemetry");
+    assert!(
+        store.telemetry.is_some(),
+        "telemetry conn must open — a failure silently routes per-frame writes onto the main ledger"
+    );
+    // The env column was added; a fresh write must land on the sidecar.
+    store
+        .record_spread_samples(
+            "BTC",
+            2_000,
+            &[VenueSampleEntry {
+                venue_id: "hyperliquid".into(),
+                mid: 100.0,
+                best_bid: 99.9,
+                best_ask: 100.1,
+                bid_depth: None,
+                ask_depth: None,
+            }],
+            "testnet",
+        )
+        .unwrap();
+    let tconn = rusqlite::Connection::open(file.with_extension("telemetry.db")).unwrap();
+    let env_col: bool = tconn
+        .prepare("SELECT 1 FROM pragma_table_info('spread_samples') WHERE name='environment'")
+        .unwrap()
+        .exists([])
+        .unwrap();
+    assert!(env_col, "environment column added to legacy telemetry table");
+    let idx: bool = tconn
+        .prepare("SELECT 1 FROM sqlite_master WHERE name='ix_spread_samples_env_ts'")
+        .unwrap()
+        .exists([])
+        .unwrap();
+    assert!(idx, "env index created after the column exists");
+    std::fs::remove_dir_all(&dir).ok();
+}

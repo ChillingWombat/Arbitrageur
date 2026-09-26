@@ -308,10 +308,13 @@ impl AlpacaAdapter {
 
     async fn data_get(&self, path: &str) -> anyhow::Result<serde_json::Value> {
         // Crypto market data requires the same key headers on the data
-        // host — a 401 is the honest answer when creds are absent.
+        // host — an unauthenticated request is a guaranteed 401/403, so
+        // fail locally instead of burning a TLS handshake per poll.
+        if !self.has_live_credentials() {
+            anyhow::bail!("Alpaca API credentials are not configured or vault is locked");
+        }
         let url = format!("{}{}", self.data_url, path);
-        self.request("GET", &url, None, self.has_live_credentials())
-            .await
+        self.request("GET", &url, None, true).await
     }
 
     async fn trade_request(
@@ -427,10 +430,14 @@ impl ExchangeAdapter for AlpacaAdapter {
     }
 
     async fn ping(&self) -> anyhow::Result<()> {
-        // Public clock endpoint — proves the trade host is reachable
-        // without burning an authed call.
+        // Alpaca requires key headers on every /v2 route including clock —
+        // without credentials this is a guaranteed 401, so fail locally and
+        // let the caller's public-endpoint probe measure the same host.
+        if !self.has_live_credentials() {
+            anyhow::bail!("Alpaca API credentials are not configured or vault is locked");
+        }
         let url = format!("{}/v2/clock", self.trade_url);
-        let _ = self.request("GET", &url, None, false).await?;
+        let _ = self.request("GET", &url, None, true).await?;
         Ok(())
     }
 

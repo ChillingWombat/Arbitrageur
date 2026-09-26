@@ -461,31 +461,38 @@ impl StateStore {
             return Ok(());
         }
         let bucketed = ts_ms / 60_000 * 60_000;
-        let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
-            "INSERT OR REPLACE INTO funding_rate_samples
-                 (venue_id, symbol, ts_ms, rate_8h, interval_hours, environment)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-        )?;
-        for (venue_raw, symbol_raw, rate_8h, interval_hours) in samples {
-            let Ok(venue) = normalize_venue(venue_raw) else {
-                continue;
-            };
-            let Ok(symbol) = normalize_symbol(symbol_raw) else {
-                continue;
-            };
-            if !rate_8h.is_finite() || *interval_hours < 1 {
-                continue;
+        let mut conn = self.conn.lock();
+        // One transaction for the whole sample batch: a funding scan writes
+        // ~venues×symbols rows per poll and autocommit would turn each row
+        // into its own fsync.
+        let tx = conn.transaction()?;
+        {
+            let mut stmt = tx.prepare(
+                "INSERT OR REPLACE INTO funding_rate_samples
+                     (venue_id, symbol, ts_ms, rate_8h, interval_hours, environment)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            )?;
+            for (venue_raw, symbol_raw, rate_8h, interval_hours) in samples {
+                let Ok(venue) = normalize_venue(venue_raw) else {
+                    continue;
+                };
+                let Ok(symbol) = normalize_symbol(symbol_raw) else {
+                    continue;
+                };
+                if !rate_8h.is_finite() || *interval_hours < 1 {
+                    continue;
+                }
+                stmt.execute(rusqlite::params![
+                    venue,
+                    symbol,
+                    bucketed,
+                    rate_8h,
+                    interval_hours,
+                    environment
+                ])?;
             }
-            stmt.execute(rusqlite::params![
-                venue,
-                symbol,
-                bucketed,
-                rate_8h,
-                interval_hours,
-                environment
-            ])?;
         }
+        tx.commit()?;
         Ok(())
     }
 

@@ -1268,6 +1268,32 @@ type VolumeCache = Mutex<
     )>,
 >;
 
+/// Cached venue market listings, keyed `{env}-{venue}` so a live/testnet
+/// switch can never serve the other environment's instruments. Scan and
+/// filter surfaces read this instead of fanning `fetch_markets` out on
+/// every UI poll — listings are slow-moving metadata.
+type MarketsCache = Mutex<
+    std::collections::HashMap<
+        String,
+        (
+            std::time::Instant,
+            Vec<arbitrageur_core::market::MarketMetadata>,
+        ),
+    >,
+>;
+
+/// Cached venue mark prices (`fetch_market_prices`), same keying and
+/// staleness contract as [`MarketsCache`].
+type MarketPricesCache = Mutex<
+    std::collections::HashMap<
+        String,
+        (
+            std::time::Instant,
+            std::collections::HashMap<String, Decimal>,
+        ),
+    >,
+>;
+
 #[allow(dead_code)]
 /// Cached Boros market-data snapshot (public REST, no credentials).
 #[derive(Clone)]
@@ -1461,6 +1487,12 @@ pub struct AppEngineState {
     pub latency_probe_at: Mutex<std::collections::HashMap<String, std::time::Instant>>,
     /// 24h volume cache: venue_id -> asset -> volume USD (5-minute TTL).
     pub volume_cache: VolumeCache,
+    /// Market listings cache (`{env}-{venue}` key). Poll-frequency callers
+    /// must go through `cached_markets` — a direct `fetch_markets` per scan
+    /// tick turns the UI refresh loop into a per-venue request storm.
+    pub markets_cache: MarketsCache,
+    /// Venue mark-price cache (`{env}-{venue}` key) via `cached_market_prices`.
+    pub market_prices_cache: MarketPricesCache,
     /// Spread Range Monitor engine, installed by main() after construction
     /// (it needs a fully-built state to hydrate from).
     pub monitor: Mutex<Option<Arc<crate::monitor::SpreadMonitorEngine>>>,
@@ -2312,6 +2344,8 @@ impl AppEngineState {
             latency_ema: Mutex::new(std::collections::HashMap::new()),
             latency_probe_at: Mutex::new(std::collections::HashMap::new()),
             volume_cache: Mutex::new(None),
+            markets_cache: Mutex::new(std::collections::HashMap::new()),
+            market_prices_cache: Mutex::new(std::collections::HashMap::new()),
             monitor: Mutex::new(None),
             radar_bot: Mutex::new(None),
             orderbook_flights: Arc::new(crate::ws_primary::OrderbookSingleFlight::new()),
@@ -3249,6 +3283,73 @@ impl AppEngineState {
             .into_iter()
             .find(|(vid, _, _)| *vid == canonical)
             .map(|(_, _, adapter)| adapter)
+    }
+
+    /// Market listings for one admitted venue, served from the env-scoped
+    /// cache when fresh. Poll-frequency callers (scans, strategy tickers,
+    /// universe views) must use this instead of `adapter.fetch_markets()` —
+    /// several UI surfaces poll on a ~3s cadence and an uncached per-venue
+    /// fetch turns every tick into a request storm.
+    ///
+    /// A failed refresh serves the stale snapshot if one exists (a
+    /// connectivity blip doesn't empty the universe); the error propagates
+    /// only when nothing was ever learned for this environment.
+    pub(crate) async fn cached_markets(
+        &self,
+        vid: &str,
+        adapter: &Arc<dyn arbitrageur_core::exchange::ExchangeAdapter>,
+    ) -> anyhow::Result<Vec<arbitrageur_core::market::MarketMetadata>> {
+        const TTL: std::time::Duration = std::time::Duration::from_secs(300);
+        let key = format!("{}-{vid}", self.env().as_str());
+        let stale = self.markets_cache.lock().get(&key).cloned();
+        if let Some((at, ref markets)) = stale {
+            if at.elapsed() < TTL {
+                return Ok(markets.clone());
+            }
+        }
+        match adapter.fetch_markets().await {
+            Ok(markets) => {
+                self.markets_cache
+                    .lock()
+                    .insert(key, (std::time::Instant::now(), markets.clone()));
+                Ok(markets)
+            }
+            Err(e) => match stale {
+                Some((_, markets)) => Ok(markets),
+                None => Err(e),
+            },
+        }
+    }
+
+    /// Venue mark prices through the same env-scoped cache contract as
+    /// [`Self::cached_markets`]. Prices move faster than listings, so the
+    /// TTL is shorter; callers must only need threshold-grade marks (any
+    /// consumer pricing orders uses the order book, never this).
+    pub(crate) async fn cached_market_prices(
+        &self,
+        vid: &str,
+        adapter: &Arc<dyn arbitrageur_core::exchange::ExchangeAdapter>,
+    ) -> anyhow::Result<std::collections::HashMap<String, Decimal>> {
+        const TTL: std::time::Duration = std::time::Duration::from_secs(60);
+        let key = format!("{}-{vid}", self.env().as_str());
+        let stale = self.market_prices_cache.lock().get(&key).cloned();
+        if let Some((at, ref prices)) = stale {
+            if at.elapsed() < TTL {
+                return Ok(prices.clone());
+            }
+        }
+        match adapter.fetch_market_prices().await {
+            Ok(prices) => {
+                self.market_prices_cache
+                    .lock()
+                    .insert(key, (std::time::Instant::now(), prices.clone()));
+                Ok(prices)
+            }
+            Err(e) => match stale {
+                Some((_, prices)) => Ok(prices),
+                None => Err(e),
+            },
+        }
     }
 
     /// Install a zero-latency `SimulatedExchange` as a venue's adapter for
