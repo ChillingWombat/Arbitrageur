@@ -155,31 +155,24 @@ fn map_autotune_report(
     }
 }
 
-/// Capacity tiers backing the step/maxStep candidates: the monitor's
-/// default tiers plus a 0.5% participation-cap tier off the smaller venue's
-/// 24h volume when both volumes are known.
-fn autotune_tiers_with_cap(
+/// Usable-notional bound for the capacity walk: 0.5% participation of the
+/// smaller venue's 24h volume when both volumes are known, else `None`
+/// (walk consumes the whole book — the old fixed $1k/$5k/$10k probes were
+/// arbitrary ceilings, not capability).
+fn autotune_usable_cap(
     volumes: &HashMap<String, HashMap<String, f64>>,
     buy_v: &str,
     sell_v: &str,
     base: &str,
-) -> Vec<f64> {
-    let mut tiers = vec![1000.0, 5000.0, 10_000.0];
+) -> Option<f64> {
     // Venue volume maps are keyed by canonical BASE-QUOTE symbols; reuse the
     // shared quote-stripping matcher so every venue spelling resolves.
     let lookup = |venue: &str| -> Option<f64> {
         let m = volumes.get(venue)?;
         crate::strategy_filters::venue_asset_volume_usd(m, base)
     };
-    if let (Some(a), Some(b)) = (lookup(buy_v), lookup(sell_v)) {
-        let cap = a.min(b) * 0.005;
-        if cap.is_finite() && cap > 0.0 {
-            tiers.push(cap);
-            tiers.sort_by(|x, y| x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal));
-            tiers.dedup();
-        }
-    }
-    tiers
+    let cap = lookup(buy_v)?.min(lookup(sell_v)?) * 0.005;
+    (cap.is_finite() && cap > 0.0).then_some(cap)
 }
 
 pub async fn get_autotune_recommendation_impl(
@@ -475,7 +468,7 @@ pub async fn get_autotune_recommendation_impl(
                     (None, None)
                 } else {
                     let volumes = cached_venue_volumes(state).await;
-                    let tiers = autotune_tiers_with_cap(&volumes, &buy_v, &sell_v, &base);
+                    let usable_cap = autotune_usable_cap(&volumes, &buy_v, &sell_v, &base);
                     let curve = arbitrageur_math::pair_monitor::build_pwin_curve(
                         &fit,
                         mu_f,
@@ -486,7 +479,7 @@ pub async fn get_autotune_recommendation_impl(
                         chrono::Utc::now().timestamp_millis(),
                     );
                     let rep = arbitrageur_math::pair_monitor::capacity_ladder(
-                        &asks, &bids, mu_f, fee_sum, &tiers, &curve, 0.9, None, 2.0,
+                        &asks, &bids, mu_f, fee_sum, usable_cap, &curve, 0.9, None, 2.0,
                     );
                     (rep.optimal_size_usd, rep.breakeven_size_usd)
                 }

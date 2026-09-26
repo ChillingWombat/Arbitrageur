@@ -650,22 +650,6 @@ pub fn reversion_stats(
     }
 }
 
-/// One rung of the capacity ladder.
-#[derive(Debug, Clone, PartialEq)]
-pub struct CapacityTier {
-    /// Tier notional (USD) requested.
-    pub size_usd: f64,
-    /// Notional actually fillable inside both books (<= size_usd).
-    pub filled_usd: f64,
-    /// Probability-weighted expected net capture per unit notional, bps —
-    /// `None` when no win-rate curve exists (unverifiable expectation).
-    pub expected_net_bps: Option<f64>,
-    /// Win probability at the deepest level consumed by this tier.
-    pub marginal_p_win: Option<f64>,
-    /// Raw (unweighted) net capture at this tier's average entry, bps.
-    pub net_bps: Option<f64>,
-}
-
 /// Depth capacity at a marginal expected-net floor: how much notional can
 /// be consumed from both books while each unit still contributes at least
 /// `min_net_bps` of probability-weighted net capture.
@@ -703,15 +687,19 @@ pub struct DepthCurvePoint {
 /// Aggregated capacity evaluation for a pair direction.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CapacityReport {
-    pub tiers: Vec<CapacityTier>,
-    /// Tier with the highest expected USD (probability-weighted); `None`
+    /// Fillable size with the highest expected USD (probability-weighted),
+    /// evaluated at exact book-level boundaries — not probe tiers. `None`
     /// when no win-rate curve exists.
     pub optimal_size_usd: Option<f64>,
-    /// Largest tier whose marginal level satisfies `p_min` with positive
-    /// cumulative expectation — not merely where raw benefit hits zero.
+    /// Largest fillable size whose marginal level satisfies `p_min` with
+    /// positive cumulative expectation — not merely where raw benefit hits
+    /// zero.
     pub breakeven_size_usd: Option<f64>,
-    /// Expected USD at the optimal tier.
+    /// Expected USD at the optimal size.
     pub expected_profit_usd: Option<f64>,
+    /// Cumulative probability-weighted expected net capture per unit at
+    /// the optimal size, bps.
+    pub expected_net_bps_at_optimal: Option<f64>,
     /// Probability-weighted fillable notional across every book level whose
     /// marginal expected net (`p·dev⁺ − friction`) is positive — the
     /// opportunity's total expected capacity. `None` with no win-rate curve.
@@ -725,13 +713,17 @@ pub struct CapacityReport {
 }
 
 /// Walk both orderbooks in lockstep and compute the probability-weighted
-/// capture curve at each fixed notional tier.
+/// capture curve over the fillable depth — continuously, at exact book
+/// boundaries rather than configured probe tiers.
 ///
 /// * `buy_asks`: (price, size) ascending — the book we lift.
 /// * `sell_bids`: (price, size) descending — the book we hit.
 /// * `baseline_bps`: `mu` for this pair (historical expected spread).
 /// * `friction_bps`: static per-unit costs — entry fees + funding carry +
 ///   estimated exit friction (caller composes one-way vs two-way).
+/// * `usable_cap_usd`: optional bound on total usable notional (e.g. a
+///   participation cap) — truncates the depth walk so every output
+///   reflects only the depth we may actually consume.
 /// * `pwin`: conditional win-rate curve; empty → expected fields `None`.
 /// * `p_min`: minimum marginal win probability for the breakeven bound.
 ///
@@ -745,7 +737,7 @@ pub fn capacity_ladder(
     sell_bids: &[(f64, f64)],
     baseline_bps: f64,
     friction_bps: f64,
-    tiers_usd: &[f64],
+    usable_cap_usd: Option<f64>,
     pwin: &PWinCurve,
     p_min: f64,
     z_gate: Option<f64>,
@@ -760,7 +752,13 @@ pub fn capacity_ladder(
     let mut chunks: Vec<Chunk> = Vec::new();
     let (mut i, mut j) = (0usize, 0usize);
     let (mut rem_a, mut rem_b) = (0.0, 0.0);
+    let mut walked_usd = 0.0;
     while i < buy_asks.len() && j < sell_bids.len() {
+        if let Some(cap) = usable_cap_usd {
+            if walked_usd >= cap {
+                break;
+            }
+        }
         if rem_a <= 0.0 {
             rem_a = buy_asks[i].1;
             if rem_a <= 0.0 {
@@ -782,19 +780,26 @@ pub fn capacity_ladder(
             let dev = (b - a) / a * 10_000.0 - baseline_bps;
             let est =
                 p_win_est_at_deviation(pwin, dev.abs(), z_gate.unwrap_or(1.645), prior_strength);
-            chunks.push(Chunk {
-                notional: q * a,
-                dev_bps: dev,
-                p_win: est
-                    .and_then(|e| e.rate)
-                    .or_else(|| p_win_at_deviation(pwin, dev.abs())),
-                p_gate: match z_gate {
-                    Some(_) => est.and_then(|e| e.lower),
-                    None => est
+            let mut notional = q * a;
+            if let Some(cap) = usable_cap_usd {
+                notional = notional.min((cap - walked_usd).max(0.0));
+            }
+            if notional > 0.0 {
+                walked_usd += notional;
+                chunks.push(Chunk {
+                    notional,
+                    dev_bps: dev,
+                    p_win: est
                         .and_then(|e| e.rate)
                         .or_else(|| p_win_at_deviation(pwin, dev.abs())),
-                },
-            });
+                    p_gate: match z_gate {
+                        Some(_) => est.and_then(|e| e.lower),
+                        None => est
+                            .and_then(|e| e.rate)
+                            .or_else(|| p_win_at_deviation(pwin, dev.abs())),
+                    },
+                });
+            }
         }
         rem_a -= q;
         rem_b -= q;
@@ -806,67 +811,56 @@ pub fn capacity_ladder(
         }
     }
 
-    let mut tiers: Vec<CapacityTier> = Vec::with_capacity(tiers_usd.len());
-    let mut optimal: Option<(f64, f64)> = None; // (filled_usd, expected_usd)
+    // Single prefix walk over consumed depth: optimal is the boundary with
+    // max cumulative expected USD (piecewise-linear within a constant-
+    // marginal chunk, so the argmax always lands on a boundary); breakeven
+    // is the deepest boundary whose marginal level still clears p_min with
+    // positive cumulative expectation.
+    let marginal_exp = |c: &Chunk| c.p_win.map(|p| p * c.dev_bps.max(0.0) - friction_bps);
+    let any_p = chunks.iter().any(|c| c.p_win.is_some());
+    let mut optimal: Option<(f64, f64, f64)> = None; // (cum_usd, exp_usd, cum_exp_bps)
     let mut breakeven: Option<f64> = None;
-
-    for &tier in tiers_usd {
-        if !(tier.is_finite() && tier > 0.0) {
-            continue;
-        }
-        let mut filled = 0.0;
-        let mut sum_net = 0.0; // unweighted net integral (usd*bps)
-        let mut sum_exp = 0.0; // probability-weighted integral
-        let mut any_p = false;
-        let mut marginal_p: Option<f64> = None;
-        let mut marginal_gate: Option<f64> = None;
+    let mut depth_curve: Vec<DepthCurvePoint> = Vec::with_capacity(chunks.len());
+    {
+        let mut cum_usd = 0.0;
+        let mut net_integral = 0.0; // Σ (dev−friction)·notional  (usd·bps)
+        let mut exp_integral = 0.0; // Σ (p·dev⁺−friction)·notional
         for c in &chunks {
-            if filled >= tier {
-                break;
+            cum_usd += c.notional;
+            net_integral += (c.dev_bps - friction_bps) * c.notional;
+            if let Some(e) = marginal_exp(c) {
+                exp_integral += e * c.notional;
             }
-            let take = (tier - filled).min(c.notional);
-            if take <= 0.0 {
-                continue;
-            }
-            filled += take;
-            sum_net += (c.dev_bps - friction_bps) * take;
-            if let Some(p) = c.p_win {
-                any_p = true;
-                sum_exp += (p * c.dev_bps.max(0.0) - friction_bps) * take;
-            }
-            marginal_p = c.p_win;
-            marginal_gate = c.p_gate;
-        }
-        if filled <= 0.0 {
-            break; // book exhausted — deeper tiers unfillable
-        }
-        let net_bps = Some(sum_net / filled);
-        let expected_net_bps = if any_p { Some(sum_exp / filled) } else { None };
-        if let (Some(eb), true) = (expected_net_bps, any_p) {
-            let exp_usd = eb * filled / 10_000.0;
-            if exp_usd > 0.0 && optimal.map(|(_, v)| exp_usd > v).unwrap_or(true) {
-                optimal = Some((filled, exp_usd));
-            }
-            let p_ok = marginal_gate.map(|p| p >= p_min).unwrap_or(false);
-            if exp_usd > 0.0 && p_ok {
-                breakeven = Some(filled);
+            depth_curve.push(DepthCurvePoint {
+                cum_usd,
+                cum_net_bps: net_integral / cum_usd,
+                cum_exp_bps: if any_p {
+                    Some(exp_integral / cum_usd)
+                } else {
+                    None
+                },
+                marg_net_bps: c.dev_bps - friction_bps,
+                marg_exp_bps: marginal_exp(c),
+            });
+            if any_p && cum_usd > 0.0 {
+                let cum_exp = exp_integral / cum_usd;
+                let exp_usd = cum_exp * cum_usd / 10_000.0;
+                if exp_usd > 0.0 {
+                    if optimal.map(|(_, v, _)| exp_usd > v).unwrap_or(true) {
+                        optimal = Some((cum_usd, exp_usd, cum_exp));
+                    }
+                    if c.p_gate.map(|p| p >= p_min).unwrap_or(false) {
+                        breakeven = Some(cum_usd);
+                    }
+                }
             }
         }
-        tiers.push(CapacityTier {
-            size_usd: tier,
-            filled_usd: filled,
-            expected_net_bps,
-            marginal_p_win: marginal_p,
-            net_bps,
-        });
     }
 
     // Depth-capacity profile: per book level, marginal expected net per
     // unit is `p·dev⁺ − friction`. Expected capacity weights each viable
     // level's notional by its win probability; the bps ladder reports raw
     // fillable notional while marginal expected net clears each floor.
-    let marginal_exp = |c: &Chunk| c.p_win.map(|p| p * c.dev_bps.max(0.0) - friction_bps);
-    let any_p = chunks.iter().any(|c| c.p_win.is_some());
     let expected_capacity_usd = if any_p {
         let mut sum = 0.0;
         for c in &chunks {
@@ -896,41 +890,11 @@ pub fn capacity_ladder(
         Vec::new()
     };
 
-    // Depth curve: running capture per unit at each consumed chunk. The
-    // chart reads cum_*/marg_* directly; USD values derive as bps·cum_usd
-    // in the client.
-    let depth_curve = {
-        let mut cum_usd = 0.0;
-        let mut net_integral = 0.0; // Σ (dev−friction)·notional  (usd·bps)
-        let mut exp_integral = 0.0; // Σ (p·dev⁺−friction)·notional
-        chunks
-            .iter()
-            .map(|c| {
-                cum_usd += c.notional;
-                net_integral += (c.dev_bps - friction_bps) * c.notional;
-                if let Some(e) = marginal_exp(c) {
-                    exp_integral += e * c.notional;
-                }
-                DepthCurvePoint {
-                    cum_usd,
-                    cum_net_bps: net_integral / cum_usd,
-                    cum_exp_bps: if any_p {
-                        Some(exp_integral / cum_usd)
-                    } else {
-                        None
-                    },
-                    marg_net_bps: c.dev_bps - friction_bps,
-                    marg_exp_bps: marginal_exp(c),
-                }
-            })
-            .collect()
-    };
-
     CapacityReport {
-        tiers,
-        optimal_size_usd: optimal.map(|(s, _)| s),
+        optimal_size_usd: optimal.map(|(s, _, _)| s),
         breakeven_size_usd: breakeven,
-        expected_profit_usd: optimal.map(|(_, v)| v),
+        expected_profit_usd: optimal.map(|(_, v, _)| v),
+        expected_net_bps_at_optimal: optimal.map(|(_, _, e)| e),
         expected_capacity_usd,
         bps_capacity_ladder,
         depth_curve,
@@ -1088,34 +1052,29 @@ mod tests {
             point_censored: vec![0, 0, 0],
             point_sum_w2: vec![10.0, 10.0, 10.0],
         };
-        let rep = capacity_ladder(
-            &asks,
-            &bids,
-            0.0,
-            10.0,
-            &[100.0, 201.0],
-            &pwin,
-            0.9,
-            None,
-            0.0,
-        );
-        assert_eq!(rep.tiers.len(), 2);
-        let t0 = &rep.tiers[0];
-        assert!((t0.net_bps.unwrap() - 190.0).abs() < 1e-6); // 200 - 10 friction
-        assert!((t0.expected_net_bps.unwrap() - 190.0).abs() < 1e-6);
-        let t1 = &rep.tiers[1];
-        assert!(t1.net_bps.unwrap() < t0.net_bps.unwrap()); // deep level drags
-                                                            // Tier1 exp = 190bps*$100 = $1.90; tier2's negative level drags it
-                                                            // below tier1's expected USD.
-        assert_eq!(rep.optimal_size_usd, Some(t0.filled_usd));
-        assert_eq!(
-            rep.breakeven_size_usd,
-            Some(rep.tiers.last().unwrap().filled_usd)
-        );
-        // Expected capacity = Σ notional·p over levels with positive
+        let rep = capacity_ladder(&asks, &bids, 0.0, 10.0, None, &pwin, 0.9, None, 0.0);
+        // Continuous curve: one point per consumed chunk boundary.
+        assert_eq!(rep.depth_curve.len(), 2);
+        let c0 = &rep.depth_curve[0];
+        assert!((c0.cum_usd - 100.0).abs() < 1e-6);
+        assert!((c0.cum_net_bps - 190.0).abs() < 1e-6); // 200 − 10 friction
+        assert!((c0.cum_exp_bps.unwrap() - 190.0).abs() < 1e-6);
+        assert!((c0.marg_net_bps - 190.0).abs() < 1e-6);
+        assert!((c0.marg_exp_bps.unwrap() - 190.0).abs() < 1e-6);
+        let c1 = &rep.depth_curve[1];
+        assert!((c1.cum_usd - 201.0).abs() < 1e-6);
+        assert!(c1.cum_net_bps < c0.cum_net_bps); // deep level drags
+                                                  // Optimal is the chunk boundary maximizing expected USD: prefix 1
+                                                  // earns 190bps·$100 = $1.90; L2's negative level drags it lower.
+        assert_eq!(rep.optimal_size_usd, Some(100.0));
+        assert!((rep.expected_profit_usd.unwrap() - 1.9).abs() < 1e-6);
+        assert!((rep.expected_net_bps_at_optimal.unwrap() - 190.0).abs() < 1e-6);
+        // Both marginal gates clear p_min=0.9 (p=1.0) with positive
+        // cumulative expectation — deepest boundary stands.
+        assert_eq!(rep.breakeven_size_usd, Some(201.0));
+        // Expected capacity = Σ notional·p over chunks with positive
         // marginal expected net. L1: dev 200 → p=1.0 → exp 190>0 →
-        // $100·1.0. L2: dev ≈ −198 → p(198)=0.5, but dev⁺=0 → exp −10<0
-        // → excluded. Total = $100.
+        // $100·1.0. L2: dev ≈ −198 → dev⁺=0 → exp −10<0 → excluded.
         let cap = rep.expected_capacity_usd.unwrap();
         assert!((cap - 100.0).abs() < 1e-6);
         // Bps ladder: floor 10 → only L1 clears (exp 190 ≥ 10) → $100;
@@ -1135,6 +1094,62 @@ mod tests {
     }
 
     #[test]
+    fn capacity_ladder_optimal_lands_on_chunk_boundary() {
+        // Profitable depth ends at $3,700 — a size no fixed probe tier
+        // (1k/5k/10k) would ever evaluate. The continuous walk must land
+        // the optimal exactly on the boundary.
+        let asks = vec![(100.0, 37.0)];
+        let bids = vec![(102.0, 37.0)];
+        // dev 200bps -> bucket = first threshold ≥ 200 -> p = 1.0.
+        let pwin = PWinCurve {
+            points: vec![(300.0, 1.0)],
+            episodes: 5,
+            point_wins: vec![5.0],
+            point_trials: vec![5.0],
+            point_censored: vec![0],
+            point_sum_w2: vec![5.0],
+        };
+        let rep = capacity_ladder(&asks, &bids, 0.0, 10.0, None, &pwin, 0.9, None, 0.0);
+        assert_eq!(rep.depth_curve.len(), 1);
+        assert!((rep.depth_curve[0].cum_usd - 3700.0).abs() < 1e-6);
+        assert_eq!(rep.optimal_size_usd, Some(3700.0));
+        assert!((rep.expected_profit_usd.unwrap() - 190.0 * 3700.0 / 10_000.0).abs() < 1e-6);
+        assert_eq!(rep.breakeven_size_usd, Some(3700.0));
+    }
+
+    #[test]
+    fn capacity_ladder_usable_cap_truncates_walk() {
+        let asks = vec![(100.0, 1.0), (101.0, 100.0)];
+        let bids = vec![(102.0, 1.0), (103.0, 100.0)];
+        // L2: dev = (103−101)/101·1e4 ≈ 198bps — also profitable (p=1.0).
+        let pwin = PWinCurve {
+            points: vec![(0.0, 1.0), (200.0, 1.0), (300.0, 0.5)],
+            episodes: 10,
+            point_wins: vec![10.0, 10.0, 5.0],
+            point_trials: vec![10.0, 10.0, 10.0],
+            point_censored: vec![0, 0, 0],
+            point_sum_w2: vec![10.0, 10.0, 10.0],
+        };
+        // Usable notional capped at $150: chunk1 fills $100, chunk2 is
+        // truncated to $50 of its raw $10,100 — the boundary sits on the
+        // cap, not on any book or probe size.
+        let rep = capacity_ladder(&asks, &bids, 0.0, 10.0, Some(150.0), &pwin, 0.9, None, 0.0);
+        assert_eq!(rep.depth_curve.len(), 2);
+        assert!((rep.depth_curve[1].cum_usd - 150.0).abs() < 1e-6);
+        assert!(
+            (rep.depth_curve[1].marg_net_bps - ((103.0 - 101.0) / 101.0 * 10_000.0 - 10.0)).abs()
+                < 1e-6
+        );
+        // Both chunks profitable with gate 1.0 — optimal + breakeven at cap.
+        assert_eq!(rep.optimal_size_usd, Some(150.0));
+        assert_eq!(rep.breakeven_size_usd, Some(150.0));
+        // Cap below the first chunk zeroes everything downstream.
+        let rep = capacity_ladder(&asks, &bids, 0.0, 10.0, Some(0.0), &pwin, 0.9, None, 0.0);
+        assert!(rep.depth_curve.is_empty());
+        assert!(rep.optimal_size_usd.is_none());
+    }
+
+    #[test]
     fn capacity_ladder_bps_profile_sums_deep_levels() {
         // Both levels profitable: L1 dev 200→p=1.0→exp 190; L2 dev ~49.5→
         // p=0.95→exp ~42 — every level clears the 10bps floor.
@@ -1148,17 +1163,7 @@ mod tests {
             point_censored: vec![0, 0],
             point_sum_w2: vec![20.0, 20.0],
         };
-        let rep = capacity_ladder(
-            &asks,
-            &bids,
-            0.0,
-            5.0,
-            &[100.0, 1010.0],
-            &pwin,
-            0.5,
-            None,
-            0.0,
-        );
+        let rep = capacity_ladder(&asks, &bids, 0.0, 5.0, None, &pwin, 0.5, None, 0.0);
         // Book notional: L1 1·100 = $100, L2 10·101 = $1010 → total $1110.
         let l10 = rep
             .bps_capacity_ladder
@@ -1180,7 +1185,7 @@ mod tests {
             &bids,
             0.0,
             10.0,
-            &[100.0],
+            None,
             &PWinCurve {
                 points: vec![],
                 episodes: 0,
@@ -1202,7 +1207,7 @@ mod tests {
         let asks = vec![(100.0, 1.0), (101.0, 10.0)];
         let bids = vec![(102.0, 1.0), (101.5, 10.0)];
         // L2 dev = (0.5/101)*1e4 ≈ 49.5bps -> bucket = first threshold >= 49.5
-        // = 100 -> p=0.5 < p_min 0.9. Tier1 marginal (dev 200) -> 200 -> 0.95.
+        // = 100 -> p=0.5 < p_min 0.9. Chunk1 marginal (dev 200) -> 200 -> 0.95.
         let pwin = PWinCurve {
             points: vec![(100.0, 0.5), (200.0, 0.95)],
             episodes: 20,
@@ -1211,19 +1216,13 @@ mod tests {
             point_censored: vec![0, 0],
             point_sum_w2: vec![20.0, 20.0],
         };
-        let rep = capacity_ladder(
-            &asks,
-            &bids,
-            0.0,
-            5.0,
-            &[100.0, 300.0],
-            &pwin,
-            0.9,
-            None,
-            0.0,
-        );
-        // Tier2 marginal level has dev≈49.5 -> p=0.5 < 0.9 -> not breakeven.
-        assert_eq!(rep.breakeven_size_usd, Some(rep.tiers[0].filled_usd));
+        let rep = capacity_ladder(&asks, &bids, 0.0, 5.0, None, &pwin, 0.9, None, 0.0);
+        // Chunk2's marginal gate is 0.5 < 0.9 -> breakeven stops at the
+        // first boundary ($100), even though cumulative exp stays positive.
+        assert_eq!(rep.breakeven_size_usd, Some(100.0));
+        // Optimal still walks deeper: exp_usd at $1110 (0.5·49.5−5 weighted
+        // in) exceeds the $100 prefix's 185bps·$100.
+        assert_eq!(rep.optimal_size_usd, Some(1110.0));
     }
 
     #[test]
@@ -1235,7 +1234,7 @@ mod tests {
             &bids,
             0.0,
             10.0,
-            &[100.0],
+            None,
             &PWinCurve {
                 points: vec![],
                 episodes: 0,
@@ -1248,10 +1247,14 @@ mod tests {
             None,
             0.0,
         );
-        assert_eq!(rep.tiers.len(), 1);
-        assert!(rep.tiers[0].expected_net_bps.is_none());
+        // Raw curve still renders; every expectation-gated field is None.
+        assert_eq!(rep.depth_curve.len(), 1);
+        assert!(rep.depth_curve[0].cum_exp_bps.is_none());
+        assert!((rep.depth_curve[0].cum_net_bps - 190.0).abs() < 1e-6);
+        assert!(rep.expected_net_bps_at_optimal.is_none());
         assert!(rep.optimal_size_usd.is_none());
         assert!(rep.breakeven_size_usd.is_none());
+        assert!(rep.expected_profit_usd.is_none());
     }
 
     #[test]

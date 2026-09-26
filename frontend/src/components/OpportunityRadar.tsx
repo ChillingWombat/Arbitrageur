@@ -228,7 +228,6 @@ const DEFAULT_MONITOR_CONFIG: MonitorConfigDto = {
   halfLifeMultiplier: 2,
   minWindowSecs: 1800,
   frictionCoverMult: 1,
-  capacityTiersUsd: [100, 500, 1000, 5000, 10000],
   minWinProbability: 0.9,
   executionMode: "one_way",
   participationCap: 1,
@@ -415,27 +414,6 @@ const ConfigPanel: React.FC<{
                     min={1}
                     value={draft.historyWindowSecs / 3600}
                     onChange={(e) => set("historyWindowSecs", num(e.target.value, 24) * 3600)}
-                  />
-                </div>
-                <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
-                  <label className={`${LABEL_CLS} flex-1`}>
-                    <span className="flex items-center">
-                      Capacity tiers ($)
-                      <InfoTooltip text="Comma-separated notional tiers used to build the per-row capacity ladder, in USD." />
-                    </span>
-                  </label>
-                  <input
-                    className={SELECT_INLINE_CLS}
-                    value={draft.capacityTiersUsd.join(",")}
-                    onChange={(e) =>
-                      set(
-                        "capacityTiersUsd",
-                        e.target.value
-                          .split(",")
-                          .map((s) => Number(s.trim()))
-                          .filter((n) => Number.isFinite(n) && n > 0),
-                      )
-                    }
                   />
                 </div>
               </div>
