@@ -143,7 +143,11 @@ export const OPTIONS_SUBSTRATEGIES: OptionsSubstrategy[] = [
   },
 ];
 
-const PARITY = OPTIONS_SUBSTRATEGIES[0];
+/** Fixed scan profile — there is no per-scan form; a scan always sweeps
+    every reachable underlying at this size and edge hurdle. */
+const SCAN_QTY_BASE = 0.1;
+const MIN_EDGE_BPS = 5;
+const SCAN_CURRENCIES = ["BTC", "ETH"] as const;
 
 interface OptionsArbitrageProps {
   executionLogs: ExecutionLogEntry[];
@@ -409,9 +413,6 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
 }) => {
   const [selected, setSelected] = useState<string>("all");
   const [dirFilter, setDirFilter] = useState<"all" | "conversion" | "reversal">("all");
-  const [currency, setCurrency] = useState<"BTC" | "ETH">("BTC");
-  const [qtyBase, setQtyBase] = useState("0.1");
-  const [minEdgeBps, setMinEdgeBps] = useState("5");
   const [opps, setOpps] = useState<OptionsParityOpportunityDto[]>([]);
   const [scanning, setScanning] = useState(false);
   const [scanned, setScanned] = useState(false);
@@ -455,12 +456,30 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
     setError(null);
     setMessage(null);
     try {
-      const qty = parseFloat(qtyBase);
-      const res = await api.scanOptionsParity({
-        currency,
-        qty_base: Number.isFinite(qty) && qty > 0 ? qty : 0.1,
-        min_edge_bps: parseFloat(minEdgeBps) || 0,
-      });
+      const settled = await Promise.allSettled(
+        SCAN_CURRENCIES.map((currency) =>
+          api.scanOptionsParity({
+            currency,
+            qty_base: SCAN_QTY_BASE,
+            min_edge_bps: MIN_EDGE_BPS,
+          }),
+        ),
+      );
+      const res = settled.flatMap((s) => (s.status === "fulfilled" ? s.value : []));
+      const rejected = settled.filter((s) => s.status === "rejected");
+      if (rejected.length === settled.length) {
+        const reason = (rejected[0] as PromiseRejectedResult).reason;
+        throw reason instanceof Error ? reason : new Error(String(reason));
+      }
+      if (rejected.length > 0) {
+        setError(
+          rejected
+            .map((r) =>
+              r.reason instanceof Error ? r.reason.message : String(r.reason),
+            )
+            .join("; "),
+        );
+      }
       setOpps(res);
       setScanned(true);
     } catch (e) {
@@ -469,7 +488,7 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
     } finally {
       setScanning(false);
     }
-  }, [currency, qtyBase, minEdgeBps]);
+  }, []);
 
   const runExecute = useCallback(
     async (opp: OptionsParityOpportunityDto) => {
@@ -480,8 +499,8 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
         const params: OptionsParityExecutionParams = {
           id: opp.id,
           currency: opp.currency,
-          qty_base: parseFloat(qtyBase) || opp.qty_base_suggested,
-          min_edge_bps: parseFloat(minEdgeBps) || 0,
+          qty_base: opp.qty_base_suggested,
+          min_edge_bps: MIN_EDGE_BPS,
         };
         const res = await api.executeOptionsParity(params);
         setExecuted((s) => new Set(s).add(opp.id));
@@ -494,7 +513,7 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
         setConfirmOpp(null);
       }
     },
-    [qtyBase, minEdgeBps, onRefreshAll],
+    [onRefreshAll],
   );
 
   return (
@@ -518,7 +537,7 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
               <>
                 <div className="ribbon-pill" title="Net-edge hurdle for reported setups">
                   <span className="text-muted">Min Edge</span>
-                  <span className="font-bold text-slate-900 tabular-nums">{minEdgeBps}</span>
+                  <span className="font-bold text-slate-900 tabular-nums">{MIN_EDGE_BPS}</span>
                   <span className="text-muted">BPS</span>
                 </div>
               </>
@@ -596,64 +615,18 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
           </div>
         </div>
 
-        {/* Parity scanner panel — visible in the overall view and when the
-            parity substrategy is selected. */}
-        {parityVisible && (
-          <div className="panel p-4">
-            <div className="flex items-center gap-3 flex-wrap">
-              <div className="flex items-center gap-2">
-                <Option className="w-4 h-4 text-accent" />
-                <span className="text-sm font-semibold">{PARITY.name} Scan</span>
-              </div>
-              <label className="text-xs text-slate-400">
-                Underlying
-                <select
-                  value={currency}
-                  onChange={(e) => setCurrency(e.target.value as "BTC" | "ETH")}
-                  className="ml-1 px-2 py-1 bg-surface border border-surface-border rounded-md text-xs font-mono"
-                >
-                  <option value="BTC">BTC</option>
-                  <option value="ETH">ETH</option>
-                </select>
-              </label>
-              <label className="text-xs text-slate-400">
-                Qty ({currency})
-                <input
-                  value={qtyBase}
-                  onChange={(e) => setQtyBase(e.target.value)}
-                  className="ml-1 w-20 px-2 py-1 bg-surface border border-surface-border rounded-md text-xs font-mono"
-                />
-              </label>
-              <label className="text-xs text-slate-400">
-                Min edge (bps)
-                <input
-                  value={minEdgeBps}
-                  onChange={(e) => setMinEdgeBps(e.target.value)}
-                  className="ml-1 w-16 px-2 py-1 bg-surface border border-surface-border rounded-md text-xs font-mono"
-                />
-              </label>
-            </div>
-            <p className="mt-2 text-xs text-slate-500">
-              Put-call parity: synthetic forward K + (C − P) vs the perpetual's
-              funding-adjusted price. Conversion sells the rich synthetic
-              (short call + long put + long perp); Reversal buys the cheap one.
-              Edge is unrealized until expiry — premiums and fees are the only
-              cash at entry. Equity and index underlyings become reachable as
-              IBKR and other options venues land.
-            </p>
-            {!optionsVenueAvailable && (
-              <div className="mt-2 p-2.5 rounded-lg border border-amber-500/40 bg-amber-500/10 text-amber-300 text-xs flex items-center gap-2">
-                <AlertCircle className="w-4 h-4 shrink-0" />
-                <span>
-                  No options-capable venue is enabled — parity scanning
-                  currently requires Deribit. Enable it under Engine Settings →
-                  Exchanges and add Client ID + Secret in Exchange Accounts
-                  (test.deribit.com credentials in Testnet mode). IBKR and
-                  other options venues will slot into this page as they are
-                  wired.
-                </span>
-              </div>
-            )}
+        {/* Venue capability warning — parity scanning is the only live
+            scanner today and it requires an options venue. */}
+        {parityVisible && !optionsVenueAvailable && (
+          <div className="p-2.5 rounded-lg border border-amber-500/40 bg-amber-500/10 text-amber-300 text-xs flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 shrink-0" />
+            <span>
+              No options-capable venue is enabled — parity scanning currently
+              requires Deribit. Enable it under Engine Settings → Exchanges and
+              add Client ID + Secret in Exchange Accounts (test.deribit.com
+              credentials in Testnet mode). IBKR and other options venues will
+              slot into this page as they are wired.
+            </span>
           </div>
         )}
 
