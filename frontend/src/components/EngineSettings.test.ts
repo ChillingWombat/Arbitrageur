@@ -1,11 +1,21 @@
-import test from "node:test";
+import nodeTest from "node:test";
 import assert from "node:assert/strict";
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import {
   EXCHANGES_ALPHABETICAL,
   EXCHANGE_GROUP_ORDER,
   filterSidebarExchanges,
   groupExchangesBySection,
+  TransactionHistoryCard,
 } from "./EngineSettings.tsx";
+import type { ConfirmActionSpec } from "./ConfirmActionModal.tsx";
+
+// In `--interactive-child` mode this file re-executes as a plain script: the
+// DOM mount lives at the bottom and tests must not re-register (or they'd
+// recurse into another child). `test` becomes a no-op there.
+const INTERACTIVE_CHILD = process.argv.includes("--interactive-child");
+const test = INTERACTIVE_CHILD ? (((() => {}) as unknown) as typeof nodeTest) : nodeTest;
 import { EVM_AMM_VENUE_IDS } from "./ExchangeAccounts.tsx";
 import { venueHasTestnet } from "../types/tickers";
 
@@ -78,3 +88,110 @@ test("favorites filter cannot resurrect a live-only venue in testnet", () => {
   const ids = visible.map((ex) => ex.id);
   assert.deepEqual(ids, ["binance"]);
 });
+
+test("transaction history card scopes the wipe to the active environment", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(TransactionHistoryCard, {
+      tradingMode: "testnet",
+      disabled: false,
+      onRequestReset: () => {},
+      resetMsg: null,
+      resetErr: null,
+    }),
+  );
+  assert.match(html, /Transaction History/);
+  assert.match(html, /Testnet<\/span>\s*mode/, "env label names the mode being wiped");
+  assert.match(html, /Net Profit reset to \$0\.00/);
+  assert.match(html, /Cannot be undone/);
+  assert.match(html, /Reset Transaction History/);
+
+  const live = renderToStaticMarkup(
+    React.createElement(TransactionHistoryCard, {
+      tradingMode: "live",
+      disabled: true,
+      onRequestReset: () => {},
+      resetMsg: "Removed 3 signal(s)",
+      resetErr: null,
+    }),
+  );
+  assert.match(live, /Live<\/span>\s*mode/);
+  assert.match(live, /disabled=""/, "disabled state reaches the button");
+  assert.match(live, /Removed 3 signal\(s\)/);
+});
+
+test("reset button hands the parent an explicit confirm spec (interactive DOM)", async (t) => {
+  await t.test("click → spec", () => {
+    const { execFileSync } = require("node:child_process");
+    const out = execFileSync(
+      process.execPath,
+      [__filename, "--interactive-child"],
+      { encoding: "utf8", timeout: 30000 },
+    );
+    assert.match(out, /INTERACTIVE-OK/);
+  });
+});
+
+// ── child-process harness (not executed under node:test) ────────────────────
+declare const __filename: string;
+
+async function runInteractiveChild() {
+  const { Window } = await import("happy-dom");
+  const { createRoot } = await import("react-dom/client");
+  const { act } = await import("react");
+
+  const window = new Window();
+  for (const key of [
+    "document", "window", "HTMLElement", "HTMLButtonElement",
+    "Element", "Node", "MouseEvent", "CustomEvent", "Event",
+    "SVGElement", "DocumentFragment", "MutationObserver", "getComputedStyle",
+    "requestAnimationFrame", "cancelAnimationFrame",
+  ]) {
+    (globalThis as Record<string, unknown>)[key] =
+      (window as unknown as Record<string, unknown>)[key] ??
+      (globalThis as Record<string, unknown>)[key];
+  }
+  (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
+
+  const container = window.document.createElement("div");
+  window.document.body.appendChild(container);
+  const reactContainer = container as unknown as HTMLElement;
+
+  let spec: ConfirmActionSpec | null = null;
+  const root = createRoot(reactContainer);
+  await act(async () => {
+    root.render(
+      React.createElement(TransactionHistoryCard, {
+        tradingMode: "testnet",
+        disabled: false,
+        onRequestReset: (s) => { spec = s; },
+        resetMsg: null,
+        resetErr: null,
+      }),
+    );
+  });
+
+  const btn = container.querySelector("button");
+  if (!btn) throw new Error("no reset button");
+  await act(async () => {
+    btn.dispatchEvent(new window.MouseEvent("click", { bubbles: true, cancelable: true }));
+  });
+  if (!spec) throw new Error("click did not request the reset spec");
+  const s: ConfirmActionSpec = spec;
+  if (s.title !== "Reset Transaction History") throw new Error(`bad title ${s.title}`);
+  if (!s.subtitle?.includes("Testnet")) throw new Error(`bad subtitle ${s.subtitle}`);
+  if (!s.body.includes("Net Profit") || !s.body.includes("cannot be undone")) {
+    throw new Error("confirm body missing blast-radius wording");
+  }
+  if (s.confirmLabel !== "Delete Transaction History") throw new Error(`bad label ${s.confirmLabel}`);
+
+  await act(async () => root.unmount());
+  process.stdout.write("INTERACTIVE-OK\n");
+  process.exit(0);
+}
+
+if (INTERACTIVE_CHILD) {
+  runInteractiveChild().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}

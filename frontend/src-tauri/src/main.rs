@@ -206,6 +206,7 @@ fn main() {
             commands::trigger_emergency_killswitch,
             commands::flatten_ticker_positions,
             commands::get_execution_logs,
+            commands::reset_transaction_history,
             commands::get_venue_execution_capabilities,
             commands::set_live_mode,
             commands::set_trading_environment,

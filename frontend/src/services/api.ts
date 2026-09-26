@@ -62,6 +62,7 @@ import type {
   StrategyCapabilityDto,
   SignalExecutionDto,
   TradedOpportunityDto,
+  TransactionHistoryResetDto,
   OpenPositionDto,
   TickerPositionState,
   FlattenResultDto,
@@ -253,6 +254,7 @@ const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   "get_radar_bot_status",
   "list_signal_executions",
   "list_traded_opportunities",
+  "reset_transaction_history",
   "get_ticker_position_state",
   "get_open_positions",
   "get_external_positions",
@@ -1174,6 +1176,14 @@ export const api = {
 
   async listTradedOpportunities(): Promise<TradedOpportunityDto[]> {
     return invokeDesktop<TradedOpportunityDto[]>("list_traded_opportunities");
+  },
+
+  /** Wipe the ACTIVE environment's transaction ledger — signals, atomic
+   * legs, cycle lots, execution journal, and the cumulative Net Profit
+   * counter. Refuses while any position is open. Rows tagged 'unknown'
+   * environment are removed too (every env view surfaces them). */
+  async resetTransactionHistory(): Promise<TransactionHistoryResetDto> {
+    return invokeDesktop<TransactionHistoryResetDto>("reset_transaction_history");
   },
 
   async getTickerPositionState(symbol: string): Promise<TickerPositionState> {

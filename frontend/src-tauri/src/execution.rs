@@ -5940,6 +5940,7 @@ mod traded_opportunity_tests {
     use chrono::Utc;
     use std::collections::HashMap;
 
+    #[allow(clippy::too_many_arguments)]
     fn leg(
         id: &str,
         signal: &str,

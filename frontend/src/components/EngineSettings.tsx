@@ -31,6 +31,7 @@ import type { EngineSettingsDto, SystemStatusDto, VenueStatusDto, VaultStatus, V
 import { DEFAULT_PASSIVE_UNWIND } from "../types";
 import { venueHasTestnet } from "../types/tickers";
 import { VaultUnlockModal } from "./VaultUnlockModal";
+import { ConfirmActionModal, type ConfirmActionSpec } from "./ConfirmActionModal";
 import { InfoTooltip } from "./InfoTooltip";
 import { SaveButton, useSaveButton } from "./SaveButton";
 import { ArbitrageurLogo } from "./ArbitrageurLogo";
@@ -185,6 +186,77 @@ export function filterSidebarExchanges(
       (ex.id === "evm_wallet" ||
         exchangeFilter === "all" ||
         favoriteExchanges.includes(ex.id)),
+  );
+}
+
+/** Danger-zone card on the Execution tab: wipes the active environment's
+ * executed-transaction ledger. `onRequestReset` receives the confirm-modal
+ * spec — the parent owns the modal and the actual IPC call so this card
+ * stays purely presentational. */
+export function TransactionHistoryCard({
+  tradingMode,
+  disabled,
+  onRequestReset,
+  resetMsg,
+  resetErr,
+}: {
+  tradingMode: string;
+  disabled: boolean;
+  onRequestReset: (spec: ConfirmActionSpec) => void;
+  resetMsg: string | null;
+  resetErr: string | null;
+}) {
+  const envLabel = tradingMode === "live" ? "Live" : "Testnet";
+  return (
+    <div className="p-3.5 bg-surface border border-loss-border/40 rounded-lg shadow-2xs space-y-3">
+      <div className="space-y-1 min-w-0">
+        <label className="text-slate-800 font-bold text-xs flex items-center">
+          Transaction History
+          <InfoTooltip
+            position="bottom"
+            text={"Wipes this environment's executed-transaction ledger: traded-opportunity records with their atomic order legs, cycle lots, the execution journal, and the cumulative Net Profit counter.\n\nScoped to the active trading mode — the other environment's history is untouched. Rows without a recorded environment are also removed (they display in every environment's view). Credentials, settings, venue accounts, spread history, and radar data are never touched.\n\nRefuses while any position or open signal exists anywhere — the ledger cannot be deleted out from under live exposure."}
+          />
+        </label>
+        <p className="text-xs text-slate-500">
+          Remove all past transactions recorded in{" "}
+          <span className="font-semibold text-slate-700">{envLabel}</span>{" "}
+          mode — opportunity ledger, atomic fills, and Net Profit reset to $0.00.
+        </p>
+      </div>
+      <div className="flex items-center justify-between gap-3 pt-1 border-t border-surface-border">
+        <p className="text-[11px] text-slate-500 leading-snug">
+          Cannot be undone. Refused while any position is open.
+        </p>
+        <button
+          type="button"
+          disabled={disabled}
+          onClick={() =>
+            onRequestReset({
+              title: "Reset Transaction History",
+              subtitle: `${tradingMode === "live" ? "Live (Mainnet)" : "Paper (Testnet)"} environment`,
+              body: `Permanently delete every transaction record in the ${envLabel} environment: traded-opportunity signals with their atomic order legs, cycle lots, the execution journal, and the cumulative Net Profit counter (reset to $0.00). Records without a stored environment are removed too since they appear in this view. Credentials, settings, accounts, market-data history, and the other environment's records are NOT touched. This cannot be undone.`,
+              confirmLabel: "Delete Transaction History",
+            })
+          }
+          className="btn-danger px-3 py-2 text-xs font-bold flex items-center space-x-1.5 shrink-0 disabled:opacity-50"
+        >
+          <Trash2 className="w-3.5 h-3.5" />
+          <span>Reset Transaction History</span>
+        </button>
+      </div>
+      {resetMsg && (
+        <div className="p-2.5 bg-profit-dim border border-profit-border text-profit rounded-lg text-[11px] font-mono flex items-center space-x-2">
+          <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+          <span>{resetMsg}</span>
+        </div>
+      )}
+      {resetErr && (
+        <div className="p-2.5 bg-loss-dim border border-loss-border text-loss rounded-lg text-[11px] font-mono flex items-center space-x-2">
+          <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+          <span>{resetErr}</span>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -481,6 +553,11 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   const [liveRiskAgreed, setLiveRiskAgreed] = useState(false);
   const [liveRiskConfirmationInput, setLiveRiskConfirmationInput] = useState("");
   const [liveRiskAck, setLiveRiskAck] = useState(false);
+
+  // Transaction-history reset (Execution danger card)
+  const [resetConfirm, setResetConfirm] = useState<ConfirmActionSpec | null>(null);
+  const [resetMsg, setResetMsg] = useState<string | null>(null);
+  const [resetErr, setResetErr] = useState<string | null>(null);
 
   // Venue Balances
   const [venueBalances, setVenueBalances] = useState<VenueBalanceInfo[]>([]);
@@ -1983,6 +2060,18 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               </div>
             </div>
 
+            {/* Transaction History — destructive reset */}
+            <TransactionHistoryCard
+              tradingMode={tradingMode}
+              disabled={!api.isTauri || loading}
+              onRequestReset={(spec) => {
+                setResetErr(null);
+                setResetConfirm(spec);
+              }}
+              resetMsg={resetMsg}
+              resetErr={resetErr}
+            />
+
           </div>
         )}
 
@@ -2688,6 +2777,24 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
       </div>
     </div>
   )}
+
+  {/* Transaction-history reset — same confirm pattern as flatten/halt. */}
+  <ConfirmActionModal
+    spec={resetConfirm}
+    onCancel={() => setResetConfirm(null)}
+    onError={(msg) => {
+      setResetMsg(null);
+      setResetErr(msg);
+    }}
+    onConfirm={async () => {
+      setResetMsg(null);
+      setResetErr(null);
+      const r = await api.resetTransactionHistory();
+      setResetMsg(
+        `Removed ${r.signalsRemoved} signal(s), ${r.legsRemoved} order leg(s), ${r.lotsRemoved} cycle lot(s), ${r.logsRemoved} log entr${r.logsRemoved === 1 ? "y" : "ies"} — Net Profit reset to $0.00.`
+      );
+    }}
+  />
 </div>
   );
 }, areEngineSettingsPropsEqual);
