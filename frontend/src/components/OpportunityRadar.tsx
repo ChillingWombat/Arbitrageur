@@ -1123,9 +1123,6 @@ const RadarRow: React.FC<RadarRowProps> = React.memo(
   },
 );
 
-/* Auto-bot status gadget lives in ./AutoBotGadget (single radar bot
-   control; backend BotMode is the source of truth). */
-
 /* ------------------------------------------------------------------ */
 /* Main component                                                      */
 /* ------------------------------------------------------------------ */

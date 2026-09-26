@@ -820,7 +820,6 @@ export interface EngineSettingsDto {
 
   // Execution & Warm-up Modes
   trading_mode: "testnet" | "live";
-  paper_starting_balance_usd?: number;
   fast_warmup_enabled: boolean;
 
   // Overall circuit-breaker + safety-net limits (Safety settings section)
