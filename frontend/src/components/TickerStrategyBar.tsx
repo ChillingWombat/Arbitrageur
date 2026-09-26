@@ -53,7 +53,7 @@ export const TickerStrategyBar: React.FC<TickerStrategyBarProps> = ({
         <div className="flex flex-wrap items-center gap-2">
           <div className="flex items-center space-x-1.5 text-slate-500 font-medium">
             <span className="w-1.5 h-1.5 rounded-full bg-accent" />
-            <span className="font-semibold text-slate-800">Strategy Parameters:</span>
+            <span className="font-semibold text-slate-800">Strategy Status:</span>
           </div>
 
           <span

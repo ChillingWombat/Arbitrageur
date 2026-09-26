@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef } from "react";
 import { Filter, SlidersHorizontal, X } from "lucide-react";
 import type { PredictionOpportunityDto, StrategyCapabilityDto } from "../types";
-import { BotLifecycleControls } from "./BotLifecycleControls";
+import { BotLifecycleControls, BotPhaseBadge } from "./BotLifecycleControls";
 import { EmptyState } from "./EmptyState";
 import { ExecuteButton } from "./ExecuteButton";
 import { CapacityChart } from "./CapacityChart";
@@ -205,8 +205,9 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
       <div className="ribbon-container">
         <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
           <span className="text-[13px] font-mono font-bold tracking-wider text-slate-900 pr-1">
-            Strategy Parameters
+            Strategy Status
           </span>
+          <BotPhaseBadge phase={bot.phase} />
           <div
             className="ribbon-pill"
             title="Minimum net profit required for auto-execution"

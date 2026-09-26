@@ -10,7 +10,7 @@ import {
 import { api } from "../services/api";
 import type { SpotOpportunityDto, SpotExecutionParams, ExecutionLogEntry, StrategyCapabilityDto } from "../types";
 import type { SpotStrategyParams } from "./TickerConfigModal";
-import { BotLifecycleControls } from "./BotLifecycleControls";
+import { BotLifecycleControls, BotPhaseBadge } from "./BotLifecycleControls";
 import { EmptyState } from "./EmptyState";
 import { ExecuteButton } from "./ExecuteButton";
 import { CapacityChart } from "./CapacityChart";
@@ -185,8 +185,9 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
       <div className="ribbon-container">
         <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
           <span className="text-[13px] font-mono font-bold tracking-wider text-slate-900 pr-1">
-            Strategy Parameters
+            Strategy Status
           </span>
+          <BotPhaseBadge phase={bot.phase} />
           {/* Trade Size */}
           <div
             className="ribbon-pill"

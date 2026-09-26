@@ -15,7 +15,7 @@ import type {
   ExecutionLogEntry,
   StrategyParamsDto,
 } from "../types";
-import { BotLifecycleControls } from "./BotLifecycleControls";
+import { BotLifecycleControls, BotPhaseBadge } from "./BotLifecycleControls";
 import { EmptyState } from "./EmptyState";
 import { ExecuteButton } from "./ExecuteButton";
 import { DetailField, DetailSection } from "./DetailBits";
@@ -358,8 +358,9 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
       <div className="ribbon-container">
         <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
           <span className="text-[13px] font-mono font-bold tracking-wider text-slate-900 pr-1">
-            Strategy Parameters
+            Strategy Status
           </span>
+          <BotPhaseBadge phase={bot.phase} />
           <div
             className="ribbon-pill"
             title="Notional per 3-leg cycle — edit in Cycle Guardrails"

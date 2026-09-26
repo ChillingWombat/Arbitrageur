@@ -25,6 +25,21 @@ interface BtnDef {
   activeClass: string;
 }
 
+/** Phase status badge — rendered by each strategy page inside its
+ * "Strategy Status" ribbon next to the parameter chips, so the bot's
+ * drain/flatten state reads alongside the parameters it operates under.
+ * Returns null for phases with no operator-visible label. */
+export const BotPhaseBadge: React.FC<{ phase: BotPhase }> = ({ phase }) => {
+  const label =
+    phase === "reduce_only" ? "Reduce-Only" : phase === "stopping" ? "Stopping" : null;
+  if (!label) return null;
+  return (
+    <span className="text-xs font-mono font-bold px-2 py-0.5 rounded-md bg-warn-dim text-warn-strong border border-warn-border">
+      {label}
+    </span>
+  );
+};
+
 /**
  * Start / Pause / Reduce Only / Stop control group for strategy bots.
  * Stop is the emergency exit: flattens this strategy's positions for the
@@ -102,13 +117,6 @@ export const BotLifecycleControls: React.FC<BotLifecycleControlsProps> = ({
     },
   ];
 
-  const phaseLabel =
-    phase === "reduce_only"
-      ? "Reduce-Only"
-      : phase === "stopping"
-      ? "Stopping"
-      : null;
-
   return (
     <div className="flex items-center space-x-1.5 px-2 py-1 bg-surface border border-surface-border rounded-lg shadow-xs">
       <div className="flex items-center gap-1">
@@ -128,11 +136,6 @@ export const BotLifecycleControls: React.FC<BotLifecycleControlsProps> = ({
           </button>
         ))}
       </div>
-      {phaseLabel && (
-        <span className="text-xs font-mono font-bold px-2 py-0.5 rounded-md bg-warn-dim text-warn-strong border border-warn-border">
-          {phaseLabel}
-        </span>
-      )}
       <ConfirmActionModal
         spec={
           showStopConfirm
