@@ -1412,6 +1412,11 @@ pub struct SpreadMonitorEngine {
     /// `Arc<dyn ExchangeAdapter>` at construction, so without this a
     /// testnet adapter keeps polling — and writing — under a live env.
     watchlist_env: Mutex<Option<crate::state::TradingEnvironment>>,
+    /// The admitted-venue set as of the last refresh *attempt*. The cheap
+    /// path compares against this — a venue whose `fetch_markets` failed is
+    /// still "seen", so a permanently-failing venue cannot retrigger a
+    /// full multi-venue refresh on every 500ms tick.
+    watchlist_admitted: Mutex<std::collections::HashSet<String>>,
     /// Venue → settlement currency (the modal quote across its listed
     /// markets), learned at watchlist refresh. Drives account-equity
     /// normalization: a venue settling in USDT reports USDT equity.
@@ -1476,6 +1481,7 @@ impl SpreadMonitorEngine {
             funding_ema: Mutex::new(HashMap::new()),
             watchlist_mode: Mutex::new(String::new()),
             watchlist_env: Mutex::new(None),
+            watchlist_admitted: Mutex::new(std::collections::HashSet::new()),
             settlement_quotes: Mutex::new(HashMap::new()),
             watchlist: Mutex::new(Vec::new()),
             venue_symbols: Mutex::new(HashMap::new()),
@@ -1597,9 +1603,13 @@ impl SpreadMonitorEngine {
     }
 
     /// Force the next tick to re-derive the watchlist (exemption or
-    /// account-enablement change).
-    pub fn request_watchlist_refresh(&self) {
+    /// account-enablement change). The env's market caches are dropped too:
+    /// a forced refresh exists precisely because listing-relevant state
+    /// just changed, so serving the 5-minute-old snapshot would rebuild
+    /// the watchlist from the very staleness the caller is correcting.
+    pub fn request_watchlist_refresh(&self, state: &AppEngineState) {
         *self.last_watchlist_at.lock() = None;
+        state.invalidate_market_caches();
     }
 
     /// Latest computed snapshot (None until the first eval pass completes).
@@ -1752,20 +1762,34 @@ impl SpreadMonitorEngine {
             // ratio must never seed live-group conversions.
             self.ratio_ema.lock().clear();
         }
+        let admitted: HashSet<String> = state
+            .get_venues()
+            .iter()
+            .map(|(v, _, _)| v.to_string())
+            .collect();
         if !due {
-            // Cheap path: still pick up newly-admitted venues between full
-            // refreshes without re-calling fetch_markets.
-            let known: HashSet<String> =
-                self.lanes.lock().iter().map(|l| l.venue.clone()).collect();
-            let admitted: HashSet<String> = state
-                .get_venues()
-                .iter()
-                .map(|(v, _, _)| v.to_string())
-                .collect();
-            if admitted.is_subset(&known) {
+            let set_changed = *self.watchlist_admitted.lock() != admitted;
+            // A venue that never got a lane (new or failing) still retries —
+            // but on a minute cadence, not every tick: cached_markets'
+            // failure cooldown already bounds the wire cost, and this bounds
+            // how often the full pairing rebuild runs for a dead venue.
+            let laneless_retry = {
+                let lanes = self.lanes.lock();
+                admitted
+                    .iter()
+                    .any(|v| !lanes.iter().any(|l| l.venue == *v))
+            } && self
+                .last_watchlist_at
+                .lock()
+                .map(|t| t.elapsed() >= Duration::from_secs(60))
+                .unwrap_or(true);
+            if !set_changed && !laneless_retry {
                 return;
             }
         }
+        // Record the attempt — not just successful lanes — so a venue whose
+        // fetch keeps failing cannot retrigger a full refresh every tick.
+        *self.watchlist_admitted.lock() = admitted.clone();
 
         // Exemption rows are stored under the write-time policy's key.
         // Matching honors both shapes: a bare base ("BTC") exempts every
@@ -1810,7 +1834,11 @@ impl SpreadMonitorEngine {
             let reserve = self.cfg.lock().tx_reserve_pct.clamp(0.0, 0.9);
             let usable = (budget * (1.0 - reserve)).max(6.0);
 
-            match adapter.fetch_markets().await {
+            // Cached fetch: the scan/UI pollers share the same env-scoped
+            // cache, a stale listing serves on refresh failure, and a venue
+            // that keeps erroring rides the 30s failure cooldown instead of
+            // being re-requested on every tick.
+            match state.cached_markets(vid, &adapter).await {
                 Ok(markets) => {
                     // Pair keys under the active quote mode. For merged
                     // modes several markets share one key (BTC-USDT +
@@ -1916,7 +1944,7 @@ impl SpreadMonitorEngine {
                     // the venue's own stable/stable markets are the honest
                     // conversion for intra-venue cycles and venue equity.
                     if merge_usd {
-                        if let Ok(marks) = adapter.fetch_market_prices().await {
+                        if let Ok(marks) = state.cached_market_prices(vid, &adapter).await {
                             let mut pairs: Vec<(String, String, f64)> = Vec::new();
                             for (vsym, price) in &marks {
                                 let Some(q) = arbitrageur_core::symbol::symbol_quote(vsym) else {
@@ -4136,7 +4164,7 @@ mod tests {
         );
         // The venue set is unchanged, so force the refresh past the
         // newly-admitted-venues short-circuit.
-        engine.request_watchlist_refresh();
+        engine.request_watchlist_refresh(&state);
         engine.maybe_refresh_watchlist(&state).await;
         assert_eq!(
             *engine.watchlist.lock(),

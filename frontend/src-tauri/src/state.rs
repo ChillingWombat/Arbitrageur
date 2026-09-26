@@ -1493,6 +1493,11 @@ pub struct AppEngineState {
     pub markets_cache: MarketsCache,
     /// Venue mark-price cache (`{env}-{venue}` key) via `cached_market_prices`.
     pub market_prices_cache: MarketPricesCache,
+    /// Last-failure timestamps for cached venue reads, keyed
+    /// `{env}-{venue}-{kind}`. A failed fetch used to retry on every poll
+    /// tick (a guaranteed-fail venue got hammered at UI cadence); failures
+    /// cool down briefly so a recovering venue is retried, not hammered.
+    pub venue_fetch_failures: Mutex<std::collections::HashMap<String, std::time::Instant>>,
     /// Spread Range Monitor engine, installed by main() after construction
     /// (it needs a fully-built state to hydrate from).
     pub monitor: Mutex<Option<Arc<crate::monitor::SpreadMonitorEngine>>>,
@@ -2346,6 +2351,7 @@ impl AppEngineState {
             volume_cache: Mutex::new(None),
             markets_cache: Mutex::new(std::collections::HashMap::new()),
             market_prices_cache: Mutex::new(std::collections::HashMap::new()),
+            venue_fetch_failures: Mutex::new(std::collections::HashMap::new()),
             monitor: Mutex::new(None),
             radar_bot: Mutex::new(None),
             orderbook_flights: Arc::new(crate::ws_primary::OrderbookSingleFlight::new()),
@@ -3300,25 +3306,62 @@ impl AppEngineState {
         adapter: &Arc<dyn arbitrageur_core::exchange::ExchangeAdapter>,
     ) -> anyhow::Result<Vec<arbitrageur_core::market::MarketMetadata>> {
         const TTL: std::time::Duration = std::time::Duration::from_secs(300);
+        const FAIL_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
         let key = format!("{}-{vid}", self.env().as_str());
+        let fail_key = format!("{key}-markets");
         let stale = self.markets_cache.lock().get(&key).cloned();
         if let Some((at, ref markets)) = stale {
             if at.elapsed() < TTL {
                 return Ok(markets.clone());
             }
         }
+        if let Some(at) = self.venue_fetch_failures.lock().get(&fail_key) {
+            if at.elapsed() < FAIL_COOLDOWN {
+                match stale {
+                    Some((_, markets)) => return Ok(markets),
+                    None => anyhow::bail!("{vid}: markets fetch cooling down after failure"),
+                }
+            }
+        }
         match adapter.fetch_markets().await {
             Ok(markets) => {
+                self.venue_fetch_failures.lock().remove(&fail_key);
                 self.markets_cache
                     .lock()
                     .insert(key, (std::time::Instant::now(), markets.clone()));
                 Ok(markets)
             }
-            Err(e) => match stale {
-                Some((_, markets)) => Ok(markets),
-                None => Err(e),
-            },
+            Err(e) => {
+                self.venue_fetch_failures
+                    .lock()
+                    .insert(fail_key, std::time::Instant::now());
+                match stale {
+                    Some((_, markets)) => {
+                        tracing::warn!("{vid}: markets refresh failed, serving stale cache: {e}");
+                        Ok(markets)
+                    }
+                    None => {
+                        tracing::warn!("{vid}: markets fetch failed: {e}");
+                        Err(e)
+                    }
+                }
+            }
         }
+    }
+
+    /// Drop every cached market/price snapshot and failure stamp for the
+    /// active environment. Called by forced watchlist refreshes — a caller
+    /// requesting one just changed listing-relevant config, so the cached
+    /// answer is exactly what it no longer trusts. Env-scoped: the other
+    /// environment's caches stay warm.
+    pub(crate) fn invalidate_market_caches(&self) {
+        let prefix = format!("{}-", self.env().as_str());
+        let mut markets = self.markets_cache.lock();
+        markets.retain(|k, _| !k.starts_with(&prefix));
+        let mut prices = self.market_prices_cache.lock();
+        prices.retain(|k, _| !k.starts_with(&prefix));
+        let mut fails = self.venue_fetch_failures.lock();
+        fails.retain(|k, _| !k.starts_with(&prefix));
     }
 
     /// Venue mark prices through the same env-scoped cache contract as
@@ -3331,24 +3374,48 @@ impl AppEngineState {
         adapter: &Arc<dyn arbitrageur_core::exchange::ExchangeAdapter>,
     ) -> anyhow::Result<std::collections::HashMap<String, Decimal>> {
         const TTL: std::time::Duration = std::time::Duration::from_secs(60);
+        const FAIL_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
         let key = format!("{}-{vid}", self.env().as_str());
+        let fail_key = format!("{key}-prices");
         let stale = self.market_prices_cache.lock().get(&key).cloned();
         if let Some((at, ref prices)) = stale {
             if at.elapsed() < TTL {
                 return Ok(prices.clone());
             }
         }
+        if let Some(at) = self.venue_fetch_failures.lock().get(&fail_key) {
+            if at.elapsed() < FAIL_COOLDOWN {
+                match stale {
+                    Some((_, prices)) => return Ok(prices),
+                    None => anyhow::bail!("{vid}: market prices fetch cooling down after failure"),
+                }
+            }
+        }
         match adapter.fetch_market_prices().await {
             Ok(prices) => {
+                self.venue_fetch_failures.lock().remove(&fail_key);
                 self.market_prices_cache
                     .lock()
                     .insert(key, (std::time::Instant::now(), prices.clone()));
                 Ok(prices)
             }
-            Err(e) => match stale {
-                Some((_, prices)) => Ok(prices),
-                None => Err(e),
-            },
+            Err(e) => {
+                self.venue_fetch_failures
+                    .lock()
+                    .insert(fail_key, std::time::Instant::now());
+                match stale {
+                    Some((_, prices)) => {
+                        tracing::warn!(
+                            "{vid}: market prices refresh failed, serving stale cache: {e}"
+                        );
+                        Ok(prices)
+                    }
+                    None => {
+                        tracing::warn!("{vid}: market prices fetch failed: {e}");
+                        Err(e)
+                    }
+                }
+            }
         }
     }
 

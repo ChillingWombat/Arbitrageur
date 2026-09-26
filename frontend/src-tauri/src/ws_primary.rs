@@ -18,12 +18,45 @@ struct FlightSlot {
 /// markets, and ticker paths are untouched.
 pub struct OrderbookSingleFlight {
     slots: Mutex<HashMap<(String, String), Arc<FlightSlot>>>,
+    /// Last-failure instant per (venue, symbol), with the cooldown the
+    /// failure earned. A book fetch that just failed used to be retried on
+    /// every poll tick, burning a TLS handshake per failure forever. Within
+    /// the cooldown the error is replayed locally. Transient failures get a
+    /// short window so recovery stays prompt; errors that prove the venue
+    /// doesn't list the symbol (HTTP 404, "no quote", "unknown instrument")
+    /// get a long one — the answer won't change until listings refresh.
+    failures: Mutex<HashMap<(String, String), (std::time::Instant, std::time::Duration)>>,
+}
+
+/// How long a transiently-failed (venue, symbol) book fetch replays its
+/// error locally.
+const BOOK_FAIL_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(15);
+/// Cooldown for failures that prove the venue does not list the symbol.
+const BOOK_UNLISTED_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Whether a book-fetch error proves the venue doesn't list the symbol —
+/// HTTP 404 plus the phrasing venues use for missing instruments. Anything
+/// else (network, auth, rate limit, 5xx) stays transient: it may recover
+/// within seconds and the short cooldown preserves that.
+fn book_failure_is_unlisted(err: &str) -> bool {
+    let e = err.to_ascii_lowercase();
+    e.contains("404")
+        || e.contains("no quote found")
+        || e.contains("unknown symbol")
+        || e.contains("unknown instrument")
+        || e.contains("instrument not found")
+        || e.contains("symbol not found")
+        || e.contains("not listed")
+        || e.contains("unsupported")
+        || e.contains("ws-only")
+        || e.contains("ws only")
 }
 
 impl OrderbookSingleFlight {
     pub fn new() -> Self {
         Self {
             slots: Mutex::new(HashMap::new()),
+            failures: Mutex::new(HashMap::new()),
         }
     }
 
@@ -38,6 +71,14 @@ impl OrderbookSingleFlight {
         symbol: &str,
     ) -> Result<OrderBook, String> {
         let key = (adapter.venue_id().0.clone(), symbol.to_string());
+        if let Some((at, cooldown)) = self.failures.lock().get(&key) {
+            if at.elapsed() < *cooldown {
+                return Err(format!(
+                    "{}: book fetch for {symbol} cooling down after failure",
+                    key.0
+                ));
+            }
+        }
         let (slot, am_leader) = {
             let mut slots = self.slots.lock();
             match slots.get(&key) {
@@ -57,6 +98,21 @@ impl OrderbookSingleFlight {
                 .fetch_orderbook(symbol)
                 .await
                 .map_err(|e| format!("{e:?}"));
+            match &outcome {
+                Ok(_) => {
+                    self.failures.lock().remove(&key);
+                }
+                Err(e) => {
+                    let cooldown = if book_failure_is_unlisted(e) {
+                        BOOK_UNLISTED_COOLDOWN
+                    } else {
+                        BOOK_FAIL_COOLDOWN
+                    };
+                    self.failures
+                        .lock()
+                        .insert(key.clone(), (std::time::Instant::now(), cooldown));
+                }
+            }
             *slot.result.lock() = Some(outcome.clone());
             self.slots.lock().remove(&key);
             slot.notify.notify_waiters();
@@ -106,7 +162,18 @@ pub async fn resolve_book_ws_first(
     }
     match flights.fetch(adapter, symbol).await {
         Ok(book) => Some(ResolvedBook::Fresh(book)),
-        Err(_) => None,
+        Err(e) => {
+            // The REST fallback failure used to vanish here — every poll
+            // then retried a doomed call with no trace. The real error is
+            // logged once per wire attempt; a cooldown replay is not new
+            // information, so it stays at debug.
+            if e.contains("cooling down after failure") {
+                tracing::debug!("ws_first: {venue_id} REST book fetch for {symbol}: {e}");
+            } else {
+                tracing::info!("ws_first: {venue_id} REST book fetch for {symbol} failed: {e}");
+            }
+            None
+        }
     }
 }
 

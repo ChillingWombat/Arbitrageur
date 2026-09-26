@@ -352,7 +352,11 @@ impl ExchangeAdapter for AlpacaAdapter {
         let v = self
             .trade_request("GET", "/v2/assets?status=active&asset_class=crypto", None)
             .await?;
-        for row in v.as_array().cloned().unwrap_or_default() {
+        let crypto_assets = v
+            .as_array()
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("alpaca assets response is not a JSON array"))?;
+        for row in crypto_assets {
             let tradable = row
                 .get("tradable")
                 .and_then(|t| t.as_bool())
@@ -638,22 +642,20 @@ impl ExchangeAdapter for AlpacaAdapter {
             .await?;
         let syms: Vec<String> = assets
             .as_array()
-            .map(|a| {
-                a.iter()
-                    .filter_map(|r| {
-                        r.get("tradable")
-                            .and_then(|t| t.as_bool())
-                            .unwrap_or(false)
-                            .then(|| {
-                                r.get("symbol")
-                                    .and_then(|s| s.as_str())
-                                    .map(|s| s.to_string())
-                            })
-                            .flatten()
+            .ok_or_else(|| anyhow::anyhow!("alpaca assets response is not a JSON array"))?
+            .iter()
+            .filter_map(|r| {
+                r.get("tradable")
+                    .and_then(|t| t.as_bool())
+                    .unwrap_or(false)
+                    .then(|| {
+                        r.get("symbol")
+                            .and_then(|s| s.as_str())
+                            .map(|s| s.to_string())
                     })
-                    .collect()
+                    .flatten()
             })
-            .unwrap_or_default();
+            .collect();
         let mut out = HashMap::new();
         if syms.is_empty() {
             return Ok(out);

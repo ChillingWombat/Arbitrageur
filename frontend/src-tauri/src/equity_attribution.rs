@@ -14,13 +14,31 @@
 /// note instead of attributing the move.
 pub const EQUITY_POLL_GAP_MAX_MS: i64 = 300_000;
 
-/// Noise deadband: absolute deltas at or below this are reporting noise, not
-/// external flows. Venue equity readouts wobble — observed symmetric
-/// oscillation of ±$0.02–0.21 across consecutive polls on flat accounts —
-/// and classifying that as deposit/withdrawal floods `account_equity_events`
-/// with phantom flows (thousands observed). Real external flows are
-/// dollars-scale, so a quarter of deadband loses no information.
+/// Noise deadband, absolute floor: absolute deltas at or below this are
+/// reporting noise, not external flows. Venue equity readouts wobble —
+/// observed symmetric oscillation of ±$0.02–0.21 across consecutive polls
+/// on flat accounts — and classifying that as deposit/withdrawal floods
+/// `account_equity_events` with phantom flows (thousands observed). Real
+/// external flows are dollars-scale, so a quarter of deadband loses no
+/// information.
 pub const EQUITY_DELTA_EPS_USD: f64 = 0.25;
+
+/// Noise deadband, relative term: mark/collateral repricing scales with
+/// account size, so a flat floor under-filters large accounts — an ~$11M
+/// deribit testnet equity readout oscillated ±$90–2450 between ~7s polls
+/// (~0.02% — crypto collateral repricing on a FLAT account, not flows) and
+/// recorded a phantom "withdrawal" every poll. The effective band is
+/// `max(EPS, REL × (expected − REL_FLOOR))`, so accounts under
+/// [`EQUITY_REL_NOISE_FLOOR_USD`] keep the $0.25 floor while large-equity
+/// reads absorb proportional marks noise. 0.05% of the over-floor amount is
+/// ~2× the observed large-account wobble; a flow smaller than that share of
+/// a >$1M account is indistinguishable from mark drift anyway.
+pub const EQUITY_DELTA_EPS_REL: f64 = 5e-4;
+
+/// Equity below this never widens its noise band — at small balances the
+/// observed wobble is sub-dollar, so the $0.25 floor stays authoritative and
+/// dust-scale funding/transfer classification is preserved.
+pub const EQUITY_REL_NOISE_FLOOR_USD: f64 = 1_000_000.0;
 
 /// Absolute deltas at or below this with open positions are classified as
 /// funding settlements rather than manual transfers.
@@ -97,7 +115,9 @@ pub fn check_equity_delta(
         };
     }
     let delta = actual - exp;
-    if delta.abs() <= EQUITY_DELTA_EPS_USD {
+    let band = EQUITY_DELTA_EPS_USD
+        .max((exp.abs() - EQUITY_REL_NOISE_FLOOR_USD).max(0.0) * EQUITY_DELTA_EPS_REL);
+    if delta.abs() <= band {
         // Noise band: no event, but DO rebase to actual. Pinning the
         // baseline to the last noise reading keeps the next comparison
         // honest — otherwise symmetric wobble could random-walk the stored
@@ -154,6 +174,24 @@ mod tests {
         let out = check_equity_delta(Some(100_000.0), 97_500.0, false, false, Some(1000));
         assert_eq!(out.event_kind.as_deref(), Some("withdrawal"));
         assert!(out.rebased);
+    }
+
+    #[test]
+    fn large_account_mark_drift_is_noise_not_flow() {
+        // $11.1M account drifting ~0.001% between polls — index repricing,
+        // not a withdrawal. The flat $0.25 band alone would emit a phantom
+        // withdrawal every poll.
+        let out = check_equity_delta(Some(11_133_435.1), 11_133_322.6, false, true, Some(7000));
+        assert_eq!(out.event_kind, None);
+        assert!(out.rebased, "noise still re-pins the baseline");
+    }
+
+    #[test]
+    fn large_account_real_flow_still_detected() {
+        // The band widens to ~$5.1k at $11.1M; a deliberate transfer is far
+        // above that and must still surface.
+        let out = check_equity_delta(Some(11_133_435.1), 11_083_435.1, false, true, Some(7000));
+        assert_eq!(out.event_kind.as_deref(), Some("withdrawal"));
     }
 
     #[test]
