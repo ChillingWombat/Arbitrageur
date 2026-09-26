@@ -64,6 +64,10 @@ fn main() {
         AppEngineState::new_persistent().expect("failed to initialize durable application state"),
     );
 
+    // Repair pre-fix unwind records: coordinator fills/unwinds that lived
+    // only in the signal note become real leg rows (idempotent one-shot).
+    execution::backfill_unwound_atomic_trails(&engine_state);
+
     // Install and spawn the spread-range monitor engine.
     {
         let monitor = monitor::SpreadMonitorEngine::new(&engine_state);
@@ -261,6 +265,7 @@ fn main() {
             commands::eligible_strategy_routes,
             commands::execute_spatial_candidates,
             commands::list_signal_executions,
+            commands::list_traded_opportunities,
             commands::get_ticker_position_state,
             commands::get_open_positions,
             commands::set_ticker_reduce_only,

@@ -1217,6 +1217,11 @@ export interface SignalLegDto {
   feeUsd: number;
   venueOrderId: string | null;
   clientOrderId: string | null;
+  /** Dispatch-time expected fill price; null for pre-v27 legs. */
+  intendedPrice: number | null;
+  /** Leg venue-units per unit of the parent symbol (tracked-group scale;
+   *  1.0 for same-instrument and pre-v39 legs). */
+  unitScale: number;
   createdAt: string;
   updatedAt: string;
 }
@@ -1229,6 +1234,8 @@ export interface SignalExecutionDto {
   strategyId: string;
   symbol: string;
   status: "in_flight" | "balanced" | "imbalanced" | "unresolved" | "closed" | "failed";
+  /** `testnet` | `live`; `unknown` for legacy rows — visible to every env. */
+  environment: string;
   routeId: string | null;
   accountLongId: string | null;
   accountShortId: string | null;
@@ -1239,6 +1246,64 @@ export interface SignalExecutionDto {
   createdAt: string;
   updatedAt: string;
   closedAt: string | null;
+}
+
+/** One atomic venue order inside a traded opportunity — a persisted signal
+ *  leg with its dispatch role and derived order side. */
+export interface AtomicTransactionDto {
+  legId: string;
+  signalId: string;
+  role: "entry" | "flatten" | "trim";
+  venue: string;
+  accountId: string | null;
+  /** Position side persisted on the leg row. */
+  side: "long" | "short";
+  /** Order side — entry longs buy / close longs sell. */
+  orderSide: "buy" | "sell";
+  /** Venue-facing instrument this leg ordered. */
+  symbol: string;
+  intendedQty: number;
+  filledQty: number;
+  intendedPrice: number | null;
+  fillPrice: number | null;
+  feeUsd: number;
+  /** Leg venue-units per unit of the parent symbol. */
+  unitScale: number;
+  venueOrderId: string | null;
+  clientOrderId: string | null;
+  /** Aggregate fill state of this order. */
+  fillState: "no_fill" | "partial" | "filled";
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** A traded opportunity: the root dispatch + close-family children + the
+ *  matched cycle lot when one exists. `realizedPnlUsd` is null while the
+ *  position may still be open — never a fabricated mark. */
+export interface TradedOpportunityDto {
+  signalId: string;
+  strategyId: string;
+  symbol: string;
+  environment: string;
+  status: "in_flight" | "balanced" | "imbalanced" | "unresolved" | "closed" | "failed";
+  routeId: string | null;
+  expectedNetUsd: number | null;
+  note: string | null;
+  venueLong: string | null;
+  venueShort: string | null;
+  createdAt: string;
+  closedAt: string | null;
+  lotId: string | null;
+  lotStatus: "open" | "closed" | "stopped_out" | "timed_out" | null;
+  entrySpreadBps: number | null;
+  closeSpreadBps: number | null;
+  realizedPnlUsd: number | null;
+  realizedPnlBps: number | null;
+  /** Signed cash-flow across all family fills (sells − buys − fees). */
+  legNetFlowUsd: number;
+  totalFeesUsd: number;
+  childCount: number;
+  transactions: AtomicTransactionDto[];
 }
 
 /** Attributed realized PnL for one strategy, from durable signal-leg fills

@@ -271,6 +271,17 @@ async fn dispatch(line: &str, state: &Arc<AppEngineState>) -> Value {
         // ── positions / signal ledger / bot ─────────────────────────────────
         "open_positions" => open_positions(&args, st),
         "signal_executions" => signal_executions(&args, st),
+        "traded_opportunities" => st
+            .state_store
+            .list_signals(None, None)
+            .map(|signals| {
+                json!(crate::execution::build_traded_opportunities(
+                    st.env().as_str(),
+                    &signals,
+                    &st.virtual_ledger.read().lots
+                ))
+            })
+            .map_err(|e| e.to_string()),
         "radar_bot_status" => radar_bot_status(st),
         "radar_bot_config" => radar_bot_config(st),
         "set_radar_bot_config" => set_radar_bot_config(&args, st),

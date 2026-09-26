@@ -211,6 +211,352 @@ pub(crate) fn reconcile_signal_legs(
     )
 }
 
+/// Persist the atomic truth of a coordinator unwind: the filled entry leg's
+/// actual fill on the root signal, plus the compensation unwind order as a
+/// `flat-` close child with its own leg, order identity, fill, and terminal
+/// status. Without this the unwind exists only as raw JSON inside the
+/// parent's failure note — the opportunity's atomic transaction trail and
+/// per-signal cash-flow reads lose two real venue orders.
+pub(crate) fn persist_unwind_leg_records(
+    state: &AppEngineState,
+    signal_id: &str,
+    side: crate::state_store::LegSide,
+    entry_fill: &arbitrageur_core::order::OrderResponse,
+    unwind_resp: &arbitrageur_core::order::OrderResponse,
+) {
+    let to_f64 = |d: rust_decimal::Decimal| d.to_string().parse::<f64>().unwrap_or(0.0);
+    // 1) The entry leg's actual fill — monotonic apply can't regress truth.
+    if !entry_fill.order_id.is_empty() {
+        let cid =
+            (!entry_fill.client_order_id.is_empty()).then_some(entry_fill.client_order_id.as_str());
+        if let Err(e) = state.state_store.record_leg_order_id(
+            signal_id,
+            side,
+            entry_fill.order_id.as_str(),
+            cid,
+        ) {
+            tracing::error!("persist unwound entry leg order id failed for {signal_id}: {e}");
+        }
+    }
+    let entry_qty = to_f64(entry_fill.filled_qty);
+    if entry_qty > 0.0 {
+        if let Some(px) = entry_fill
+            .avg_fill_price
+            .and_then(|p| p.to_string().parse::<f64>().ok())
+            .filter(|p| *p > 0.0)
+        {
+            let fee = entry_fill
+                .fee
+                .map(|f| f.to_string().parse::<f64>().unwrap_or(0.0))
+                .unwrap_or(0.0);
+            if let Err(e) = state.state_store.apply_leg_fill(
+                signal_id,
+                side,
+                entry_qty,
+                px,
+                fee,
+                Some(entry_fill.order_id.as_str()),
+            ) {
+                tracing::error!("persist unwound entry leg fill failed for {signal_id}: {e}");
+            }
+        } else {
+            tracing::warn!(
+                "unwound entry leg {signal_id} reports fill without a positive price — left unpriced"
+            );
+        }
+    }
+
+    // 2) The compensation unwind as a `flat-` close child carrying the
+    // filled position side — same convention the flatten path uses, so
+    // family grouping and cash-flow reads see it as a close order.
+    let root = match state.state_store.get_signal(signal_id) {
+        Ok(Some(s)) => s,
+        Ok(None) => {
+            tracing::error!("unwind persist: root signal {signal_id} missing");
+            return;
+        }
+        Err(e) => {
+            tracing::error!("unwind persist: read root signal {signal_id} failed: {e}");
+            return;
+        }
+    };
+    let parent_leg = root.legs.iter().find(|l| l.side == side);
+    let close_id = format!("flat-{signal_id}-{:04x}", rand::random::<u16>());
+    let unwind_qty = to_f64(unwind_resp.filled_qty);
+    let new_leg = crate::state_store::NewSignalLeg {
+        account_id: parent_leg.and_then(|l| l.account_id.clone()),
+        venue: parent_leg
+            .map(|l| l.venue.clone())
+            .unwrap_or_else(|| unwind_resp.venue.0.clone()),
+        side,
+        symbol: Some(
+            parent_leg
+                .map(|l| l.symbol.clone())
+                .unwrap_or_else(|| unwind_resp.symbol.clone()),
+        ),
+        intended_qty: if unwind_qty > 0.0 {
+            unwind_qty
+        } else {
+            entry_qty
+        },
+        intended_price: None,
+        unit_scale: parent_leg.map(|l| l.unit_scale),
+    };
+    if let Err(e) = state.state_store.record_signal_execution(
+        &crate::state_store::NewSignalExecution {
+            id: close_id.clone(),
+            strategy_id: root.strategy_id.clone(),
+            symbol: root.symbol.clone(),
+            route_id: root.route_id.clone(),
+            expected_net_usd: None,
+            note: Some(format!("coordinator unwind of {signal_id}")),
+            legs: vec![new_leg],
+        },
+        state.env().as_str(),
+    ) {
+        tracing::error!("persist unwind child {close_id} failed: {e}");
+        return;
+    }
+    if !unwind_resp.order_id.is_empty() {
+        let cid = (!unwind_resp.client_order_id.is_empty())
+            .then_some(unwind_resp.client_order_id.as_str());
+        if let Err(e) = state.state_store.record_leg_order_id(
+            &close_id,
+            side,
+            unwind_resp.order_id.as_str(),
+            cid,
+        ) {
+            tracing::error!("persist unwind order id failed for {close_id}: {e}");
+        }
+    }
+    let unwind_px = unwind_resp
+        .avg_fill_price
+        .and_then(|p| p.to_string().parse::<f64>().ok())
+        .filter(|p| *p > 0.0);
+    if let Some(px) = unwind_px.filter(|_| unwind_qty > 0.0) {
+        let fee = unwind_resp
+            .fee
+            .map(|f| f.to_string().parse::<f64>().unwrap_or(0.0))
+            .unwrap_or(0.0);
+        if let Err(e) = state.state_store.apply_leg_fill(
+            &close_id,
+            side,
+            unwind_qty,
+            px,
+            fee,
+            Some(unwind_resp.order_id.as_str()),
+        ) {
+            tracing::error!("persist unwind leg fill failed for {close_id}: {e}");
+            return;
+        }
+        let _ = state.state_store.update_signal_status(
+            &close_id,
+            crate::state_store::SignalStatus::Closed,
+            None,
+        );
+    } else {
+        // Unwind response without a verifiable fill is not a close —
+        // leave the child failed rather than claiming flatness.
+        let _ = state.state_store.update_signal_status(
+            &close_id,
+            crate::state_store::SignalStatus::Failed,
+            Some("unwind response carried no verifiable fill"),
+        );
+    }
+}
+
+/// One-shot repair for signals recorded before unwind atomic records were
+/// persisted: `LegAFailedUnwound`/`LegBFailedUnwound` failures kept their
+/// real venue orders only as Debug text inside the signal note. Parses the
+/// note back into `OrderResponse`s and replays them through
+/// `persist_unwind_leg_records`, so the ledger carries the same rows the
+/// live path now writes — the opportunity's atomic trail and its cash-flow
+/// totals become truthful for dispatches made on earlier builds.
+/// Idempotent: a `flat-{id}-` child or an entry leg already showing the
+/// fill means the records exist (persisted live or by an earlier boot).
+pub(crate) fn backfill_unwound_atomic_trails(state: &AppEngineState) {
+    let signals = match state.state_store.list_signals(None, None) {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("unwound-trail backfill: list signals failed: {e}");
+            return;
+        }
+    };
+    for sig in &signals {
+        let Some(note) = sig.note.as_deref() else {
+            continue;
+        };
+        let (side, fill_marker) = if note.starts_with("LegBFailedUnwound {") {
+            (
+                crate::state_store::LegSide::Long,
+                "leg_a_fill: OrderResponse {",
+            )
+        } else if note.starts_with("LegAFailedUnwound {") {
+            (
+                crate::state_store::LegSide::Short,
+                "leg_b_fill: OrderResponse {",
+            )
+        } else {
+            continue;
+        };
+        let prefix = format!("flat-{}-", sig.id);
+        if signals.iter().any(|s| s.id.starts_with(&prefix))
+            || sig
+                .legs
+                .iter()
+                .any(|l| l.side == side && l.filled_qty > 0.0)
+        {
+            continue;
+        }
+        match (
+            parse_debug_order_response(note, fill_marker),
+            parse_debug_order_response(note, "unwind_resp: OrderResponse {"),
+        ) {
+            (Some(entry), Some(unwind)) => {
+                persist_unwind_leg_records(state, &sig.id, side, &entry, &unwind);
+                tracing::info!("unwound-trail backfill: repaired {}", sig.id);
+            }
+            _ => tracing::warn!(
+                "unwound-trail backfill: note for {} did not parse — atomic trail stays note-only",
+                sig.id
+            ),
+        }
+    }
+}
+
+/// Extract one `OrderResponse { ... }` block from a coordinator failure
+/// note's Debug text and rebuild the struct. Field scans are tolerant of
+/// the embedded `raw_response` JSON — its keys are camelCase (`"orderId"`),
+/// which can never collide with the snake_case Debug fields (`order_id:`).
+fn parse_debug_order_response(
+    note: &str,
+    marker: &str,
+) -> Option<arbitrageur_core::order::OrderResponse> {
+    let start = note.find(marker)? + marker.len();
+    let rest = &note[start..];
+    // The block ends at the next sibling field of the failure variant.
+    let end = [", unwind_resp:", ", error_a:", ", error_b:", ", error:"]
+        .iter()
+        .filter_map(|m| rest.find(m))
+        .min()
+        .unwrap_or(rest.len());
+    let block = &rest[..end];
+
+    let order_id = debug_str_field(block, "order_id")?.to_string();
+    if order_id.is_empty() {
+        return None;
+    }
+    let client_order_id = debug_str_field(block, "client_order_id")
+        .unwrap_or_default()
+        .to_string();
+    let venue = {
+        let i = block.find("venue: VenueId(\"")? + "venue: VenueId(\"".len();
+        let end = block[i..].find('"')? + i;
+        arbitrageur_core::types::VenueId(block[i..end].to_string())
+    };
+    let symbol = debug_str_field(block, "symbol")?.to_string();
+    let status_word = debug_word_field(block, "status")?;
+    let status = match status_word {
+        "New" => arbitrageur_core::types::OrderStatus::New,
+        "PartiallyFilled" => arbitrageur_core::types::OrderStatus::PartiallyFilled,
+        "Filled" => arbitrageur_core::types::OrderStatus::Filled,
+        "Cancelled" => arbitrageur_core::types::OrderStatus::Cancelled,
+        "Rejected" => arbitrageur_core::types::OrderStatus::Rejected,
+        "Expired" => arbitrageur_core::types::OrderStatus::Expired,
+        _ => return None,
+    };
+    let filled_qty = debug_dec_field(block, "filled_qty")?;
+    let original_qty = debug_dec_field(block, "original_qty").unwrap_or(filled_qty);
+    let remaining_qty =
+        debug_dec_field(block, "remaining_qty").unwrap_or_else(|| original_qty - filled_qty);
+    let avg_fill_price = debug_opt_dec_field(block, "avg_fill_price");
+    let fee = debug_opt_dec_field(block, "fee");
+    let fee_currency = debug_str_field(block, "fee_currency")
+        .unwrap_or("USD")
+        .to_string();
+    let timestamp = debug_word_field(block, "timestamp")
+        .and_then(|w| chrono::DateTime::parse_from_rfc3339(w).ok())
+        .map(|d| d.with_timezone(&chrono::Utc))
+        .unwrap_or_else(chrono::Utc::now);
+    Some(arbitrageur_core::order::OrderResponse {
+        order_id,
+        client_order_id,
+        venue,
+        symbol,
+        status,
+        original_qty,
+        filled_qty,
+        remaining_qty,
+        avg_fill_price,
+        fee,
+        fee_currency,
+        raw_response: None,
+        timestamp,
+    })
+}
+
+/// `key: "value"` inside a Debug struct dump. Requires a non-word char (or
+/// start) before `key` so `order_id` can't match inside `client_order_id`.
+fn debug_str_field<'a>(block: &'a str, key: &str) -> Option<&'a str> {
+    let pat = format!("{key}: \"");
+    let mut from = 0;
+    loop {
+        let i = block[from..].find(&pat)? + from;
+        let boundary = i == 0
+            || !block.as_bytes()[i - 1].is_ascii_alphanumeric() && block.as_bytes()[i - 1] != b'_';
+        if boundary {
+            let rest = &block[i + pat.len()..];
+            let bytes = rest.as_bytes();
+            let mut j = 0;
+            while j < bytes.len() {
+                match bytes[j] {
+                    b'\\' => j += 2,
+                    b'"' => break,
+                    _ => j += 1,
+                }
+            }
+            return Some(&rest[..j.min(bytes.len())]);
+        }
+        from = i + pat.len();
+    }
+}
+
+/// `key: 123.45` — a bare Debug scalar, ended by `,`/` `/`}`.
+fn debug_dec_field(block: &str, key: &str) -> Option<rust_decimal::Decimal> {
+    debug_word_field(block, key)?.parse().ok()
+}
+
+/// `key: Some(123.45)` or `key: None`.
+fn debug_opt_dec_field(block: &str, key: &str) -> Option<rust_decimal::Decimal> {
+    let pat = format!("{key}: ");
+    let i = block.find(&pat)? + pat.len();
+    let rest = &block[i..];
+    if rest.starts_with("None") {
+        return None;
+    }
+    let inner = rest.strip_prefix("Some(")?;
+    let end = inner.find(')')?;
+    inner[..end].parse().ok()
+}
+
+/// `key: token` — a bare word/number/timestamp, ended by `,`/` `/`}`.
+/// Same boundary rule as `debug_str_field`.
+fn debug_word_field<'a>(block: &'a str, key: &str) -> Option<&'a str> {
+    let pat = format!("{key}: ");
+    let mut from = 0;
+    loop {
+        let i = block[from..].find(&pat)? + from;
+        let boundary = i == 0
+            || !block.as_bytes()[i - 1].is_ascii_alphanumeric() && block.as_bytes()[i - 1] != b'_';
+        if boundary {
+            let rest = &block[i + pat.len()..];
+            let end = rest.find([',', ' ', '}']).unwrap_or(rest.len());
+            return Some(&rest[..end]);
+        }
+        from = i + pat.len();
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 /// Test-facing wrapper over `execute_spatial_arbitrage_inner`.
 #[cfg(test)]
@@ -1575,6 +1921,34 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
                 ArbitrageExecutionResult::HaltedByRisk(_) => ("HALTED", "HALTED"),
                 _ => ("REJECTED", "REJECTED"),
             };
+            // Persist the true atomic trail BEFORE the failed mark: the
+            // filled leg's entry fill plus its compensation unwind are real
+            // venue orders — as leg rows, not only raw JSON in the note.
+            match &other {
+                ArbitrageExecutionResult::LegBFailedUnwound {
+                    leg_a_fill,
+                    unwind_resp,
+                    ..
+                } => persist_unwind_leg_records(
+                    state,
+                    &signal_id,
+                    crate::state_store::LegSide::Long,
+                    leg_a_fill,
+                    unwind_resp,
+                ),
+                ArbitrageExecutionResult::LegAFailedUnwound {
+                    leg_b_fill,
+                    unwind_resp,
+                    ..
+                } => persist_unwind_leg_records(
+                    state,
+                    &signal_id,
+                    crate::state_store::LegSide::Short,
+                    leg_b_fill,
+                    unwind_resp,
+                ),
+                _ => {}
+            }
             // Unwound legs restored flatness → `failed` (not blocking). Any
             // other terminal failure is also non-blocking once recorded.
             let _ = state.state_store.update_signal_status(
@@ -1830,6 +2204,293 @@ pub async fn list_signal_executions(
         .state_store
         .list_signals(symbol.as_deref(), st)
         .map_err(|e| e.to_string())
+}
+
+/// One atomic venue order of a traded opportunity — a persisted signal leg
+/// with its dispatch role derived from the owning signal's id (`entry` for
+/// the root signal, `flatten`/`trim` for close-family children).
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AtomicTransactionDto {
+    pub leg_id: String,
+    pub signal_id: String,
+    pub role: &'static str,
+    pub venue: String,
+    pub account_id: Option<String>,
+    /// Position side persisted on the leg row.
+    pub side: &'static str,
+    /// Order side — derived from role+side (entry longs buy, close longs sell).
+    pub order_side: &'static str,
+    /// Venue-facing instrument this leg actually ordered.
+    pub symbol: String,
+    pub intended_qty: f64,
+    pub filled_qty: f64,
+    pub intended_price: Option<f64>,
+    pub fill_price: Option<f64>,
+    pub fee_usd: f64,
+    /// Leg venue-units per unit of the parent symbol (tracked-group scale).
+    pub unit_scale: f64,
+    pub venue_order_id: Option<String>,
+    pub client_order_id: Option<String>,
+    /// Aggregate fill state of this order: none/partial/filled.
+    pub fill_state: &'static str,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+/// One traded opportunity: the root dispatch plus every close-family child
+/// dispatch (flatten/trim) and the matched virtual-ledger cycle lot when one
+/// exists. Realized PnL comes from the closed lot (authoritative); for
+/// terminal families without a lot the persisted leg cash-flow stands in —
+/// open positions report `null` rather than a fabricated mark.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TradedOpportunityDto {
+    pub signal_id: String,
+    pub strategy_id: String,
+    pub symbol: String,
+    pub environment: String,
+    pub status: &'static str,
+    pub route_id: Option<String>,
+    pub expected_net_usd: Option<f64>,
+    pub note: Option<String>,
+    pub venue_long: Option<String>,
+    pub venue_short: Option<String>,
+    pub created_at: String,
+    pub closed_at: Option<String>,
+    pub lot_id: Option<String>,
+    pub lot_status: Option<&'static str>,
+    pub entry_spread_bps: Option<f64>,
+    pub close_spread_bps: Option<f64>,
+    pub realized_pnl_usd: Option<f64>,
+    pub realized_pnl_bps: Option<f64>,
+    /// Signed cash-flow across all family fills (sells − buys − fees).
+    pub leg_net_flow_usd: f64,
+    pub total_fees_usd: f64,
+    pub child_count: usize,
+    pub transactions: Vec<AtomicTransactionDto>,
+}
+
+/// All opportunities actually dispatched by the system — the durable signal
+/// ledger, environment-scoped like every other exposure read (`unknown`
+/// stays visible: unattributable exposure must never hide). Radar rows that
+/// never dispatched produce no signal record and correctly never appear.
+#[tauri::command]
+pub async fn list_traded_opportunities(
+    state: tauri::State<'_, Arc<AppEngineState>>,
+) -> Result<Vec<TradedOpportunityDto>, String> {
+    let env = state.env().as_str().to_string();
+    let signals = state
+        .state_store
+        .list_signals(None, None)
+        .map_err(|e| e.to_string())?;
+    let lots = state.virtual_ledger.read().lots.clone();
+    Ok(build_traded_opportunities(&env, &signals, &lots))
+}
+
+/// Group durable signals into traded opportunities for one environment.
+/// Pure over the persisted rows — unit-testable without engine state.
+pub(crate) fn build_traded_opportunities(
+    env: &str,
+    signals: &[crate::state_store::SignalExecution],
+    lots: &std::collections::HashMap<
+        String,
+        arbitrageur_execution::virtual_ledger::ArbitrageCycleLot,
+    >,
+) -> Vec<TradedOpportunityDto> {
+    let scoped: Vec<&crate::state_store::SignalExecution> = signals
+        .iter()
+        .filter(|s| s.environment == "unknown" || s.environment == env)
+        .collect();
+    let roots: Vec<&crate::state_store::SignalExecution> = scoped
+        .iter()
+        .copied()
+        .filter(|s| !s.id.starts_with("flat-") && !s.id.starts_with("trim-"))
+        .collect();
+    let children_of = |root_id: &str| -> Vec<&crate::state_store::SignalExecution> {
+        let flat_prefix = format!("flat-{root_id}-");
+        let trim_prefix = format!("trim-{root_id}-");
+        let mut kids: Vec<&crate::state_store::SignalExecution> = scoped
+            .iter()
+            .copied()
+            .filter(|s| s.id.starts_with(&flat_prefix) || s.id.starts_with(&trim_prefix))
+            .collect();
+        kids.sort_by(|a, b| a.created_at.cmp(&b.created_at).then(a.id.cmp(&b.id)));
+        kids
+    };
+    let role_of = |sig_id: &str| -> &'static str {
+        if sig_id.starts_with("flat-") {
+            "flatten"
+        } else if sig_id.starts_with("trim-") {
+            "trim"
+        } else {
+            "entry"
+        }
+    };
+    let mut out = Vec::with_capacity(roots.len());
+    for root in roots {
+        let children = children_of(&root.id);
+        let mut txs: Vec<AtomicTransactionDto> = Vec::new();
+        let mut net_flow = 0.0f64;
+        let mut fees = 0.0f64;
+        let mut buy_filled = false;
+        let mut sell_filled = false;
+        for sig in std::iter::once(root).chain(children.iter().copied()) {
+            let role = role_of(&sig.id);
+            for leg in &sig.legs {
+                // Leg rows persist the POSITION side. Entry signals buy
+                // longs / sell shorts; close-family signals unwind them —
+                // a stored `long` on a flat-/trim- signal was a sell order.
+                let order_side = match (role, leg.side) {
+                    ("entry", crate::state_store::LegSide::Long)
+                    | ("flatten" | "trim", crate::state_store::LegSide::Short) => "buy",
+                    _ => "sell",
+                };
+                let filled = if leg.filled_qty.is_finite() {
+                    leg.filled_qty
+                } else {
+                    0.0
+                };
+                let fee = if leg.fee_usd.is_finite() {
+                    leg.fee_usd.max(0.0)
+                } else {
+                    0.0
+                };
+                let intended = if leg.intended_qty.is_finite() {
+                    leg.intended_qty
+                } else {
+                    0.0
+                };
+                if let Some(px) = leg.fill_price.filter(|p| p.is_finite() && *p > 0.0) {
+                    if filled > 0.0 {
+                        if order_side == "sell" {
+                            sell_filled = true;
+                        } else {
+                            buy_filled = true;
+                        }
+                    }
+                    let sign = if order_side == "sell" { 1.0 } else { -1.0 };
+                    net_flow += sign * filled * px;
+                }
+                fees += fee;
+                let fill_state = if filled <= 0.0 {
+                    "no_fill"
+                } else if filled + 1e-9 < intended {
+                    "partial"
+                } else {
+                    "filled"
+                };
+                txs.push(AtomicTransactionDto {
+                    leg_id: leg.id.clone(),
+                    signal_id: sig.id.clone(),
+                    role,
+                    venue: leg.venue.clone(),
+                    account_id: leg.account_id.clone(),
+                    side: leg.side.as_str(),
+                    order_side,
+                    symbol: leg.symbol.clone(),
+                    intended_qty: intended,
+                    filled_qty: filled,
+                    intended_price: leg.intended_price,
+                    fill_price: leg.fill_price,
+                    fee_usd: fee,
+                    unit_scale: if leg.unit_scale.is_finite() && leg.unit_scale > 0.0 {
+                        leg.unit_scale
+                    } else {
+                        1.0
+                    },
+                    venue_order_id: leg.venue_order_id.clone(),
+                    client_order_id: leg.client_order_id.clone(),
+                    fill_state,
+                    created_at: leg.created_at.clone(),
+                    updated_at: leg.updated_at.clone(),
+                });
+            }
+        }
+        net_flow -= fees;
+        txs.sort_by(|a, b| {
+            a.created_at
+                .cmp(&b.created_at)
+                .then(a.leg_id.cmp(&b.leg_id))
+        });
+
+        // Cycle-lot join: writers name the lot "{kind}-{root_signal_id}" —
+        // ends_with covers spatial/funding/rehydrated without a prefix list
+        // that could drift when a new strategy starts opening lots.
+        let lot = lots.values().find(|l| l.id.ends_with(&root.id));
+        let terminal = matches!(
+            root.status,
+            crate::state_store::SignalStatus::Closed | crate::state_store::SignalStatus::Failed
+        );
+        let lot_status = lot.map(|l| match l.status {
+            arbitrageur_execution::virtual_ledger::CycleStatus::Open => "open",
+            arbitrageur_execution::virtual_ledger::CycleStatus::Closed => "closed",
+            arbitrageur_execution::virtual_ledger::CycleStatus::StoppedOut => "stopped_out",
+            arbitrageur_execution::virtual_ledger::CycleStatus::TimedOut => "timed_out",
+        });
+        // Cash-flow realized P&L is only meaningful for a family that
+        // round-tripped: fills on both order sides close the loop. A
+        // single-direction family (e.g. an `extclose-` buy-back whose
+        // entry never passed through the ledger) shows gross flow, not
+        // profit — attribute nothing rather than misstate it. No fills at
+        // all is provably $0.00.
+        let realized = lot
+            .and_then(|l| l.realized_pnl_usd)
+            .or(if terminal && lot.is_none() {
+                if !buy_filled && !sell_filled {
+                    Some(0.0)
+                } else if buy_filled && sell_filled {
+                    Some(net_flow)
+                } else {
+                    None
+                }
+            } else {
+                None
+            });
+        let realized_bps = lot.and_then(|l| l.realized_pnl_bps);
+        let venue_long = lot.map(|l| l.venue_long.clone()).or_else(|| {
+            root.legs
+                .iter()
+                .find(|l| l.side == crate::state_store::LegSide::Long)
+                .map(|l| l.venue.clone())
+        });
+        let venue_short = lot.map(|l| l.venue_short.clone()).or_else(|| {
+            root.legs
+                .iter()
+                .find(|l| l.side == crate::state_store::LegSide::Short)
+                .map(|l| l.venue.clone())
+        });
+        out.push(TradedOpportunityDto {
+            signal_id: root.id.clone(),
+            strategy_id: root.strategy_id.clone(),
+            symbol: root.symbol.clone(),
+            environment: root.environment.clone(),
+            status: root.status.as_str(),
+            route_id: root.route_id.clone(),
+            expected_net_usd: root.expected_net_usd,
+            note: root.note.clone(),
+            venue_long,
+            venue_short,
+            created_at: root.created_at.clone(),
+            closed_at: root.closed_at.clone(),
+            lot_id: lot.map(|l| l.id.clone()),
+            lot_status,
+            entry_spread_bps: lot.map(|l| l.entry_spread_bps),
+            close_spread_bps: lot.and_then(|l| l.close_spread_bps),
+            realized_pnl_usd: realized,
+            realized_pnl_bps: realized_bps,
+            leg_net_flow_usd: net_flow,
+            total_fees_usd: fees,
+            child_count: children.len(),
+            transactions: txs,
+        });
+    }
+    out.sort_by(|a, b| {
+        b.created_at
+            .cmp(&a.created_at)
+            .then(b.signal_id.cmp(&a.signal_id))
+    });
+    out
 }
 
 /// Per-ticker execution/position state: whether the symbol is blocked, its
@@ -5240,5 +5901,575 @@ mod account_read_tests {
         );
         assert_eq!(lighter.placed.load(Ordering::SeqCst), 1);
         assert_eq!(binance.placed.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[cfg(test)]
+mod traded_opportunity_tests {
+    use super::*;
+    use crate::state_store::{LegSide, SignalExecution, SignalLeg, SignalStatus};
+    use arbitrageur_execution::virtual_ledger::{ArbitrageCycleLot, CycleStatus};
+    use chrono::Utc;
+    use std::collections::HashMap;
+
+    fn leg(
+        id: &str,
+        signal: &str,
+        venue: &str,
+        side: LegSide,
+        intended: f64,
+        filled: f64,
+        price: Option<f64>,
+        fee: f64,
+        ts: &str,
+    ) -> SignalLeg {
+        SignalLeg {
+            id: id.into(),
+            signal_id: signal.into(),
+            account_id: Some(format!("acct-{venue}")),
+            venue: venue.into(),
+            side,
+            symbol: "BTC-USDC".into(),
+            intended_qty: intended,
+            filled_qty: filled,
+            fill_price: price,
+            fee_usd: fee,
+            venue_order_id: Some(format!("oid-{id}")),
+            client_order_id: Some(format!("cid-{id}")),
+            intended_price: Some(99.0),
+            unit_scale: 1.0,
+            created_at: ts.into(),
+            updated_at: ts.into(),
+        }
+    }
+
+    fn sig(
+        id: &str,
+        env: &str,
+        status: SignalStatus,
+        legs: Vec<SignalLeg>,
+        ts: &str,
+    ) -> SignalExecution {
+        SignalExecution {
+            id: id.into(),
+            strategy_id: "futures".into(),
+            symbol: "BTC-USDC".into(),
+            status,
+            environment: env.into(),
+            route_id: None,
+            account_long_id: None,
+            account_short_id: None,
+            expected_net_usd: Some(4.0),
+            fees_usd: 0.0,
+            note: None,
+            legs,
+            created_at: ts.into(),
+            updated_at: ts.into(),
+            closed_at: None,
+        }
+    }
+
+    #[test]
+    fn groups_root_children_and_flows_and_env() {
+        let t = "2024-01-01T00:00:00Z";
+        // Entry: buy 1 @100 (long hyperliquid), sell 1 @101 (short lighter).
+        let root = sig(
+            "sig-1-aa",
+            "testnet",
+            SignalStatus::Closed,
+            vec![
+                leg(
+                    "l1",
+                    "sig-1-aa",
+                    "hyperliquid",
+                    LegSide::Long,
+                    1.0,
+                    1.0,
+                    Some(100.0),
+                    0.5,
+                    t,
+                ),
+                leg(
+                    "l2",
+                    "sig-1-aa",
+                    "lighter",
+                    LegSide::Short,
+                    1.0,
+                    1.0,
+                    Some(101.0),
+                    0.5,
+                    t,
+                ),
+            ],
+            t,
+        );
+        // Flatten child: long side sells 1 @102; short side buys back 1 @100.5.
+        let flat = sig(
+            "flat-sig-1-aa-0001",
+            "testnet",
+            SignalStatus::Closed,
+            vec![
+                leg(
+                    "l3",
+                    "flat-sig-1-aa-0001",
+                    "hyperliquid",
+                    LegSide::Long,
+                    1.0,
+                    1.0,
+                    Some(102.0),
+                    0.4,
+                    "2024-01-01T01:00:00Z",
+                ),
+                leg(
+                    "l4",
+                    "flat-sig-1-aa-0001",
+                    "lighter",
+                    LegSide::Short,
+                    1.0,
+                    1.0,
+                    Some(100.5),
+                    0.4,
+                    "2024-01-01T01:00:00Z",
+                ),
+            ],
+            "2024-01-01T01:00:00Z",
+        );
+        // A live-env sibling root that must not leak into the testnet view.
+        let live = sig(
+            "sig-9-live",
+            "live",
+            SignalStatus::Closed,
+            vec![leg(
+                "lx",
+                "sig-9-live",
+                "hyperliquid",
+                LegSide::Long,
+                1.0,
+                1.0,
+                Some(100.0),
+                0.1,
+                t,
+            )],
+            t,
+        );
+        // Unknown-env row stays visible to every environment (fail-closed).
+        let unknown = sig(
+            "sig-7-legacy",
+            "unknown",
+            SignalStatus::Closed,
+            vec![leg(
+                "lu",
+                "sig-7-legacy",
+                "lighter",
+                LegSide::Short,
+                1.0,
+                1.0,
+                Some(50.0),
+                0.0,
+                t,
+            )],
+            "2024-01-02T00:00:00Z",
+        );
+        let signals = vec![root, flat, live, unknown];
+        let lots: HashMap<String, ArbitrageCycleLot> = HashMap::new();
+
+        let testnet_rows = build_traded_opportunities("testnet", &signals, &lots);
+        // Roots only: sig-1-aa + sig-7-legacy (live filtered, flat- not a root).
+        assert_eq!(testnet_rows.len(), 2);
+        let opp = &testnet_rows[1]; // older created_at sorts last
+        assert_eq!(opp.signal_id, "sig-1-aa");
+        assert_eq!(opp.child_count, 1);
+        assert_eq!(opp.transactions.len(), 4);
+        // Roles + derived order sides.
+        assert_eq!(opp.transactions[0].role, "entry");
+        assert_eq!(opp.transactions[0].order_side, "buy");
+        assert_eq!(opp.transactions[1].order_side, "sell");
+        assert_eq!(opp.transactions[2].role, "flatten");
+        assert_eq!(opp.transactions[2].order_side, "sell"); // stored long closes by selling
+        assert_eq!(opp.transactions[3].order_side, "buy"); // stored short buys back
+                                                           // Cash flow: -(100) + 101 + 102 - 100.5 = +2.5, minus fees 1.8 = +0.7.
+        assert!(
+            (opp.leg_net_flow_usd - 0.7).abs() < 1e-9,
+            "{}",
+            opp.leg_net_flow_usd
+        );
+        assert!((opp.total_fees_usd - 1.8).abs() < 1e-9);
+        // Terminal + no lot → realized falls back to the leg cash-flow.
+        assert!((opp.realized_pnl_usd.unwrap() - 0.7).abs() < 1e-9);
+        // Unknown-env row is present and reported verbatim.
+        assert_eq!(testnet_rows[0].signal_id, "sig-7-legacy");
+        assert_eq!(testnet_rows[0].environment, "unknown");
+
+        // Live view must exclude testnet rows entirely.
+        let live_rows = build_traded_opportunities("live", &signals, &lots);
+        let ids: Vec<&str> = live_rows.iter().map(|r| r.signal_id.as_str()).collect();
+        assert_eq!(ids, vec!["sig-7-legacy", "sig-9-live"]);
+    }
+
+    #[test]
+    fn lot_join_supplies_realized_and_open_means_none() {
+        let t = "2024-01-01T00:00:00Z";
+        let root = sig(
+            "sig-2-bb",
+            "live",
+            SignalStatus::Balanced,
+            vec![leg(
+                "l1",
+                "sig-2-bb",
+                "hyperliquid",
+                LegSide::Long,
+                1.0,
+                1.0,
+                Some(100.0),
+                0.5,
+                t,
+            )],
+            t,
+        );
+        let mut lots: HashMap<String, ArbitrageCycleLot> = HashMap::new();
+        lots.insert(
+            "spatial-sig-2-bb".to_string(),
+            ArbitrageCycleLot {
+                id: "spatial-sig-2-bb".into(),
+                strategy_id: "spatial_spread".into(),
+                symbol: "BTC-USDC".into(),
+                environment: "live".into(),
+                venue_long: "hyperliquid".into(),
+                venue_short: "lighter".into(),
+                entry_time: Utc::now(),
+                entry_spread_bps: 12.0,
+                long_qty: 1.0,
+                long_entry_price: 100.0,
+                short_qty: 1.0,
+                short_entry_price: 101.0,
+                fees_paid_usd: 1.0,
+                status: CycleStatus::Closed,
+                close_time: Some(Utc::now()),
+                close_spread_bps: Some(2.0),
+                realized_pnl_usd: Some(4.25),
+                realized_pnl_bps: Some(3.9),
+            },
+        );
+        let rows = build_traded_opportunities("live", &[root], &lots);
+        assert_eq!(rows.len(), 1);
+        let opp = &rows[0];
+        assert_eq!(opp.lot_id.as_deref(), Some("spatial-sig-2-bb"));
+        assert_eq!(opp.lot_status, Some("closed"));
+        assert_eq!(opp.entry_spread_bps, Some(12.0));
+        assert_eq!(opp.close_spread_bps, Some(2.0));
+        // Lot is authoritative even though the signal row is still "balanced".
+        assert_eq!(opp.realized_pnl_usd, Some(4.25));
+        assert_eq!(opp.realized_pnl_bps, Some(3.9));
+        assert_eq!(opp.venue_long.as_deref(), Some("hyperliquid"));
+        assert_eq!(opp.venue_short.as_deref(), Some("lighter"));
+
+        // Same signal without a lot and still open → realized unknown.
+        let open = sig(
+            "sig-3-cc",
+            "live",
+            SignalStatus::Balanced,
+            vec![leg(
+                "l9",
+                "sig-3-cc",
+                "hyperliquid",
+                LegSide::Long,
+                1.0,
+                0.5,
+                Some(100.0),
+                0.5,
+                t,
+            )],
+            t,
+        );
+        let rows = build_traded_opportunities("live", &[open], &HashMap::new());
+        assert_eq!(rows[0].realized_pnl_usd, None);
+        assert_eq!(rows[0].transactions[0].fill_state, "partial");
+        assert_eq!(rows[0].lot_id, None);
+        // Venue falls back to the leg when no lot exists.
+        assert_eq!(rows[0].venue_long.as_deref(), Some("hyperliquid"));
+    }
+
+    #[test]
+    fn unwind_persist_records_entry_fill_and_flat_child() {
+        use arbitrageur_core::order::OrderResponse;
+        use arbitrageur_core::types::{OrderStatus, VenueId};
+        use rust_decimal_macros::dec;
+
+        let state = AppEngineState::new();
+        state
+            .state_store
+            .record_signal_execution(
+                &crate::state_store::NewSignalExecution {
+                    id: "sig-unw-1".to_string(),
+                    strategy_id: "futures".into(),
+                    symbol: "BTC-USDC".into(),
+                    route_id: None,
+                    expected_net_usd: Some(1.0),
+                    note: None,
+                    legs: vec![
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "hyperliquid".into(),
+                            side: LegSide::Long,
+                            symbol: None,
+                            intended_qty: 2.0,
+                            intended_price: None,
+                            unit_scale: None,
+                        },
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "lighter".into(),
+                            side: LegSide::Short,
+                            symbol: None,
+                            intended_qty: 2.0,
+                            intended_price: None,
+                            unit_scale: None,
+                        },
+                    ],
+                },
+                "testnet",
+            )
+            .unwrap();
+
+        let entry = OrderResponse {
+            order_id: "entry-oid".into(),
+            client_order_id: "entry-cid".into(),
+            venue: VenueId("hyperliquid".into()),
+            symbol: "BTC-USDC".into(),
+            status: OrderStatus::Filled,
+            original_qty: dec!(2),
+            filled_qty: dec!(2),
+            remaining_qty: dec!(0),
+            avg_fill_price: Some(dec!(100)),
+            fee: Some(dec!(0.2)),
+            fee_currency: "USD".into(),
+            raw_response: None,
+            timestamp: Utc::now(),
+        };
+        let unwind = OrderResponse {
+            order_id: "unw-oid".into(),
+            client_order_id: "unw-cid".into(),
+            venue: VenueId("hyperliquid".into()),
+            symbol: "BTC-USDC".into(),
+            status: OrderStatus::Filled,
+            original_qty: dec!(2),
+            filled_qty: dec!(2),
+            remaining_qty: dec!(0),
+            avg_fill_price: Some(dec!(99.5)),
+            fee: Some(dec!(0.1)),
+            fee_currency: "USD".into(),
+            raw_response: None,
+            timestamp: Utc::now(),
+        };
+
+        persist_unwind_leg_records(&state, "sig-unw-1", LegSide::Long, &entry, &unwind);
+
+        // The entry leg now carries its real fill + order identity.
+        let root = state.state_store.get_signal("sig-unw-1").unwrap().unwrap();
+        let long = root.legs.iter().find(|l| l.side == LegSide::Long).unwrap();
+        assert_eq!(long.filled_qty, 2.0);
+        assert_eq!(long.fill_price, Some(100.0));
+        assert_eq!(long.venue_order_id.as_deref(), Some("entry-oid"));
+
+        // The unwind is a closed `flat-` child with the position side and
+        // its own order identity + fill.
+        let kids = state
+            .state_store
+            .list_signals(None, None)
+            .unwrap()
+            .into_iter()
+            .filter(|s| s.id.starts_with("flat-sig-unw-1-"))
+            .collect::<Vec<_>>();
+        assert_eq!(kids.len(), 1);
+        let child = &kids[0];
+        assert_eq!(child.status, SignalStatus::Closed);
+        assert_eq!(child.legs.len(), 1);
+        let unwind_leg = &child.legs[0];
+        assert_eq!(unwind_leg.side, LegSide::Long);
+        assert_eq!(unwind_leg.filled_qty, 2.0);
+        assert_eq!(unwind_leg.fill_price, Some(99.5));
+        assert_eq!(unwind_leg.venue_order_id.as_deref(), Some("unw-oid"));
+
+        // The grouped opportunity reports the full atomic trail: entry leg
+        // filled, close unwind ordered sell-side cash flow −0.7 net.
+        let rows = build_traded_opportunities(
+            "testnet",
+            &state.state_store.list_signals(None, None).unwrap(),
+            &state.virtual_ledger.read().lots,
+        );
+        let opp = rows.iter().find(|r| r.signal_id == "sig-unw-1").unwrap();
+        assert_eq!(opp.child_count, 1);
+        assert_eq!(opp.transactions.len(), 3);
+        // Buy 2@100 + entry-fee .2; unwind sells 2@99.5 fee .1 → -1.3 total.
+        assert!((opp.leg_net_flow_usd - (-1.3)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn backfill_repairs_legacy_unwound_note() {
+        let state = AppEngineState::new();
+        // The pre-fix record shape: both legs no_fill, real venue orders
+        // only as Debug text in the note (matches live LegBFailedUnwound).
+        let note = concat!(
+            "LegBFailedUnwound { leg_a_fill: OrderResponse { order_id: \"oid-a\", ",
+            "client_order_id: \"cid-a\", venue: VenueId(\"arcus\"), symbol: \"QQQ\", ",
+            "status: Filled, original_qty: 2, filled_qty: 2, remaining_qty: 0, ",
+            "avg_fill_price: Some(753.5), fee: None, fee_currency: \"USDG\", ",
+            "raw_response: Some(\"{\\\"orderId\\\":\\\"oid-a\\\",\\\"status\\\":\\\"FILLED\\\"}\"), ",
+            "timestamp: 2026-09-25T19:59:28.293765639Z }, ",
+            "unwind_resp: OrderResponse { order_id: \"oid-u\", ",
+            "client_order_id: \"cid-u\", venue: VenueId(\"arcus\"), symbol: \"QQQ\", ",
+            "status: Filled, original_qty: 2, filled_qty: 2, remaining_qty: 0, ",
+            "avg_fill_price: Some(752.43), fee: None, fee_currency: \"USDG\", ",
+            "raw_response: Some(\"{\\\"orderId\\\":\\\"oid-u\\\"}\"), ",
+            "timestamp: 2026-09-25T19:59:29.137230913Z }, ",
+            "error_b: \"Alpaca HTTP 422\" }"
+        );
+        state
+            .state_store
+            .record_signal_execution(
+                &crate::state_store::NewSignalExecution {
+                    id: "sig-legacy-1".to_string(),
+                    strategy_id: "futures".into(),
+                    symbol: "QQQ".into(),
+                    route_id: None,
+                    expected_net_usd: Some(1.0),
+                    note: Some(note.to_string()),
+                    legs: vec![
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "arcus".into(),
+                            side: LegSide::Long,
+                            symbol: None,
+                            intended_qty: 2.0,
+                            intended_price: None,
+                            unit_scale: None,
+                        },
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "alpaca".into(),
+                            side: LegSide::Short,
+                            symbol: None,
+                            intended_qty: 1.94,
+                            intended_price: None,
+                            unit_scale: None,
+                        },
+                    ],
+                },
+                "testnet",
+            )
+            .unwrap();
+        let _ = state.state_store.update_signal_status(
+            "sig-legacy-1",
+            crate::state_store::SignalStatus::Failed,
+            Some(note),
+        );
+
+        backfill_unwound_atomic_trails(&state);
+
+        // Entry leg carries the parsed fill + order identity.
+        let root = state
+            .state_store
+            .get_signal("sig-legacy-1")
+            .unwrap()
+            .unwrap();
+        let long = root.legs.iter().find(|l| l.side == LegSide::Long).unwrap();
+        assert_eq!(long.filled_qty, 2.0);
+        assert_eq!(long.fill_price, Some(753.5));
+        assert_eq!(long.venue_order_id.as_deref(), Some("oid-a"));
+        assert_eq!(long.client_order_id.as_deref(), Some("cid-a"));
+
+        // The unwind child exists with its own fill.
+        let kids = state
+            .state_store
+            .list_signals(None, None)
+            .unwrap()
+            .into_iter()
+            .filter(|s| s.id.starts_with("flat-sig-legacy-1-"))
+            .collect::<Vec<_>>();
+        assert_eq!(kids.len(), 1);
+        assert_eq!(kids[0].legs[0].fill_price, Some(752.43));
+
+        // Second run is a no-op — no duplicate child.
+        backfill_unwound_atomic_trails(&state);
+        let kids = state
+            .state_store
+            .list_signals(None, None)
+            .unwrap()
+            .into_iter()
+            .filter(|s| s.id.starts_with("flat-sig-legacy-1-"))
+            .count();
+        assert_eq!(kids, 1);
+
+        // Cash flow is honest: bought 2@753.5, unwound 2@752.43 → -2.14.
+        let rows = build_traded_opportunities(
+            "testnet",
+            &state.state_store.list_signals(None, None).unwrap(),
+            &state.virtual_ledger.read().lots,
+        );
+        let opp = rows.iter().find(|r| r.signal_id == "sig-legacy-1").unwrap();
+        assert!((opp.leg_net_flow_usd - (-2.14)).abs() < 1e-9);
+        assert!((opp.realized_pnl_usd.unwrap() - (-2.14)).abs() < 1e-9);
+    }
+
+    #[test]
+    fn one_sided_family_has_no_attributable_pnl() {
+        // An `extclose-` buy-back spends cash to close a short whose entry
+        // never passed through the ledger — gross outflow is not P&L.
+        let t = "2024-01-02T00:00:00Z";
+        let ext = sig(
+            "extclose-arcus-1",
+            "testnet",
+            SignalStatus::Closed,
+            vec![leg(
+                "lx",
+                "extclose-arcus-1",
+                "arcus",
+                LegSide::Long,
+                0.001,
+                0.001,
+                Some(84530.8),
+                0.0,
+                t,
+            )],
+            t,
+        );
+        let rows = build_traded_opportunities("testnet", &[ext], &HashMap::new());
+        assert_eq!(rows.len(), 1);
+        assert!((rows[0].leg_net_flow_usd - (-84.5308)).abs() < 1e-9);
+        assert_eq!(rows[0].realized_pnl_usd, None);
+
+        // A no-fill family provably realized $0.00 — nothing traded.
+        let dead = sig(
+            "sig-dead",
+            "testnet",
+            SignalStatus::Failed,
+            vec![
+                leg(
+                    "la",
+                    "sig-dead",
+                    "arcus",
+                    LegSide::Long,
+                    1.0,
+                    0.0,
+                    None,
+                    0.0,
+                    t,
+                ),
+                leg(
+                    "lb",
+                    "sig-dead",
+                    "alpaca",
+                    LegSide::Short,
+                    1.0,
+                    0.0,
+                    None,
+                    0.0,
+                    t,
+                ),
+            ],
+            t,
+        );
+        let rows = build_traded_opportunities("testnet", &[dead], &HashMap::new());
+        assert_eq!(rows[0].realized_pnl_usd, Some(0.0));
     }
 }

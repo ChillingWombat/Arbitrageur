@@ -20,6 +20,7 @@ import { VenueLogo } from "./VenueLogo";
 import { ExchangeVenueGadget } from "./ExchangeVenueGadget";
 import { RebalanceEstimatorGadget } from "./RebalanceEstimatorGadget";
 import { ExternalPositionsGadget } from "./ExternalPositionsGadget";
+import { TradedOpportunitiesGadget } from "./TradedOpportunitiesGadget";
 import { formatStrategyName } from "../types/tickers";
 import { api } from "../services/api";
 import { computeExchangeStats } from "../services/exchangeStats";
@@ -518,6 +519,10 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
           Live account reads minus system legs; reduce-only closes with depth
           pricing. Placed after capital: same money-movement story. */}
       <ExternalPositionsGadget />
+
+      {/* 3c. Traded opportunities: Net Profit + every dispatched signal with
+          its atomic order trail (click row → detail popup). */}
+      <TradedOpportunitiesGadget status={status} />
 
       {/* 4. Risk detail: DeltaGuard neutrality + margin + breaker controls */}
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
