@@ -37,13 +37,14 @@ use tauri::State;
 
 /// Slippage bound on each leg's IOC price, padded over the execution VWAP.
 /// Option books are thin — wider than the triangle bound but still bounded.
-const OPTIONS_IOC_BOUND_BPS: u32 = 60;
-const OPTIONS_SETTLE_POLLS: usize = 4;
-const OPTIONS_SETTLE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(400);
+pub(crate) const OPTIONS_IOC_BOUND_BPS: u32 = 60;
+pub(crate) const OPTIONS_SETTLE_POLLS: usize = 4;
+pub(crate) const OPTIONS_SETTLE_INTERVAL: std::time::Duration =
+    std::time::Duration::from_millis(400);
 /// Deribit option taker fee is 0.03% of underlying notional, capped at
 /// 12.5% of the option premium.
-const OPTION_TAKER_FEE_RATE: f64 = 0.0003;
-const OPTION_FEE_PREMIUM_CAP: f64 = 0.125;
+pub(crate) const OPTION_TAKER_FEE_RATE: f64 = 0.0003;
+pub(crate) const OPTION_FEE_PREMIUM_CAP: f64 = 0.125;
 /// Option books on far-dated wings are empty — a quote is required on the
 /// exact side each leg executes.
 const MAX_RESULTS: usize = 12;
@@ -235,7 +236,7 @@ pub fn evaluate_parity(q: &ParityQuotes, qty_base: Decimal) -> Option<ParityEval
         .max_by(|a, b| a.net_edge_usd.cmp(&b.net_edge_usd))
 }
 
-fn summary_px(row: &DeribitBookSummary) -> (Option<Decimal>, Option<Decimal>) {
+pub(crate) fn summary_px(row: &DeribitBookSummary) -> (Option<Decimal>, Option<Decimal>) {
     (
         row.bid.filter(|b| *b > dec!(0)),
         row.ask.filter(|a| *a > dec!(0)),
@@ -245,7 +246,7 @@ fn summary_px(row: &DeribitBookSummary) -> (Option<Decimal>, Option<Decimal>) {
 /// The env-scoped Deribit adapter — the options path is Deribit-only (no
 /// other configured venue lists crypto options). Admission still flows
 /// through `get_adapter` so a disabled/credential-less Deribit refuses.
-fn deribit_for_env(state: &AppEngineState) -> Result<Arc<DeribitAdapter>, String> {
+pub(crate) fn deribit_for_env(state: &AppEngineState) -> Result<Arc<DeribitAdapter>, String> {
     if state.get_adapter("deribit").is_none() {
         return Err(
             "Deribit is not admitted in this environment — enable it and configure credentials"
@@ -450,7 +451,11 @@ pub async fn scan_options_parity_impl(
     Ok(out)
 }
 
-fn options_leg_bound_px(book: &OrderBook, side: Side, venue_qty: Decimal) -> Option<Decimal> {
+pub(crate) fn options_leg_bound_px(
+    book: &OrderBook,
+    side: Side,
+    venue_qty: Decimal,
+) -> Option<Decimal> {
     let bound = dec!(1) + Decimal::from(OPTIONS_IOC_BOUND_BPS) / dec!(10_000);
     let vwap = match side {
         Side::Buy => book
@@ -712,6 +717,7 @@ pub async fn execute_options_parity_impl(
         if let Err(e) = record_options_leg_intent(
             state,
             &leg_signal_id,
+            OPTIONS_PARITY_STRATEGY_ID,
             vid.as_str(),
             sym,
             side,
@@ -1052,9 +1058,10 @@ pub async fn execute_options_parity_impl(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn record_options_leg_intent(
+pub(crate) fn record_options_leg_intent(
     state: &AppEngineState,
     signal_id: &str,
+    strategy_id: &str,
     venue_id: &str,
     symbol: &str,
     order_side: Side,
@@ -1064,7 +1071,7 @@ fn record_options_leg_intent(
 ) -> Result<(), String> {
     use crate::state_store::{LegSide, NewSignalExecution, NewSignalLeg};
     if !qty_f64.is_finite() || qty_f64 <= 0.0 {
-        return Err("options parity leg quantity is not positive".into());
+        return Err("options leg quantity is not positive".into());
     }
     let side = match order_side {
         Side::Buy => LegSide::Long,
@@ -1081,7 +1088,7 @@ fn record_options_leg_intent(
         .record_signal_execution(
             &NewSignalExecution {
                 id: signal_id.to_string(),
-                strategy_id: OPTIONS_PARITY_STRATEGY_ID.to_string(),
+                strategy_id: strategy_id.to_string(),
                 symbol: symbol.to_string(),
                 route_id: None,
                 expected_net_usd,
@@ -1098,7 +1105,7 @@ fn record_options_leg_intent(
             },
             state.env().as_str(),
         )
-        .map_err(|e| format!("Failed to persist options parity leg intent: {e}"))?;
+        .map_err(|e| format!("Failed to persist options leg intent: {e}"))?;
     Ok(())
 }
 

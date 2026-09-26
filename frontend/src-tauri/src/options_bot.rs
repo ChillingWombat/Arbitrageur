@@ -3,14 +3,15 @@
 //! (environment, substrategy) so each substrategy's bot arms, pauses and
 //! drains independently, and a testnet bot never implies a live one.
 //!
-//! Today only `parity` has a scanner: while armed in `auto` the loop scans
-//! every reachable underlying each poll and dispatches executable setups,
-//! each entry re-validated fresh by `execute_options_parity_impl` (which
-//! refuses duplicate symbols, stale edges, a paused engine, a tripped
-//! circuit breaker, and — via `auto` — autonomous entries on live).
-//! Options positions ride to expiry, so `paused`/`reduce_only` simply
-//! freeze new entries; a `reduce_only` book that reaches flat retires the
-//! persisted mode to `off`, matching the radar bot's drain-down contract.
+//! Live substrategies: `parity` plus the three Deribit package strategies
+//! (box spread, jelly roll, convexity). While armed in `auto` the loop
+//! scans every reachable underlying each poll and dispatches executable
+//! setups, each entry re-validated fresh by its execute impl (which
+//! refuses stale edges, a paused engine, a tripped circuit breaker, and —
+//! via `auto` — autonomous entries on live). Options positions ride to
+//! expiry, so `paused`/`reduce_only` simply freeze new entries; a
+//! `reduce_only` book that reaches flat retires the persisted mode to
+//! `off`, matching the radar bot's drain-down contract.
 
 use std::cmp::Ordering;
 use std::sync::Arc;
@@ -21,6 +22,11 @@ use serde::{Deserialize, Serialize};
 
 use arbitrageur_strategy::convergence_auto::BotMode;
 
+use crate::commands::OPTIONS_PARITY_STRATEGY_ID;
+use crate::options_packages::{
+    execute_options_package_impl, package_strategy_id, scan_options_packages_impl,
+    OptionsPackageExecutionParams, OptionsPackageScanParams, LIVE_PACKAGE_SUBSTRATEGIES,
+};
 use crate::options_parity::{
     execute_options_parity_impl, scan_options_parity_impl, OptionsParityExecutionParams,
     OptionsParityScanParams,
@@ -30,7 +36,7 @@ use crate::state_store::SignalStatus;
 
 /// Substrategies with a working scanner. Pending catalog entries never
 /// reach the loop — their rail rows stay honest placeholders.
-pub const LIVE_SUBSTRATEGIES: [&str; 1] = ["parity"];
+pub const LIVE_SUBSTRATEGIES: [&str; 4] = ["parity", "box_spread", "jelly_roll", "convexity"];
 const SCAN_CURRENCIES: [&str; 2] = ["BTC", "ETH"];
 
 const DEFAULT_QTY_BASE: f64 = 0.1;
@@ -205,18 +211,18 @@ impl OptionsBotExecutor {
         Ok(())
     }
 
-    /// Non-terminal parity *cycles* in the active environment — the bot's
-    /// open-position book. One execution writes three leg signals sharing
-    /// the `{cycle}-legN` prefix, so rows are counted by distinct cycle,
-    /// not individually. `None` when the ledger is unreadable: an
+    /// Non-terminal *cycles* for one substrategy in the active environment —
+    /// the bot's open-position book. One execution writes N leg signals
+    /// sharing the `{cycle}-legN` prefix, so rows are counted by distinct
+    /// cycle, not individually. `None` when the ledger is unreadable: an
     /// uncountable book fails closed (no entries, no retire).
-    fn open_positions(state: &AppEngineState) -> Option<usize> {
+    fn open_positions(state: &AppEngineState, strategy_id: &str) -> Option<usize> {
         let env = state.env().as_str();
         state.state_store.list_signals(None, None).ok().map(|sigs| {
             sigs.iter()
                 .filter(|s| {
                     s.environment.eq_ignore_ascii_case(env)
-                        && s.strategy_id.eq_ignore_ascii_case("options_parity")
+                        && s.strategy_id.eq_ignore_ascii_case(strategy_id)
                         && !matches!(s.status, SignalStatus::Closed | SignalStatus::Failed)
                 })
                 .map(|s| {
@@ -251,13 +257,24 @@ impl OptionsBotExecutor {
         delay.max(5)
     }
 
+    /// The signal-ledger strategy id one substrategy's executions write —
+    /// `options_parity` for parity, `options_{sub}` for packages.
+    fn ledger_strategy_id(substrategy: &str) -> String {
+        if substrategy == "parity" {
+            OPTIONS_PARITY_STRATEGY_ID.to_string()
+        } else {
+            package_strategy_id(substrategy)
+        }
+    }
+
     async fn tick_substrategy(&self, state: &AppEngineState, substrategy: &str) -> u64 {
         let (cfg, mode) = Self::load_config(state, substrategy);
         let poll = cfg.poll_interval_secs.max(5);
         if !mode.exits_allowed() {
             return poll;
         }
-        let Some(mut open) = Self::open_positions(state) else {
+        let strategy_id = Self::ledger_strategy_id(substrategy);
+        let Some(mut open) = Self::open_positions(state, &strategy_id) else {
             // Ledger unreadable — cannot prove the book is flat; hold mode,
             // skip entries.
             return poll;
@@ -279,53 +296,100 @@ impl OptionsBotExecutor {
         }
 
         // Fresh scan per underlying; each execute re-scans server-side, so a
-        // stale edge or duplicated symbol is refused by the impl, never here.
+        // stale edge is refused by the impl, never here.
         for ccy in SCAN_CURRENCIES {
-            let opps = scan_options_parity_impl(
-                &OptionsParityScanParams {
-                    currency: ccy.to_string(),
-                    qty_base: Some(cfg.qty_base),
-                    min_hours_to_expiry: Some(cfg.min_hours_to_expiry),
-                    max_days_to_expiry: Some(cfg.max_days_to_expiry),
-                    min_edge_bps: Some(cfg.min_edge_bps),
-                },
-                state,
-            )
-            .await;
-            let mut opps = match opps {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!("options bot {substrategy}: {ccy} scan failed: {e}");
-                    continue;
-                }
-            };
-            opps.retain(|o| o.is_executable);
-            opps.sort_by(|a, b| {
-                b.net_edge_usd
-                    .partial_cmp(&a.net_edge_usd)
-                    .unwrap_or(Ordering::Equal)
-            });
-            for opp in opps {
-                if open >= cfg.max_open_positions {
-                    break;
-                }
-                // One refusal ends the currency's batch — a mid-batch error
-                // may mean partial fills; next poll re-evaluates honestly.
-                match execute_options_parity_impl(
-                    OptionsParityExecutionParams {
-                        id: opp.id.clone(),
-                        currency: opp.currency.clone(),
-                        qty_base: cfg.qty_base,
+            // (id, currency, net_edge_usd) — the two scanners' DTOs project
+            // onto one shape for sorting + dispatch.
+            let opps: Vec<(String, String, f64)> = if substrategy == "parity" {
+                match scan_options_parity_impl(
+                    &OptionsParityScanParams {
+                        currency: ccy.to_string(),
+                        qty_base: Some(cfg.qty_base),
+                        min_hours_to_expiry: Some(cfg.min_hours_to_expiry),
+                        max_days_to_expiry: Some(cfg.max_days_to_expiry),
                         min_edge_bps: Some(cfg.min_edge_bps),
-                        auto: true,
                     },
                     state,
                 )
                 .await
                 {
-                    Ok(_) => open += 1,
+                    Ok(v) => v
+                        .into_iter()
+                        .filter(|o| o.is_executable)
+                        .map(|o| (o.id, o.currency, o.net_edge_usd))
+                        .collect(),
                     Err(e) => {
-                        tracing::warn!("options bot {substrategy}: entry {} refused: {e}", opp.id);
+                        tracing::warn!("options bot {substrategy}: {ccy} scan failed: {e}");
+                        continue;
+                    }
+                }
+            } else if LIVE_PACKAGE_SUBSTRATEGIES.contains(&substrategy) {
+                match scan_options_packages_impl(
+                    &OptionsPackageScanParams {
+                        substrategy_id: substrategy.to_string(),
+                        currency: ccy.to_string(),
+                        qty_base: Some(cfg.qty_base),
+                        min_hours_to_expiry: Some(cfg.min_hours_to_expiry),
+                        max_days_to_expiry: Some(cfg.max_days_to_expiry),
+                        min_edge_bps: Some(cfg.min_edge_bps),
+                    },
+                    state,
+                )
+                .await
+                {
+                    Ok(v) => v
+                        .into_iter()
+                        .filter(|o| o.is_executable)
+                        .map(|o| (o.id, o.currency, o.net_edge_usd))
+                        .collect(),
+                    Err(e) => {
+                        tracing::warn!("options bot {substrategy}: {ccy} scan failed: {e}");
+                        continue;
+                    }
+                }
+            } else {
+                continue;
+            };
+            let mut opps = opps;
+            opps.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(Ordering::Equal));
+            for (id, _ccy, _edge) in opps {
+                if open >= cfg.max_open_positions {
+                    break;
+                }
+                // One refusal ends the currency's batch — a mid-batch error
+                // may mean partial fills; next poll re-evaluates honestly.
+                let res = if substrategy == "parity" {
+                    execute_options_parity_impl(
+                        OptionsParityExecutionParams {
+                            id: id.clone(),
+                            currency: ccy.to_string(),
+                            qty_base: cfg.qty_base,
+                            min_edge_bps: Some(cfg.min_edge_bps),
+                            auto: true,
+                        },
+                        state,
+                    )
+                    .await
+                    .map(|_| ())
+                } else {
+                    execute_options_package_impl(
+                        &OptionsPackageExecutionParams {
+                            id: id.clone(),
+                            substrategy_id: substrategy.to_string(),
+                            currency: ccy.to_string(),
+                            qty_base: cfg.qty_base,
+                            min_edge_bps: Some(cfg.min_edge_bps),
+                            auto: true,
+                        },
+                        state,
+                    )
+                    .await
+                    .map(|_| ())
+                };
+                match res {
+                    Ok(()) => open += 1,
+                    Err(e) => {
+                        tracing::warn!("options bot {substrategy}: entry {id} refused: {e}");
                         break;
                     }
                 }
@@ -387,8 +451,13 @@ mod tests {
         assert_eq!(mode, BotMode::Auto);
         assert_eq!(policy.max_open_positions, 2);
 
+        // Package substrategies arm independently.
+        OptionsBotExecutor::save_config(&st, &armed("box_spread")).expect("box bot arms");
+        let (_, mode) = OptionsBotExecutor::load_config(&st, "box_spread");
+        assert_eq!(mode, BotMode::Auto);
+
         // Pending substrategies cannot arm.
-        assert!(OptionsBotExecutor::save_config(&st, &armed("box_spread")).is_err());
+        assert!(OptionsBotExecutor::save_config(&st, &armed("dividend")).is_err());
 
         // Bad mode fails closed — never persists.
         let mut bad = armed("parity");

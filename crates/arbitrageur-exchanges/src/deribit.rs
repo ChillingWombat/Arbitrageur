@@ -437,6 +437,28 @@ impl DeribitAdapter {
         Ok(out)
     }
 
+    /// Dated futures for a currency — (instrument name, expiration_ms).
+    /// Shares the instruments cache with `option_chain`, so the jelly-roll
+    /// term-structure benchmark needs no extra round trip.
+    pub async fn dated_futures(&self, currency: &str) -> anyhow::Result<Vec<(String, i64)>> {
+        let ccy = currency.trim().to_ascii_uppercase();
+        if !SUPPORTED_CURRENCIES.iter().any(|s| *s == ccy) {
+            anyhow::bail!("Deribit unsupported currency '{currency}'");
+        }
+        let meta = self.currency_instruments(&ccy).await?;
+        let mut out: Vec<(String, i64)> = meta
+            .iter()
+            .filter_map(|(name, m)| {
+                if m.kind != DeribitKind::Future {
+                    return None;
+                }
+                m.expiration_ms.map(|exp| (name.clone(), exp))
+            })
+            .collect();
+        out.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+        Ok(out)
+    }
+
     /// Top-of-book for every instrument of a currency — one call per kind,
     /// giving the parity scanner both option and future quotes without
     /// per-instrument round trips.

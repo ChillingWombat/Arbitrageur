@@ -16,6 +16,7 @@ mod monitor;
 mod monitor_ipc;
 mod num;
 mod options_bot;
+mod options_packages;
 mod options_parity;
 mod performance;
 mod priceretriver;
@@ -196,6 +197,8 @@ fn main() {
             commands::execute_triangle_arbitrage,
             options_parity::scan_options_parity,
             options_parity::execute_options_parity,
+            options_packages::scan_options_packages,
+            options_packages::execute_options_package,
             commands::check_spatial_convergence,
             commands::scan_spot_opportunities,
             commands::execute_spot_arbitrage,
