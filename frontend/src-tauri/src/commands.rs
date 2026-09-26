@@ -1407,57 +1407,61 @@ pub async fn refresh_venue_latencies_impl(
 pub async fn get_market_universe_impl(
     state: &AppEngineState,
 ) -> Result<Vec<VenueMarketUniverseDto>, String> {
-    let mut tasks = Vec::new();
-    for (vid, _, adapter) in state.get_venues() {
-        let vid = vid.to_string();
-        tasks.push(tokio::spawn(async move {
-            let (markets, prices) =
-                tokio::join!(adapter.fetch_markets(), adapter.fetch_market_prices());
-            let prices = prices.unwrap_or_default();
-            (vid, markets, prices)
-        }));
-    }
+    // Universe metadata rides the env-scoped caches — the UI polls this
+    // every 30s while listings only need refreshing on a 5-minute TTL.
+    let tasks: Vec<_> = state
+        .get_venues()
+        .into_iter()
+        .map(|(vid, _, adapter)| async move {
+            let (markets, prices) = tokio::join!(
+                state.cached_markets(vid, &adapter),
+                state.cached_market_prices(vid, &adapter)
+            );
+            (vid, markets, prices.unwrap_or_default())
+        })
+        .collect();
     let mut out = Vec::new();
-    for h in tasks {
-        if let Ok((vid, Ok(markets), prices)) = h.await {
-            let mut symbols: Vec<String> = markets
-                .iter()
-                .filter(|m| {
-                    m.is_active
-                        && m.symbol.market_type == arbitrageur_core::market::MarketType::Perpetual
-                })
-                .map(|m| {
-                    format!(
-                        "{}-{}",
-                        m.symbol.base.to_uppercase(),
-                        m.symbol.quote.to_uppercase()
-                    )
-                })
-                .collect();
-            symbols.sort();
-            symbols.dedup();
+    for (vid, markets, prices) in futures::future::join_all(tasks).await {
+        let Ok(markets) = markets else {
+            continue;
+        };
+        let mut symbols: Vec<String> = markets
+            .iter()
+            .filter(|m| {
+                m.is_active
+                    && m.symbol.market_type == arbitrageur_core::market::MarketType::Perpetual
+            })
+            .map(|m| {
+                format!(
+                    "{}-{}",
+                    m.symbol.base.to_uppercase(),
+                    m.symbol.quote.to_uppercase()
+                )
+            })
+            .collect();
+        symbols.sort();
+        symbols.dedup();
 
-            let mut base_prices = HashMap::new();
-            for market in &markets {
-                if !market.is_active
-                    || market.symbol.market_type != arbitrageur_core::market::MarketType::Perpetual
-                {
-                    continue;
-                }
-                let Some(price) = prices.get(&market.venue_symbol) else {
-                    continue;
-                };
-                let price = price.to_string().parse::<f64>().ok();
-                if let Some(price) = price.filter(|p| p.is_finite() && *p > 0.0) {
-                    base_prices.insert(market.symbol.canonical(), price);
-                }
+        let mut base_prices = HashMap::new();
+        for market in &markets {
+            if !market.is_active
+                || market.symbol.market_type != arbitrageur_core::market::MarketType::Perpetual
+            {
+                continue;
             }
-            out.push(VenueMarketUniverseDto {
-                venue_id: vid,
-                symbols,
-                base_prices,
-            });
+            let Some(price) = prices.get(&market.venue_symbol) else {
+                continue;
+            };
+            let price = price.to_string().parse::<f64>().ok();
+            if let Some(price) = price.filter(|p| p.is_finite() && *p > 0.0) {
+                base_prices.insert(market.symbol.canonical(), price);
+            }
         }
+        out.push(VenueMarketUniverseDto {
+            venue_id: vid.to_string(),
+            symbols,
+            base_prices,
+        });
     }
     out.sort_by(|a, b| a.venue_id.cmp(&b.venue_id));
     Ok(out)
@@ -2115,11 +2119,14 @@ pub async fn scan_spot_opportunities_impl(
     }
 
     // canonical spot symbol -> venues listing it (first listing wins when a
-    // venue exposes duplicate instruments for one canonical pair).
+    // venue exposes duplicate instruments for one canonical pair). Listings
+    // come through the env-scoped markets cache — this scan runs on the UI
+    // poll cadence and an uncached fetch_markets per venue per tick is a
+    // request storm.
     let mut symbol_venues: HashMap<String, Vec<usize>> = HashMap::new();
-    for (idx, (_vid, _vname, adapter)) in venues.iter().enumerate() {
+    for (idx, (vid, _vname, adapter)) in venues.iter().enumerate() {
         let mut seen = std::collections::HashSet::new();
-        if let Ok(markets) = adapter.fetch_markets().await {
+        if let Ok(markets) = state.cached_markets(vid, adapter).await {
             for m in markets {
                 if m.symbol.market_type != arbitrageur_core::market::MarketType::Spot
                     || !m.is_active
@@ -2177,29 +2184,23 @@ pub async fn scan_spot_opportunities_impl(
         let idxs = &symbol_venues[&canonical];
         state.ensure_market(&canonical);
 
+        // Books are hub-only here: the monitor's WS lanes and fair-share
+        // REST polling feed the hub continuously, and the dispatch path
+        // re-resolves fresh books before any order. A per-scan REST
+        // fallback (like the triangle scan's `rest_fallback = false`
+        // contract) would multiply every UI tick into a per-symbol
+        // per-venue request storm. Books older than the scan window are
+        // simply not tradeable-grade data — the route is skipped.
         let mut books = Vec::new();
         for &idx in idxs {
             let (vid, vname, adapter) = &venues[idx];
             let venue_id = adapter.venue_id();
-            let book = match crate::ws_primary::resolve_book_ws_first(
-                &state.market_data_hub,
-                &state.orderbook_flights,
-                adapter,
+            let Some(book) = state.market_data_hub.get_valid_orderbook(
+                &venue_id,
                 &canonical,
-                std::time::Duration::from_millis(350),
-            )
-            .await
-            {
-                Some(crate::ws_primary::ResolvedBook::Ws(b))
-                | Some(crate::ws_primary::ResolvedBook::Cached(b)) => b,
-                Some(crate::ws_primary::ResolvedBook::Fresh(b)) => {
-                    if validate_adapter_book(&b, &venue_id, &canonical).is_err() {
-                        continue;
-                    }
-                    state.market_data_hub.update_orderbook(b.clone());
-                    b
-                }
-                None => continue,
+                Some(std::time::Duration::from_secs(30)),
+            ) else {
+                continue;
             };
             if validate_adapter_book(&book, &venue_id, &canonical).is_err() {
                 continue;
@@ -4965,7 +4966,9 @@ async fn scan_strategy_venue_universe(
 ) -> StrategyVenueUniverse {
     let mut scan = StrategyVenueUniverse::default();
     for (vid, _, adapter) in state.get_venues() {
-        let markets = match adapter.fetch_markets().await {
+        // Listings/marks come through the env-scoped caches — this runs on
+        // the strategy-tickers poll cadence, not the venue refresh cadence.
+        let markets = match state.cached_markets(vid, &adapter).await {
             Ok(markets) => markets,
             Err(_) => continue,
         };
@@ -4980,7 +4983,10 @@ async fn scan_strategy_venue_universe(
         scan.bases_by_venue.insert(vid.to_string(), bases);
 
         if include_prices {
-            let prices = adapter.fetch_market_prices().await.unwrap_or_default();
+            let prices = state
+                .cached_market_prices(vid, &adapter)
+                .await
+                .unwrap_or_default();
             scan.mark_prices_by_venue
                 .insert(vid.to_string(), base_mark_prices(&markets, &prices));
         }
@@ -5210,8 +5216,12 @@ pub(crate) async fn maybe_record_margin_snapshots(state: &AppEngineState, now_ms
         if fresh {
             continue;
         }
-        // Uncredentialed venues fail the account read and skip — same
-        // best-effort semantics the old simulator loop had.
+        // Uncredentialed venues (vault locked, nothing provisioned) skip
+        // before the wire — attempting the read anyway would just count a
+        // doomed request against the venue's rate-limit backoff budget.
+        if !adapter.has_live_credentials() {
+            continue;
+        }
         let account = match adapter.fetch_account().await {
             Ok(mut acc) => {
                 state.normalize_account_usd(vid, &mut acc);

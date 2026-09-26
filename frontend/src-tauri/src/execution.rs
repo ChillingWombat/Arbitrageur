@@ -2771,6 +2771,17 @@ pub(crate) async fn live_account_or_cached(
             return Ok((acc, None));
         }
     }
+    // Uncredentialed venues (vault locked or never provisioned) cannot
+    // answer an account read — serve the stale snapshot and skip the wire
+    // call entirely. Without this gate every poller's tick burns a doomed
+    // request per venue, and the failures count against the venue's
+    // rate-limit backoff budget, starving its public market-data lanes.
+    if !adapter.has_live_credentials() {
+        if let Some((acc, ts)) = state.last_good_accounts.lock().get(&key).cloned() {
+            return Ok((acc, Some(now_ms.saturating_sub(ts))));
+        }
+        return Err(format!("{vid}: no live credentials loaded"));
+    }
     // Singleflight: concurrent stale reads share one in-flight fetch.
     let lock = state
         .account_fetch_locks
@@ -5449,6 +5460,9 @@ mod account_read_tests {
                 timestamp: Utc::now(),
             })
         }
+        fn has_live_credentials(&self) -> bool {
+            true
+        }
         async fn place_order(
             &self,
             _o: arbitrageur_core::order::OrderRequest,
@@ -5557,6 +5571,108 @@ mod account_read_tests {
             fail: true,
         });
         assert!(live_account_or_cached(&state, "mock", &bad).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn uncredentialed_account_read_never_touches_the_wire() {
+        // Vault locked / nothing provisioned: the poller must serve the
+        // last-known snapshot (or Err with none) without invoking
+        // fetch_account — otherwise every credentialed lane burns a doomed
+        // request per tick and the failures poison the venue's rate-limit
+        // backoff budget for public market data too.
+        struct NoCreds {
+            calls: AtomicUsize,
+        }
+        #[async_trait::async_trait]
+        impl ExchangeAdapter for NoCreds {
+            fn venue_id(&self) -> VenueId {
+                VenueId::new("mock")
+            }
+            fn name(&self) -> &str {
+                "mock"
+            }
+            async fn fetch_markets(
+                &self,
+            ) -> anyhow::Result<Vec<arbitrageur_core::market::MarketMetadata>> {
+                unimplemented!()
+            }
+            async fn fetch_orderbook(&self, _s: &str) -> anyhow::Result<OrderBook> {
+                unimplemented!()
+            }
+            async fn fetch_ticker(
+                &self,
+                _s: &str,
+            ) -> anyhow::Result<arbitrageur_core::quote::Ticker> {
+                unimplemented!()
+            }
+            async fn fetch_funding_rate(
+                &self,
+                _s: &str,
+            ) -> anyhow::Result<arbitrageur_core::quote::FundingRate> {
+                unimplemented!()
+            }
+            async fn fetch_account(&self) -> anyhow::Result<AccountSnapshot> {
+                self.calls.fetch_add(1, Ordering::SeqCst);
+                Ok(AccountSnapshot {
+                    venue: VenueId::new("mock"),
+                    equity: dec!(777),
+                    free_margin: dec!(700),
+                    maintenance_margin: dec!(70),
+                    margin_usage_pct: dec!(9),
+                    balances: vec![],
+                    positions: vec![],
+                    timestamp: Utc::now(),
+                })
+            }
+            async fn place_order(
+                &self,
+                _o: arbitrageur_core::order::OrderRequest,
+            ) -> anyhow::Result<arbitrageur_core::order::OrderResponse> {
+                unimplemented!()
+            }
+            async fn cancel_order(
+                &self,
+                _c: arbitrageur_core::order::CancelRequest,
+            ) -> anyhow::Result<()> {
+                unimplemented!()
+            }
+        }
+
+        let state = AppEngineState::new();
+        let inner = Arc::new(NoCreds {
+            calls: AtomicUsize::new(0),
+        });
+        let no_creds: Arc<dyn ExchangeAdapter> = inner.clone();
+
+        // No snapshot at all: fail-closed Err without a wire call.
+        assert!(live_account_or_cached(&state, "mock", &no_creds)
+            .await
+            .is_err());
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 0);
+
+        // Seed the cache with a credentialed read, age it past the fresh
+        // window, then swap to the uncredentialed adapter: the stale
+        // snapshot must be served instead of a wire call.
+        let good: Arc<dyn ExchangeAdapter> = Arc::new(CountingAccountAdapter {
+            calls: AtomicUsize::new(0),
+            delay_ms: 0,
+            fail: false,
+        });
+        live_account_or_cached(&state, "mock", &good)
+            .await
+            .expect("seed read");
+        {
+            let mut map = state.last_good_accounts.lock();
+            if let Some(entry) = map.get_mut("testnet-mock") {
+                entry.1 -= 10_000;
+            }
+        }
+        let (acc, stale_age) = live_account_or_cached(&state, "mock", &no_creds)
+            .await
+            .expect("stale snapshot must serve when uncredentialed");
+        assert_eq!(acc.equity, dec!(1000));
+        assert!(stale_age.unwrap() >= 10_000);
+        assert_eq!(inner.calls.load(Ordering::SeqCst), 0);
     }
 
     fn resp_with(
