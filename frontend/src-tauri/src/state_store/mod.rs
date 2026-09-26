@@ -2547,7 +2547,15 @@ impl StateStore {
         }
         tconn.execute_batch(
             "CREATE INDEX IF NOT EXISTS ix_spread_samples_env_ts
-                 ON spread_samples(environment, ts_ms);",
+                 ON spread_samples(environment, ts_ms);
+             -- (environment, symbol, ts_ms): the per-frame incumbent_anchor
+             -- probe filters env+symbol and orders by ts; without it SQLite
+             -- scans every env row in ts order once per write batch —
+             -- hundreds of calls/sec × a degenerating range is a page-read
+             -- storm. Both equalities first keeps the scan bounded to the
+             -- key's own rows.
+             CREATE INDEX IF NOT EXISTS ix_spread_samples_env_symbol_ts
+                 ON spread_samples(environment, symbol, ts_ms);",
         )?;
         if let Err(e) = Self::drain_legacy_samples(&tconn, main_path) {
             tracing::warn!("state_store: legacy spread_samples drain failed ({e}); leftover rows stay in the main db");

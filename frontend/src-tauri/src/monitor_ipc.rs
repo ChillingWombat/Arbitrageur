@@ -93,7 +93,7 @@ pub async fn set_ticker_exempted(
         .map_err(|e| e.to_string())?;
     // Force the watchlist to re-derive on the next tick.
     if let Some(engine) = state.monitor.lock().clone() {
-        engine.request_watchlist_refresh();
+        engine.request_watchlist_refresh(&state);
     }
     Ok(())
 }
@@ -118,7 +118,7 @@ pub async fn reveal_all_tickers(state: State<'_, Arc<AppEngineState>>) -> Result
         .clear_ticker_exemptions()
         .map_err(|e| e.to_string())?;
     if let Some(engine) = state.monitor.lock().clone() {
-        engine.request_watchlist_refresh();
+        engine.request_watchlist_refresh(&state);
     }
     Ok(n)
 }

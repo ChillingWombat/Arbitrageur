@@ -59,12 +59,26 @@ pub fn spawn_all(state: Arc<AppEngineState>) {
 /// stalled upgrade (edge holding the socket open on a flagged IP) wedges
 /// the lane forever with zero log output. 10s covers a healthy handshake
 /// with margin; failure surfaces as a normal lane end + backoff retry.
+///
+/// The request carries a User-Agent: CloudFront in front of some venue WS
+/// endpoints (api.rh-testnet.lighter.xyz verified) 403s handshakes that
+/// omit it, while accepting the same handshake with any UA present.
 async fn ws_connect(
     url: &str,
 ) -> anyhow::Result<
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
 > {
-    match tokio::time::timeout(Duration::from_secs(10), connect_async(url)).await {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let mut request = url
+        .into_client_request()
+        .map_err(|e| anyhow::anyhow!("WS request build failed for {url}: {e}"))?;
+    request.headers_mut().insert(
+        tokio_tungstenite::tungstenite::http::header::USER_AGENT,
+        concat!("arbitrageur-desktop/", env!("CARGO_PKG_VERSION"))
+            .parse()
+            .expect("UA header is valid ASCII"),
+    );
+    match tokio::time::timeout(Duration::from_secs(10), connect_async(request)).await {
         Ok(Ok((ws, _))) => Ok(ws),
         Ok(Err(e)) => Err(anyhow::anyhow!("WS connect failed for {url}: {e}")),
         Err(_) => Err(anyhow::anyhow!("WS connect timed out for {url}")),

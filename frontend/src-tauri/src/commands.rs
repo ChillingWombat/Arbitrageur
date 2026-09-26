@@ -1538,8 +1538,23 @@ pub async fn fetch_orderbooks_impl(
     let mut result = Vec::new();
     let mut sample_entries = Vec::new();
 
+    let want_base = arbitrageur_core::symbol::canonical_base(symbol);
     for (vid, vname, adapter) in venues {
         let venue_id = adapter.venue_id();
+        // A venue whose cached listing provably lacks the symbol's base can
+        // never resolve the book — skip its REST fallback instead of paying
+        // a guaranteed 404/mismatch every poll. A failed or absent listing
+        // can't disprove anything, so the fetch proceeds in that case.
+        if let Ok(markets) = state.cached_markets(vid, &adapter).await {
+            let listed = markets.iter().any(|m| {
+                m.symbol.base.eq_ignore_ascii_case(&want_base)
+                    || arbitrageur_core::symbol::canonical_base(&m.venue_symbol)
+                        .eq_ignore_ascii_case(&want_base)
+            });
+            if !listed {
+                continue;
+            }
+        }
         let book = match crate::ws_primary::resolve_book_ws_first(
             &state.market_data_hub,
             &state.orderbook_flights,
@@ -1754,9 +1769,24 @@ pub async fn fetch_multi_market_quotes_impl(
         let mut best_ask_venue = "Hyperliquid".to_string();
         let mut best_buy_spread_bps = 2.0f64;
         let mut found_any = false;
+        let want_base = arbitrageur_core::symbol::canonical_base(&sym);
 
         for (_vid, vname, adapter) in &venues {
             let venue_id = adapter.venue_id();
+            // Same listing gate as fetch_orderbooks_impl: a venue whose
+            // cached markets lack the base can never resolve the book —
+            // skip the REST fallback rather than paying a guaranteed
+            // failure per symbol per poll.
+            if let Ok(markets) = state.cached_markets(_vid, adapter).await {
+                let listed = markets.iter().any(|m| {
+                    m.symbol.base.eq_ignore_ascii_case(&want_base)
+                        || arbitrageur_core::symbol::canonical_base(&m.venue_symbol)
+                            .eq_ignore_ascii_case(&want_base)
+                });
+                if !listed {
+                    continue;
+                }
+            }
             let book = match crate::ws_primary::resolve_book_ws_first(
                 &state.market_data_hub,
                 &state.orderbook_flights,

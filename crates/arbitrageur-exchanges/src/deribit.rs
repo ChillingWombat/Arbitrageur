@@ -1355,7 +1355,12 @@ impl ExchangeAdapter for DeribitAdapter {
     }
 
     fn has_live_credentials(&self) -> bool {
-        self.has_credentials() && !self.testnet
+        // Env-agnostic like every other adapter: live_* and tn_* instances
+        // are distinct objects already scoped by env, so a testnet adapter's
+        // loaded credentials ARE the right answer. The previous `&& !testnet`
+        // permanently marked testnet Deribit as uncredentialed to every
+        // credential gate — account reads, capability reports, dispatch.
+        self.has_credentials()
     }
 }
 

@@ -4875,7 +4875,10 @@ fn pre_v38_telemetry_file_opens_and_gets_env_column() {
         .unwrap()
         .exists([])
         .unwrap();
-    assert!(env_col, "environment column added to legacy telemetry table");
+    assert!(
+        env_col,
+        "environment column added to legacy telemetry table"
+    );
     let idx: bool = tconn
         .prepare("SELECT 1 FROM sqlite_master WHERE name='ix_spread_samples_env_ts'")
         .unwrap()

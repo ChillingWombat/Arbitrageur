@@ -2782,6 +2782,19 @@ pub(crate) async fn live_account_or_cached(
         }
         return Err(format!("{vid}: no live credentials loaded"));
     }
+    // Failure cooldown: a venue whose account read just errored (auth
+    // rejection, venue outage) is retried after the window, not on every
+    // poller's tick. Stale snapshots still serve during the cooldown.
+    const ACCOUNT_FAIL_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
+    let fail_key = format!("{key}-account");
+    if let Some(at) = state.venue_fetch_failures.lock().get(&fail_key) {
+        if at.elapsed() < ACCOUNT_FAIL_COOLDOWN {
+            if let Some((acc, ts)) = state.last_good_accounts.lock().get(&key).cloned() {
+                return Ok((acc, Some(now_ms.saturating_sub(ts))));
+            }
+            return Err(format!("{vid}: account read cooling down after failure"));
+        }
+    }
     // Singleflight: concurrent stale reads share one in-flight fetch.
     let lock = state
         .account_fetch_locks
@@ -2807,9 +2820,14 @@ pub(crate) async fn live_account_or_cached(
                 .last_good_accounts
                 .lock()
                 .insert(key.clone(), (acc.clone(), now_ms));
+            state.venue_fetch_failures.lock().remove(&fail_key);
             Ok((acc, None))
         }
         Err(e) => {
+            state
+                .venue_fetch_failures
+                .lock()
+                .insert(fail_key.clone(), std::time::Instant::now());
             let cached = state.last_good_accounts.lock().get(&key).cloned();
             match cached {
                 Some((acc, ts)) => {
