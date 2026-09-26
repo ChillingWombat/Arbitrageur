@@ -134,7 +134,7 @@ function TickerLogMonitorInner({
   const [levelFilter, setLevelFilter] = useState<string>("ALL");
   const [logDepth, setLogDepth] = useState<string>("100");
   const [searchQuery, setSearchQuery] = useState<string>("");
-  const [autoScroll, setAutoScroll] = useState<boolean>(true);
+
   const [runtimeLogs, setRuntimeLogs] = useState<LogItem[]>([]);
   const scrollBottomRef = useRef<HTMLDivElement>(null);
   // Heartbeat entries buffer here and flush to state at most once per
@@ -337,12 +337,10 @@ function TickerLogMonitorInner({
     return out;
   }, [allLogs, levelFilter, searchQuery, logDepth]);
 
-  // Scroll to top/bottom when logs change if auto-scroll is enabled
+  // Keep the view pinned to the newest entries as the stream grows.
   useEffect(() => {
-    if (autoScroll && scrollBottomRef.current) {
-      scrollBottomRef.current.scrollIntoView({ behavior: "smooth" });
-    }
-  }, [filteredLogs.length, autoScroll]);
+    scrollBottomRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [filteredLogs.length]);
 
   const handleClearLogs = useCallback(() => {
     pendingRef.current = [];
@@ -463,17 +461,6 @@ function TickerLogMonitorInner({
           <strong className="text-slate-800">{allLogs.length}</strong> log events for {namespace ?? symbol} ({strategyName})
         </span>
 
-        <div className="flex items-center space-x-2">
-          <label className="flex items-center space-x-1.5 cursor-pointer text-slate-600">
-            <input
-              type="checkbox"
-              checked={autoScroll}
-              onChange={(e) => setAutoScroll(e.target.checked)}
-              className="rounded-lg border-surface-border text-accent-strong focus:ring-accent"
-            />
-            <span className="text-xs">Follow Live Stream</span>
-          </label>
-        </div>
       </div>
     </div>
   );
