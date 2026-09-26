@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const ALLOWED_STRATEGY_IDS: [&str; 12] = [
     "futures",
@@ -2146,7 +2147,59 @@ pub struct StateStore {
     /// switch must not let the old env's last-write suppress the new
     /// env's first frame.
     sample_watermarks: Mutex<HashMap<(String, String, String), i64>>,
+    /// Incremental read windows for `spread_samples*`: rows are append-only
+    /// in ts order, so a sliding-window reader only needs the delta beyond
+    /// the last served watermark. Without it the monitor's every-5s eval
+    /// re-read each watched symbol's whole history window — ~1.5k rows/key
+    /// within an hour of a session, degenerating daily — at hundreds of
+    /// keys per tick that was the dominant page-read load.
+    /// Keyed by the resolved key-set + environment so merged/separate
+    /// quote policies and envs never share a window. Invalidated by any
+    /// write landing at-or-behind the watermark and by retention prunes.
+    spread_series_cache: Mutex<HashMap<String, SeriesWindow<SpreadSample>>>,
+    /// Same watermarked-window trick for `venue_volume_samples`: the eval
+    /// reads a 7-day depth window per (symbol, venue) every tick — on the
+    /// order of watchlist×venues queries per 5s — and each uncached read
+    /// thrashed the page cache. Rows are plain (ts, vol) tuples.
+    vol_series_cache: Mutex<HashMap<String, SeriesWindow<(i64, f64)>>>,
+    /// Memoized incumbent scale anchors (the write-side consistency gate).
+    /// The anchor derives from the earliest rows of a key-set — it only
+    /// changes when those rows do — but `record_spread_samples_mode` ran
+    /// the full earliest-window scan on every feed frame, hundreds of
+    /// times a second. Cached per (env, key-set) as `(anchor, coverage)`:
+    /// `coverage` is the greatest ts the scan consumed, so only a write
+    /// landing at-or-inside that span can change the answer and evict.
+    /// `None` results are not cached (empty key-set scans are cheap).
+    /// Cleared on prunes alongside the series windows.
+    anchor_cache: Mutex<HashMap<String, (f64, i64)>>,
+    /// Admission memo for `has_enabled_account`/`default_account`. Venue
+    /// resolution runs per feed frame (~hundreds/sec) and each call was a
+    /// prepared `SELECT EXISTS` per venue — epoch-invalidated so account
+    /// mutations take effect on the very next call, never stale.
+    accounts_epoch: AtomicU64,
+    accounts_memo: Mutex<(u64, HashMap<String, Option<AccountProfile>>)>,
 }
+
+/// One cached sliding window of raw sample rows (pre-filter).
+/// `watermark` = highest ts served; `floor` = lowest ts retained (a request
+/// below it forces a full refetch since rows under it were evicted).
+pub(crate) struct SeriesWindow<T> {
+    watermark: i64,
+    floor: i64,
+    rows: Vec<T>,
+    touched: std::time::Instant,
+}
+
+/// Cached windows retained per (env, keyset); the monitor watchlist is
+/// ~hundreds of symbols and callers beyond it evict least-recently-touched.
+const SERIES_CACHE_MAX_ENTRIES: usize = 1024;
+/// Volume windows key by (venue × symbol key-set) — a wider fan-out than
+/// spread windows, still a few KB each.
+const VOL_SERIES_CACHE_MAX_ENTRIES: usize = 8192;
+/// Rows retained per window — beyond this, the oldest rows evict and the
+/// floor advances, so deep-history requests simply refetch.
+const SERIES_CACHE_MAX_ROWS: usize = 64_000;
+const VOL_SERIES_CACHE_MAX_ROWS: usize = 16_000;
 
 fn normalize_id(raw: &str) -> anyhow::Result<String> {
     let v = raw.trim().to_lowercase();
@@ -2451,6 +2504,16 @@ impl StateStore {
     }
 
     fn init(conn: Connection, file_path: Option<&Path>) -> anyhow::Result<Self> {
+        if std::env::var_os("ARBITRAGEUR_SQL_TRACE").is_some() {
+            conn.trace_v2(
+                rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+                Some(|ev| {
+                    if let rusqlite::trace::TraceEvent::Stmt(stmt, _) = ev {
+                        tracing::info!(target: "sqltrace", "{}", stmt.expanded_sql().unwrap_or_else(|| stmt.sql().into_owned()));
+                    }
+                }),
+            );
+        }
         conn.execute_batch(
             "PRAGMA foreign_keys = ON;
              PRAGMA synchronous = FULL;
@@ -2484,6 +2547,11 @@ impl StateStore {
             conn: Mutex::new(conn),
             telemetry,
             sample_watermarks: Mutex::new(HashMap::new()),
+            spread_series_cache: Mutex::new(HashMap::new()),
+            vol_series_cache: Mutex::new(HashMap::new()),
+            anchor_cache: Mutex::new(HashMap::new()),
+            accounts_epoch: AtomicU64::new(0),
+            accounts_memo: Mutex::new((0, HashMap::new())),
         })
     }
 
@@ -2517,6 +2585,16 @@ impl StateStore {
             );
         }
         let tconn = Connection::open(&tpath)?;
+        if std::env::var_os("ARBITRAGEUR_SQL_TRACE").is_some() {
+            tconn.trace_v2(
+                rusqlite::trace::TraceEventCodes::SQLITE_TRACE_STMT,
+                Some(|ev| {
+                    if let rusqlite::trace::TraceEvent::Stmt(stmt, _) = ev {
+                        tracing::info!(target: "sqltrace", "{}", stmt.expanded_sql().unwrap_or_else(|| stmt.sql().into_owned()));
+                    }
+                }),
+            );
+        }
         tconn.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;

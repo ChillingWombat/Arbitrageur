@@ -45,7 +45,39 @@ impl StateStore {
         // so its first cells still bind the instrument freely. The anchor
         // is environment-scoped: a testnet scale must not arbitrate live
         // rows (and pre-v38 'unknown' rows arbitrate nothing).
-        let anchor = incumbent_anchor(&conn, &sample_keys(&symbol, merge_usd), &environment)?;
+        let anchor =
+            self.incumbent_anchor_cached(&conn, &sample_keys(&symbol, merge_usd), &environment)?;
+        // Writes normally land past every cached window's watermark (append
+        // order = ts order), so the check is a no-op in the hot path. A
+        // backdated or same-ts write would be invisible to an incremental
+        // reader — any window covering this key-set and env is evicted. It
+        // may also precede the incumbent's earliest rows, so its anchor
+        // entry goes too.
+        {
+            let mut cache = self.spread_series_cache.lock();
+            let env_key = format!("{environment}|");
+            cache.retain(|k, w| {
+                if w.watermark < ts_ms || !k.starts_with(&env_key) {
+                    return true;
+                }
+                !k.split('|')
+                    .nth(2)
+                    .unwrap_or_default()
+                    .split(',')
+                    .any(|s| s.eq_ignore_ascii_case(&symbol))
+            });
+            let mut anchors = self.anchor_cache.lock();
+            anchors.retain(|k, (_, coverage)| {
+                ts_ms > *coverage
+                    || !k.starts_with(&env_key)
+                    || !k
+                        .split('|')
+                        .nth(1)
+                        .unwrap_or_default()
+                        .split(',')
+                        .any(|s| s.eq_ignore_ascii_case(&symbol))
+            });
+        }
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         {
             let mut stmt = tx.prepare(
@@ -167,6 +199,41 @@ impl StateStore {
         let symbol = normalize_symbol(symbol)?;
         let environment = normalize_environment(environment)?;
         let keys = sample_keys(&symbol, merge_usd);
+        let conn = self.telemetry().lock();
+        let rows =
+            self.read_series_window(&conn, &keys, merge_usd, &environment, from_ts_ms, to_ts_ms)?;
+        // One anchor source for every read: the scale the canonical key was
+        // first bound to *in this environment*. A window of pure intruder
+        // data reads self-consistent at the wrong scale, so the incumbent
+        // must arbitrate even when nothing inside the window looks split.
+        let anchor = self.incumbent_anchor_cached(&conn, &keys, &environment)?;
+        Ok(filter_symbol_consistency(rows, anchor))
+    }
+
+    /// Windowed read behind `spread_samples_mode`. Rows append in ts order,
+    /// so a repeat reader only fetches the delta past the last served
+    /// watermark instead of re-scanning the whole window — the monitor's
+    /// every-5s eval reads ~hundreds of keys and the full-window variant
+    /// was the dominant page-read load (measured ~150-450 MB/s bursts).
+    ///
+    /// Invariants: a cached window is complete over `[floor, watermark]`
+    /// (cap evictions raise `floor`); a request under `floor` or a key miss
+    /// refetches fully; writes landing at-or-behind a window's watermark
+    /// evict it (see `record_spread_samples_mode`), and retention prunes
+    /// clear the whole map, so the cache can never serve rows the table
+    /// no longer holds nor miss rows it gained.
+    fn read_series_window(
+        &self,
+        conn: &Connection,
+        keys: &[String],
+        merge_usd: bool,
+        environment: &str,
+        from_ts_ms: i64,
+        to_ts_ms: i64,
+    ) -> anyhow::Result<Vec<SpreadSample>> {
+        let mut key_parts = keys.to_vec();
+        key_parts.sort();
+        let cache_key = format!("{environment}|{merge_usd}|{}", key_parts.join(","));
         let placeholders = keys.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
             "SELECT symbol, venue_id, ts_ms, mid, best_bid, best_ask, bid_depth, ask_depth
@@ -175,32 +242,101 @@ impl StateStore {
                AND environment = ?
              ORDER BY ts_ms ASC, venue_id ASC"
         );
-        let conn = self.telemetry().lock();
-        let mut stmt = conn.prepare(&sql)?;
-        let mut params: Vec<&dyn rusqlite::ToSql> =
-            keys.iter().map(|k| k as &dyn rusqlite::ToSql).collect();
-        params.push(&from_ts_ms);
-        params.push(&to_ts_ms);
-        params.push(&environment);
-        let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
-            Ok(SpreadSample {
-                symbol: r.get(0)?,
-                venue_id: r.get(1)?,
-                ts_ms: r.get(2)?,
-                mid: r.get(3)?,
-                best_bid: r.get(4)?,
-                best_ask: r.get(5)?,
-                bid_depth: r.get(6).ok().flatten(),
-                ask_depth: r.get(7).ok().flatten(),
-            })
-        })?;
-        let rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
-        // One anchor source for every read: the scale the canonical key was
-        // first bound to *in this environment*. A window of pure intruder
-        // data reads self-consistent at the wrong scale, so the incumbent
-        // must arbitrate even when nothing inside the window looks split.
-        let anchor = incumbent_anchor(&conn, &keys, &environment)?;
-        Ok(filter_symbol_consistency(rows, anchor))
+        let fetch = |conn: &Connection, lo: i64| -> rusqlite::Result<Vec<SpreadSample>> {
+            let mut stmt = conn.prepare(&sql)?;
+            let mut params: Vec<&dyn rusqlite::ToSql> =
+                keys.iter().map(|k| k as &dyn rusqlite::ToSql).collect();
+            params.push(&lo);
+            params.push(&to_ts_ms);
+            params.push(&environment);
+            let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
+                Ok(SpreadSample {
+                    symbol: r.get(0)?,
+                    venue_id: r.get(1)?,
+                    ts_ms: r.get(2)?,
+                    mid: r.get(3)?,
+                    best_bid: r.get(4)?,
+                    best_ask: r.get(5)?,
+                    bid_depth: r.get(6).ok().flatten(),
+                    ask_depth: r.get(7).ok().flatten(),
+                })
+            })?;
+            rows.collect()
+        };
+
+        let mut cache = self.spread_series_cache.lock();
+        let now = std::time::Instant::now();
+        let incremental = cache.get(&cache_key).is_some_and(|w| from_ts_ms >= w.floor);
+        if incremental {
+            let w = cache.get_mut(&cache_key).expect("checked above");
+            let new_rows = fetch(conn, w.watermark.saturating_add(1))?;
+            w.rows.extend(new_rows);
+            w.watermark = w.watermark.max(to_ts_ms);
+            w.touched = now;
+            if w.rows.len() > SERIES_CACHE_MAX_ROWS {
+                let drop_n = w.rows.len() - SERIES_CACHE_MAX_ROWS;
+                w.rows.drain(..drop_n);
+                w.floor = w.rows.first().map(|r| r.ts_ms).unwrap_or(i64::MAX);
+            }
+        } else {
+            let rows = fetch(conn, from_ts_ms)?;
+            // floor = the requested window start, NOT the first row's ts:
+            // coverage is complete from `from` to `watermark` even when the
+            // series' first row lands inside the window — anchoring on the
+            // row would send every sliding-window read back to disk.
+            let floor = from_ts_ms;
+            if cache.len() >= SERIES_CACHE_MAX_ENTRIES {
+                if let Some(oldest) = cache
+                    .iter()
+                    .min_by_key(|(_, w)| w.touched)
+                    .map(|(k, _)| k.clone())
+                {
+                    cache.remove(&oldest);
+                }
+            }
+            cache.insert(
+                cache_key.clone(),
+                SeriesWindow {
+                    watermark: to_ts_ms,
+                    floor,
+                    rows,
+                    touched: now,
+                },
+            );
+        }
+        let w = cache.get(&cache_key).expect("entry exists after fill");
+        Ok(w.rows
+            .iter()
+            .filter(|r| r.ts_ms >= from_ts_ms && r.ts_ms <= to_ts_ms)
+            .cloned()
+            .collect())
+    }
+
+    /// Memoized `incumbent_anchor`: the answer is a function of the
+    /// earliest rows only, so feed-frame write paths would otherwise rescan
+    /// the same earliest window hundreds of times a second. Entries carry
+    /// the scan's coverage frontier — writes beyond it cannot change the
+    /// answer; writes inside it evict (see `record_spread_samples_mode`),
+    /// as do prunes. `None` (empty key-set) stays uncached by design.
+    fn incumbent_anchor_cached(
+        &self,
+        conn: &Connection,
+        keys: &[String],
+        environment: &str,
+    ) -> rusqlite::Result<Option<f64>> {
+        let mut key_parts = keys.to_vec();
+        key_parts.sort();
+        let key = format!("{environment}|{}", key_parts.join(","));
+        if let Some((anchor, _)) = self.anchor_cache.lock().get(&key) {
+            return Ok(Some(*anchor));
+        }
+        match incumbent_anchor(conn, keys, environment)? {
+            (Some(anchor), coverage) => {
+                self.anchor_cache.lock().insert(key, (anchor, coverage));
+                Ok(Some(anchor))
+            }
+            (None, _) => Ok(None),
+        }
     }
 
     /// Earliest recorded sample timestamp for a symbol (history depth indicator).
@@ -266,6 +402,10 @@ impl StateStore {
              )",
             [max_rows],
         )?;
+        // Deleted rows may sit inside cached read windows — the cache must
+        // never serve rows the table no longer holds.
+        self.spread_series_cache.lock().clear();
+        self.anchor_cache.lock().clear();
         Ok(())
     }
 
@@ -305,6 +445,7 @@ impl StateStore {
         }
         let mut conn = self.conn.lock();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut written: Vec<String> = Vec::with_capacity(volumes.len());
         {
             let mut stmt = tx.prepare(
                 "INSERT OR REPLACE INTO venue_volume_samples
@@ -320,9 +461,29 @@ impl StateStore {
                     continue;
                 }
                 stmt.execute(params![venue, symbol, ts_ms, vol, environment])?;
+                written.push(symbol);
             }
         }
         tx.commit()?;
+        // Same backdated-write guard as spread samples: a row landing inside
+        // a cached window's already-served range must evict that window —
+        // incremental readers only ever fetch past the watermark.
+        if !written.is_empty() {
+            let mut cache = self.vol_series_cache.lock();
+            let env_venue = format!("{environment}|");
+            cache.retain(|k, w| {
+                if w.watermark < ts_ms
+                    || !k.starts_with(&env_venue)
+                    || k.split('|').nth(2).is_none_or(|v| v != venue)
+                {
+                    return true;
+                }
+                let keyset = k.split('|').nth(3).unwrap_or_default();
+                !written
+                    .iter()
+                    .any(|s| keyset.split(',').any(|k| k.eq_ignore_ascii_case(s)))
+            });
+        }
         Ok(())
     }
 
@@ -354,6 +515,12 @@ impl StateStore {
         let venue = normalize_venue(venue)?;
         let environment = normalize_environment(environment)?;
         let keys = sample_keys(&symbol, merge_usd);
+        // Watermarked window, same rationale as `read_series_window` — the
+        // eval asks for each (symbol, venue) 7-day depth series every 5s;
+        // rows append in ts order so only the delta is worth fetching.
+        let mut key_parts = keys.clone();
+        key_parts.sort();
+        let cache_key = format!("{environment}|{merge_usd}|{venue}|{}", key_parts.join(","));
         let placeholders = keys.iter().map(|_| "?").collect::<Vec<_>>().join(",");
         let sql = format!(
             "SELECT ts_ms, vol_usd FROM venue_volume_samples
@@ -362,19 +529,62 @@ impl StateStore {
              ORDER BY ts_ms ASC"
         );
         let conn = self.conn.lock();
-        let mut stmt = conn.prepare(&sql)?;
-        let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(keys.len() + 4);
-        params.push(&venue);
-        for k in &keys {
-            params.push(k);
+        let fetch = |lo: i64| -> rusqlite::Result<Vec<(i64, f64)>> {
+            let mut stmt = conn.prepare(&sql)?;
+            let mut params: Vec<&dyn rusqlite::ToSql> = Vec::with_capacity(keys.len() + 4);
+            params.push(&venue);
+            for k in &keys {
+                params.push(k);
+            }
+            params.push(&lo);
+            params.push(&to_ts_ms);
+            params.push(&environment);
+            let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?))
+            })?;
+            rows.collect()
+        };
+        let mut cache = self.vol_series_cache.lock();
+        let now = std::time::Instant::now();
+        let incremental = cache.get(&cache_key).is_some_and(|w| from_ts_ms >= w.floor);
+        if incremental {
+            let w = cache.get_mut(&cache_key).expect("checked above");
+            w.rows.extend(fetch(w.watermark.saturating_add(1))?);
+            w.watermark = w.watermark.max(to_ts_ms);
+            w.touched = now;
+            if w.rows.len() > VOL_SERIES_CACHE_MAX_ROWS {
+                let drop_n = w.rows.len() - VOL_SERIES_CACHE_MAX_ROWS;
+                w.rows.drain(..drop_n);
+                w.floor = w.rows.first().map(|r| r.0).unwrap_or(i64::MAX);
+            }
+        } else {
+            let rows = fetch(from_ts_ms)?;
+            let floor = from_ts_ms;
+            if cache.len() >= VOL_SERIES_CACHE_MAX_ENTRIES {
+                if let Some(oldest) = cache
+                    .iter()
+                    .min_by_key(|(_, w)| w.touched)
+                    .map(|(k, _)| k.clone())
+                {
+                    cache.remove(&oldest);
+                }
+            }
+            cache.insert(
+                cache_key.clone(),
+                SeriesWindow {
+                    watermark: to_ts_ms,
+                    floor,
+                    rows,
+                    touched: now,
+                },
+            );
         }
-        params.push(&from_ts_ms);
-        params.push(&to_ts_ms);
-        params.push(&environment);
-        let rows = stmt.query_map(rusqlite::params_from_iter(params), |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?))
-        })?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        let w = cache.get(&cache_key).expect("entry exists after fill");
+        Ok(w.rows
+            .iter()
+            .filter(|r| r.0 >= from_ts_ms && r.0 <= to_ts_ms)
+            .copied()
+            .collect())
     }
 
     /// Bound the raw volume log with the same retention cutoffs as spread
@@ -397,6 +607,7 @@ impl StateStore {
              )",
             [max_rows],
         )?;
+        self.vol_series_cache.lock().clear();
         Ok(())
     }
 
@@ -437,10 +648,13 @@ impl StateStore {
 
     pub fn delete_spread_samples_before(&self, retain_after_ts_ms: i64) -> anyhow::Result<usize> {
         let conn = self.telemetry().lock();
-        Ok(conn.execute(
+        let n = conn.execute(
             "DELETE FROM spread_samples WHERE ts_ms < ?1",
             [retain_after_ts_ms],
-        )?)
+        )?;
+        self.spread_series_cache.lock().clear();
+        self.anchor_cache.lock().clear();
+        Ok(n)
     }
 
     /// Record funding-rate prints observed by a scan under `environment`.
@@ -545,12 +759,15 @@ impl StateStore {
         // Rows are append-only with ts_ms = insert time, so rowid order is
         // timestamp order — ORDER BY id walks the PK directly instead of
         // sorting the whole table per batch under a GB retention cap.
-        Ok(conn.execute(
+        let n = conn.execute(
             "DELETE FROM spread_samples WHERE id IN (
                  SELECT id FROM spread_samples ORDER BY id ASC LIMIT ?1
              )",
             [limit as i64],
-        )?)
+        )?;
+        self.spread_series_cache.lock().clear();
+        self.anchor_cache.lock().clear();
+        Ok(n)
     }
 
     pub fn spread_sample_count(&self) -> anyhow::Result<u64> {
@@ -674,11 +891,15 @@ fn consensus_anchor(cells: &[(f64, usize)]) -> Option<f64> {
 const INCUMBENT_CELL_CAP: usize = 6;
 const INCUMBENT_ROW_CAP: i64 = 16_384;
 
+/// Returns `(anchor, coverage)` — `coverage` is the greatest ts_ms the
+/// scan consumed. Callers may memoize the anchor while treating the
+/// coverage as an eviction frontier: writes landing within it can change
+/// the bucket majority; writes past it cannot.
 fn incumbent_anchor(
     conn: &Connection,
     keys: &[String],
     environment: &str,
-) -> rusqlite::Result<Option<f64>> {
+) -> rusqlite::Result<(Option<f64>, i64)> {
     let placeholders = keys.iter().map(|_| "?").collect::<Vec<_>>().join(",");
     // Environment-strict: a testnet incumbent must not arbitrate live rows
     // (identical key spaces, unrelated scales).
@@ -699,8 +920,10 @@ fn incumbent_anchor(
         ))
     })?;
     let mut cells: HashMap<(i64, String), Vec<f64>> = HashMap::new();
+    let mut coverage = 0i64;
     for row in rows {
         let (venue, ts, mid) = row?;
+        coverage = coverage.max(ts);
         if mid.is_finite() && mid > 0.0 && ts >= 0 {
             cells
                 .entry((ts / CONSISTENCY_BUCKET_MS, venue))
@@ -715,7 +938,7 @@ fn incumbent_anchor(
         .values()
         .filter_map(|ms| median_f64(&mut ms.clone()).map(|m| (m, ms.len())))
         .collect();
-    Ok(consensus_anchor(&meds))
+    Ok((consensus_anchor(&meds), coverage))
 }
 
 /// Apply the arbitrated anchor: every surviving row must sit within 3x of

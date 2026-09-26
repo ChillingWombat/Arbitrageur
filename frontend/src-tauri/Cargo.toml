@@ -40,7 +40,9 @@ hex = { workspace = true }
 rand = { workspace = true }
 argon2 = { workspace = true }
 zeroize = { workspace = true }
-rusqlite = { version = "0.40.2", features = ["bundled"] }
+# `trace` powers the opt-in ARBITRAGEUR_SQL_TRACE statement logger used for
+# hot-query attribution; it is inert unless the env var is set at startup.
+rusqlite = { version = "0.40.2", features = ["bundled", "trace"] }
 # EVM wallet key custody: the shared-wallet secp256k1 key lives inside an
 # IOTA Stronghold snapshot (guarded memory, encrypted at rest) instead of
 # being decrypted into process memory. We use the plugin's Rust-side

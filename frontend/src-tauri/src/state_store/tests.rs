@@ -4887,3 +4887,196 @@ fn pre_v38_telemetry_file_opens_and_gets_env_column() {
     assert!(idx, "env index created after the column exists");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+/* --------- incremental read-window cache (spread_samples) -------- */
+
+#[test]
+fn test_spread_samples_cache_serves_incremental_appends() {
+    // A second read of an overlapping window must see rows written after
+    // the first read — the watermark fetch covers [watermark+1, to].
+    let store = StateStore::open_in_memory().unwrap();
+    store
+        .record_spread_samples("BTC-USDC", 1_000, &[sample("hyperliquid", 100.0)], "live")
+        .unwrap();
+    let first = store.spread_samples("BTC-USDC", 0, 5_000, "live").unwrap();
+    assert_eq!(first.len(), 1);
+
+    // New rows after the watermark: incremental path must pick them up.
+    store
+        .record_spread_samples("BTC-USDC", 3_000, &[sample("lighter", 100.2)], "live")
+        .unwrap();
+    store
+        .record_spread_samples("BTC-USDC", 4_500, &[sample("hyperliquid", 100.4)], "live")
+        .unwrap();
+    let second = store.spread_samples("BTC-USDC", 0, 5_000, "live").unwrap();
+    assert_eq!(second.len(), 3);
+    assert_eq!(
+        second.iter().map(|s| s.ts_ms).collect::<Vec<_>>(),
+        vec![1_000, 3_000, 4_500]
+    );
+
+    // Narrow window must slice the cached superset correctly.
+    let narrow = store
+        .spread_samples("BTC-USDC", 2_000, 4_000, "live")
+        .unwrap();
+    assert_eq!(narrow.len(), 1);
+    assert_eq!(narrow[0].venue_id, "lighter");
+}
+
+#[test]
+fn test_spread_samples_backdated_write_evicts_cache() {
+    // A write landing at-or-behind a cached window's watermark would be
+    // invisible to the incremental fetch — the writer evicts that window.
+    let store = StateStore::open_in_memory().unwrap();
+    store
+        .record_spread_samples("BTC-USDC", 5_000, &[sample("hyperliquid", 100.0)], "live")
+        .unwrap();
+    let first = store.spread_samples("BTC-USDC", 0, 6_000, "live").unwrap();
+    assert_eq!(first.len(), 1);
+
+    // Backdated insert inside the already-served range.
+    store
+        .record_spread_samples("BTC-USDC", 2_500, &[sample("lighter", 99.9)], "live")
+        .unwrap();
+    let second = store.spread_samples("BTC-USDC", 0, 6_000, "live").unwrap();
+    assert_eq!(second.len(), 2);
+    assert_eq!(second[0].ts_ms, 2_500);
+}
+
+#[test]
+fn test_spread_samples_cache_env_and_mode_isolation() {
+    // Environments and merge modes key separate windows: a write in one
+    // must never bleed into another's cached series.
+    let store = StateStore::open_in_memory().unwrap();
+    store
+        .record_spread_samples("BTC-USDC", 1_000, &[sample("hyperliquid", 100.0)], "live")
+        .unwrap();
+    store
+        .record_spread_samples("BTC-USDC", 1_000, &[sample("lighter", 200.0)], "testnet")
+        .unwrap();
+    // Prime both env caches.
+    assert_eq!(
+        store
+            .spread_samples("BTC-USDC", 0, 5_000, "live")
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        store
+            .spread_samples("BTC-USDC", 0, 5_000, "testnet")
+            .unwrap()
+            .len(),
+        1
+    );
+    // Backdated testnet write must not appear in the live window.
+    store
+        .record_spread_samples("BTC-USDC", 500, &[sample("lighter", 199.0)], "testnet")
+        .unwrap();
+    let live = store.spread_samples("BTC-USDC", 0, 5_000, "live").unwrap();
+    assert_eq!(live.len(), 1);
+    assert_eq!(live[0].venue_id, "hyperliquid");
+    let testnet = store
+        .spread_samples("BTC-USDC", 0, 5_000, "testnet")
+        .unwrap();
+    assert_eq!(testnet.len(), 2);
+}
+
+#[test]
+fn test_spread_samples_prune_clears_cached_windows() {
+    // Retention deletes may remove rows inside cached windows — a reread
+    // must not resurrect them.
+    let store = StateStore::open_in_memory().unwrap();
+    for i in 0..6 {
+        store
+            .record_spread_samples(
+                "BTC-USDC",
+                i * 1_000,
+                &[sample("hyperliquid", 100.0 + i as f64)],
+                "live",
+            )
+            .unwrap();
+    }
+    // Prime cache over the full range, then delete the head.
+    assert_eq!(
+        store
+            .spread_samples("BTC-USDC", 0, i64::MAX, "live")
+            .unwrap()
+            .len(),
+        6
+    );
+    store.prune_spread_samples(3_000, 1_000_000).unwrap();
+    let rows = store
+        .spread_samples("BTC-USDC", 0, i64::MAX, "live")
+        .unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(rows[0].ts_ms, 3_000);
+}
+
+#[test]
+fn test_spread_samples_cache_merge_mode_shares_key_set() {
+    // "BTC" and "BTC-USDC" resolve to the same merged key-set — one cached
+    // window serves both spellings.
+    let store = StateStore::open_in_memory().unwrap();
+    store
+        .record_spread_samples("BTC-USDC", 1_000, &[sample("hyperliquid", 100.0)], "live")
+        .unwrap();
+    store
+        .record_spread_samples("BTC-USDT", 1_000, &[sample("lighter", 100.1)], "live")
+        .unwrap();
+    let a = store.spread_samples("BTC", 0, 5_000, "live").unwrap();
+    let b = store.spread_samples("BTC-USDC", 0, 5_000, "live").unwrap();
+    assert_eq!(a.len(), 2);
+    assert_eq!(a.len(), b.len());
+    assert_eq!(
+        a.iter().map(|s| s.venue_id.clone()).collect::<Vec<_>>(),
+        b.iter().map(|s| s.venue_id.clone()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_venue_volume_series_incremental_and_backdated() {
+    let store = StateStore::open_in_memory().unwrap();
+    let mut v = HashMap::new();
+    v.insert("BTC-USDC".to_string(), 1_000.0);
+    store
+        .record_venue_volume_samples("hyperliquid", 1_000, &v, "live")
+        .unwrap();
+    let first = store
+        .venue_volume_series("BTC-USDC", "hyperliquid", 0, 5_000, "live")
+        .unwrap();
+    assert_eq!(first.len(), 1);
+
+    // Append after the watermark — incremental fetch must see it.
+    store
+        .record_venue_volume_samples("hyperliquid", 3_000, &v, "live")
+        .unwrap();
+    let second = store
+        .venue_volume_series("BTC-USDC", "hyperliquid", 0, 5_000, "live")
+        .unwrap();
+    assert_eq!(second.len(), 2);
+
+    // Backdated write inside the served range evicts and reappears.
+    store
+        .record_venue_volume_samples("hyperliquid", 500, &v, "live")
+        .unwrap();
+    let third = store
+        .venue_volume_series("BTC-USDC", "hyperliquid", 0, 5_000, "live")
+        .unwrap();
+    assert_eq!(third.len(), 3);
+    assert_eq!(third[0].0, 500);
+
+    // Venue + env isolation: another venue's write must not leak in.
+    let mut v2 = HashMap::new();
+    v2.insert("BTC-USDC".to_string(), 2_000.0);
+    store
+        .record_venue_volume_samples("lighter", 600, &v2, "live")
+        .unwrap();
+    store
+        .record_venue_volume_samples("hyperliquid", 700, &v, "testnet")
+        .unwrap();
+    let hl = store
+        .venue_volume_series("BTC-USDC", "hyperliquid", 0, 5_000, "live")
+        .unwrap();
+    assert_eq!(hl.len(), 3, "lighter/testnet writes must not merge");
+}
