@@ -346,7 +346,8 @@ const SubstrategyRail: React.FC<{
             <div className="px-2.5 pt-1 pb-0.5 text-[9px] font-bold uppercase tracking-widest text-slate-400">
               {family}
             </div>
-            {items.map((s) => {
+            <div className="space-y-1.5">
+              {items.map((s) => {
               const active = selected === s.id;
               const live = s.status === "live";
               const count = oppCounts.get(s.id) ?? 0;
@@ -390,7 +391,8 @@ const SubstrategyRail: React.FC<{
                   <div className="text-[10px] text-slate-400 truncate">{s.tagline}</div>
                 </button>
               );
-            })}
+              })}
+            </div>
           </div>
         ))}
       </div>
