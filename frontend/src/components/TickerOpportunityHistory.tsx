@@ -66,7 +66,9 @@ export const TickerOpportunityHistory: React.FC<TickerOpportunityHistoryProps> =
   const [events, setEvents] = useState<MonitorSignalEventDto[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [allTickers, setAllTickers] = useState(false);
+  // Multi-ticker hosts (radar page) pass symbol="" — all tickers is the
+  // only meaningful scope there; single-ticker hosts still start scoped.
+  const [allTickers, setAllTickers] = useState(() => symbol.trim() === "");
   const [detectedOnly, setDetectedOnly] = useState(true);
   const [query, setQuery] = useState("");
 

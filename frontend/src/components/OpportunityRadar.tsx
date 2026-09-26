@@ -8,9 +8,13 @@ import {
   ChevronDown,
   Clock,
   EyeOff,
+  History,
   Layers,
+  Radar,
   RotateCcw,
+  Terminal,
   TrendingUp,
+  Wallet,
   X,
 } from "lucide-react";
 import { BotLifecycleControls, BotPhaseBadge } from "./BotLifecycleControls";
@@ -20,6 +24,7 @@ import { InfoTooltip } from "./InfoTooltip";
 import { SaveButton, useSaveButton } from "./SaveButton";
 import { SwitchToggle } from "./SwitchToggle";
 import type {
+  ExecutionLogEntry,
   MonitorSnapshotDto,
   MonitorRowDto,
   MonitorConfigDto,
@@ -41,6 +46,9 @@ import { computeBotCycleStats } from "../services/botCycleStats";
 import { flattenResidualMessage } from "../services/flatten";
 import { EmptyState } from "./EmptyState";
 import { ConfirmActionModal } from "./ConfirmActionModal";
+import { TickerTransactionHistory } from "./TickerTransactionHistory";
+import { TickerOpportunityHistory } from "./TickerOpportunityHistory";
+import { TickerLogMonitor } from "./TickerLogMonitor";
 import { VenueLogo } from "./VenueLogo";
 import { ExecuteButton } from "./ExecuteButton";
 import { CapacityChart } from "./CapacityChart";
@@ -1124,9 +1132,15 @@ const RadarRow: React.FC<RadarRowProps> = React.memo(
 
 interface OpportunityRadarProps {
   venueCaps?: VenueCaps;
+  executionLogs?: ExecutionLogEntry[];
+  isPaused?: boolean;
 }
 
-const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({ venueCaps }) => {
+const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({
+  venueCaps,
+  executionLogs = [],
+  isPaused = false,
+}) => {
   const [snap, setSnap] = useState<MonitorSnapshotDto | null>(null);
   const [cfg, setCfg] = useState<MonitorConfigDto | null>(null);
   const [showConfig, setShowConfig] = useState(false);
@@ -1171,6 +1185,15 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({ venueCaps }) =
   // Durable radar signal ledger backing the bot stat cards (null = unread).
   const [signals, setSignals] = useState<SignalExecutionDto[] | null>(null);
   const [fillPnl, setFillPnl] = useState<StrategyFillPnl | null>(null);
+  // Bottom gadget dock — same tabs the other strategy pages expose.
+  const [dockTab, setDockTab] = useState<"position" | "history" | "opps" | "logs">("position");
+  // Radar-dispatched executions (bot + manual monitor Execute) persist under
+  // the "radar" strategy id — scope the global log fan-out to this page.
+  const radarLogs = useMemo(
+    () => executionLogs.filter((l) => l.strategy_id === "radar"),
+    [executionLogs],
+  );
+  const openPos = botStatus?.openPositions ?? [];
 
   // Poll the snapshot while the tab is mounted.
   useEffect(() => {
@@ -1752,6 +1775,123 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({ venueCaps }) =
         </table>
       </div>
       </div>
+
+      {/* Bottom dock: Current Positions vs Execution History vs
+          Opportunity History vs Log Monitor — same gadget window the other
+          strategy pages carry, scoped to this page's radar strategy. */}
+      <div className="bg-surface rounded-lg border border-surface-border shadow-2xs overflow-hidden">
+        <div className="flex items-stretch border-b border-surface-border bg-slate-50/80 select-none">
+          <div className="grid grid-cols-4 flex-1 divide-x divide-surface-border">
+            {(
+              [
+                { id: "position", label: "Current Positions", icon: Wallet, count: openPos.length },
+                { id: "history", label: "Execution History", icon: History, count: radarLogs.length },
+                { id: "opps", label: "Opportunity History", icon: Radar, count: null },
+                { id: "logs", label: "Log Monitor", icon: Terminal, count: radarLogs.length },
+              ] as const
+            ).map(({ id, label, icon: Icon, count }) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setDockTab(id)}
+                className={`relative h-9 flex items-center justify-center space-x-2 px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
+                  dockTab === id
+                    ? "text-accent-strong font-bold bg-surface"
+                    : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
+                }`}
+              >
+                <Icon
+                  className={`w-3 h-3 transition shrink-0 ${
+                    dockTab === id ? "text-accent-strong" : "text-muted group-hover:text-slate-600"
+                  }`}
+                />
+                <span>{label}</span>
+                {count != null && count > 0 && (
+                <span className="px-1.5 py-0.5 rounded-md text-[11px] font-sans font-bold min-w-[16px] text-center leading-tight bg-accent-dim text-accent-strong border border-accent-line/60">
+                  {count}
+                </span>
+                )}
+                {dockTab === id && (
+                  <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
+                )}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div className="p-3.5">
+          {dockTab === "position" ? (
+            <div className="max-h-96 overflow-y-auto">
+              {openPos.length === 0 ? (
+                <EmptyState
+                  plain
+                  title="No Open Radar Positions"
+                  hint="Bot-managed and manual radar entries aggregate here with live deviation and unwind deadline."
+                />
+              ) : (
+                <div className="divide-y divide-surface-border">
+                  {openPos.map((p, i) => {
+                    const remainingSecs = (p.deadlineMs - Date.now()) / 1000;
+                    return (
+                      <div
+                        key={`${p.symbol}-${p.buyVenue}-${p.sellVenue}-${i}`}
+                        className="flex items-center justify-between gap-3 px-2 py-2.5"
+                      >
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs font-sans font-bold text-slate-900 truncate">{p.symbol}</span>
+                            {p.unwatched ? (
+                              <span className="px-1.5 py-px rounded-md text-[10px] font-bold border bg-warn-dim text-warn-strong border-warn-border">
+                                unwatched
+                              </span>
+                            ) : p.liveStatus ? (
+                              <span className="px-1.5 py-px rounded-md text-[10px] font-bold border bg-slate-100 text-slate-600 border-slate-200">
+                                {p.liveStatus}
+                              </span>
+                            ) : null}
+                          </div>
+                          <div className="text-[11px] font-sans text-slate-500 truncate">
+                            {p.buyVenue} → {p.sellVenue} · entry {fmtBpsU(p.entryDevBps)} · {fmtTs(p.entryTsMs)}
+                          </div>
+                        </div>
+                        <div className="text-right shrink-0">
+                          <div className="text-xs font-sans font-bold tabular-nums text-slate-900">
+                            {p.liveDevBps != null ? <>{fmtBpsU(p.liveDevBps)} live</> : "—"}
+                          </div>
+                          <div className="text-[11px] font-sans text-slate-500 tabular-nums">
+                            {fmtUsd(p.sizeUsd)} ·{" "}
+                            {remainingSecs > 0 ? `${fmtDur(remainingSecs)} left` : "past deadline"}
+                          </div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          ) : dockTab === "history" ? (
+            <div className="max-h-96 overflow-y-auto">
+              <TickerTransactionHistory symbol="" logs={radarLogs} matchAllSymbols />
+            </div>
+          ) : dockTab === "opps" ? (
+            <div className="max-h-96 overflow-y-auto">
+              <TickerOpportunityHistory symbol="" />
+            </div>
+          ) : (
+            <div className="overflow-y-auto">
+              <TickerLogMonitor
+                symbol=""
+                namespace="spread-radar"
+                strategyName="Spread Radar"
+                executionLogs={radarLogs}
+                matchAllSymbols
+                isPaused={isPaused}
+              />
+            </div>
+          )}
+        </div>
+      </div>
+
       {(() => {
         const detailRow = detailKey != null ? rows.find((r) => key(r) === detailKey) ?? null : null;
         if (!detailRow) return null;
