@@ -104,13 +104,17 @@ export function getBotControlAvailability(
   hasOpenPositions: boolean,
   entriesDisabled: boolean,
   reduceOnlyAvailable = true,
+  /** Convergence bots require a flat book before re-arming; strategies whose
+   *  positions are the product (options ride to expiry) may re-arm while
+   *  holding — the open-position cap governs entries, not presence. */
+  allowStartWithOpenPositions = false,
 ): BotControlAvailability {
   const stopping = phase === "stopping";
   return {
     start:
       !entriesDisabled &&
       !stopping &&
-      !hasOpenPositions &&
+      (allowStartWithOpenPositions || !hasOpenPositions) &&
       (phase === "idle" || phase === "paused"),
     pause: phase === "running",
     reduceOnly:

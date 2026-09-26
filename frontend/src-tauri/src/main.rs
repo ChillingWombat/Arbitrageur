@@ -15,6 +15,7 @@ mod funding;
 mod monitor;
 mod monitor_ipc;
 mod num;
+mod options_bot;
 mod options_parity;
 mod performance;
 mod priceretriver;
@@ -96,6 +97,14 @@ fn main() {
     {
         let bot = auto_exec::OpportunityExecutor::new();
         *engine_state.radar_bot.lock() = Some(bot.clone());
+        let bg_state = engine_state.clone();
+        tauri::async_runtime::spawn(async move { bot.run(bg_state).await });
+    }
+
+    // Spawn the options substrategy bot (opt-in, testnet for auto entries,
+    // inert until a substrategy is armed via its bot config).
+    {
+        let bot = options_bot::OptionsBotExecutor::new();
         let bg_state = engine_state.clone();
         tauri::async_runtime::spawn(async move { bot.run(bg_state).await });
     }
@@ -296,6 +305,8 @@ fn main() {
             commands::execute_monitor_opportunity,
             auto_exec::get_radar_bot_config,
             auto_exec::set_radar_bot_config,
+            options_bot::get_options_bot_config,
+            options_bot::set_options_bot_config,
             auto_exec::get_radar_bot_status,
             commands::generate_popdex_agent,
             commands::build_popdex_approve_tx,

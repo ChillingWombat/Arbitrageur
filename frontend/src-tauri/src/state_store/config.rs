@@ -184,4 +184,53 @@ impl StateStore {
         )?;
         Ok(())
     }
+
+    /// Options substrategy bot config — one JSON row per
+    /// (environment, substrategy). The environments arm independently, so a
+    /// running testnet bot can never imply a live one.
+    pub fn options_bot_config_json(
+        &self,
+        environment: &str,
+        substrategy_id: &str,
+    ) -> anyhow::Result<Option<String>> {
+        let conn = self.conn.lock();
+        Ok(conn
+            .query_row(
+                "SELECT config_json FROM options_bot_config
+                 WHERE environment = ? AND substrategy_id = ? COLLATE NOCASE",
+                params![environment, substrategy_id],
+                |r| r.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn save_options_bot_config_json(
+        &self,
+        environment: &str,
+        substrategy_id: &str,
+        json: &str,
+    ) -> anyhow::Result<()> {
+        if !matches!(environment, "testnet" | "live") {
+            anyhow::bail!("options bot config requires a real environment");
+        }
+        if substrategy_id.trim().is_empty() || substrategy_id.len() > 64 {
+            anyhow::bail!("invalid options substrategy id");
+        }
+        if json.is_empty() || json.len() > 64 * 1024 {
+            anyhow::bail!("invalid options bot config payload");
+        }
+        if serde_json::from_str::<serde_json::Value>(json).is_err() {
+            anyhow::bail!("options bot config payload is not valid JSON");
+        }
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO options_bot_config
+                (environment, substrategy_id, config_json, updated_at)
+             VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(environment, substrategy_id)
+             DO UPDATE SET config_json = ?3, updated_at = ?4",
+            params![environment, substrategy_id, json, Utc::now().to_rfc3339()],
+        )?;
+        Ok(())
+    }
 }

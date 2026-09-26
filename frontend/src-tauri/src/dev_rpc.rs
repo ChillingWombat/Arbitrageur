@@ -288,6 +288,8 @@ async fn dispatch(line: &str, state: &Arc<AppEngineState>) -> Value {
         "radar_bot_status" => radar_bot_status(st),
         "radar_bot_config" => radar_bot_config(st),
         "set_radar_bot_config" => set_radar_bot_config(&args, st),
+        "options_bot_config" => options_bot_config(&args, st),
+        "set_options_bot_config" => set_options_bot_config(&args, st),
         "monitor_snapshot" => monitor_snapshot(&args, st),
         "adopt_position" => adopt_position(&args, st),
 
@@ -406,6 +408,21 @@ fn set_radar_bot_config(args: &Value, state: &AppEngineState) -> Result<Value, S
         serde_json::from_value(args.get("config").cloned().unwrap_or_else(|| json!({})))
             .map_err(|e| format!("bad config: {e}"))?;
     crate::auto_exec::OpportunityExecutor::save_config(state, &cfg).map(|_| json!(true))
+}
+
+fn options_bot_config(args: &Value, state: &AppEngineState) -> Result<Value, String> {
+    let id = arg(args, "substrategy_id").unwrap_or_default().to_string();
+    let (cfg, mode) = crate::options_bot::OptionsBotExecutor::load_config(state, &id);
+    Ok(json!(crate::options_bot::OptionsBotConfigDto::from_policy(
+        &id, &cfg, mode
+    )))
+}
+
+fn set_options_bot_config(args: &Value, state: &AppEngineState) -> Result<Value, String> {
+    let cfg: crate::options_bot::OptionsBotConfigDto =
+        serde_json::from_value(args.get("config").cloned().unwrap_or_else(|| json!({})))
+            .map_err(|e| format!("bad config: {e}"))?;
+    crate::options_bot::OptionsBotExecutor::save_config(state, &cfg).map(|_| json!(true))
 }
 
 fn monitor_snapshot(args: &Value, state: &AppEngineState) -> Result<Value, String> {

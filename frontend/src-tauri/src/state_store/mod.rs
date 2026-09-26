@@ -1765,6 +1765,22 @@ ALTER TABLE signal_legs ADD COLUMN unit_scale
 PRAGMA user_version = 39;
 COMMIT;";
 
+/// v40 adds the per-substrategy options bot config — one JSON row per
+/// (environment, substrategy). Testnet and live bots arm independently:
+/// arming the testnet parity bot never touches the live row.
+const MIGRATION_V40_SQL: &str = "\
+BEGIN IMMEDIATE;
+CREATE TABLE options_bot_config (
+    environment TEXT NOT NULL CHECK(environment IN ('testnet','live')),
+    substrategy_id TEXT NOT NULL COLLATE NOCASE
+        CHECK(length(substrategy_id) BETWEEN 1 AND 64),
+    config_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY (environment, substrategy_id)
+);
+PRAGMA user_version = 40;
+COMMIT;";
+
 const MIGRATION_V38_SQL: &str = "\
 PRAGMA foreign_keys = OFF;
 BEGIN IMMEDIATE;
@@ -2540,7 +2556,7 @@ impl StateStore {
 
     fn migrate(conn: &Connection) -> anyhow::Result<()> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 39 {
+        if version > 40 {
             anyhow::bail!("unsupported state store schema version: {version}");
         }
         if version == 0 {
@@ -2773,6 +2789,12 @@ impl StateStore {
         }
         if version <= 38 {
             if let Err(err) = conn.execute_batch(MIGRATION_V39_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 39 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V40_SQL) {
                 let _ = conn.execute_batch("ROLLBACK;");
                 return Err(err.into());
             }

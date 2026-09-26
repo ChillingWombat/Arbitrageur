@@ -18,6 +18,7 @@ import type {
   OptionsParityOpportunityDto,
   OptionsParityScanParams,
   OptionsParityExecutionParams,
+  OptionsBotConfigDto,
   TriangleExecutionParams,
   ConvergenceCheckDto,
   FundingOpportunityDto,
@@ -252,6 +253,8 @@ const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   "get_radar_bot_config",
   "set_radar_bot_config",
   "get_radar_bot_status",
+  "get_options_bot_config",
+  "set_options_bot_config",
   "list_signal_executions",
   "list_traded_opportunities",
   "reset_transaction_history",
@@ -1368,6 +1371,15 @@ export const api = {
 
   async getRadarBotStatus(): Promise<RadarBotStatusDto> {
     return invokeDesktop<RadarBotStatusDto>("get_radar_bot_status");
+  },
+
+  // ---- Options substrategy bots (per-substrategy, env-scoped) ----
+  async getOptionsBotConfig(substrategyId: string): Promise<OptionsBotConfigDto> {
+    return invokeDesktop<OptionsBotConfigDto>("get_options_bot_config", { substrategyId });
+  },
+
+  async setOptionsBotConfig(config: OptionsBotConfigDto): Promise<void> {
+    return invokeDesktop<void>("set_options_bot_config", { config });
   },
 
   // ---- PopDEX agent-setup toolkit (desktop only) ----
