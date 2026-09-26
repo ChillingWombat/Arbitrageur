@@ -1,11 +1,12 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import { SlidersHorizontal, X, ChevronDown, Check } from "lucide-react";
-import type { FundingOpportunityDto, FundingTrendDto, ExecutionLogEntry, OpenPositionDto, FixedYieldMaturityDto, FixedYieldExitQuoteDto } from "../types";
+import type { FundingOpportunityDto, FundingTrendDto, ExecutionLogEntry, OpenPositionDto, FixedYieldMaturityDto, FixedYieldExitQuoteDto, TradedOpportunityDto } from "../types";
 import { api, describeCommandError } from "../services/api";
 import type { PerpTicker } from "../types/tickers";
 import { BotLifecycleControls, BotPhaseBadge } from "./BotLifecycleControls";
 import { TickerTransactionHistory } from "./TickerTransactionHistory";
 import { TickerLogMonitor } from "./TickerLogMonitor";
+import { TradedOpportunitiesTable, TradedOpportunityDetailModal } from "./TradedOpportunitiesGadget";
 import { EmptyState } from "./EmptyState";
 import { VenueLogo } from "./VenueLogo";
 import { ExecuteButton } from "./ExecuteButton";
@@ -1105,7 +1106,13 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
   const [execError, setExecError] = useState<string | null>(null);
   const execErrorTimer = useRef<number | null>(null);
   const [detailOppId, setDetailOppId] = useState<string | null>(null);
-  const [dockTab, setDockTab] = useState<"position" | "history" | "logs">("history");
+  const [dockTab, setDockTab] = useState<"position" | "history" | "opps" | "logs">("history");
+  // Durable signal-ledger view for the Opportunity History tab — every
+  // funding-family dispatch (carry, basis, fixed-yield) with its atomic
+  // transaction trail, polled like the other gadgets.
+  const [tradedOpps, setTradedOpps] = useState<TradedOpportunityDto[] | null>(null);
+  const [tradedFailed, setTradedFailed] = useState(false);
+  const [selectedOpp, setSelectedOpp] = useState<TradedOpportunityDto | null>(null);
   const [detailPosKey, setDetailPosKey] = useState<string | null>(null);
   // Display-only scanner filters (mirror the spread monitor strip): venue
   // multi-select, min net 8h edge (BPS), min win probability (%). None of
@@ -1172,6 +1179,44 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
           (l.trade_type ?? "").toLowerCase().includes("carry")
       ),
     [executionLogs]
+  );
+
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const rows = await api.listTradedOpportunities();
+        if (!alive) return;
+        setTradedOpps(Array.isArray(rows) ? rows : []);
+        setTradedFailed(false);
+      } catch {
+        if (!alive) return;
+        setTradedFailed(true);
+      }
+    };
+    void load();
+    const t = setInterval(load, 5000);
+    return () => {
+      alive = false;
+      clearInterval(t);
+    };
+  }, []);
+
+  // Carry/basis/fixed-yield all persist under the "funding" strategy id
+  // ("funding_rate" is the legacy spelling on pre-attribution rows).
+  const fundingOpps = useMemo(
+    () =>
+      (tradedOpps ?? []).filter((o) =>
+        ["funding", "funding_rate"].includes((o.strategyId ?? "").toLowerCase())
+      ),
+    [tradedOpps]
+  );
+  const selectedOppFresh = useMemo(
+    () =>
+      selectedOpp == null
+        ? null
+        : fundingOpps.find((o) => o.signalId === selectedOpp.signalId) ?? selectedOpp,
+    [selectedOpp, fundingOpps]
   );
 
   // Bot lifecycle is strategy-wide for Funding Rate carry, not locked to a single ticker
@@ -1565,10 +1610,10 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
           </div>
         )}
       </div>
-      {/* Bottom dock: Current Position vs Execution History vs Log Monitor */}
+      {/* Bottom dock: Current Position vs Execution History vs Opportunity History vs Log Monitor */}
       <div className="bg-surface rounded-xl border border-surface-border shadow-card overflow-hidden shrink-0">
         <div className="flex items-stretch border-b border-surface-border bg-slate-50/80 select-none">
-          <div className="grid grid-cols-3 flex-1 divide-x divide-surface-border">
+          <div className="grid grid-cols-4 flex-1 divide-x divide-surface-border">
             <button
               type="button"
               onClick={() => setDockTab("position")}
@@ -1604,6 +1649,25 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
               </span>
               )}
               {dockTab === "history" && (
+                <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
+              )}
+            </button>
+            <button
+              type="button"
+              onClick={() => setDockTab("opps")}
+              className={`relative h-9 flex items-center justify-center gap-2 px-4 text-[11px] font-sans transition select-none cursor-pointer ${
+                dockTab === "opps"
+                  ? "text-accent-strong font-bold bg-surface"
+                  : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
+              }`}
+            >
+              <span>Opportunity History</span>
+              {fundingOpps.length > 0 && (
+              <span className="px-1.5 py-0.5 rounded-md text-[11px] font-sans font-bold min-w-[16px] text-center leading-tight bg-accent-dim text-accent-strong border border-accent-line/60">
+                {fundingOpps.length}
+              </span>
+              )}
+              {dockTab === "opps" && (
                 <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
               )}
             </button>
@@ -1667,6 +1731,12 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
             </>
           ) : dockTab === "history" ? (
             <TickerTransactionHistory symbol="" logs={fundingLogs} matchAllSymbols />
+          ) : dockTab === "opps" ? (
+            <TradedOpportunitiesTable
+              opps={tradedOpps == null ? null : fundingOpps}
+              failed={tradedFailed}
+              onSelect={setSelectedOpp}
+            />
           ) : (
             <TickerLogMonitor
               symbol=""
@@ -1685,6 +1755,9 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
         if (!detailPos) return null;
         return <PositionDetailModal pos={detailPos} onClose={() => setDetailPosKey(null)} />;
       })()}
+      {selectedOppFresh && (
+        <TradedOpportunityDetailModal opp={selectedOppFresh} onClose={() => setSelectedOpp(null)} />
+      )}
       {(() => {
         const detailOpp =
           detailOppId != null ? opportunities.find((o) => o.id === detailOppId) ?? null : null;

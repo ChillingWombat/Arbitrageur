@@ -1168,7 +1168,13 @@ export const App: React.FC = () => {
             />
           )}
 
-          {activeTab === "radar" && <OpportunityRadar venueCaps={venueCaps} />}
+          {activeTab === "radar" && (
+            <OpportunityRadar
+              venueCaps={venueCaps}
+              executionLogs={executionLogs}
+              isPaused={isPaused}
+            />
+          )}
 
           {activeTab === "portfolio_monitor" && (
             <PortfolioMonitor
