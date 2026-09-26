@@ -209,6 +209,40 @@ fn default_max_ticker_equity_pct() -> f64 {
     20.0
 }
 
+/// Last-resort salvage for a persisted circuit-breaker snapshot whose
+/// `Decimal` fields no longer deserialize (the serialization shape drifted
+/// across versions). The scalar trip fields are format-stable: a stored
+/// halt must survive an incompatible row — never silently re-armed.
+/// Returns `None` when the row is not tripped or is not JSON at all.
+fn salvage_tripped_snapshot(
+    raw: &str,
+) -> Option<arbitrageur_risk::circuit_breaker::CircuitBreakerSnapshot> {
+    let v = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+    if v.get("tripped").and_then(|t| t.as_bool()) != Some(true) {
+        return None;
+    }
+    Some(arbitrageur_risk::circuit_breaker::CircuitBreakerSnapshot {
+        tripped: true,
+        trip_reason: v
+            .get("trip_reason")
+            .and_then(|r| r.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| Some("restored from unreadable snapshot".to_string())),
+        tripped_at: v
+            .get("tripped_at")
+            .and_then(|t| t.as_str())
+            .and_then(|t| t.parse::<chrono::DateTime<chrono::Utc>>().ok()),
+        // Equity baselines are unknowable under schema drift; seeding
+        // them at the construction default keeps the halt latched while
+        // the next real equity update re-anchors the drawdown window.
+        day_start_equity: dec!(200000.0),
+        current_equity: dec!(200000.0),
+        peak_equity: dec!(200000.0),
+        day_key: Some(chrono::Utc::now().date_naive()),
+        consecutive_errors: 0,
+    })
+}
+
 /// Universal, strategy-scoped parameters — one record per strategy_id
 /// ("futures" | "funding" | "spot"), shared across all tickers. Per-ticker
 /// contract specifics (unit size in base units, accumulated grid units) stay in
@@ -2050,7 +2084,16 @@ impl AppEngineState {
                     cb.restore(&snap);
                 }
                 Err(e) => {
-                    tracing::warn!("circuit breaker snapshot unreadable, starting fresh: {e}")
+                    if let Some(snap) = salvage_tripped_snapshot(&raw) {
+                        tracing::warn!(
+                            "circuit breaker snapshot partially unreadable ({e}); \
+                             preserving TRIPPED state: {}",
+                            snap.trip_reason.as_deref().unwrap_or("unknown")
+                        );
+                        cb.restore(&snap);
+                    } else {
+                        tracing::warn!("circuit breaker snapshot unreadable, starting fresh: {e}");
+                    }
                 }
             }
         }
@@ -3502,6 +3545,49 @@ impl AppEngineState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_cb_salvage_preserves_trip_across_decimal_schema_drift() {
+        // Old-format row: decimals serialized as maps — the strict
+        // CircuitBreakerSnapshot parse fails, but the halt must survive.
+        let drifted = serde_json::json!({
+            "tripped": true,
+            "trip_reason": "daily drawdown 6.2% exceeded 5.0%",
+            "tripped_at": "2026-09-20T14:33:00Z",
+            "day_start_equity": {"mantissa": 11_500_000, "exponent": -2},
+            "current_equity": {"mantissa": 10_800_000, "exponent": -2},
+            "peak_equity": {"mantissa": 11_600_000, "exponent": -2},
+            "day_key": "2026-09-20",
+            "consecutive_errors": 7
+        })
+        .to_string();
+        // Confirm the strict parse really does fail for this shape.
+        assert!(
+            serde_json::from_str::<arbitrageur_risk::circuit_breaker::CircuitBreakerSnapshot>(
+                &drifted
+            )
+            .is_err()
+        );
+        let snap = salvage_tripped_snapshot(&drifted).expect("trip must survive");
+        assert!(snap.tripped);
+        assert_eq!(
+            snap.trip_reason.as_deref(),
+            Some("daily drawdown 6.2% exceeded 5.0%")
+        );
+        assert!(snap.tripped_at.is_some());
+
+        // A not-tripped drifted row stays None — nothing to preserve.
+        let quiet = serde_json::json!({
+            "tripped": false,
+            "day_start_equity": {"mantissa": 1, "exponent": 0}
+        })
+        .to_string();
+        assert!(salvage_tripped_snapshot(&quiet).is_none());
+
+        // Garbage is not a trip.
+        assert!(salvage_tripped_snapshot("not json").is_none());
+        assert!(salvage_tripped_snapshot("{}").is_none());
+    }
 
     #[test]
     fn test_strategy_params_old_rows_load_with_sizing_defaults() {
