@@ -120,6 +120,7 @@ impl StateStore {
 
         let profile = tx.query_row(ACCOUNT_BY_ID_SQL, [&id], account_from_row)?;
         tx.commit()?;
+        self.accounts_epoch.fetch_add(1, Ordering::AcqRel);
         Ok(profile)
     }
 
@@ -232,6 +233,7 @@ impl StateStore {
             }
         }
         tx.commit()?;
+        self.accounts_epoch.fetch_add(1, Ordering::AcqRel);
         Ok(true)
     }
 
@@ -239,20 +241,15 @@ impl StateStore {
     /// account exists for the *active* environment — a live credential must
     /// never admit a testnet adapter or vice versa.
     pub fn has_enabled_account(&self, venue: &str, environment: &str) -> anyhow::Result<bool> {
-        let venue = normalize_venue(venue)?;
-        let environment = normalize_environment(Some(environment))?;
-        let conn = self.conn.lock();
-        let exists: bool = conn.query_row(
-            "SELECT EXISTS(
-    SELECT 1 FROM exchange_accounts WHERE venue = ?1 AND environment = ?2 AND enabled = 1
-)",
-            params![venue, environment],
-            |r| r.get(0),
-        )?;
-        Ok(exists)
+        // Presence-of-enabled is exactly "a default row resolves".
+        Ok(self.default_account(venue, environment)?.is_some())
     }
 
     /// The default enabled account for a venue within one environment.
+    /// Memoized on `accounts_epoch` — venue admission runs per feed frame
+    /// (~hundreds/sec across all venues) and each uncached call was a
+    /// prepared statement + B-tree probe. Any account mutation bumps the
+    /// epoch, so the memo is never stale across a write.
     pub fn default_account(
         &self,
         venue: &str,
@@ -260,8 +257,20 @@ impl StateStore {
     ) -> anyhow::Result<Option<AccountProfile>> {
         let venue = normalize_venue(venue)?;
         let environment = normalize_environment(Some(environment))?;
+        let key = format!("{venue}|{environment}");
+        let epoch = self.accounts_epoch.load(Ordering::Acquire);
+        {
+            let mut memo = self.accounts_memo.lock();
+            if memo.0 != epoch {
+                memo.0 = epoch;
+                memo.1.clear();
+            }
+            if let Some(cached) = memo.1.get(&key) {
+                return Ok(cached.clone());
+            }
+        }
         let conn = self.conn.lock();
-        Ok(conn
+        let row = conn
             .query_row(
                 "SELECT id, venue, label, enabled, is_default, account_tier, max_leverage, environment, created_at, updated_at
 FROM exchange_accounts
@@ -271,7 +280,13 @@ LIMIT 1",
                 params![venue, environment],
                 account_from_row,
             )
-            .optional()?)
+            .optional()?;
+        drop(conn);
+        let mut memo = self.accounts_memo.lock();
+        if memo.0 == epoch {
+            memo.1.insert(key, row.clone());
+        }
+        Ok(row)
     }
 
     pub fn upsert_strategy_route(
