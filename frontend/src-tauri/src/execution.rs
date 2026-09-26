@@ -266,9 +266,14 @@ pub(crate) fn persist_unwind_leg_records(
         }
     }
 
-    // 2) The compensation unwind as a `flat-` close child carrying the
-    // filled position side — same convention the flatten path uses, so
-    // family grouping and cash-flow reads see it as a close order.
+    // 2) The compensation unwind as a `flat-` close child. Close-family
+    // legs store the ORDER direction as the leg side (buy→Long, sell→Short
+    // — `opposite` of the position being closed): that convention is what
+    // lets family net-position math read the child fill as offsetting.
+    let close_side = match side {
+        crate::state_store::LegSide::Long => crate::state_store::LegSide::Short,
+        crate::state_store::LegSide::Short => crate::state_store::LegSide::Long,
+    };
     let root = match state.state_store.get_signal(signal_id) {
         Ok(Some(s)) => s,
         Ok(None) => {
@@ -288,7 +293,7 @@ pub(crate) fn persist_unwind_leg_records(
         venue: parent_leg
             .map(|l| l.venue.clone())
             .unwrap_or_else(|| unwind_resp.venue.0.clone()),
-        side,
+        side: close_side,
         symbol: Some(
             parent_leg
                 .map(|l| l.symbol.clone())
@@ -322,7 +327,7 @@ pub(crate) fn persist_unwind_leg_records(
             .then_some(unwind_resp.client_order_id.as_str());
         if let Err(e) = state.state_store.record_leg_order_id(
             &close_id,
-            side,
+            close_side,
             unwind_resp.order_id.as_str(),
             cid,
         ) {
@@ -340,7 +345,7 @@ pub(crate) fn persist_unwind_leg_records(
             .unwrap_or(0.0);
         if let Err(e) = state.state_store.apply_leg_fill(
             &close_id,
-            side,
+            close_side,
             unwind_qty,
             px,
             fee,
@@ -400,12 +405,34 @@ pub(crate) fn backfill_unwound_atomic_trails(state: &AppEngineState) {
             continue;
         };
         let prefix = format!("flat-{}-", sig.id);
-        if signals.iter().any(|s| s.id.starts_with(&prefix))
-            || sig
-                .legs
-                .iter()
-                .any(|l| l.side == side && l.filled_qty > 0.0)
-        {
+        let kids: Vec<_> = signals
+            .iter()
+            .filter(|s| s.id.starts_with(&prefix))
+            .collect();
+        if !kids.is_empty() {
+            // Children already exist — but ones written before the
+            // order-direction convention was fixed store the closed
+            // POSITION side. Flip those legs to `close_side` (the unwind
+            // order's direction) once; a correct row never matches.
+            let close_side = match side {
+                crate::state_store::LegSide::Long => crate::state_store::LegSide::Short,
+                crate::state_store::LegSide::Short => crate::state_store::LegSide::Long,
+            };
+            for child in &kids {
+                if child.legs.iter().any(|l| l.side == side) {
+                    match state.state_store.repair_leg_side(&child.id, close_side) {
+                        Ok(n) if n > 0 => tracing::info!(
+                            "unwound-trail backfill: corrected leg side on {}",
+                            child.id
+                        ),
+                        Ok(_) => {}
+                        Err(e) => tracing::warn!(
+                            "unwound-trail backfill: side repair failed on {}: {e}",
+                            child.id
+                        ),
+                    }
+                }
+            }
             continue;
         }
         match (
@@ -2338,13 +2365,14 @@ pub(crate) fn build_traded_opportunities(
         for sig in std::iter::once(root).chain(children.iter().copied()) {
             let role = role_of(&sig.id);
             for leg in &sig.legs {
-                // Leg rows persist the POSITION side. Entry signals buy
-                // longs / sell shorts; close-family signals unwind them —
-                // a stored `long` on a flat-/trim- signal was a sell order.
-                let order_side = match (role, leg.side) {
-                    ("entry", crate::state_store::LegSide::Long)
-                    | ("flatten" | "trim", crate::state_store::LegSide::Short) => "buy",
-                    _ => "sell",
+                // Leg rows persist the ORDER direction as the leg side on
+                // every record type: entry `long` bought, close-family
+                // `long` bought back the short it closed (`opposite` of the
+                // position). Verified against venue truth — a flat- child
+                // stored `long` filled as a buy.
+                let order_side = match leg.side {
+                    crate::state_store::LegSide::Long => "buy",
+                    crate::state_store::LegSide::Short => "sell",
                 };
                 let filled = if leg.filled_qty.is_finite() {
                     leg.filled_qty
@@ -6003,7 +6031,9 @@ mod traded_opportunity_tests {
             ],
             t,
         );
-        // Flatten child: long side sells 1 @102; short side buys back 1 @100.5.
+        // Flatten child (order-direction storage): the hyperliquid long
+        // closes by selling → stored Short @102; the lighter short closes
+        // by buying back → stored Long @100.5.
         let flat = sig(
             "flat-sig-1-aa-0001",
             "testnet",
@@ -6013,7 +6043,7 @@ mod traded_opportunity_tests {
                     "l3",
                     "flat-sig-1-aa-0001",
                     "hyperliquid",
-                    LegSide::Long,
+                    LegSide::Short,
                     1.0,
                     1.0,
                     Some(102.0),
@@ -6024,7 +6054,7 @@ mod traded_opportunity_tests {
                     "l4",
                     "flat-sig-1-aa-0001",
                     "lighter",
-                    LegSide::Short,
+                    LegSide::Long,
                     1.0,
                     1.0,
                     Some(100.5),
@@ -6085,8 +6115,8 @@ mod traded_opportunity_tests {
         assert_eq!(opp.transactions[0].order_side, "buy");
         assert_eq!(opp.transactions[1].order_side, "sell");
         assert_eq!(opp.transactions[2].role, "flatten");
-        assert_eq!(opp.transactions[2].order_side, "sell"); // stored long closes by selling
-        assert_eq!(opp.transactions[3].order_side, "buy"); // stored short buys back
+        assert_eq!(opp.transactions[2].order_side, "sell"); // stored Short = sell to close the long
+        assert_eq!(opp.transactions[3].order_side, "buy"); // stored Long = buy to close the short
                                                            // Cash flow: -(100) + 101 + 102 - 100.5 = +2.5, minus fees 1.8 = +0.7.
         assert!(
             (opp.leg_net_flow_usd - 0.7).abs() < 1e-9,
@@ -6285,7 +6315,8 @@ mod traded_opportunity_tests {
         assert_eq!(child.status, SignalStatus::Closed);
         assert_eq!(child.legs.len(), 1);
         let unwind_leg = &child.legs[0];
-        assert_eq!(unwind_leg.side, LegSide::Long);
+        // Order-direction storage: the unwind SELLS the long → Short.
+        assert_eq!(unwind_leg.side, LegSide::Short);
         assert_eq!(unwind_leg.filled_qty, 2.0);
         assert_eq!(unwind_leg.fill_price, Some(99.5));
         assert_eq!(unwind_leg.venue_order_id.as_deref(), Some("unw-oid"));
