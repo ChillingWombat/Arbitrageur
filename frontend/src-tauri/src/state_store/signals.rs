@@ -372,6 +372,20 @@ impl StateStore {
     /// Attach the venue's order identity to a submitted leg before any fill is
     /// known. Accepted-but-working live closes need this durable handle for
     /// operator reconciliation and future restart recovery.
+    /// Repair helper for the unwind-trail backfill: rewrite a close-family
+    /// child's leg side. Children written before the order-direction
+    /// convention was fixed carry the closed position side; the caller
+    /// supplies the corrected side. Returns rows changed.
+    pub fn repair_leg_side(&self, signal_id: &str, side: LegSide) -> anyhow::Result<usize> {
+        let signal_id = normalize_id(signal_id)?;
+        let conn = self.conn.lock();
+        let changed = conn.execute(
+            "UPDATE signal_legs SET side = ?2, updated_at = ?3 WHERE signal_id = ?1",
+            params![signal_id, side.as_str(), Utc::now().to_rfc3339()],
+        )?;
+        Ok(changed)
+    }
+
     pub fn record_leg_order_id(
         &self,
         signal_id: &str,
