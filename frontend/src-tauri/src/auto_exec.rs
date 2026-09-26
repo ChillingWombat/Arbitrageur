@@ -1185,7 +1185,7 @@ pub async fn get_radar_bot_status(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::monitor::{CapacityTierDto, MonitorRowDto, MonitorSnapshotDto, SpreadMonitorEngine};
+    use crate::monitor::{MonitorRowDto, MonitorSnapshotDto, SpreadMonitorEngine};
     use crate::state_store::{LegSide, NewSignalExecution, NewSignalLeg, SignalStatus};
     use std::sync::Mutex as StdMutex;
 
@@ -1309,13 +1309,6 @@ mod tests {
             expected_profit_usd: Some(57.0),
             optimal_size_usd: Some(10_000.0),
             breakeven_size_usd: Some(8_000.0),
-            capacity_ladder: vec![CapacityTierDto {
-                size_usd: 1000.0,
-                filled_usd: 1000.0,
-                net_bps: Some(6.0),
-                expected_net_bps: Some(5.7),
-                marginal_p_win: Some(0.95),
-            }],
             expected_capacity_usd: None,
             bps_capacity_ladder: Vec::new(),
             depth_curve: Vec::new(),

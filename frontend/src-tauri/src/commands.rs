@@ -2027,7 +2027,7 @@ pub async fn scan_spatial_opportunities_impl(
                     &bids,
                     baseline_bps,
                     econ.expected_friction_bps,
-                    &monitor_cfg.capacity_tiers_usd,
+                    None,
                     &pwin_curve,
                     monitor_cfg.min_win_probability,
                     None,
@@ -2305,7 +2305,7 @@ pub async fn scan_spot_opportunities_impl(
                     &bids,
                     0.0,
                     econ.expected_friction_bps,
-                    &monitor_cfg.capacity_tiers_usd,
+                    None,
                     &arbitrageur_math::pair_monitor::PWinCurve {
                         points: Vec::new(),
                         episodes: 0,

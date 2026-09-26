@@ -1754,14 +1754,6 @@ export type MonitorRowStatus =
   | "ready"
   | "no-data";
 
-export interface CapacityTierDto {
-  sizeUsd: number;
-  filledUsd: number;
-  netBps: number | null;
-  expectedNetBps: number | null;
-  marginalPWin: number | null;
-}
-
 /** Fillable notional while marginal expected net stays >= `minNetBps`. */
 export interface BpsCapacityTierDto {
   minNetBps: number;
@@ -1845,7 +1837,6 @@ export interface MonitorRowDto {
   expectedProfitUsd: number | null;
   optimalSizeUsd: number | null;
   breakevenSizeUsd: number | null;
-  capacityLadder: CapacityTierDto[];
   /** Total expected capacity — probability-weighted fillable notional
    * over book levels with positive marginal expected net (backend). */
   expectedCapacityUsd?: number | null;
@@ -1947,7 +1938,6 @@ export interface MonitorConfigDto {
   halfLifeMultiplier: number;
   minWindowSecs: number;
   frictionCoverMult: number;
-  capacityTiersUsd: number[];
   minWinProbability: number;
   executionMode: "one_way" | "two_way";
   participationCap: number;

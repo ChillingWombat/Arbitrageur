@@ -42,7 +42,7 @@ const row = (symbol: string, buyVenue: string, sellVenue: string): MonitorRowDto
   expectedProfitUsd: 57,
   optimalSizeUsd: 1000,
   breakevenSizeUsd: 800,
-  capacityLadder: [],
+  
   fundingCarryBps: 0.1,
   fundingUnknown: false,
   firstSeenMs: 1,

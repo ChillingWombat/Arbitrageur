@@ -74,9 +74,7 @@ pub struct MonitorConfigDto {
     /// friction floor (default 1.0 = variation must at least cover friction).
     #[serde(default = "d_one")]
     pub friction_cover_mult: f64,
-    /// Capacity ladder notional tiers, USD.
-    #[serde(default = "d_tiers")]
-    pub capacity_tiers_usd: Vec<f64>,
+
     /// Minimum marginal win probability for the breakeven bound (0.90).
     #[serde(default = "d_p_min")]
     pub min_win_probability: f64,
@@ -154,9 +152,6 @@ fn d_min_window() -> u64 {
 fn d_one() -> f64 {
     1.0
 }
-fn d_tiers() -> Vec<f64> {
-    vec![1000.0, 5000.0, 10000.0]
-}
 fn d_p_min() -> f64 {
     0.90
 }
@@ -204,7 +199,6 @@ impl Default for MonitorConfigDto {
             half_life_multiplier: d_hl_mult(),
             min_window_secs: d_min_window(),
             friction_cover_mult: d_one(),
-            capacity_tiers_usd: d_tiers(),
             min_win_probability: d_p_min(),
             execution_mode: d_exec_mode(),
             participation_cap: d_part_cap(),
@@ -225,16 +219,6 @@ impl Default for MonitorConfigDto {
 /* ------------------------------------------------------------------------ */
 /* DTOs emitted to the frontend                                              */
 /* ------------------------------------------------------------------------ */
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CapacityTierDto {
-    pub size_usd: f64,
-    pub filled_usd: f64,
-    pub net_bps: Option<f64>,
-    pub expected_net_bps: Option<f64>,
-    pub marginal_p_win: Option<f64>,
-}
 
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -365,7 +349,6 @@ pub struct MonitorRowDto {
     pub optimal_size_usd: Option<f64>,
     /// Probability-aware capacity boundary (marginal p >= p_min).
     pub breakeven_size_usd: Option<f64>,
-    pub capacity_ladder: Vec<CapacityTierDto>,
     /// Total expected capacity: probability-weighted fillable notional over
     /// all book levels with positive marginal expected net. `None` when no
     /// win-rate curve exists.
@@ -448,7 +431,7 @@ impl MonitorRowDto {
             expected_profit_usd: Some(1.0),
             optimal_size_usd: None,
             breakeven_size_usd: None,
-            capacity_ladder: Vec::new(),
+
             expected_capacity_usd: None,
             bps_capacity_ladder: Vec::new(),
             depth_curve: Vec::new(),
@@ -1069,21 +1052,21 @@ use crate::num::dec_opt_f64;
 /// Configured close quantity for the two-way exit walk, in base units: the
 /// smallest positive capacity tier (USD) divided by the buy-side ask. The
 /// walk prices the minimum executable close, so a thin reverse side fails
-/// closed instead of hiding behind a top-of-book floor. `None` when no tier
-/// or reference price is usable.
-pub(crate) fn monitor_exit_qty(tiers_usd: &[f64], ref_price: Option<Decimal>) -> Option<Decimal> {
-    let tier = tiers_usd
-        .iter()
-        .copied()
-        .filter(|t| t.is_finite() && *t > 0.0)
-        .fold(None::<f64>, |best, t| {
-            Some(best.map(|b: f64| b.min(t)).unwrap_or(t))
-        })?;
+/// Representative close-size probe for exit-friction estimation, USD. Exit
+/// cost scales with book depth, not with the user's entry size — the probe
+/// just needs to be a fixed, shallow reference so the estimate is comparable
+/// across pairs and stable under config changes (1k matches the historical
+/// smallest capacity tier that used to anchor this).
+pub(crate) const EXIT_PROBE_USD: f64 = 1_000.0;
+
+/// closed instead of hiding behind a top-of-book floor. `None` when the
+/// reference price is unusable.
+pub(crate) fn monitor_exit_qty(ref_price: Option<Decimal>) -> Option<Decimal> {
     let price = dec_opt_f64(ref_price?)?;
     if !price.is_finite() || price <= 0.0 {
         return None;
     }
-    let qty = Decimal::from_f64_retain(tier / price)?;
+    let qty = Decimal::from_f64_retain(EXIT_PROBE_USD / price)?;
     if qty <= dec!(0) {
         return None;
     }
@@ -1143,21 +1126,20 @@ pub(crate) fn two_way_exit_estimate(
 /// Composes the exit-friction input for one pair evaluation from the
 /// execution mode. One-way mode never prices a close (`Some(0.0)` whatever
 /// the books hold — untouched by the depth walk). Two-way mode walks both
-/// reverse sides at the configured close qty; `None` marks the route
+/// reverse sides at the fixed probe qty; `None` marks the route
 /// uncostable and the caller must fail closed (cap at triggered, block
 /// execution, record it in the audit snapshot).
 pub(crate) fn exit_estimate_for_mode(
     execution_mode: &str,
     buy_book: &Option<OrderBook>,
     sell_book: &Option<OrderBook>,
-    tiers_usd: &[f64],
     exit_fee_bps: f64,
 ) -> Option<f64> {
     if !crate::commands::execution_mode_is_two_way(execution_mode) {
         return Some(0.0);
     }
     let (bk, sk) = buy_book.as_ref().zip(sell_book.as_ref())?;
-    let qty = monitor_exit_qty(tiers_usd, bk.best_ask_price())?;
+    let qty = monitor_exit_qty(bk.best_ask_price())?;
     two_way_exit_estimate(bk, sk, qty, exit_fee_bps)
 }
 
@@ -1599,17 +1581,6 @@ impl SpreadMonitorEngine {
         } else {
             d_min_win_lb()
         };
-        cfg.capacity_tiers_usd = cfg
-            .capacity_tiers_usd
-            .iter()
-            .copied()
-            .filter(|t| t.is_finite() && *t > 0.0)
-            .collect();
-        if cfg.capacity_tiers_usd.is_empty() {
-            cfg.capacity_tiers_usd = d_tiers();
-        }
-        cfg.capacity_tiers_usd
-            .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
         let json = serde_json::to_string(&cfg).map_err(|e| e.to_string())?;
         state
             .state_store
@@ -3160,7 +3131,6 @@ impl SpreadMonitorEngine {
             ticker_mode.as_deref().unwrap_or(&cfg.execution_mode),
             &buy_book,
             &sell_book,
-            &cfg.capacity_tiers_usd,
             fee_bps,
         );
         let exit_uncostable = exit_est_opt.is_none();
@@ -3236,7 +3206,7 @@ impl SpreadMonitorEngine {
 
         // Capacity ladder over both books — requires a real historical
         // baseline; mu=0.0 would fabricate a reference price, so no ladder.
-        let (ladder, optimal, breakeven, exp_usd, exp_bps, exp_capacity, bps_ladder, depth_curve) =
+        let (optimal, breakeven, exp_usd, exp_bps, exp_capacity, bps_ladder, depth_curve) =
             match (&buy_book, &sell_book, mu) {
                 (Some(bk), Some(sk), Some(m)) => {
                     let asks: Vec<(f64, f64)> = bk
@@ -3257,29 +3227,21 @@ impl SpreadMonitorEngine {
                             (p.is_finite() && s.is_finite() && p > 0.0 && s > 0.0).then_some((p, s))
                         })
                         .collect();
-                    // Participation cap: shrink the deepest tier to the smaller
-                    // venue's 24h-volume allowance so the boundary is honest.
+                    // Participation cap: bound usable depth by the smaller
+                    // venue's 24h-volume allowance so the curve, optimal,
+                    // and capacity all reflect only consumable book.
                     let cap_usd = volumes
                         .get(buy_v)
                         .and_then(|m| m.get(symbol))
                         .zip(volumes.get(sell_v).and_then(|m| m.get(symbol)))
-                        .map(|(a, b)| a.min(*b) * cfg.participation_cap);
-                    let mut tiers = cfg.capacity_tiers_usd.clone();
-                    if let Some(cap) = cap_usd {
-                        if cap.is_finite() && cap > 0.0 {
-                            tiers.push(cap);
-                            tiers.sort_by(|a, b| {
-                                a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-                            });
-                            tiers.dedup();
-                        }
-                    }
+                        .map(|(a, b)| a.min(*b) * cfg.participation_cap)
+                        .filter(|cap| cap.is_finite() && *cap > 0.0);
                     let rep = capacity_ladder(
                         &asks,
                         &bids,
                         m,
                         friction_bps,
-                        &tiers,
+                        cap_usd,
                         &pwin_curve,
                         cfg.min_win_probability,
                         // Marginal tier gate on the shrunken rate (thin
@@ -3289,28 +3251,11 @@ impl SpreadMonitorEngine {
                         None,
                         WIN_PRIOR_STRENGTH,
                     );
-                    let ladder: Vec<CapacityTierDto> = rep
-                        .tiers
-                        .iter()
-                        .map(|t| CapacityTierDto {
-                            size_usd: t.size_usd,
-                            filled_usd: t.filled_usd,
-                            net_bps: t.net_bps,
-                            expected_net_bps: t.expected_net_bps,
-                            marginal_p_win: t.marginal_p_win,
-                        })
-                        .collect();
                     (
-                        ladder,
                         rep.optimal_size_usd,
                         rep.breakeven_size_usd,
                         rep.expected_profit_usd,
-                        rep.optimal_size_usd.and_then(|s| {
-                            rep.tiers
-                                .iter()
-                                .find(|t| (t.filled_usd - s).abs() < 1e-6)
-                                .and_then(|t| t.expected_net_bps)
-                        }),
+                        rep.expected_net_bps_at_optimal,
                         rep.expected_capacity_usd,
                         rep.bps_capacity_ladder
                             .iter()
@@ -3325,16 +3270,7 @@ impl SpreadMonitorEngine {
                             .collect(),
                     )
                 }
-                _ => (
-                    Vec::new(),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                    Vec::new(),
-                    Vec::new(),
-                ),
+                _ => (None, None, None, None, None, Vec::new(), Vec::new()),
             };
 
         let dev_abs_bps = dev_bps.map(|d| d.abs());
@@ -3493,7 +3429,7 @@ impl SpreadMonitorEngine {
             || !variation_ok
             || p_win.is_none()
             || funding_unknown
-            || ladder.is_empty()
+            || depth_curve.is_empty()
             || !session_conf_ok
             || !ratio_ok
             || !coverage_ok
@@ -3719,7 +3655,6 @@ impl SpreadMonitorEngine {
             expected_profit_usd: exp_usd,
             optimal_size_usd: optimal,
             breakeven_size_usd: breakeven,
-            capacity_ladder: ladder,
             expected_capacity_usd: exp_capacity,
             bps_capacity_ladder: bps_ladder,
             depth_curve,
@@ -5274,14 +5209,13 @@ mod tests {
     }
 
     #[test]
-    fn monitor_exit_qty_uses_smallest_tier() {
+    fn monitor_exit_qty_uses_fixed_probe_notional() {
         let ask = rust_decimal::Decimal::from_f64_retain(100.0).unwrap();
-        let q = monitor_exit_qty(&[10_000.0, 1_000.0, 5_000.0], Some(ask)).unwrap();
+        // $1,000 probe / $100 reference = 10 units.
+        let q = monitor_exit_qty(Some(ask)).unwrap();
         assert_eq!(q, rust_decimal::Decimal::from_f64_retain(10.0).unwrap());
-        assert!(monitor_exit_qty(&[], Some(ask)).is_none());
-        assert!(monitor_exit_qty(&[1_000.0], None).is_none());
-        assert!(monitor_exit_qty(&[1_000.0], Some(dec!(0))).is_none());
-        assert!(monitor_exit_qty(&[f64::NAN, f64::INFINITY, -5.0], Some(ask)).is_none());
+        assert!(monitor_exit_qty(None).is_none());
+        assert!(monitor_exit_qty(Some(dec!(0))).is_none());
     }
 
     #[test]
@@ -5291,34 +5225,22 @@ mod tests {
         let bb = Some(thin_buy);
         let sb = Some(thin_sell);
         // One-way never prices a close, however thin the reverse sides are.
-        assert_eq!(
-            exit_estimate_for_mode("one_way", &bb, &sb, &[1_000.0], 4.0),
-            Some(0.0)
-        );
-        assert_eq!(
-            exit_estimate_for_mode("other", &bb, &sb, &[1_000.0], 4.0),
-            Some(0.0)
-        );
+        assert_eq!(exit_estimate_for_mode("one_way", &bb, &sb, 4.0), Some(0.0));
+        assert_eq!(exit_estimate_for_mode("other", &bb, &sb, 4.0), Some(0.0));
         // Two-way on the same thin books is uncostable...
-        assert!(exit_estimate_for_mode("two_way", &bb, &sb, &[1_000.0], 4.0).is_none());
+        assert!(exit_estimate_for_mode("two_way", &bb, &sb, 4.0).is_none());
         // ...as are missing books — while one-way still reads 0.0.
         let none: Option<OrderBook> = None;
-        assert!(exit_estimate_for_mode("two_way", &none, &sb, &[1_000.0], 4.0).is_none());
+        assert!(exit_estimate_for_mode("two_way", &none, &sb, 4.0).is_none());
         assert_eq!(
-            exit_estimate_for_mode("one_way", &none, &sb, &[1_000.0], 4.0),
+            exit_estimate_for_mode("one_way", &none, &sb, 4.0),
             Some(0.0)
         );
         // Deep books price in two-way mode.
         let deep_buy = levels_book("a", "BTC", &[(100.0, 100.0)], &[(101.0, 100.0)]);
         let deep_sell = levels_book("b", "BTC", &[(120.0, 100.0)], &[(121.0, 100.0)]);
-        let est = exit_estimate_for_mode(
-            "two_way",
-            &Some(deep_buy),
-            &Some(deep_sell),
-            &[1_000.0],
-            4.0,
-        )
-        .expect("deep books price");
+        let est = exit_estimate_for_mode("two_way", &Some(deep_buy), &Some(deep_sell), 4.0)
+            .expect("deep books price");
         assert!(est > 4.0, "walk adds slippage + spread over fees: {est}");
     }
 
