@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Option,
   RefreshCw,
@@ -7,18 +7,25 @@ import {
   Clock3,
   ChevronRight,
   CircleHelp,
+  SlidersHorizontal,
 } from "lucide-react";
 import { api } from "../services/api";
 import type {
   OptionsParityOpportunityDto,
   OptionsParityExecutionParams,
+  OptionsBotConfigDto,
   ExecutionLogEntry,
 } from "../types";
+import { defaultOptionsBotConfig } from "../services/optionsBot";
+import { flattenResidualMessage } from "../services/flatten";
 import { EmptyState } from "./EmptyState";
 import { ExecuteButton } from "./ExecuteButton";
 import { ConfirmActionModal } from "./ConfirmActionModal";
 import { DetailField, DetailSection } from "./DetailBits";
 import { TickerLogMonitor } from "./TickerLogMonitor";
+import { BotPhaseBadge, BotLifecycleControls } from "./BotLifecycleControls";
+import type { BotPhase } from "../hooks/useBotLifecycle";
+import { SaveButton, useSaveButton } from "./SaveButton";
 
 /**
  * Options strategy catalog — the taxonomy from
@@ -452,9 +459,131 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
   const [executed, setExecuted] = useState<Set<string>>(new Set());
   const [message, setMessage] = useState<string | null>(null);
   const [confirmOpp, setConfirmOpp] = useState<OptionsParityOpportunityDto | null>(null);
+  const [botCfg, setBotCfg] = useState<OptionsBotConfigDto | null>(null);
+  const [botError, setBotError] = useState<string | null>(null);
+  const [openPositions, setOpenPositions] = useState(0);
+  const [flattening, setFlattening] = useState(false);
+  const [flattenError, setFlattenError] = useState<string | null>(null);
+  const [showBotConfig, setShowBotConfig] = useState(false);
 
   const selDef = OPTIONS_SUBSTRATEGIES.find((s) => s.id === selected);
   const parityVisible = selected === "all" || selected === "parity";
+  /** A bot exists only for live scanners — the "All" view is monitor-only
+   *  and pending substrategies have no executor to configure. */
+  const botSubstrategy = selDef && selDef.status === "live" ? selDef : null;
+  const env = isLive ? "live" : "testnet";
+
+  // Poll the selected substrategy's persisted bot config + its open signal
+  // count — the same sources the backend executor drains against.
+  useEffect(() => {
+    let cancelled = false;
+    const sub = selDef && selDef.status === "live" ? selDef : null;
+    if (!sub) {
+      setBotCfg(null);
+      setOpenPositions(0);
+      return;
+    }
+    const load = async () => {
+      try {
+        const [cfg, sigs] = await Promise.all([
+          api.getOptionsBotConfig(sub.id),
+          api.listSignalExecutions(),
+        ]);
+        if (cancelled) return;
+        setBotCfg(cfg);
+        // One parity cycle persists three leg signals ({cycle}-legN) — count
+        // distinct cycles, mirroring the executor's open-position book.
+        setOpenPositions(
+          new Set(
+            sigs
+              .filter(
+                (s) =>
+                  s.strategyId === sub.logStrategyId &&
+                  s.environment.toLowerCase() === env &&
+                  s.status !== "closed" &&
+                  s.status !== "failed",
+              )
+              .map((s) => {
+                const i = s.id.lastIndexOf("-leg");
+                return i > 0 ? s.id.slice(0, i) : s.id;
+              }),
+          ).size,
+        );
+      } catch {
+        // Config unreadable → controls stay on inert defaults (botCfg may be
+        // null); the next poll retries. Never guess a mode.
+      }
+    };
+    void load();
+    const t = setInterval(load, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(t);
+    };
+  }, [selDef, env]);
+
+  /** Scan profile — a selected live substrategy scans at its bot config so
+   *  manual Scan shows what the bot would see; "all" uses fixed defaults. */
+  const scanQty = botSubstrategy && botCfg ? botCfg.qtyBase : SCAN_QTY_BASE;
+  const scanEdge = botSubstrategy && botCfg ? botCfg.minEdgeBps : MIN_EDGE_BPS;
+
+  const botPhase: BotPhase = flattening
+    ? "stopping"
+    : botCfg?.mode === "auto" && botCfg.enabled
+      ? "running"
+      : botCfg?.mode === "paused"
+        ? "paused"
+        : botCfg?.mode === "reduce_only"
+          ? "reduce_only"
+          : "idle";
+
+  const handleBotMode = useCallback(
+    async (mode: OptionsBotConfigDto["mode"]) => {
+      if (!botSubstrategy) return;
+      if (mode === "auto" && isLive) {
+        // Backend refuses the write too — surface the reason immediately.
+        setBotError(
+          "Autonomous options entries are testnet-only — run a manual Execute for live.",
+        );
+        return;
+      }
+      const base = botCfg ?? defaultOptionsBotConfig(botSubstrategy.id);
+      const next: OptionsBotConfigDto = {
+        ...base,
+        substrategyId: botSubstrategy.id,
+        enabled: mode === "auto",
+        mode,
+      };
+      setBotError(null);
+      try {
+        await api.setOptionsBotConfig(next);
+        setBotCfg(next);
+      } catch (e) {
+        setBotError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [botCfg, botSubstrategy, isLive],
+  );
+
+  const handleFlatten = useCallback(async () => {
+    if (!botSubstrategy) return;
+    setFlattening(true);
+    setFlattenError(null);
+    try {
+      const res = await api.flattenTickerPositions(null, botSubstrategy.logStrategyId);
+      const residual = flattenResidualMessage(res);
+      if (residual !== null) setFlattenError(residual);
+    } catch (e) {
+      setFlattenError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setFlattening(false);
+    }
+  }, [botSubstrategy]);
+
+  const saveBotConfig = useCallback(async (cfg: OptionsBotConfigDto) => {
+    await api.setOptionsBotConfig(cfg);
+    setBotCfg(cfg);
+  }, []);
 
   const filteredOpps = useMemo(
     () =>
@@ -491,8 +620,10 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
         SCAN_CURRENCIES.map((currency) =>
           api.scanOptionsParity({
             currency,
-            qty_base: SCAN_QTY_BASE,
-            min_edge_bps: MIN_EDGE_BPS,
+            qty_base: scanQty,
+            min_edge_bps: scanEdge,
+            min_hours_to_expiry: botCfg?.minHoursToExpiry,
+            max_days_to_expiry: botCfg?.maxDaysToExpiry,
           }),
         ),
       );
@@ -519,7 +650,7 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
     } finally {
       setScanning(false);
     }
-  }, []);
+  }, [scanQty, scanEdge, botCfg]);
 
   const runExecute = useCallback(
     async (opp: OptionsParityOpportunityDto) => {
@@ -531,7 +662,7 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
           id: opp.id,
           currency: opp.currency,
           qty_base: opp.qty_base_suggested,
-          min_edge_bps: MIN_EDGE_BPS,
+          min_edge_bps: scanEdge,
         };
         const res = await api.executeOptionsParity(params);
         setExecuted((s) => new Set(s).add(opp.id));
@@ -544,7 +675,7 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
         setConfirmOpp(null);
       }
     },
-    [onRefreshAll],
+    [onRefreshAll, scanEdge],
   );
 
   return (
@@ -558,19 +689,43 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
 
       <div className="flex-1 overflow-y-auto p-4 pr-5 space-y-4 pb-24 min-w-0">
         {/* Strategy Status ribbon — mirrors the other strategy pages:
-            read-only params left, primary action right. */}
+            read-only params + phase badge left, configurator, scan and the
+            substrategy bot's lifecycle buttons right. The "All" view stays
+            monitor-only — per-substrategy controls need a selection. */}
         <div className="ribbon-container">
           <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
             <span className="text-[13px] font-mono font-bold tracking-wider text-slate-900 pr-1">
-              Options Strategies
+              {selDef ? selDef.name : "Options Strategies"}
             </span>
+            {botSubstrategy && <BotPhaseBadge phase={botPhase} />}
             {parityVisible && (
               <>
                 <div className="ribbon-pill" title="Net-edge hurdle for reported setups">
                   <span className="text-muted">Min Edge</span>
-                  <span className="font-bold text-slate-900 tabular-nums">{MIN_EDGE_BPS}</span>
+                  <span className="font-bold text-slate-900 tabular-nums">{scanEdge}</span>
                   <span className="text-muted">BPS</span>
                 </div>
+                <div className="ribbon-pill" title="Scan/entry size in base units">
+                  <span className="text-muted">Qty</span>
+                  <span className="font-bold text-slate-900 tabular-nums">{scanQty}</span>
+                </div>
+                {botSubstrategy && botCfg && (
+                  <>
+                    <div className="ribbon-pill" title="Bot poll cadence">
+                      <span className="text-muted">Poll</span>
+                      <span className="font-bold text-slate-900 tabular-nums">
+                        {botCfg.pollIntervalSecs}
+                      </span>
+                      <span className="text-muted">s</span>
+                    </div>
+                    <div className="ribbon-pill" title="Max simultaneous managed positions">
+                      <span className="text-muted">Max Open</span>
+                      <span className="font-bold text-slate-900 tabular-nums">
+                        {botCfg.maxOpenPositions}
+                      </span>
+                    </div>
+                  </>
+                )}
               </>
             )}
             {isPaused && <span className="badge-status-warn">Engine Paused</span>}
@@ -581,6 +736,25 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
             )}
           </div>
           <div className="flex items-center space-x-3 shrink-0">
+            {(botError || flattenError) && (
+              <span
+                className="text-xs font-mono text-loss max-w-72 truncate"
+                title={botError ?? flattenError ?? ""}
+              >
+                {botError ?? flattenError}
+              </span>
+            )}
+            {botSubstrategy && (
+              <button
+                type="button"
+                onClick={() => setShowBotConfig(true)}
+                className="btn-secondary !text-xs !py-2 !px-2 font-sans cursor-pointer gap-2"
+                title={`Configure the ${botSubstrategy.name} bot`}
+              >
+                <SlidersHorizontal className="w-3.5 h-3.5 text-accent-strong" />
+                <span>Configurator</span>
+              </button>
+            )}
             {parityVisible && (
               <button
                 type="button"
@@ -596,6 +770,18 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
                 <RefreshCw className={`w-3.5 h-3.5 ${scanning ? "animate-spin" : ""}`} />
                 {scanning ? "Scanning…" : "Scan"}
               </button>
+            )}
+            {botSubstrategy && (
+              <BotLifecycleControls
+                phase={botPhase}
+                hasOpenPositions={openPositions > 0}
+                disabled={botCfg == null}
+                allowStartWithOpenPositions
+                onStart={() => void handleBotMode("auto")}
+                onPause={() => void handleBotMode("paused")}
+                onReduceOnly={() => void handleBotMode("reduce_only")}
+                onStop={() => void handleFlatten()}
+              />
             )}
           </div>
         </div>
@@ -772,6 +958,183 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
         onCancel={() => setConfirmOpp(null)}
         onError={(m) => setError(m)}
       />
+
+      {botSubstrategy && botCfg && showBotConfig && (
+        <OptionsBotConfigModal
+          cfg={botCfg}
+          name={botSubstrategy.name}
+          onSave={saveBotConfig}
+          onClose={() => setShowBotConfig(false)}
+        />
+      )}
+    </div>
+  );
+};
+
+const BOT_FIELD_DEFS: {
+  key: keyof OptionsBotConfigDto;
+  label: string;
+  tooltip: string;
+  step?: string;
+}[] = [
+  {
+    key: "qtyBase",
+    label: "Entry size (base units)",
+    tooltip: "Per-entry size in base units (BTC or ETH) — the manual Scan uses this size too.",
+  },
+  {
+    key: "minEdgeBps",
+    label: "Min net edge (bps)",
+    tooltip: "Net-of-fees edge hurdle an entry must clear — the manual Scan reports at this hurdle too.",
+    step: "0.5",
+  },
+  {
+    key: "minHoursToExpiry",
+    label: "Min hours to expiry",
+    tooltip: "Skip setups expiring sooner — too little time for convergence.",
+    step: "1",
+  },
+  {
+    key: "maxDaysToExpiry",
+    label: "Max days to expiry",
+    tooltip: "Skip setups expiring later — carry cost dominates the edge.",
+    step: "1",
+  },
+  {
+    key: "pollIntervalSecs",
+    label: "Poll interval (s)",
+    tooltip: "How often the bot scans for entries.",
+    step: "1",
+  },
+  {
+    key: "maxOpenPositions",
+    label: "Max open positions",
+    tooltip: "Cap on simultaneously managed parity positions.",
+    step: "1",
+  },
+];
+
+const BOT_INPUT_CLS =
+  "w-32 shrink-0 px-3 py-2 bg-surface border border-surface-border rounded-lg text-slate-900 font-bold text-xs focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent transition-all h-[38px] font-mono tabular-nums shadow-2xs";
+
+/** Per-substrategy bot configurator — edits scan/entry profile and the
+ *  bot's loop parameters. Mode is owned by the lifecycle buttons, never
+ *  silently flipped here. */
+export const OptionsBotConfigModal: React.FC<{
+  cfg: OptionsBotConfigDto;
+  name: string;
+  onSave: (cfg: OptionsBotConfigDto) => Promise<void>;
+  onClose: () => void;
+}> = ({ cfg, name, onSave, onClose }) => {
+  const [draft, setDraft] = useState<OptionsBotConfigDto>(cfg);
+  const [error, setError] = useState<string | null>(null);
+  const saveBtn = useSaveButton();
+
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
+
+  const set = <K extends keyof OptionsBotConfigDto>(k: K, v: OptionsBotConfigDto[K]) => {
+    setError(null);
+    setDraft((d) => ({ ...d, [k]: v }));
+  };
+
+  const handleResetDefaults = () => {
+    setError(null);
+    setDraft((d) => ({ ...defaultOptionsBotConfig(d.substrategyId), mode: d.mode }));
+  };
+
+  const handleSave = async () => {
+    setError(null);
+    const ok = await saveBtn.run(async () => {
+      try {
+        await onSave(draft);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        throw e; // lands the save button on "Failed!"
+      }
+    });
+    if (ok) setTimeout(onClose, 400);
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-3 sm:p-6 select-none animate-in fade-in duration-150"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className="bg-surface border border-surface-border rounded-2xl w-[520px] max-w-[96vw] max-h-[92vh] flex flex-col shadow-2xl overflow-hidden animate-in zoom-in-95 duration-150">
+        <div className="flex items-center justify-between px-6 py-3.5 border-b border-surface-border bg-surface shrink-0">
+          <div className="flex items-center space-x-3">
+            <div className="w-8 h-8 rounded-lg bg-accent-dim border border-accent-line flex items-center justify-center text-accent-strong shadow-2xs">
+              <SlidersHorizontal className="w-4 h-4" />
+            </div>
+            <div>
+              <h2 className="text-sm font-bold font-sans tracking-tight text-slate-900 leading-tight">
+                {name} Bot Configurator
+              </h2>
+              <p className="text-[11px] text-muted font-sans">
+                Scan and entry profile for this substrategy — Start/Pause are on the page ribbon
+              </p>
+            </div>
+          </div>
+        </div>
+
+        <div className="flex-1 overflow-y-auto px-6 py-5 space-y-4">
+          {BOT_FIELD_DEFS.map((f) => (
+            <div key={f.key} className="flex items-center justify-between gap-4">
+              <label
+                className="text-xs text-slate-700 font-medium flex items-center font-sans"
+                title={f.tooltip}
+              >
+                {f.label}
+                <CircleHelp className="w-3 h-3 ml-1.5 text-slate-400" aria-hidden />
+              </label>
+              <input
+                type="number"
+                step={f.step ?? "any"}
+                className={BOT_INPUT_CLS}
+                value={Number(draft[f.key])}
+                onChange={(e) => {
+                  const n = Number(e.target.value);
+                  if (Number.isFinite(n)) set(f.key, n as never);
+                }}
+              />
+            </div>
+          ))}
+          {error && (
+            <div className="p-2.5 rounded-lg border border-loss-border text-loss text-xs flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              {error}
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center justify-between gap-3 px-6 py-3.5 border-t border-surface-border bg-surface shrink-0">
+          <button
+            type="button"
+            onClick={handleResetDefaults}
+            className="text-xs font-sans font-medium text-slate-500 hover:text-slate-700 cursor-pointer"
+          >
+            Reset defaults
+          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={onClose}
+              className="btn-secondary !text-xs !py-2 !px-3 font-sans cursor-pointer"
+            >
+              Cancel
+            </button>
+            <SaveButton state={saveBtn.state} onClick={handleSave} />
+          </div>
+        </div>
+      </div>
     </div>
   );
 };

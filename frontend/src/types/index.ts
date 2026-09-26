@@ -1651,6 +1651,21 @@ export interface OptionsParityExecutionParams {
   auto?: boolean;
 }
 
+/** Per-substrategy options bot config — one row per (environment,
+ *  substrategy). `mode` is the backend BotMode string; `enabled` is a
+ *  display mirror of mode==="auto" (the backend derives it). */
+export interface OptionsBotConfigDto {
+  substrategyId: string;
+  enabled: boolean;
+  mode: "off" | "auto" | "paused" | "reduce_only" | string;
+  qtyBase: number;
+  minEdgeBps: number;
+  minHoursToExpiry: number;
+  maxDaysToExpiry: number;
+  pollIntervalSecs: number;
+  maxOpenPositions: number;
+}
+
 export interface TriangleExecutionParams {
   id: string;
   venue: string;

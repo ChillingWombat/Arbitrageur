@@ -1,4 +1,4 @@
-import test from "node:test";
+import nodeTest from "node:test";
 import assert from "node:assert/strict";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -15,6 +15,11 @@ import type {
 } from "../types/index.ts";
 
 const noop = async () => {};
+
+// Interactive children re-exec this file with --interactive-child; the test
+// registry is silenced there so only the child harness runs.
+const INTERACTIVE_CHILD = process.argv.includes("--interactive-child");
+const test = INTERACTIVE_CHILD ? (((() => {}) as unknown) as typeof nodeTest) : nodeTest;
 
 const opp = (over: Partial<OptionsParityOpportunityDto> = {}): OptionsParityOpportunityDto => ({
   id: "opar-BTC-1-85000-conversion",
@@ -203,3 +208,106 @@ test("card: reversal direction labels buy-call / sell-put / sell-perp", () => {
   assert.match(html, /SELL PUT/);
   assert.match(html, /SELL PERP/);
 });
+
+test("substrategy bot controls live only on the selected live scanner (interactive DOM)", async (t) => {
+  await t.test("all-view monitor-only → parity view controls", () => {
+    const { execFileSync } = require("node:child_process");
+    const out = execFileSync(
+      process.execPath,
+      [__filename, "--interactive-child"],
+      { encoding: "utf8", timeout: 30000 },
+    );
+    assert.match(out, /INTERACTIVE-OK/);
+  });
+});
+
+// ── child-process harness (not executed under node:test) ────────────────────
+declare const __filename: string;
+
+async function runInteractiveChild() {
+  const { Window } = await import("happy-dom");
+  const { createRoot } = await import("react-dom/client");
+  const { act } = await import("react");
+
+  const window = new Window();
+  for (const key of [
+    "document", "window", "HTMLElement", "HTMLButtonElement",
+    "Element", "Node", "MouseEvent", "CustomEvent", "Event",
+    "SVGElement", "DocumentFragment", "MutationObserver", "getComputedStyle",
+    "requestAnimationFrame", "cancelAnimationFrame",
+  ]) {
+    (globalThis as Record<string, unknown>)[key] =
+      (window as unknown as Record<string, unknown>)[key] ??
+      (globalThis as Record<string, unknown>)[key];
+  }
+  (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
+
+  // Stub the bot-config + signal ledger reads the page polls.
+  const { api } = await import("../services/api.ts");
+  const { defaultOptionsBotConfig } = await import("../services/optionsBot.ts");
+  (api as Record<string, unknown>).getOptionsBotConfig = async (id: string) =>
+    defaultOptionsBotConfig(id);
+  (api as Record<string, unknown>).listSignalExecutions = async () => [];
+  (api as Record<string, unknown>).scanOptionsParity = async () => [];
+
+  const container = window.document.createElement("div");
+  window.document.body.appendChild(container);
+  const root = createRoot(container as unknown as HTMLElement);
+  await act(async () => {
+    root.render(
+      React.createElement(OptionsArbitrage, {
+        executionLogs: [],
+        onRefreshAll: noop,
+        optionsVenueAvailable: true,
+      }),
+    );
+  });
+
+  const buttons = () =>
+    Array.from(container.querySelectorAll("button")).map(
+      (b) => (b as unknown as HTMLElement).textContent ?? "",
+    );
+  const has = (label: string) => buttons().some((t) => t.includes(label));
+
+  if (has("Start") || has("Configurator")) {
+    throw new Error("All Strategies view must stay monitor-only");
+  }
+
+  const rail = Array.from(container.querySelectorAll("button")).find((b) =>
+    ((b as unknown as HTMLElement).textContent ?? "").includes("Put–Call Parity"),
+  );
+  if (!rail) throw new Error("parity rail row missing");
+  await act(async () => {
+    rail.dispatchEvent(new window.MouseEvent("click", { bubbles: true, cancelable: true }));
+    // Let the config poll settle.
+    await new Promise((r) => setTimeout(r, 50));
+  });
+
+  for (const label of ["Configurator", "Start", "Pause", "Reduce Only", "Stop"]) {
+    if (!has(label)) throw new Error(`missing lifecycle control: ${label}`);
+  }
+
+  // Pending substrategies expose no bot controls.
+  const pending = Array.from(container.querySelectorAll("button")).find((b) =>
+    ((b as unknown as HTMLElement).textContent ?? "").includes("Box Spread"),
+  );
+  if (!pending) throw new Error("box_spread rail row missing");
+  await act(async () => {
+    pending.dispatchEvent(new window.MouseEvent("click", { bubbles: true, cancelable: true }));
+    await new Promise((r) => setTimeout(r, 50));
+  });
+  if (has("Start") || has("Configurator")) {
+    throw new Error("pending substrategy must not expose bot controls");
+  }
+
+  await act(async () => root.unmount());
+  process.stdout.write("INTERACTIVE-OK\n");
+  process.exit(0);
+}
+
+if (INTERACTIVE_CHILD) {
+  runInteractiveChild().catch((err) => {
+    console.error(err);
+    process.exit(1);
+  });
+}

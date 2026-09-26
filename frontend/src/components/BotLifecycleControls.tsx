@@ -9,6 +9,9 @@ interface BotLifecycleControlsProps {
   hasOpenPositions: boolean;
   disabled?: boolean;
   reduceOnlyAvailable?: boolean;
+  /** Let Start re-arm while positions are open (options bots, whose managed
+   *  positions ride to expiry — their cap, not flatness, gates entries). */
+  allowStartWithOpenPositions?: boolean;
   onStart: () => void;
   onPause: () => void;
   onReduceOnly?: () => void;
@@ -50,6 +53,7 @@ export const BotLifecycleControls: React.FC<BotLifecycleControlsProps> = ({
   hasOpenPositions,
   disabled = false,
   reduceOnlyAvailable = true,
+  allowStartWithOpenPositions = false,
   onStart,
   onPause,
   onReduceOnly,
@@ -62,6 +66,7 @@ export const BotLifecycleControls: React.FC<BotLifecycleControlsProps> = ({
     hasOpenPositions,
     disabled,
     reduceOnlyAvailable,
+    allowStartWithOpenPositions,
   );
 
   const buttons: BtnDef[] = [
