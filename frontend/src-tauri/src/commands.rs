@@ -2740,6 +2740,122 @@ pub fn get_execution_logs_by_mode_impl(
     Ok(filtered)
 }
 
+/// What `reset_transaction_history` removed, surfaced so the operator
+/// sees the blast radius it confirmed.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct TransactionHistoryResetDto {
+    /// Environment the reset ran against (`testnet` or `live`).
+    pub environment: String,
+    pub signals_removed: i64,
+    pub legs_removed: i64,
+    pub lots_removed: i64,
+    pub logs_removed: i64,
+}
+
+/// Operator-initiated wipe of the *active* environment's transaction
+/// ledger: signal executions (legs, predictions, and fixed-yield
+/// maturities cascade), cycle lots, the execution journal, and the
+/// cumulative realized-PnL counter. 'unknown'-environment rows are
+/// deleted too — env-scoped reads surface them in every environment, so
+/// leaving them behind would keep "past transactions" visible after a
+/// reset the operator meant to be complete.
+///
+/// Fail-closed guards mirror the environment-switch rules: refuse while
+/// a dispatch holds the execution lock, while ANY environment still has
+/// a non-terminal signal (deleting the ledger under live exposure
+/// orphans the venue-truth records reconciliation needs), or while an
+/// in-scope cycle lot is still open. The other environment's rows,
+/// credentials, settings, and market-data history are untouched.
+pub async fn reset_transaction_history_impl(
+    state: &AppEngineState,
+) -> Result<TransactionHistoryResetDto, String> {
+    let _exec_guard = match state.execution_lock.try_lock() {
+        Ok(g) => g,
+        Err(_) => {
+            return Err(
+                "Cannot reset transaction history while an execution is in progress — retry once it settles."
+                    .into(),
+            )
+        }
+    };
+    let env = state.env();
+    let env_str = env.as_str();
+    let is_live = state.is_live();
+
+    let open = state
+        .state_store
+        .list_open_signals(None)
+        .map_err(|e| format!("Cannot verify open positions before history reset: {e}"))?;
+    if !open.is_empty() {
+        let ids: Vec<String> = open
+            .iter()
+            .take(4)
+            .map(|s| format!("{}:{}", s.symbol, s.status.as_str()))
+            .collect();
+        return Err(format!(
+            "Cannot reset transaction history while {} signal(s) remain open ({}). Flatten or resolve them first.",
+            open.len(),
+            ids.join(", ")
+        ));
+    }
+    let open_lots: Vec<String> = {
+        let ledger = state.virtual_ledger.read();
+        ledger
+            .lots
+            .values()
+            .filter(|l| {
+                l.status == arbitrageur_execution::virtual_ledger::CycleStatus::Open
+                    && (l.environment == env_str || l.environment == "unknown")
+            })
+            .map(|l| format!("{}:{}", l.symbol, l.id))
+            .collect()
+    };
+    if !open_lots.is_empty() {
+        return Err(format!(
+            "Cannot reset transaction history while {} cycle lot(s) remain open ({}). Flatten or resolve them first.",
+            open_lots.len(),
+            open_lots.join(", ")
+        ));
+    }
+
+    let counts = state
+        .state_store
+        .clear_transaction_history(env_str)
+        .map_err(|e| format!("History reset failed: {e}"))?;
+
+    let key = if is_live {
+        "pnl.total.live"
+    } else {
+        "pnl.total.testnet"
+    };
+    if let Err(e) = state.state_store.kv_set(key, "0") {
+        tracing::warn!("persist reset cumulative realized PnL failed: {e}");
+    }
+    if is_live {
+        *state.total_realized_profit_live.write() = dec!(0);
+    } else {
+        *state.total_realized_profit.write() = dec!(0);
+    }
+    state
+        .execution_logs
+        .write()
+        .retain(|l| l.is_live != is_live);
+    state
+        .virtual_ledger
+        .write()
+        .lots
+        .retain(|_, l| l.environment != env_str && l.environment != "unknown");
+
+    Ok(TransactionHistoryResetDto {
+        environment: env_str.into(),
+        signals_removed: counts.signals,
+        legs_removed: counts.legs,
+        lots_removed: counts.lots,
+        logs_removed: counts.logs,
+    })
+}
+
 #[cfg(test)]
 pub fn get_execution_logs_impl(state: &AppEngineState) -> Result<Vec<ExecutionLogEntry>, String> {
     get_execution_logs_by_mode_impl(state, None)
@@ -4243,6 +4359,17 @@ pub async fn get_execution_logs(
     is_live: Option<bool>,
 ) -> Result<Vec<ExecutionLogEntry>, String> {
     get_execution_logs_by_mode_impl(&state, is_live)
+}
+
+/// Destructive maintenance command behind the Execution settings' danger
+/// card — wipes the active environment's signal/cycle/execution journal
+/// and cumulative PnL after the UI's explicit confirm. Refuses under any
+/// open signal or in-scope open lot.
+#[tauri::command]
+pub async fn reset_transaction_history(
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<TransactionHistoryResetDto, String> {
+    reset_transaction_history_impl(&state).await
 }
 
 #[tauri::command]
@@ -15066,6 +15193,156 @@ mod tests {
         assert!(state.execution_logs.read().iter().any(|e| e.id == "fail-1"));
         let rows = state.state_store.load_execution_logs(500).expect("load");
         assert!(rows.iter().any(|e| e.id == "fail-1" && !e.success));
+    }
+
+    #[tokio::test]
+    async fn test_reset_transaction_history_refuses_open_then_clears_env() {
+        use crate::state_store::{LegSide, NewSignalExecution, NewSignalLeg};
+
+        let state = AppEngineState::new();
+        let mk_sig = |id: &str| NewSignalExecution {
+            id: id.into(),
+            strategy_id: "futures".into(),
+            symbol: "BTC-USDC".into(),
+            route_id: None,
+            expected_net_usd: None,
+            note: None,
+            legs: vec![
+                NewSignalLeg {
+                    account_id: None,
+                    venue: "hyperliquid".into(),
+                    side: LegSide::Long,
+                    symbol: None,
+                    intended_qty: 1.0,
+                    intended_price: None,
+                    unit_scale: None,
+                },
+                NewSignalLeg {
+                    account_id: None,
+                    venue: "lighter".into(),
+                    side: LegSide::Short,
+                    symbol: None,
+                    intended_qty: 1.0,
+                    intended_price: None,
+                    unit_scale: None,
+                },
+            ],
+        };
+        state
+            .state_store
+            .record_signal_execution(&mk_sig("sig-open"), "testnet")
+            .expect("open signal");
+        // A sibling signal in the OTHER environment must survive a testnet
+        // reset; closing it first keeps the open-exposure guard honest.
+        state
+            .state_store
+            .record_signal_execution(&mk_sig("sig-live"), "live")
+            .expect("live signal");
+        state
+            .state_store
+            .update_signal_status("sig-live", crate::state_store::SignalStatus::Closed, None)
+            .expect("live closes");
+
+        // 1) An open signal in ANY environment refuses the reset — the
+        //    ledger cannot be deleted out from under exposure.
+        let err = reset_transaction_history_impl(&state)
+            .await
+            .expect_err("open signal must refuse");
+        assert!(err.contains("remain open"), "err: {err}");
+
+        // Close the testnet signal and seed the rest of the ledger surface:
+        // a closed cycle lot, an execution-log row, and realized PnL.
+        state
+            .state_store
+            .update_signal_status("sig-open", crate::state_store::SignalStatus::Closed, None)
+            .expect("testnet closes");
+        {
+            let mut ledger = state.virtual_ledger.write();
+            ledger.open_cycle(
+                "spatial-reset-1".into(),
+                "spatial_spread".into(),
+                "BTC-USDC".into(),
+                "hyperliquid".into(),
+                "lighter".into(),
+                30.0,
+                1.0,
+                60_000.0,
+                1.0,
+                60_100.0,
+                1.0,
+                "testnet".into(),
+            );
+            ledger.lots.get_mut("spatial-reset-1").unwrap().status =
+                arbitrageur_execution::virtual_ledger::CycleStatus::Closed;
+            let lot = ledger.lots.get("spatial-reset-1").unwrap().clone();
+            state.state_store.upsert_cycle_lot(&lot).unwrap();
+        }
+        record_execution_log(
+            &state,
+            ExecutionLogEntry {
+                id: "exec-reset-1".into(),
+                timestamp: chrono::Utc::now().to_rfc3339(),
+                trade_type: "Spatial".into(),
+                strategy_id: "futures".into(),
+                symbol: "BTC-USDC".into(),
+                venue_a: "hyperliquid".into(),
+                venue_b: "lighter".into(),
+                leg_a_status: "filled".into(),
+                leg_b_status: "filled".into(),
+                success: true,
+                gross_profit: 1.0,
+                fees: 0.5,
+                net_profit: 0.5,
+                latency_us: 0,
+                note: "seed".into(),
+                direction: None,
+                trigger_spread_bps: None,
+                baseline_mean_spread_bps: None,
+                position_step: None,
+                max_units: None,
+                nominal_hurdle_bps: None,
+                is_live: false,
+            },
+        );
+        crate::execution::accumulate_realized_profit(&state, false, -7.5);
+        assert!(*state.total_realized_profit.read() < dec!(0));
+
+        // 2) The reset clears the active env and reports honest counts.
+        let r = reset_transaction_history_impl(&state)
+            .await
+            .expect("flat ledger resets");
+        assert_eq!(r.environment, "testnet");
+        assert_eq!(r.signals_removed, 1, "testnet signal only");
+        assert_eq!(r.legs_removed, 2);
+        assert_eq!(r.lots_removed, 1);
+        assert_eq!(r.logs_removed, 1);
+
+        // Persisted: the live signal survives; testnet rows are gone.
+        let remaining = state.state_store.list_signals(None, None).expect("signals");
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, "sig-live");
+        assert!(remaining[0].environment == "live");
+        assert!(state
+            .state_store
+            .load_execution_logs(500)
+            .expect("logs")
+            .is_empty());
+        assert!(state
+            .state_store
+            .load_cycle_lots()
+            .expect("lots")
+            .is_empty());
+
+        // In-memory mirrors: counter zeroed, env's log rows and lots gone.
+        assert_eq!(*state.total_realized_profit.read(), dec!(0));
+        assert!(state.execution_logs.read().is_empty());
+        assert!(state.virtual_ledger.read().lots.is_empty());
+
+        // Idempotent — a second reset is a no-op, not an error.
+        let again = reset_transaction_history_impl(&state)
+            .await
+            .expect("idempotent");
+        assert_eq!(again.signals_removed, 0);
     }
 
     #[test]

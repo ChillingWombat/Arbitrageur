@@ -5,6 +5,16 @@
 
 use super::*;
 
+/// Per-table row counts removed by `clear_transaction_history` — surfaced
+/// to the operator so the reset reports exactly what it erased.
+#[derive(Debug, Clone, Default)]
+pub struct HistoryClearCounts {
+    pub signals: i64,
+    pub legs: i64,
+    pub lots: i64,
+    pub logs: i64,
+}
+
 impl StateStore {
     /// Persist a selected candidate as `in_flight` before any order is
     /// dispatched. Because the row exists before execution, an interrupted
@@ -384,6 +394,65 @@ impl StateStore {
             params![signal_id, side.as_str(), Utc::now().to_rfc3339()],
         )?;
         Ok(changed)
+    }
+
+    /// Delete every persisted transaction record belonging to one
+    /// environment in a single transaction: signal executions (legs,
+    /// predictions, and fixed-yield maturities cascade), cycle lots, and
+    /// the execution journal. `environment` scopes the delete to the
+    /// active env; `'unknown'` rows are included because env-scoped reads
+    /// surface them in every environment — removing only tagged rows
+    /// would leave "past transactions" visibly behind. The other env's
+    /// rows are untouched. Callers must refuse while any signal counts as
+    /// open or an in-scope lot is open — this method performs no
+    /// exposure checks of its own.
+    pub fn clear_transaction_history(
+        &self,
+        environment: &str,
+    ) -> anyhow::Result<HistoryClearCounts> {
+        let env = environment.trim().to_ascii_lowercase();
+        if !matches!(env.as_str(), "testnet" | "live") {
+            anyhow::bail!("environment must be testnet or live");
+        }
+        let is_live = (env == "live") as i64;
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction()?;
+        let count = |sql: &str, p: &[&dyn rusqlite::types::ToSql]| -> anyhow::Result<i64> {
+            Ok(tx.query_row(sql, p, |r| r.get::<_, i64>(0))?)
+        };
+        let counts = HistoryClearCounts {
+            signals: count(
+                "SELECT COUNT(*) FROM signal_executions WHERE environment IN ('unknown', ?1)",
+                &[&env],
+            )?,
+            legs: count(
+                "SELECT COUNT(*) FROM signal_legs l JOIN signal_executions e ON e.id = l.signal_id
+                 WHERE e.environment IN ('unknown', ?1)",
+                &[&env],
+            )?,
+            lots: count(
+                "SELECT COUNT(*) FROM cycle_lots WHERE environment IN ('unknown', ?1)",
+                &[&env],
+            )?,
+            logs: count(
+                "SELECT COUNT(*) FROM execution_log WHERE is_live = ?1",
+                &[&is_live],
+            )?,
+        };
+        tx.execute(
+            "DELETE FROM signal_executions WHERE environment IN ('unknown', ?1)",
+            params![env],
+        )?;
+        tx.execute(
+            "DELETE FROM cycle_lots WHERE environment IN ('unknown', ?1)",
+            params![env],
+        )?;
+        tx.execute(
+            "DELETE FROM execution_log WHERE is_live = ?1",
+            params![is_live],
+        )?;
+        tx.commit()?;
+        Ok(counts)
     }
 
     pub fn record_leg_order_id(

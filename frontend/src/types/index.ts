@@ -1306,6 +1306,16 @@ export interface TradedOpportunityDto {
   transactions: AtomicTransactionDto[];
 }
 
+/** Report from `reset_transaction_history` — the environment wiped and
+ *  how many persisted rows it removed per table. */
+export interface TransactionHistoryResetDto {
+  environment: string;
+  signalsRemoved: number;
+  legsRemoved: number;
+  lotsRemoved: number;
+  logsRemoved: number;
+}
+
 /** Attributed realized PnL for one strategy, from durable signal-leg fills
  *  (fees included). Unattributed rows are excluded from the sums and
  *  reported in the unattributed counters — never absorbed. */

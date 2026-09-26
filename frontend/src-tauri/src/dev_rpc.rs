@@ -282,6 +282,9 @@ async fn dispatch(line: &str, state: &Arc<AppEngineState>) -> Value {
                 ))
             })
             .map_err(|e| e.to_string()),
+        "reset_transaction_history" => crate::commands::reset_transaction_history_impl(st)
+            .await
+            .map(|v| json!(v)),
         "radar_bot_status" => radar_bot_status(st),
         "radar_bot_config" => radar_bot_config(st),
         "set_radar_bot_config" => set_radar_bot_config(&args, st),
