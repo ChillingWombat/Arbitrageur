@@ -41,7 +41,7 @@ import {
 import { deriveStepSizing } from "../services/contractSpecs";
 import { describeCommandError } from "../services/api";
 import { formatWinPct as fmtPct } from "../services/winPct";
-import { BotLifecycleControls } from "./BotLifecycleControls";
+import { BotLifecycleControls, BotPhaseBadge } from "./BotLifecycleControls";
 import { useBotLifecycle } from "../hooks/useBotLifecycle";
 import { TickerTransactionHistory } from "./TickerTransactionHistory";
 import { TickerTelemetryGadget } from "./TickerTelemetryGadget";
@@ -948,8 +948,9 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
       <div className="ribbon-container">
         <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
           <span className="text-[13px] font-mono font-bold tracking-wider text-slate-900 pr-1">
-            Strategy Parameters
+            Strategy Status
           </span>
+          <BotPhaseBadge phase={bot.phase} />
 
           {/* Delta-neutral gate: ticker refuses new orders until the open
               signal's own legs reconcile. */}
@@ -1029,7 +1030,7 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
         )}
         <div className="flex-1 min-w-0 overflow-y-auto space-y-4 pr-4">
           {/* Execution Telemetry — post-trade diagnosis for the selected
-              ticker, directly beneath the Strategy Parameters ribbon. */}
+              ticker, directly beneath the Strategy Status ribbon. */}
           <TickerTelemetryGadget
             symbol={sym}
             logs={executionLogs || []}

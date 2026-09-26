@@ -505,7 +505,7 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
       />
 
       <div className="flex-1 overflow-y-auto p-4 pr-5 space-y-4 pb-24 min-w-0">
-        {/* Strategy Parameters ribbon — mirrors the other strategy pages:
+        {/* Strategy Status ribbon — mirrors the other strategy pages:
             read-only params left, primary action right. */}
         <div className="ribbon-container">
           <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
@@ -522,13 +522,13 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
               </>
             )}
             {isPaused && <span className="badge-status-warn">Engine Paused</span>}
-          </div>
-          <div className="flex items-center space-x-3 shrink-0">
             {isLive && (
               <span className="text-xs text-amber-400 border border-amber-500/40 rounded px-1.5 py-0.5 font-sans">
                 LIVE — manual executes only
               </span>
             )}
+          </div>
+          <div className="flex items-center space-x-3 shrink-0">
             {parityVisible && (
               <button
                 type="button"

@@ -3,7 +3,7 @@ import { SlidersHorizontal, X, ChevronDown, Check } from "lucide-react";
 import type { FundingOpportunityDto, FundingTrendDto, ExecutionLogEntry, OpenPositionDto, FixedYieldMaturityDto, FixedYieldExitQuoteDto } from "../types";
 import { api, describeCommandError } from "../services/api";
 import type { PerpTicker } from "../types/tickers";
-import { BotLifecycleControls } from "./BotLifecycleControls";
+import { BotLifecycleControls, BotPhaseBadge } from "./BotLifecycleControls";
 import { TickerTransactionHistory } from "./TickerTransactionHistory";
 import { TickerLogMonitor } from "./TickerLogMonitor";
 import { EmptyState } from "./EmptyState";
@@ -1245,8 +1245,9 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
       <div className="ribbon-container">
         <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
           <span className="text-[13px] font-mono font-bold tracking-wider text-slate-900 pr-1">
-            Strategy Parameters
+            Strategy Status
           </span>
+          <BotPhaseBadge phase={bot.phase} />
           <div
             className="ribbon-pill"
             title="Notional per leg — edit via Configurator"

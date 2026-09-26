@@ -13,7 +13,8 @@ import {
   TrendingUp,
   X,
 } from "lucide-react";
-import { BotLifecycleControls } from "./BotLifecycleControls";
+import { BotLifecycleControls, BotPhaseBadge } from "./BotLifecycleControls";
+import type { BotPhase } from "../hooks/useBotLifecycle";
 import { BotStatCards } from "./BotStatCards";
 import { InfoTooltip } from "./InfoTooltip";
 import { SaveButton, useSaveButton } from "./SaveButton";
@@ -1326,6 +1327,18 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({ venueCaps }) =
 
   const key = useCallback((r: MonitorRowDto) => `${r.symbol}:${r.buyVenue}:${r.sellVenue}`, []);
 
+  // Bot lifecycle phase — shared by the status badge in the ribbon and
+  // the lifecycle button group.
+  const botPhase: BotPhase = flattening
+    ? "stopping"
+    : botCfg?.mode === "auto" && botCfg.enabled
+    ? "running"
+    : botCfg?.mode === "paused"
+    ? "paused"
+    : botCfg?.mode === "reduce_only"
+    ? "reduce_only"
+    : "idle";
+
   const handleExecute = useCallback(
     async (r: MonitorRowDto) => {
       const k = key(r);
@@ -1389,8 +1402,9 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({ venueCaps }) =
       <div className="px-4 py-3 flex flex-wrap items-center justify-between gap-3 bg-surface rounded-lg border border-surface-border shadow-2xs shrink-0">
         <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
           <span className="text-[13px] font-mono font-bold tracking-wider text-slate-900 pr-1">
-            Strategy Parameters
+            Strategy Status
           </span>
+          <BotPhaseBadge phase={botPhase} />
           <div
             className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-lg"
             title="Engine floor on directional trade win probability — the executable gate also requires the Wilson lower bound to clear a confidence floor. Edit via Configurator."
@@ -1450,17 +1464,7 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({ venueCaps }) =
           </button>
 
           <BotLifecycleControls
-            phase={
-              flattening
-                ? "stopping"
-                : botCfg?.mode === "auto" && botCfg.enabled
-                ? "running"
-                : botCfg?.mode === "paused"
-                ? "paused"
-                : botCfg?.mode === "reduce_only"
-                ? "reduce_only"
-                : "idle"
-            }
+            phase={botPhase}
             hasOpenPositions={(botStatus?.openPositions ?? []).length > 0}
             disabled={botControlsDisabled(botCfg)}
             onStart={() => void handleBotMode("auto")}
