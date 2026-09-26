@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   Clock3,
   ChevronRight,
+  CircleHelp,
 } from "lucide-react";
 import { api } from "../services/api";
 import type {
@@ -33,6 +34,8 @@ export interface OptionsSubstrategy {
   logStrategyId: string;
   name: string;
   tagline: string;
+  /** One-line explainer surfaced on the rail's help affordance. */
+  description: string;
   family: string;
   /** Asset classes the strategy trades — drives the all-assets framing. */
   universe: string;
@@ -47,6 +50,8 @@ export const OPTIONS_SUBSTRATEGIES: OptionsSubstrategy[] = [
     logStrategyId: "options_parity",
     name: "Put–Call Parity",
     tagline: "Conversion / reversal vs funding-adjusted forward",
+    description:
+      "Buys or sells the synthetic forward (long call + short put at strike K) against the perpetual's funding-adjusted price. Conversion shorts the rich synthetic; reversal buys the cheap one. Edge realizes at expiry — only premiums and fees are cash at entry.",
     family: "Parity & Convergence",
     universe: "Crypto perps (Deribit) — equities once IBKR options land",
     status: "live",
@@ -56,6 +61,8 @@ export const OPTIONS_SUBSTRATEGIES: OptionsSubstrategy[] = [
     logStrategyId: "options_box_spread",
     name: "Box Spread",
     tagline: "4-leg synthetic bond vs implied rate",
+    description:
+      "A four-leg package (bull call spread + bear put spread across two strikes) paying a fixed amount at expiry — a synthetic zero-coupon bond. Arbitrage when its implied interest rate diverges from the real funding/borrow rate on the same underlying.",
     family: "Rate Structures",
     universe: "European index & equity options",
     status: "pending",
@@ -66,6 +73,8 @@ export const OPTIONS_SUBSTRATEGIES: OptionsSubstrategy[] = [
     logStrategyId: "options_jelly_roll",
     name: "Jelly Roll",
     tagline: "Calendar box — term-structure mispricing",
+    description:
+      "Two box spreads across different expiries — a calendar box. Arbitrage when the implied term structure of rates between expiries diverges from actual funding and carry.",
     family: "Rate Structures",
     universe: "Index & equity options across expiries",
     status: "pending",
@@ -76,6 +85,8 @@ export const OPTIONS_SUBSTRATEGIES: OptionsSubstrategy[] = [
     logStrategyId: "options_convexity",
     name: "Convexity Boundary",
     tagline: "Butterfly/condor upper-bound violations",
+    description:
+      "A butterfly or condor's price can never exceed its maximum payoff bounds. A book quoting above the convexity upper bound is a locked-in arbitrage sell.",
     family: "Boundary & Convexity",
     universe: "Any listed option chain with a wing quote",
     status: "pending",
@@ -86,6 +97,8 @@ export const OPTIONS_SUBSTRATEGIES: OptionsSubstrategy[] = [
     logStrategyId: "options_dividend_play",
     name: "Dividend Assignment",
     tagline: "Ex-dividend eve ITM-call non-exercise",
+    description:
+      "Short ITM calls worth less than the upcoming dividend get exercised early by rational holders. On ex-dividend eve, a failure to exercise leaves capturable edge between the call price and the overnight drop in the underlying.",
     family: "Event & Microstructure",
     universe: "Dividend-paying equities",
     status: "pending",
@@ -96,6 +109,8 @@ export const OPTIONS_SUBSTRATEGIES: OptionsSubstrategy[] = [
     logStrategyId: "options_htb_rebate",
     name: "HTB Rebate",
     tagline: "Reverse conversion vs stock-borrow cost",
+    description:
+      "Hard-to-borrow stock earns a borrow rebate for the lender. When a reverse conversion (short synthetic via options, long stock) prices below the borrow cost, the spread is arbitrage.",
     family: "Event & Microstructure",
     universe: "Hard-to-borrow equities",
     status: "pending",
@@ -106,6 +121,8 @@ export const OPTIONS_SUBSTRATEGIES: OptionsSubstrategy[] = [
     logStrategyId: "options_merger_pin",
     name: "M&A Pinning",
     tagline: "Bear-call spreads on closed cash mergers",
+    description:
+      "After a cash merger is announced, the target pins near deal price. Bear-call spreads struck above the deal price collect near-riskless premium when venues misprice the residual deal-break risk.",
     family: "Event & Microstructure",
     universe: "Merger-target equities",
     status: "pending",
@@ -116,6 +133,8 @@ export const OPTIONS_SUBSTRATEGIES: OptionsSubstrategy[] = [
     logStrategyId: "options_occ_adjusted",
     name: "OCC Adjusted",
     tagline: "Spin-off deliverable vs combo mispricing",
+    description:
+      "Spin-offs and special dividends change an option's deliverable basket. Arbitrage when the adjusted contract's combo price diverges from the value of its deliverable parts.",
     family: "Event & Microstructure",
     universe: "Adjusted equity contracts",
     status: "pending",
@@ -126,6 +145,8 @@ export const OPTIONS_SUBSTRATEGIES: OptionsSubstrategy[] = [
     logStrategyId: "options_late_exercise",
     name: "Late-Exercise",
     tagline: "4:00–5:30 PM contra-exercise window",
+    description:
+      "Between the 4:00 PM close and the 5:30 PM exercise deadline, news can flip whether expiring options should be exercised. Holding the option into the window captures contra-exercise value the close price missed.",
     family: "Event & Microstructure",
     universe: "Equity options at expiry",
     status: "pending",
@@ -136,6 +157,8 @@ export const OPTIONS_SUBSTRATEGIES: OptionsSubstrategy[] = [
     logStrategyId: "options_odd_lot",
     name: "Odd-Lot Tender",
     tagline: "SEC 13e-4 retail-priority hedges",
+    description:
+      "SEC 13e-4 tender offers give odd-lot holders (under 100 shares) proration priority. Buying 99 shares plus protective hedges captures a near-guaranteed tender fill when the hedge cost sits below the tender premium.",
     family: "Event & Microstructure",
     universe: "Tender-offer equities",
     status: "pending",
@@ -368,16 +391,24 @@ const SubstrategyRail: React.FC<{
                   }`}
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <span
-                      className={`text-xs font-semibold truncate ${
-                        active
-                          ? "text-accent-strong"
-                          : live
-                            ? "text-slate-800"
-                            : "text-slate-500"
-                      }`}
-                    >
-                      {s.name}
+                    <span className="flex items-center gap-1 min-w-0">
+                      <span
+                        className={`text-xs font-semibold truncate ${
+                          active
+                            ? "text-accent-strong"
+                            : live
+                              ? "text-slate-800"
+                              : "text-slate-500"
+                        }`}
+                      >
+                        {s.name}
+                      </span>
+                      <span
+                        title={s.description}
+                        className="inline-flex shrink-0 cursor-help text-slate-400 hover:text-slate-500"
+                      >
+                        <CircleHelp className="w-3 h-3" aria-hidden />
+                      </span>
                     </span>
                     {live ? (
                       <span className="flex items-center gap-1 shrink-0">
