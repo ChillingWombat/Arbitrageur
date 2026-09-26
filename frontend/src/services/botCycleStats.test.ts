@@ -19,6 +19,8 @@ const leg = (filledQty: number): SignalLegDto => ({
   feeUsd: 0.5,
   venueOrderId: null,
       clientOrderId: null,
+  intendedPrice: null,
+  unitScale: 1,
   createdAt: "2026-01-01T00:00:00Z",
   updatedAt: "2026-01-01T00:00:00Z",
 });
@@ -33,6 +35,7 @@ const sig = (
   strategyId,
   symbol: "BTC",
   status,
+  environment: "testnet",
   routeId: null,
   accountLongId: null,
   accountShortId: null,

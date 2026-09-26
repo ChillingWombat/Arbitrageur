@@ -61,6 +61,7 @@ import type {
   CandidateOutcomeDto,
   StrategyCapabilityDto,
   SignalExecutionDto,
+  TradedOpportunityDto,
   OpenPositionDto,
   TickerPositionState,
   FlattenResultDto,
@@ -251,6 +252,7 @@ const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   "set_radar_bot_config",
   "get_radar_bot_status",
   "list_signal_executions",
+  "list_traded_opportunities",
   "get_ticker_position_state",
   "get_open_positions",
   "get_external_positions",
@@ -1168,6 +1170,10 @@ export const api = {
       symbol: symbol ?? null,
       status: status ?? null,
     });
+  },
+
+  async listTradedOpportunities(): Promise<TradedOpportunityDto[]> {
+    return invokeDesktop<TradedOpportunityDto[]>("list_traded_opportunities");
   },
 
   async getTickerPositionState(symbol: string): Promise<TickerPositionState> {

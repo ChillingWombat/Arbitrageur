@@ -3162,6 +3162,34 @@ pub async fn execute_funding_carry_impl(
                 ArbitrageExecutionResult::HaltedByRisk(_) => ("HALTED", "HALTED"),
                 _ => ("REJECTED", "REJECTED"),
             };
+            // Persist the true atomic trail BEFORE the failed mark: the
+            // filled leg's entry fill plus its compensation unwind are real
+            // venue orders — as leg rows, not only raw JSON in the note.
+            match &other {
+                ArbitrageExecutionResult::LegBFailedUnwound {
+                    leg_a_fill,
+                    unwind_resp,
+                    ..
+                } => crate::execution::persist_unwind_leg_records(
+                    state,
+                    &signal_id,
+                    crate::state_store::LegSide::Long,
+                    leg_a_fill,
+                    unwind_resp,
+                ),
+                ArbitrageExecutionResult::LegAFailedUnwound {
+                    leg_b_fill,
+                    unwind_resp,
+                    ..
+                } => crate::execution::persist_unwind_leg_records(
+                    state,
+                    &signal_id,
+                    crate::state_store::LegSide::Short,
+                    leg_b_fill,
+                    unwind_resp,
+                ),
+                _ => {}
+            }
             let _ = state.state_store.update_signal_status(
                 &signal_id,
                 crate::state_store::SignalStatus::Failed,
