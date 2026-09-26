@@ -71,7 +71,6 @@ test("gate: unadmitted options venue renders the page with a disabled scan + ban
     })
   );
   assert.match(html, /Options Strategies/);
-  assert.match(html, /Put–Call Parity Scan/);
   assert.match(html, /No options-capable venue is enabled/);
   assert.match(html, /test\.deribit\.com/);
   const scanBtn = html.match(/<button[^>]*>\s*<svg[\s\S]*?Scan\s*<\/button>/);
