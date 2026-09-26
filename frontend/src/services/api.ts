@@ -192,7 +192,6 @@ const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   "trigger_emergency_killswitch",
   "get_execution_logs",
   "get_venue_execution_capabilities",
-  "set_live_mode",
   "set_trading_environment",
   "set_engine_paused",
   "reconcile_orders_now",

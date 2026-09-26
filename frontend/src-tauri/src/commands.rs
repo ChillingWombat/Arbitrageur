@@ -3065,12 +3065,6 @@ pub fn save_engine_settings_impl(
         Ok(ip) if ip.is_loopback() => {}
         _ => return Err("bind_address must be a loopback IP address".into()),
     }
-    if !settings.paper_starting_balance_usd.is_finite()
-        || settings.paper_starting_balance_usd <= 0.0
-        || settings.paper_starting_balance_usd > 1_000_000_000_000.0
-    {
-        return Err("Paper starting balance must be a positive number up to 1e12 USD".into());
-    }
     // Overall circuit-breaker + safety-net limits (Safety settings section).
     if !settings.cb_max_daily_drawdown_usd.is_finite()
         || settings.cb_max_daily_drawdown_usd <= 0.0
@@ -3361,37 +3355,6 @@ pub fn save_engine_settings_impl(
             let _ = state
                 .state_store
                 .kv_set("retention.max_gb", &gb.to_string());
-        }
-    }
-    // A changed starting balance reinitializes test simulators: fresh
-    // equity, no open positions. Production has no simulated accounts —
-    // Testnet/Live balances are owned by the venues. Test-only block.
-    #[cfg(test)]
-    {
-        let prev_balance = state.settings.read().paper_starting_balance_usd;
-        if sanitized.paper_starting_balance_usd != prev_balance {
-            if let Some(eq) = Decimal::from_f64_retain(sanitized.paper_starting_balance_usd) {
-                for (_, paper) in state.paper_exchanges() {
-                    paper.reset_account(eq);
-                }
-                // A reset moves the baseline itself: rebase every account's
-                // expected equity to the new starting balance.
-                let f = sanitized.paper_starting_balance_usd;
-                if f.is_finite() && f >= 0.0 {
-                    let now_ms = Utc::now().timestamp_millis();
-                    for (vid, _) in state.paper_exchanges() {
-                        let _ = state
-                            .state_store
-                            .set_equity_expectation(&vid, f, "", now_ms);
-                    }
-                }
-                if let Some(eq) = Decimal::from_f64_retain(sanitized.paper_starting_balance_usd) {
-                    let n = state.paper_exchanges().len() as u32;
-                    if n > 0 {
-                        crate::execution::cb_reanchor_to_sims(state, eq * Decimal::from(n));
-                    }
-                }
-            }
         }
     }
     let _ = state
@@ -4377,14 +4340,6 @@ pub async fn get_venue_execution_capabilities(
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<Vec<VenueCapabilityDto>, String> {
     Ok(get_venue_execution_capabilities_impl(&state))
-}
-
-#[tauri::command]
-pub async fn set_live_mode(
-    enabled: bool,
-    state: State<'_, Arc<AppEngineState>>,
-) -> Result<bool, String> {
-    set_live_mode_impl(enabled, &state)
 }
 
 #[tauri::command]
@@ -11194,55 +11149,6 @@ mod tests {
         // Re-unlock reprovisions the adapter.
         unlock_vault_impl("test-password-123", None, &state).expect("re-unlock");
         assert!(aster_has_creds(&state), "unlock reprovisions adapter");
-    }
-
-    #[tokio::test]
-    async fn test_paper_starting_balance_resets_paper_accounts_on_change() {
-        let state = AppEngineState::new();
-
-        // Invalid values fail closed.
-        for bad in [0.0, -500.0, f64::NAN, f64::INFINITY, 2e12] {
-            let res = save_engine_settings_impl(
-                EngineSettingsDto {
-                    paper_starting_balance_usd: bad,
-                    ..EngineSettingsDto::default()
-                },
-                &state,
-            );
-            assert!(res.is_err(), "bad balance {bad} must be rejected");
-        }
-
-        // A new starting balance reinitializes every paper account.
-        save_engine_settings_impl(
-            EngineSettingsDto {
-                paper_starting_balance_usd: 25000.0,
-                ..EngineSettingsDto::default()
-            },
-            &state,
-        )
-        .expect("save");
-        for (_, paper) in state.paper_exchanges() {
-            let acc = paper.fetch_account().await.expect("account");
-            assert_eq!(acc.equity, dec!(25000.0));
-            assert_eq!(acc.free_margin, dec!(25000.0));
-            assert!(acc.positions.is_empty());
-        }
-
-        // Re-saving an unchanged balance is a no-op for paper accounts.
-        save_engine_settings_impl(
-            EngineSettingsDto {
-                paper_starting_balance_usd: 25000.0,
-                min_depth_ratio: 4.0,
-                ..EngineSettingsDto::default()
-            },
-            &state,
-        )
-        .expect("resave");
-        for (_, paper) in state.paper_exchanges() {
-            let acc = paper.fetch_account().await.expect("account");
-            assert_eq!(acc.equity, dec!(25000.0));
-        }
-        assert_eq!(state.settings.read().min_depth_ratio, 4.0);
     }
 
     #[tokio::test]

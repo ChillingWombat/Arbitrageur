@@ -220,7 +220,6 @@ fn main() {
             commands::get_execution_logs,
             commands::reset_transaction_history,
             commands::get_venue_execution_capabilities,
-            commands::set_live_mode,
             commands::set_trading_environment,
             commands::set_engine_paused,
             commands::reconcile_orders_now,

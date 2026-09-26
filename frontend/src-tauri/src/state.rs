@@ -485,9 +485,6 @@ fn default_bind_address() -> String {
 fn default_trading_mode() -> String {
     "testnet".into()
 }
-fn default_paper_starting_balance() -> f64 {
-    100000.0
-}
 fn default_fast_warmup_enabled() -> bool {
     true
 }
@@ -628,8 +625,6 @@ pub struct EngineSettingsDto {
     // Execution & Risk Modes
     #[serde(default = "default_trading_mode")]
     pub trading_mode: String, // "testnet" or "live" (legacy "paper"/"real" migrate on load)
-    #[serde(default = "default_paper_starting_balance")]
-    pub paper_starting_balance_usd: f64,
     /// USD-family quote handling (System Settings → Execution):
     /// "separate" (BTC-USDT ≠ BTC-USDC, no merging), "parity" (merge,
     /// assume 1:1), or "fx_adjusted" (merge + convert quotes to USD via
@@ -883,7 +878,6 @@ impl Default for EngineSettingsDto {
             engine_ws_port: default_engine_ws_port(),
             bind_address: default_bind_address(),
             trading_mode: default_trading_mode(),
-            paper_starting_balance_usd: default_paper_starting_balance(),
             usd_quote_mode: default_usd_quote_mode(),
             stablecoin_warn_bps: default_stablecoin_warn_bps(),
             stablecoin_halt_bps: default_stablecoin_halt_bps(),

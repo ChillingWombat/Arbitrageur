@@ -2745,14 +2745,6 @@ pub async fn execute_prediction_arbitrage_impl(
     Err("Native 'prediction' execution is disabled until authentic order submission and reconciliation are implemented".into())
 }
 
-/// Re-anchor the breaker after a test-simulator account reset. Production
-/// has no simulated accounts, so this exists only for `cfg(test)` callers.
-#[cfg(test)]
-pub(crate) fn cb_reanchor_to_sims(state: &AppEngineState, total: Decimal) {
-    state.circuit_breaker.reanchor_baseline(total);
-    *state.last_risk_live_universe.write() = Some(state.is_live());
-}
-
 /// Live account read with last-known-good fallback.
 /// Ok((snapshot, None)) = fresh read (cache refreshed).
 /// Ok((snapshot, Some(age_ms))) = read failed, serving cached figures so a
