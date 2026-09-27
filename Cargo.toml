@@ -59,7 +59,7 @@ bs58 = "0.5"
 libloading = "0.8"
 urlencoding = "2.1"
 aptos-sdk = { version = "0.7.1", default-features = false, features = ["ed25519"] }
-bcs = "0.1"
+bcs = "0.2"
 
 # Internal crates
 arbitrageur-core = { path = "crates/arbitrageur-core" }
