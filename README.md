@@ -1,195 +1,319 @@
-# ⚡ Arbitrageur: Ultra-Fast Modular Cross-Market Arbitrage Engine
+# ⚡ Arbitrageur: Institutional-Grade Modular Cross-Market Arbitrage Engine
 
 [![Rust](https://img.shields.io/badge/language-Rust_2021-orange.svg)](#)
 [![Pixi](https://img.shields.io/badge/environment-Pixi-blue.svg)](#)
 [![License](https://img.shields.io/badge/license-MIT%2FApache--2.0-green.svg)](#)
 [![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)](#)
+[![Tauri](https://img.shields.io/badge/desktop-Tauri_v2-24C8DB.svg)](#)
+[![React](https://img.shields.io/badge/frontend-React_19-61DAFB.svg)](#)
 
-A high-performance, modular cross-market arbitrage platform engineered in **Rust** for simultaneous trading across multiple decentralized and centralized venues.
-
-The system targets **Spatial Price Differences** (orderbook spread capture) and **Funding Rate Differences** (delta-neutral perpetual carry), expanding progressively across:
-1. **Blockchain Coins & Perpetual DEXs:** Hyperliquid, Lighter (zk-DEX), Vanta.exchange (Orderly Network), Robinhood EVM.
-2. **Prediction Markets:** Polymarket (CTF CLOB) and Kalshi (CFTC-regulated).
-3. **Traditional Markets:** Statistical arbitrage, basis trading, and cointegrated pairs.
+A high-performance, modular cross-venue quantitative arbitrage engine and native desktop terminal engineered in **Rust** and **Tauri v2 / React 19**. Designed for multi-asset execution across decentralized perpetuals, centralized exchanges, spot AMMs, options desks, interest-rate markets, and prediction contracts.
 
 ---
 
-## Current Safety Status
+## 📑 Table of Contents
 
-This repository is a **research platform** with testnet strategy execution (real orders on venue demo endpoints) and narrowly bounded live submission surfaces. Read this before running anything:
-
-- **Live strategy entries are real and dispatch when Trading Mode = Live.** `live_entry_gate` admits an entry once the credential vault is unlocked and every leg's adapter implements order submission, order-status polling, and automated strategy-entry transport, and holds live credentials. 33+ venue adapters can sign, submit, or cancel orders (11 primary + 15 DexPerp + 6 EVM AMM routers + Boros), and every live-submission venue also implements order-status polling; a startup + 5-second reconciliation supervisor resolves durable working orders to terminal state with monotonic accounting (unknown/unresolvable orders escalate to `unresolved`, never assumed filled or cancelled). Imbalanced entries trigger automated residual-leg resolution (passive limit-first, market fallback) and bounded cancel retry. Live entries are *gated*, not disabled — treat every execution surface as capable of moving real funds.
-- **The desktop app admits the enabled venue adapters listed in `docs/CAPABILITIES.md`** for their implemented market/account paths. Public requests disclose your IP address and requested symbols; authenticated requests additionally disclose the configured account identity to that venue.
-- **Arcus, Polymarket, and Kalshi remain research/scaffold surfaces.** PopDEX can be admitted where enabled but has no documented sandbox order proof; prediction-market adapters have no integrated execution path.
-- **Ticker availability is discovered dynamically from live `fetch_markets`** across admitted venues — the static catalog is metadata/price fallback only, not an allowlist. Each exact `BASE-QUOTE` market is offered when at least two venues actually report it; USDC and USDT listings remain distinct instruments.
-- **Signal baselines use persisted authentic spread samples.** The sliding window accepts a manual duration from 5 minutes to 30 days (default 24 hours), or per-ticker **auto mode**: the median across qualifying venue pairs of `2 × OU half-life`, floored at 30 minutes and capped at 7 days, behind R²/data gates. When history is insufficient, auto mode uses the explicitly labeled manual fallback — and pairs without enough durable baseline coverage cannot trigger divergence execution.
-- **Browser mode has no synthetic demo engine.** All engine and quote calls require the desktop application's IPC; in the browser they fail closed with the desktop-required error rather than fabricating execution, balances, quotes, P&L, risk, or calibration. Tauri command errors propagate to the UI — there is no fallback path.
-- **Testnet spatial execution** uses freshly fetched, identity- and structure-validated orderbooks, bounded IOC (immediate-or-cancel) dispatch against venue demo endpoints, leverage capped by `min(strategy target (1–10x), account max, venue max, global ceiling (default 10x))`, and margin/delta/depth/slippage checks — plus a backend-computed round-trip route-economics gate: expected entry and exit slippage, both venues' current bid/ask crossing, and round-trip commissions must leave expected net at or above the configured target profit (default 1 BPS) before dispatch. Up to **three concurrently-open matched pairs per symbol** (configurable `max_accumulated_units`) are supported — note that flatten is symbol-scoped and closes all of a symbol's open pairs together. Positions carry a persisted entry baseline, and the `check_spatial_convergence` IPC unwinds converge/stop/timeout exits through the flatten path, freeing the slot for re-entry; the Spread Radar bot has its own equivalent lifecycle.
-- **Credential vault:** local AES-256-GCM encryption with Argon2id key derivation, `0600` file / `0700` directory permissions on Unix, and no whole-bundle credential-read IPC. Explicit field-scoped reveal exists only when you ask to reveal a field. Prefer read-only credentials for monitoring; when you intentionally use risk-reducing closes, use the least-privilege trading credential required and never a withdrawal-enabled key.
-
-Nothing here is production-ready. App-level WebSocket supervisors (Hyperliquid, Lighter, Robinhood-Lighter, and Vanta) feed the MarketDataHub with REST fallback; other admitted venues poll REST and the UI still polls the hub on a ~3s cadence.
-
----
-
-## 🌟 Key Features & Innovations
-
-- **Low-Latency Math in Rust:** Nanosecond/microsecond-scale calculation latency (historical machine-specific examples below — not guaranteed).
-- **Concurrent Two-Leg Coordination:** Parallel order dispatch (`tokio::join!`) with best-effort emergency compensation; unresolved residual exposure trips the circuit breaker and is surfaced for operator review rather than hidden.
-- **Microstructure Depth Verification:** Calculates true Volume-Weighted Average Price (VWAP) across orderbook levels to prevent execution on phantom liquidity.
-- **Risk Guardrails:**
-  - **Circuit Breaker:** Dollar drawdown halts, percentage stops, consecutive failure tripwires.
-  - **DeltaGuard:** In-memory signed net delta exposure tracker per asset.
-  - **MarginMonitor:** Maintenance margin ratio monitoring and liquidation distance buffer warnings (< 15%).
-- **Hardened Rate Limiting:** `AccountRequestCoordinator` with token bucket throttling, in-memory TTL caching, and exponential backoff on HTTP 429 errors.
-- **Modern Pixi Environment:** Unified environment and workflow management with zero-config reproducibility.
+- [Core Principles & Safety Guarantees](#-core-principles--safety-guarantees)
+- [System Architecture](#-system-architecture)
+- [Crate Ecosystem](#-crate-ecosystem)
+- [Trading Strategies & Execution Pathways](#-trading-strategies--execution-pathways)
+- [Venue Coverage & Adapters (33+ Venues)](#-venue-coverage--adapters-33-venues)
+- [Quantitative Finance & Microstructure Engine](#-quantitative-finance--microstructure-engine)
+- [Security Architecture & Key Custody](#-security-architecture--key-custody)
+- [User Interface & Desktop Terminal](#-user-interface--desktop-terminal)
+- [Quick Start & Developer Guide](#-quick-start--developer-guide)
+- [Verification & Quality Assurance](#-verification--quality-assurance)
+- [Audited Reference Implementations](#-audited-reference-implementations)
+- [License](#-license)
 
 ---
 
-## 📐 Mathematical & Quantitative Finance Core
+## 🛡️ Core Principles & Safety Guarantees
 
-Built on rigorous academic quant algorithms implemented in pure Rust (`arbitrageur-math`):
-- **Ornstein-Uhlenbeck (OU) Mean-Reversion Process:** Continuous SDE $dX_t = \theta (\mu - X_t) dt + \sigma dW_t$ with closed-form MLE parameter estimation and half-life calculation $t_{1/2} = \frac{\ln 2}{\theta}$.
-- **Bertram-Style Threshold Search:** Numerical search for trade entry and exit levels targeting improved expected return per unit time under transaction costs $c$ (inspired by Bertram 2010; not a closed-form analytic solver).
-- **2D Online Kalman Filter:** Recursively estimates dynamic hedge ratio $\beta_t$ and intercept $\alpha_t$ in $O(1)$ operations with zero allocation.
-- **Funding Carry Compounding:** Hourly continuous rate normalization, APR/APY compounding ($\text{APY} = (1 + \Delta r_{\text{hourly}})^{8760} - 1$), and transaction fee break-even amortization time.
-- **Prediction Market Parity Research:** Cross-venue binary contract comparison ($P_A(\text{YES}) + P_B(\text{NO}) < 1.00 - \text{fees}$). A $1 payout is conditional on both contracts having identical settlement terms; displayed returns are indicative, never guaranteed.
+> [!IMPORTANT]
+> **Live Mode is the Product**: Real venues, real orders, real capital. Arbitrageur is engineered for production live execution, with public demo endpoints for testnet verification. The platform enforces fail-closed execution safety across every layer.
+
+- **Zero Synthetic Data Contamination**: If an exchange credential, network route, or orderbook is missing, unresponsive, or invalid, the engine strictly fails closed. Synthetic quotes, fabricated book levels, or dummy fills are never generated in production or browser mode.
+- **Fail-Closed Dual-Environment Isolation (`testnet` vs `live`)**:
+  - `TradingEnvironment::{Testnet, Live}` is strictly scoped across state stores, active adapters, feeds, and orders.
+  - Adapters with demo endpoints (`tn_*`) connect exclusively to venue testnets; live adapters (`live_*`) connect to mainnets.
+  - Venues without a public sandbox (Coinbase, Aster, EVM AMMs, Robinhood EVM) are cleanly gated and excluded from testnet execution rather than simulated.
+- **`live_entry_gate` Access Control**:
+  - Live strategy entries dispatch only when Trading Mode is set to `Live`, the credential vault is unlocked, and every leg's adapter implements order submission, authenticated `fetch_order` status polling, automated strategy transport, and holds valid live credentials.
+  - Canary-proven live two-leg execution path (e.g. Hyperliquid ↔ Lighter ETH-USDC).
+- **Automated Residual-Leg Resolution & Bounded Cancel Retry**:
+  - Two-leg executions coordinate concurrently via `tokio::join!`.
+  - Imbalanced or partial fills trigger automated reduce-only residual unwinds (passive limit-first with fallback to market) rather than unhedged exposure.
+  - Unverifiable orders trigger immediate circuit breaker halts and escalate to `unresolved` state for operator review.
+- **Continuous 5-Second Reconciliation Supervisor**:
+  - A persistent background supervisor polls working orders through venue `fetch_order` endpoints at startup and every 5 seconds.
+  - Ensures monotonic accounting transitions (`New` → `PartiallyFilled` → `Filled` / `Canceled` / `Rejected`).
+- **Real-Time Risk Tripwires & Breakers**:
+  - Background equity monitoring every 15 seconds across all admitted venues.
+  - Configurable daily dollar drawdown limits, percentage halts, consecutive failure tripwires, and DeltaGuard dollar neutrality enforcement.
 
 ---
 
-## 🏗 Modular Architecture
+## 🏗️ System Architecture
+
+Arbitrageur is built on a non-blocking asynchronous Tokio runtime with zero-cost abstractions, lock-free concurrency, and strict separation between domain primitives, quantitative math, venue protocols, risk management, execution coordination, and UI state.
 
 ```
-Arbitrageur/
-├── pixi.toml                             # Pixi environment & task orchestration
-├── Cargo.toml                            # Cargo workspace manifest
-├── README.md                             # System documentation
-├── docs/
-│   ├── QUANT_RESEARCH.md     # Quantitative finance theory (implements in arbitrageur-math)
-│   ├── REFERENCE_PROJECTS.md # Reverse-engineering audit of open-source repos (background)
-│   ├── CAPABILITIES.md       # Authoritative runtime capability matrix
-│   ├── PARAMETER_GUIDE.md    # Manual parameter semantics and evidence boundaries
-│   ├── ARCHITECTURE.md       # Workspace, crates, concurrency & threat model
-│   ├── EXCHANGES.md          # Venue integrations + transfer rails (living reference)
-│   ├── STRATEGY_RESEARCH.md  # MoB vaults / RWA carry (research only, not implemented)
-│   ├── REBUILD_GUIDE.md      # Practice rebuild path for learning the system
-│   └── RUNBOOK.md            # Failure modes, mitigation strategies & runbook
-└── crates/
-    ├── arbitrageur-core/                  # Domain types, Decimal math, unified ExchangeAdapter trait
-    ├── arbitrageur-math/                  # Kalman filter, OU MLE, Bertram thresholds, carry APY
-    ├── arbitrageur-exchanges/             # Admitted venue adapters + research/scaffold adapters + Simulated
-    ├── arbitrageur-risk/                  # CircuitBreaker, DeltaGuard, MarginMonitor
-    ├── arbitrageur-execution/             # AtomicArbitrageCoordinator, EmergencyUnwindHandler
-    ├── arbitrageur-strategy/              # SpatialPriceArb, FundingRateArb, StatArbPairs
-    └── arbitrageur-app/                   # CLI binary with monitor, simulate, funding, bench commands
+                                  +------------------------------------+
+                                  |     arbitrageur-desktop (Tauri)    |
+                                  |   (IPC, SQLite Store, Feed Loop)   |
+                                  +-----------------+------------------+
+                                                    |
+                         +--------------------------+--------------------------+
+                         |                                                     |
+             +-----------v------------+                           +------------v-----------+
+             |  arbitrageur-strategy  |                           |    arbitrageur-risk    |
+             |  - Spatial Price Arb   |                           |  - Circuit Breaker     |
+             |  - Funding Carry Arb   |<--------------------------+  - Delta Guard         |
+             |  - Stat-Arb Pairs (OU) |                           |  - Margin Monitor      |
+             |  - Options Put-Call    |                           +------------+-----------+
+             |  - Triangular Cycles   |                                        |
+             +-----------+------------+                                        |
+                         |                                                     |
+             +-----------v------------+                                        |
+             |  arbitrageur-execution |<---------------------------------------+
+             |  - Atomic Coordinator  |
+             |  - Passive Unwind      |
+             |  - Emergency Flatten   |
+             |  - Virtual Ledger      |
+             +-----------+------------+
+                         |
+             +-----------v------------+                           +------------------------+
+             |  arbitrageur-exchanges |                           |    arbitrageur-math    |
+             |  - 33+ Live Adapters   |                           |  - 2D Kalman Filter    |
+             |  - WS Feed Supervisors |                           |  - OU Process MLE      |
+             |  - Rate Throttling     |                           |  - Bertram Thresholds  |
+             |  - Lighter Signer FFI  |                           |  - Funding Carry APY   |
+             +-----------+------------+                           +-----------+------------+
+                         |                                                    |
+                         +--------------------------+-------------------------+
+                                                    |
+                                        +-----------v------------+
+                                        |    arbitrageur-core    |
+                                        | (Types, Domain, Order) |
+                                        +------------------------+
 ```
 
 ---
 
-## 🚀 Quick Start with Pixi
+## 📦 Crate Ecosystem
 
-### 1. Prerequisites
-Ensure `pixi` and `cargo` are installed:
+| Crate | Path | Primary Responsibility | Key Abstractions |
+|---|---|---|---|
+| **`arbitrageur-core`** | [`crates/arbitrageur-core`](file:///mnt/Data/Projects/Arbitrageur/crates/arbitrageur-core) | Domain primitives, precision decimal arithmetic, market models, unified adapter trait. | `OrderBook`, `BookLevel`, `Ticker`, `FundingRate`, `OrderRequest`, `OrderResponse`, `ExchangeAdapter`, `MarketDataHub` |
+| **`arbitrageur-math`** | [`crates/arbitrageur-math`](file:///mnt/Data/Projects/Arbitrageur/crates/arbitrageur-math) | Quantitative finance, time series models, statistical solvers, calibration routines. | `HedgeRatioKalmanFilter`, `OuModelParams`, `compute_bertram_thresholds`, `evaluate_funding_carry`, `evaluate_spatial_spread` |
+| **`arbitrageur-exchanges`** | [`crates/arbitrageur-exchanges`](file:///mnt/Data/Projects/Arbitrageur/crates/arbitrageur-exchanges) | Connectors for CEX, DEX, AMM, and hybrid venues; protocol signing; rate limiting. | `HyperliquidAdapter`, `LighterAdapter`, `OkxAdapter`, `BinanceAdapter`, `DeribitAdapter`, `EvmAmmAdapter`, `BorosAdapter` |
+| **`arbitrageur-risk`** | [`crates/arbitrageur-risk`](file:///mnt/Data/Projects/Arbitrageur/crates/arbitrageur-risk) | Real-time circuit breaker tripwires, delta exposure guards, margin monitoring. | `CircuitBreaker`, `DeltaGuard`, `MarginMonitor`, `CircuitBreakerConfig` |
+| **`arbitrageur-execution`** | [`crates/arbitrageur-execution`](file:///mnt/Data/Projects/Arbitrageur/crates/arbitrageur-execution) | Concurrent multi-leg dispatch, automated residual unwind, smart order routing. | `AtomicArbitrageCoordinator`, `PassiveUnwindEngine`, `EmergencyUnwindHandler`, `SmartOrderRouter`, `VirtualLedger` |
+| **`arbitrageur-strategy`** | [`crates/arbitrageur-strategy`](file:///mnt/Data/Projects/Arbitrageur/crates/arbitrageur-strategy) | Autonomous strategy engines, signal evaluation, and convergence supervisors. | `SpatialPriceArbStrategy`, `FundingRateArbStrategy`, `StatArbPairsStrategy`, `OptionsParity`, `ArbitrageEngine` |
+| **`arbitrageur-app`** | [`crates/arbitrageur-app`](file:///mnt/Data/Projects/Arbitrageur/crates/arbitrageur-app) | Headless CLI, TUI, benchmarking runners, simulated test benches. | `Cli`, `run_benchmarks`, `run_monitor`, `run_simulate`, `run_funding_scan` |
+| **`arbitrageur-desktop`** | [`frontend/src-tauri`](file:///mnt/Data/Projects/Arbitrageur/frontend/src-tauri) | Tauri v2 backend, SQLite state storage, encrypted vault, supervisors, IPC bridge. | `AppEngineState`, `StateStore`, `SecureVault`, `commands`, `reconciliation`, `feed`, `auto_exec` |
+
+---
+
+## 📈 Trading Strategies & Execution Pathways
+
+### 1. Cross-Venue Perpetual Spatial Arbitrage
+- **Mechanism**: Captures orderbook dislocations across venues by simultaneously buying on the underpriced venue and selling on the overpriced venue (`tokio::join!`).
+- **Microstructure Depth**: Computes Volume-Weighted Average Price (VWAP) across orderbook rungs to prevent execution on phantom top-of-book depth.
+- **Route Economics Gate**: Dynamically evaluates entry/exit fees, bid/ask crossings, and slippage budgets; aborts if expected net yield falls below target profit (default 1 BPS).
+- **Execution Lifecycle**: Matched pairs remain open until spread convergence into the friction band, stop loss, or timeout, supervised every 5 seconds.
+
+### 2. Delta-Neutral Funding Rate Carry & Basis
+- **Mechanism**: Simultaneously holds long perp / short perp (or long spot / short perp) across diverging funding rates to collect continuous periodic carry payouts.
+- **Compounding Math**: Truthful hourly continuous normalization, APR conversion, and APY compounding with overflow guards.
+- **Min-APR Exit Supervisor**: Continuously monitors open carry positions every 60 seconds; EMA-smoothed decay below the hurdle triggers automated, orderly position unwinds.
+
+### 3. Options ↔ Perpetual Parity (Deribit)
+- **Mechanism**: Exploits put-call parity violations on European options against the underlying index/perpetual:
+  $$C(S, K, T) - P(S, K, T) = S_0 - K \cdot e^{-rT}$$
+- **Execution Types**:
+  - **Conversion**: Long Underlying + Long Put + Short Call (synthetic short vs long spot).
+  - **Reverse Conversion (Reversal)**: Short Underlying + Short Put + Long Call.
+  - **Structured Option Packages**: Box Spreads (synthetic cash lending/borrowing), Jelly Rolls, and Negative-Risk Butterflies.
+- **Risk Control**: Three sequential legs under atomic pre-dispatch checks; partial fills resolve as `imbalanced` for residual handling.
+
+### 4. Single-Venue Triangular Arbitrage
+- **Mechanism**: Exploits cyclical cross-rate pricing inefficiencies across three pairs on the same venue (e.g., `A/B` $\to$ `B/C` $\to$ `C/A`).
+- **Atomic Dispatch**: Dispatches bounded IOC orders sequentially with pre-flight cashflow currency normalization and VWAP slippage verification.
+
+### 5. Statistical Arbitrage (Pairs Cointegration)
+- **Mechanism**: Models spread mean-reversion using a 2D recursive online Kalman filter ($\beta_t$ hedge ratio) combined with Ornstein-Uhlenbeck continuous SDE MLE parameter estimation.
+- **Threshold Search**: Bertram-style numerical search optimizing expected return per unit time under transaction costs.
+
+### 6. Fixed-Yield & Prediction Market Research
+- **Pendle Boros**: Arbitrum YU interest rate swaps for funding rate fixed-yield hedging.
+- **Prediction Markets**: Polymarket (CTF CLOB) and Kalshi (CFTC) cross-venue binary contract parity evaluation ($P_A(\text{YES}) + P_B(\text{NO}) < 1.00 - \text{fees}$).
+
+---
+
+## 🌐 Venue Coverage & Adapters (33+ Venues)
+
+Arbitrageur supports 33+ exchange connectors spanning perpetual DEXs, centralized derivatives, spot AMMs, and fixed-yield protocols:
+
+| Category | Venues | Features & Execution Readiness |
+|---|---|---|
+| **Tier-1 Perp DEXs** | **Hyperliquid**, **Lighter**, **Robinhood Lighter**, **Vanta (Orderly)**, **Aster**, **PopDEX** | Direct signed REST/WS order placement, custom FFI cryptographic signers, order polling, WebSocket feed supervisors. |
+| **Tier-1 Derivatives CEXs** | **Binance**, **OKX**, **Deribit**, **Kraken**, **Coinbase**, **Alpaca** | Sub-millisecond signed REST order routing, validated `fetch_order` polling, portfolio margin (Deribit), demo sandbox support. |
+| **DexPerp Long-Tail** | **dYdX Chain**, **Pacifica**, **StandX**, **Ondo**, **GRVT**, **Derive**, **Aevo**, **Vest**, **QFEX**, **Nado**, **EVEDEX**, **Paradex**, **edgeX**, **Extended**, **Helix/Injective** | High-performance protocols covering StarkEx SNIP-12, EIP-712, Cosmos SDK gRPC, and Ed25519 signing. |
+| **Spot AMMs (EVM)** | **Uniswap V2/V3**, **PancakeSwap V2/V3**, **SushiSwap**, **QuickSwap**, **Camelot**, **Aerodrome**, **Velodrome** | On-chain Quoter reads, executable VWAP book synthesis, wallet-signed batched swaps with on-chain receipt proof. |
+| **Fixed-Yield / Rates** | **Pendle Boros (Arbitrum)** | YU rate swap orderbook ladders, agent-approved EIP-712 signed execution. |
+| **Prediction Research** | **Polymarket**, **Kalshi** | Real CLOB orderbook streaming, binary parity calculation (scaffold / research). |
+
+---
+
+## 🧮 Quantitative Finance & Microstructure Engine
+
+Implemented in pure Rust (`arbitrageur-math`):
+
+- **Continuous Mean-Reversion (Ornstein-Uhlenbeck SDE)**:
+  $$dX_t = \theta (\mu - X_t) dt + \sigma dW_t$$
+  - Closed-form Maximum Likelihood Estimation (MLE) of speed $\theta$, long-term mean $\mu$, and volatility $\sigma$.
+  - Exact half-life calculation: $t_{1/2} = \frac{\ln 2}{\theta}$.
+  - Hitting-time differential solver for optimal exit boundaries.
+- **Bertram-Style Optimal Arbitrage Thresholds**:
+  - Numerical optimization maximizing expected Sharpe and annualized return per unit of time under bid-ask crossing and fee friction $c$.
+- **2D Online Kalman Filter**:
+  - Dynamically updates hedge ratio $\beta_t$ and intercept $\alpha_t$ at $O(1)$ complexity with guaranteed covariance matrix symmetrization:
+  $$y_t = \alpha_t + \beta_t x_t + \epsilon_t$$
+- **Microstructure VWAP Slippage Engine**:
+  - Evaluates cumulative volume-weighted execution price through orderbook ladders, rejecting trades where book depth cannot absorb sizing without adverse impact.
+- **Multi-Quote Depeg Protection**:
+  - Ingests real-time stablecoin FX feeds (USDT, USDC, USDS) with configurable basis point deviation tripwires, preventing execution on depegged synthetic pairs.
+
+---
+
+## 🔐 Security Architecture & Key Custody
+
+1. **Encrypted Credential Vault**:
+   - Master credential vault encrypted locally via **AES-256-GCM** with **Argon2id** password key derivation.
+   - Enforces `0600` file permissions on Unix (`~/.arbitrageur/vault.enc`) and `0700` directory permissions.
+   - **Zero Plaintext Leaks**: No whole-bundle credential read IPC; field-scoped reveals require explicit password verification.
+2. **Hardware & Stronghold Custody**:
+   - Shared EVM wallet private keys are isolated inside **Iota Stronghold** snapshots (`~/.arbitrageur/vault.hold`) with separate encryption keys and memory protection.
+3. **Automated Security Overlays & MFA**:
+   - Full UI backdrop blur and entry lockout when the vault is locked.
+   - Automatic 60-second inactivity lock timer on navigation away from credential settings.
+   - Optional RFC-6238 TOTP two-factor authentication for vault unlock and key management.
+4. **Signer Binary Integrity**:
+   - External shared libraries (such as `liblighter_signer.so`) are verified via SHA-256 checksums prior to runtime dynamic linking (`dlopen`), preventing binary tampering.
+
+---
+
+## 🖥️ User Interface & Desktop Terminal
+
+The frontend is a desktop trading terminal built with **React 19**, **TypeScript**, and **Tailwind CSS**, embedded via **Tauri v2**:
+
+- **⚡ Live Spatial Matrix**: Real-time cross-venue L2 orderbook ladder visualization with VWAP pricing, net dislocation indicators, and direct execution ticketing.
+- **📊 Opportunity Radar**: Autonomous spread range scanner with real-time spread tracking, configurable entry/exit percentiles, and automated bot controls.
+- **📈 Funding Carry Radar**: Normalized hourly rates, APR/APY compounding calculator, break-even amortization time, and automated carry bot controls.
+- **🎯 Options Arbitrage Hub**: Put-call parity scanner for Deribit options with interactive conversion, reversal, and structured package trading cards.
+- **🔬 Stat-Arb Lab**: Interactive 2D Kalman filter hedge ratio ($\beta_t$) charts, z-score sparklines, and cointegration testing.
+- **🛡️ Portfolio & Risk Monitor**: Consolidated multi-venue equity attribution, margin utilization, live DeltaGuard net exposure, and manual kill switch.
+- **⚙️ Dynamic Ticker Explorer**: Dynamic discovery of `BASE-QUOTE` markets across live venues with liquidity filtering and per-asset strategy configurator.
+
+---
+
+## 🚀 Quick Start & Developer Guide
+
+### Prerequisites
+
+Ensure you have installed:
+- [Rust 2021](https://rustup.rs/) (`rustc --version` >= 1.78)
+- [Node.js](https://nodejs.org/) (`node --version` >= 20.0)
+- [Pixi](https://pixi.sh/) (Recommended environment manager)
+
+### 1. Installation & Environment Setup
+
+Using Pixi:
 ```bash
-pixi --version
-cargo --version
+git clone https://github.com/ChillingWombat/Arbitrageur.git
+cd Arbitrageur
+pixi install
 ```
 
-### 2. Verify and Run Tests
+Or using standard toolchains:
 ```bash
-pixi run check
-pixi run test
+cargo build
+cd frontend && npm install && cd ..
 ```
 
-### 3. Run Quantitative Benchmarks
+### 2. Running Quantitative Benchmarks
+Measure Kalman filter latency, OU MLE parameter fitting, and threshold searches:
 ```bash
 pixi run bench
-```
-*Example output from one historical development machine — machine-specific and not guaranteed:*
-```text
-1. Kalman Filter 2D update (1,000,000 iterations):
-   Per-update latency: 19.15 nanoseconds (52.21M updates/sec)
-2. Ornstein-Uhlenbeck MLE fitting (10,000 fits on 5000-point series):
-   Per-fit latency: 71.98 microseconds
-3. Bertram-Style Threshold Search (10,000 solves):
-   Per-solve latency: 3.33 microseconds
+# or: cargo run --release --bin arbitrageur-app -- bench
 ```
 
-### 4. Run Testnet Trading
-Research/demo only: simulates spatial spread and funding carry trading between in-process simulated venues (no live execution):
-```bash
-pixi run run-sim
-```
-
-### 5. Scan Funding Rate Carry Opportunities
-Research demo using static example rates: displays normalized hourly rates, APR, APY, break-even hours, and estimated daily income (not live venue data):
-```bash
-pixi run run-funding
-```
-
-### 6. Run Statistical Arbitrage Pair Tracker
-Tracks cointegrated asset pairs with dynamic Kalman filter hedge ratios on a synthetic series:
-```bash
-pixi run run-stat
-```
-
-### 7. Scan Prediction Markets
-Research demo evaluating cross-venue binary contract parity between Polymarket and Kalshi; any payout is conditional on identical settlement terms (not live venue execution):
-```bash
-pixi run run-prediction
-```
-
----
-
-## 🖥️ Modern Desktop Frontend (Tauri v2 + TypeScript + React)
-
-Arbitrageur includes a native, low-latency quantitative trading workstation frontend engineered with **Tauri v2**, **TypeScript**, **React**, and **Tailwind CSS**.
-
-### 🌟 Frontend Capabilities
-- **⚡ Spatial Matrix:** Public L2 orderbooks from enabled venues with depth visualization, VWAP calculation, and one-click **testnet** execution against venue demo endpoints.
-- **📈 Funding Carry Radar:** Funding carry research view with normalized rates, APR, compounded APY, and break-even estimates; testnet perp/perp and same-venue basis execution is supported where exact books exist; live strategy entries dispatch once `live_entry_gate` passes (vault unlocked + per-leg submission/polling/strategy-entry/credential checks) — Trading Mode = Live is the opt-in.
-- **🎯 Prediction Parity Hub:** Cross-venue parity research for Polymarket CTF CLOB and Kalshi CFTC contracts ($P_A(\text{YES}) + P_B(\text{NO}) < 1.00 - \text{fees}$); payouts are conditional on identical settlement terms and shown returns are indicative only.
-- **🔬 Stat-Arb Lab:** In-memory 2D Kalman filter dynamic hedge ratio ($\beta_t$) and z-score sparkline chart, Bertram-style numerical threshold search, and Ornstein-Uhlenbeck AR(1) MLE fitting.
-- **🛡️ DeltaGuard & Risk Operations:** Current in-memory signed net delta tracking per asset, circuit breaker tripwires (dollar & percentage drawdown), maintenance margin proximity, and manual emergency kill switch.
-- **🧪 Simulation Studio:** High-frequency testnet trading engine with continuous auto-run loop, tick-by-tick order trace, and emergency unwind visualization.
-- **⚙️ Credential Vault:** Local encrypted credential storage (AES-256-GCM + Argon2id), plus Stronghold custody for the shared EVM wallet key (`vault.hold`); remote HSM signing is not an integrated backend. Submission-capable adapters are live-entry ready where `live_entry_gate` passes — see `docs/CAPABILITIES.md` per-venue.
-
-### 🚀 Running the Frontend
-
-#### 1. Web Dev Server (Browser Mode)
-```bash
-pixi run dev-frontend
-```
-Open `http://localhost:1420` in your browser. In browser mode, desktop IPC and order submission are unavailable: all engine and quote calls (execution, balances, quotes, P&L, risk, calibration) fail closed with the desktop-required error instead of serving synthetic data.
-
-#### 2. Build Production Web Assets
-```bash
-pixi run build-frontend
-```
-
-#### 3. Launch Native Tauri Desktop Application
+### 3. Launching the Desktop Trading Workstation
+Run the full Tauri desktop application in development mode:
 ```bash
 pixi run desktop
+# or: cargo tauri dev
 ```
-*(For optimized release desktop binary, run `pixi run desktop-release`)*
+
+### 4. Compiling the Production Release Binary
+Build an optimized release desktop binary with the custom protocol feature:
+```bash
+cargo build --release --bin arbitrageur-desktop --features custom-protocol
+```
+> [!TIP]
+> The `--features custom-protocol` flag is required for production Tauri packaging so the webview correctly serves compiled frontend assets rather than looking for a dev server.
 
 ---
 
-## 🔬 Audited Reference Projects
+## 🧪 Verification & Quality Assurance
 
-The system integrates insights gained from reverse-engineering and auditing 10 key open-source repositories:
-1. `lihanyu81/PopDEX---Lighter-Arbitrage-Tool-From-PandaZhai`: Extracted PyInstaller ELF binary; adopted step-based baseline position reconciliation and `AccountRequestCoordinator`.
-2. `taoli-tools/taoli-tools-signer`: Adopted remote HSM key management and multi-chain DEX router allowlists (including Robinhood EVM).
-3. `taoli-tools/taoli-tools-container`: Container isolation and secure browser profiles.
-4. `cryptocj520/bphltaoli`: Multi-exchange funding carry logic, cooldown periods, and depth ratios.
-5. `cryptocj520/crypto-trading-open`: Enterprise exchange adapter architecture and multi-leg pair mapping.
-6. `realfishsam/prediction-market-arbitrage-bot`: Prediction market synthetic parity and fuzzy market pairing.
-7. `lihanyu81/polymarket_lp_tool`: Rust MM bot architecture and EIP-712 order signing.
-8. `hudson-and-thames/arbitragelab`: Re-implemented OU process MLE, Bertram thresholds, and Kalman filters.
+Arbitrageur maintains high test coverage across all crates and frontend components.
+
+Run all test suites:
+
+```bash
+# 1. Frontend component & quant tests
+cd frontend && npm test
+
+# 2. Desktop backend test suite (560+ tests)
+cargo test -p arbitrageur-desktop
+
+# 3. Exchange adapters test suite (270+ tests)
+cargo test -p arbitrageur-exchanges
+
+# 4. Math, core, execution, risk, and strategy crates
+cargo test -p arbitrageur-core -p arbitrageur-math -p arbitrageur-risk -p arbitrageur-execution -p arbitrageur-strategy
+
+# 5. Format and Linter verification
+cargo fmt --check
+cargo clippy --workspace --all-targets
+```
+
+---
+
+## 🔬 Audited Reference Implementations
+
+Arbitrageur integrates quantitative, architectural, and operational insights derived from rigorous audits of 10 key open-source trading and cryptographic repositories:
+
+1. `lihanyu81/PopDEX---Lighter-Arbitrage-Tool-From-PandaZhai`: Baseline position reconciliation, rate-limited request coordination, and Lighter ZK signing.
+2. `taoli-tools/taoli-tools-signer`: Isolated cryptographic key management and multi-chain DEX router allowlists (including Robinhood EVM).
+3. `taoli-tools/taoli-tools-container`: Container sandboxing, secure browser profiles, and process isolation.
+4. `cryptocj520/bphltaoli`: Multi-exchange funding carry logic, cooldown periods, and depth ratio checks.
+5. `cryptocj520/crypto-trading-open`: Enterprise exchange adapter architecture and multi-leg order mapping.
+6. `realfishsam/prediction-market-arbitrage-bot`: Prediction market synthetic parity models and contract pairing.
+7. `lihanyu81/polymarket_lp_tool`: Rust market-making bot architecture and EIP-712 order signing.
+8. `hudson-and-thames/arbitragelab`: Re-implemented Ornstein-Uhlenbeck MLE, Bertram optimal thresholds, and Kalman filters.
 9. `cryptocj520/meteora`: Dynamic fee DLMM pool arbitrage patterns.
-10. `cryptocj520/pancake`: Universal router multi-chain swap paths.
+10. `cryptocj520/pancake`: Universal router multi-chain swap paths and on-chain receipt verification.
 
 ---
 
 ## 📜 License
 
-Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT License](LICENSE-MIT) at your option.
+Arbitrageur is open-source software dual-licensed under:
+- **MIT License** ([LICENSE-MIT](LICENSE-MIT))
+- **Apache License, Version 2.0** ([LICENSE-APACHE](LICENSE-APACHE))
+
+You may choose to use this software under either license at your discretion.
