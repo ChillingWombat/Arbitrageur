@@ -1309,7 +1309,7 @@ dependencies = [
  "arbitrageur-core",
  "arbitrageur-math",
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "bcs",
  "bech32",
  "bigdecimal",
