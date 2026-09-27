@@ -47,7 +47,7 @@ k256 = { version = "0.14", features = ["ecdsa", "arithmetic"] }
 hex = "0.4"
 hmac = "0.13"
 config = "0.14"
-crossterm = "0.27"
+crossterm = "0.29"
 ratatui = "0.27"
 rand = "0.8"
 aes-gcm = "0.10"
