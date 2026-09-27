@@ -42,7 +42,7 @@ dashmap = "6.0"
 ed25519-dalek = { version = "2.1", features = ["rand_core"] }
 sha1 = "0.11"
 sha2 = "0.11"
-sha3 = "0.10"
+sha3 = "0.11"
 k256 = { version = "0.14", features = ["ecdsa", "arithmetic"] }
 hex = "0.4"
 hmac = "0.13"
