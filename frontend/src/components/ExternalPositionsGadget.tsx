@@ -27,7 +27,7 @@
  *     with the reason inline so the gates are visible, not mysterious.
  */
 import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { ArrowDownUp, HandCoins, RefreshCw, ShieldAlert, X } from "lucide-react";
+import { ArrowDownUp, Globe, RefreshCw, ShieldAlert, X } from "lucide-react";
 import { EmptyState } from "./EmptyState";
 import { VenueLogo } from "./VenueLogo";
 import { api } from "../services/api";
@@ -297,8 +297,8 @@ export const ExternalPositionsGadget: React.FC = () => {
       <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
         <div>
           <h2 className="text-[13px] font-mono tracking-wider text-slate-900 font-bold flex items-center space-x-2">
-            <HandCoins className="w-5 h-5 text-accent-strong" />
-            <span>External Positions — Close via Bot</span>
+            <Globe className="w-5 h-5 text-accent-strong" />
+            <span>External Position</span>
           </h2>
         </div>
         <div className="flex items-center gap-2 shrink-0">
@@ -336,7 +336,7 @@ export const ExternalPositionsGadget: React.FC = () => {
       {/* Grouped position list. */}
       {groups.length === 0 ? (
         <EmptyState
-          title={data ? "No external positions — everything on-exchange is bot-owned" : "Loading live positions…"}
+          title={data ? "No external position" : "Loading live positions…"}
           hint="Manual trades placed on exchange websites appear here for bot-assisted closing."
         />
       ) : (

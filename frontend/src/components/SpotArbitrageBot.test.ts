@@ -50,3 +50,53 @@ test("fail-closed on absent capability descriptor", () => {
   const html = render(undefined);
   assert.match(html, /Spot Arbitrage Unavailable/);
 });
+
+test("renders bottom dock container with 4 tabs and fixed height", () => {
+  const html = render({
+    strategyId: "spot",
+    scanReady: true,
+    executeReady: true,
+    reason: null,
+  });
+  assert.match(html, /Current Positions/);
+  assert.match(html, /Execution History/);
+  assert.match(html, /Opportunity History/);
+  assert.match(html, /Log Monitor/);
+  assert.match(html, /class="p-3\.5 h-96 overflow-y-auto"/);
+});
+
+test("SpotArbitrageBot renders standardized status badge and passes isPaused", () => {
+  const htmlActive = renderToStaticMarkup(
+    React.createElement(SpotArbitrageBot, {
+      executionLogs: [],
+      onRefreshAll: noop,
+      params,
+      isPaused: false,
+      capability: {
+        strategyId: "spot",
+        scanReady: true,
+        executeReady: true,
+        reason: null,
+      },
+    }),
+  );
+  assert.match(htmlActive, /Strategy Status/);
+  assert.match(htmlActive, /title="Strategy bot status: Stopped"/);
+
+  const htmlPaused = renderToStaticMarkup(
+    React.createElement(SpotArbitrageBot, {
+      executionLogs: [],
+      onRefreshAll: noop,
+      params,
+      isPaused: true,
+      capability: {
+        strategyId: "spot",
+        scanReady: true,
+        executeReady: true,
+        reason: null,
+      },
+    }),
+  );
+  assert.match(htmlPaused, /title="Strategy bot status: Stopped"/);
+  assert.doesNotMatch(htmlPaused, /Engine Paused/);
+});

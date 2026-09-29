@@ -17,8 +17,16 @@ export const EXTERNAL_CATEGORY = "External ops";
  *  which strategies exist. Order follows the product nav. */
 export const KNOWN_PNL_CATEGORIES: string[] = [
   "Options",
-  ...Object.values(STRATEGY_DISPLAY_NAMES),
-];
+  ...Object.keys(STRATEGY_DISPLAY_NAMES)
+    .filter(
+      (k) =>
+        !k.startsWith("options_") &&
+        k !== "options" &&
+        k !== "unattributed" &&
+        k !== "external",
+    )
+    .map((k) => STRATEGY_DISPLAY_NAMES[k]),
+].filter((c, i, arr) => arr.indexOf(c) === i);
 
 interface Pt {
   tsMs: number;
@@ -249,11 +257,28 @@ export const NetPnlChartGadget: React.FC = () => {
   return (
     <div className="bg-surface rounded-xl border border-surface-border p-4 shadow-card space-y-3">
       <div className="flex items-center justify-between border-b border-surface-border pb-2.5 flex-wrap gap-2">
-        <div className="min-w-0">
-          <h2 className="text-[13px] font-mono tracking-wider text-slate-900 font-bold flex items-center space-x-2">
+        <div className="flex items-center gap-3 min-w-0 flex-wrap">
+          <h2 className="text-[13px] font-mono tracking-wider text-slate-900 font-bold flex items-center space-x-2 shrink-0">
             <LineChart className="w-4 h-4 text-accent-strong" />
             <span>P&amp;L &amp; Equity History</span>
           </h2>
+          {tab === "pnl" && (
+            <select
+              value={category}
+              onChange={(e) => setCategory(e.target.value)}
+              className={selectClass}
+              aria-label="Filter P&L by strategy category"
+              title="Realized P&L per strategy family; External ops = deposits/withdrawals/transfers no strategy produced"
+            >
+              <option value="all">All strategies</option>
+              {categories.map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
+              ))}
+              <option value={EXTERNAL_CATEGORY}>{EXTERNAL_CATEGORY}</option>
+            </select>
+          )}
         </div>
         <div className="flex items-center gap-3 shrink-0">
           <Tab<"pnl" | "equity">
@@ -276,29 +301,6 @@ export const NetPnlChartGadget: React.FC = () => {
           )}
         </div>
       </div>
-
-      {tab === "pnl" && (
-        <div className="flex items-center gap-2 flex-wrap">
-          <select
-            value={category}
-            onChange={(e) => setCategory(e.target.value)}
-            className={selectClass}
-            aria-label="Filter P&L by strategy category"
-            title="Realized P&L per strategy family; External ops = deposits/withdrawals/transfers no strategy produced"
-          >
-            <option value="all">All strategies</option>
-            {categories.map((c) => (
-              <option key={c} value={c}>
-                {c}
-              </option>
-            ))}
-            <option value={EXTERNAL_CATEGORY}>{EXTERNAL_CATEGORY}</option>
-          </select>
-          <span className="ml-auto text-[10px] font-mono text-slate-400 tabular-nums">
-            {pnlPoints.length} point{pnlPoints.length === 1 ? "" : "s"}
-          </span>
-        </div>
-      )}
 
       {failed && (
         <div className="rounded-lg border border-warn-border bg-warn-dim/40 px-3 py-2 text-xs font-mono text-warn-strong">

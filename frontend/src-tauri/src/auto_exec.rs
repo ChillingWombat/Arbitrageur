@@ -399,6 +399,12 @@ impl OpportunityExecutor {
         // Validate (including mode) BEFORE persisting: a rejected payload
         // leaves the previous config untouched.
         let (cfg, mode) = dto.to_policy()?;
+        if (mode == BotMode::Auto || dto.enabled) && state.circuit_breaker.is_tripped() {
+            return Err(
+                "Cannot enable or arm Radar bot while circuit breaker is tripped. Reset circuit breaker first."
+                    .into(),
+            );
+        }
         let canonical = RadarBotConfigDto::from_policy(&cfg, mode);
         let json = serde_json::to_string(&canonical).map_err(|e| format!("config encode: {e}"))?;
         state
@@ -773,6 +779,17 @@ impl OpportunityExecutor {
         if !mode.exits_allowed() {
             // Fully inert: no entries, no exit maintenance. The manual
             // flatten path remains the kill switch.
+            return cfg.poll_interval_secs.max(1);
+        }
+        if state.circuit_breaker.is_tripped() && mode != BotMode::Off {
+            let next = RadarBotConfigDto {
+                enabled: false,
+                mode: BotMode::Off.as_str().to_string(),
+                ..RadarBotConfigDto::from_policy(&cfg, BotMode::Off)
+            };
+            if let Err(e) = Self::save_config(state, &next) {
+                tracing::warn!("radar bot: circuit breaker trip retire to Off failed: {e}");
+            }
             return cfg.poll_interval_secs.max(1);
         }
         // Reduce-only retires to Off once the book is flat: nothing remains

@@ -46,7 +46,7 @@ export const ConfirmActionModal: React.FC<ConfirmActionModalProps> = ({
   };
 
   return (
-    <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-4 animate-in fade-in duration-150">
+    <div className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-3 sm:p-6 select-none animate-in fade-in duration-150">
       <div className="bg-surface border border-surface-border rounded-2xl p-6 max-w-md w-full shadow-2xl space-y-4 animate-in zoom-in-95 duration-150">
         <div className="flex items-center space-x-3">
           <div className="w-10 h-10 rounded-xl bg-loss-dim border border-loss/30 flex items-center justify-center text-loss">

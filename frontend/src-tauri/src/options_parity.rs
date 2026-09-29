@@ -1030,7 +1030,7 @@ pub async fn execute_options_parity_impl(
             success: false,
             gross_profit: 0.0,
             fees: fee_total_f,
-            net_profit: attempt_pnl_f,
+            net_profit: -fee_total_f,
             latency_us,
             note: format!(
                 "Options parity cycle PARTIAL: {err}. Residual legs recorded as imbalanced 'options_parity' signals — flatten each instrument to unwind. Record errors: {}",
@@ -1063,7 +1063,7 @@ pub async fn execute_options_parity_impl(
         success: true,
         gross_profit: 0.0,
         fees: fee_total_f,
-        net_profit: attempt_pnl_f,
+        net_profit: -fee_total_f,
         latency_us,
         note: format!(
             "Options parity {} completed 3/3 legs; premium cashflow ${attempt_pnl_f:.2} booked, convergence edge unrealized until expiry. Record errors: {}",
@@ -1745,6 +1745,12 @@ mod tests {
         for s in &leg_sigs {
             assert_eq!(s.status, SignalStatus::Balanced, "{} not balanced", s.id);
         }
+        let logs = state.execution_logs.read();
+        let entry = logs
+            .iter()
+            .find(|l| l.trade_type == "OptionsParity")
+            .expect("execution log recorded");
+        assert_eq!(entry.net_profit, -entry.fees);
     }
 
     #[tokio::test]

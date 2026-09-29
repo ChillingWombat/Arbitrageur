@@ -26,7 +26,7 @@ import { ConfirmActionModal } from "./ConfirmActionModal";
 import { DetailField, DetailSection } from "./DetailBits";
 import { TickerLogMonitor } from "./TickerLogMonitor";
 import { BotPhaseBadge, BotLifecycleControls } from "./BotLifecycleControls";
-import type { BotPhase } from "../hooks/useBotLifecycle";
+import { registerBotResetListener, type BotPhase } from "../hooks/useBotLifecycle";
 import { SaveButton, useSaveButton } from "./SaveButton";
 
 /**
@@ -665,8 +665,18 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
     [botCfg, botSubstrategy, isLive],
   );
 
+  useEffect(() => {
+    return registerBotResetListener(() => {
+      setBotCfg((prev) => {
+        if (!prev) return prev;
+        return { ...prev, enabled: false, mode: "off" };
+      });
+    });
+  }, []);
+
   const handleFlatten = useCallback(async () => {
     if (!botSubstrategy) return;
+    void handleBotMode("off");
     setFlattening(true);
     setFlattenError(null);
     try {
@@ -678,7 +688,7 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
     } finally {
       setFlattening(false);
     }
-  }, [botSubstrategy]);
+  }, [botSubstrategy, handleBotMode]);
 
   const saveBotConfig = useCallback(async (cfg: OptionsBotConfigDto) => {
     await api.setOptionsBotConfig(cfg);
@@ -823,64 +833,35 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
             read-only params + phase badge left, configurator, scan and the
             substrategy bot's lifecycle buttons right. The "All" view stays
             monitor-only — per-substrategy controls need a selection. */}
-        <div className="ribbon-container">
-          <div className="flex flex-wrap items-center gap-2 text-xs font-mono">
-            <span className="text-[13px] font-mono font-bold tracking-wider text-slate-900 pr-1">
+        <div className="shrink-0 px-4 py-3 flex items-center justify-between gap-3 bg-surface rounded-xl border border-surface-border shadow-2xs select-none">
+          <div className="flex items-center gap-2 text-xs font-mono min-w-0">
+            <span className="text-[13px] font-mono font-bold tracking-wider text-slate-900 pr-1 shrink-0">
               {selDef ? selDef.name : "Options Strategies"}
             </span>
-            {botSubstrategy && <BotPhaseBadge phase={botPhase} />}
+            <BotPhaseBadge phase={botPhase} isPaused={isPaused} />
             {liveVisible && (
               <>
-                <div className="ribbon-pill" title="Net-edge hurdle for reported setups">
+                <div className="ribbon-pill shrink-0" title="Net-edge hurdle for reported setups">
                   <span className="text-muted">Min Edge</span>
                   <span className="font-bold text-slate-900 tabular-nums">{scanEdge}</span>
                   <span className="text-muted">BPS</span>
                 </div>
-                <div className="ribbon-pill" title="Scan/entry size in base units">
+                <div className="ribbon-pill shrink-0" title="Scan/entry size in base units">
                   <span className="text-muted">Qty</span>
                   <span className="font-bold text-slate-900 tabular-nums">{scanQty}</span>
                 </div>
-                {botSubstrategy && botCfg && (
-                  <>
-                    <div className="ribbon-pill" title="Bot poll cadence">
-                      <span className="text-muted">Poll</span>
-                      <span className="font-bold text-slate-900 tabular-nums">
-                        {botCfg.pollIntervalSecs}
-                      </span>
-                      <span className="text-muted">s</span>
-                    </div>
-                    <div className="ribbon-pill" title="Max simultaneous managed positions">
-                      <span className="text-muted">Max Open</span>
-                      <span className="font-bold text-slate-900 tabular-nums">
-                        {botCfg.maxOpenPositions}
-                      </span>
-                    </div>
-                  </>
-                )}
               </>
             )}
-            {premiumOutlayUsd != null && Math.abs(premiumOutlayUsd) > 0.005 && (
-              <div
-                className="ribbon-pill"
-                title="Option premiums paid minus received at entry — financing held inside open packages, returned at close/expiry. Kept out of Net Profit."
-              >
-                <span className="text-muted">Premium Outlay</span>
-                <span className="font-bold text-slate-900 tabular-nums">
-                  {fmtUsd(premiumOutlayUsd)}
-                </span>
-              </div>
-            )}
-            {isPaused && <span className="badge-status-warn">Engine Paused</span>}
             {isLive && (
-              <span className="text-xs text-amber-400 border border-amber-500/40 rounded px-1.5 py-0.5 font-sans">
-                Manual executes only
+              <span className="text-xs text-amber-400 border border-amber-500/40 rounded px-1.5 py-0.5 font-sans shrink-0">
+                Manual only
               </span>
             )}
           </div>
-          <div className="flex items-center space-x-3 shrink-0">
+          <div className="flex items-center space-x-2 shrink-0">
             {(botError || flattenError) && (
               <span
-                className="text-xs font-mono text-loss max-w-72 truncate"
+                className="text-xs font-mono text-loss max-w-48 truncate"
                 title={botError ?? flattenError ?? ""}
               >
                 {botError ?? flattenError}
@@ -890,7 +871,7 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
               <button
                 type="button"
                 onClick={() => setShowBotConfig(true)}
-                className="btn-secondary !text-xs !py-2 !px-2 font-sans cursor-pointer gap-2"
+                className="btn-secondary !text-xs !py-1.5 !px-2.5 font-sans cursor-pointer gap-1.5 shrink-0"
                 title={`Configure the ${botSubstrategy.name} bot`}
               >
                 <SlidersHorizontal className="w-3.5 h-3.5 text-accent-strong" />
@@ -907,7 +888,7 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
                     ? "No options-capable venue is enabled in this environment"
                     : undefined
                 }
-                className="btn-primary inline-flex items-center gap-1.5 !text-xs !py-2 !px-2.5 font-sans"
+                className="btn-primary inline-flex items-center gap-1.5 !text-xs !py-1.5 !px-2.5 font-sans shrink-0"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${scanning ? "animate-spin" : ""}`} />
                 {scanning ? "Scanning…" : "Scan"}
@@ -929,7 +910,7 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
         </div>
 
         {/* Per-substrategy summary cards — filtered view of the monitor. */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
           <div className="bg-surface p-3.5 rounded-xl border border-surface-border shadow-card space-y-1">
             <div className="text-xs font-medium text-muted font-mono">Scanned Setups</div>
             <div className="text-lg font-bold text-slate-900 font-mono tabular-nums mt-0.5">
@@ -971,6 +952,18 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
             <div className="text-xs text-slate-500 mt-0.5">
               {filteredLogs.length} execution log{filteredLogs.length === 1 ? "" : "s"}
             </div>
+          </div>
+          <div
+            className="bg-surface p-3.5 rounded-xl border border-surface-border shadow-card space-y-1"
+            title="Option premiums paid minus received at entry — financing held inside open packages, returned at close/expiry. Kept out of Net Profit."
+          >
+            <div className="text-xs font-medium text-muted font-mono">Premium Outlay</div>
+            <div className="text-lg font-bold text-slate-900 font-mono tabular-nums mt-0.5">
+              {premiumOutlayUsd != null && Math.abs(premiumOutlayUsd) > 0.005
+                ? fmtUsd(premiumOutlayUsd)
+                : "—"}
+            </div>
+            <div className="text-xs text-slate-500 mt-0.5">net financing in packages</div>
           </div>
         </div>
 

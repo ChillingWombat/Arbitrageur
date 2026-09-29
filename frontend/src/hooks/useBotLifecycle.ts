@@ -30,18 +30,37 @@ const OPEN_STATUSES = new Set(["in_flight", "balanced", "imbalanced", "unresolve
 
 const botPhaseRegistry = new Map<string, BotPhase>();
 const botPhaseListeners = new Set<() => void>();
+const botResetListeners = new Set<() => void>();
 let botPhaseVersion = 0;
 
 function botRegistryKey(strategyId: string, symbol?: string | null): string {
   return `${strategyId}:${symbol ?? "all"}`;
 }
 
-function publishBotPhase(strategyId: string, symbol: string | null | undefined, phase: BotPhase): void {
+export function publishBotPhase(strategyId: string, symbol: string | null | undefined, phase: BotPhase): void {
   const key = botRegistryKey(strategyId, symbol);
   if (botPhaseRegistry.get(key) === phase) return;
   botPhaseRegistry.set(key, phase);
   botPhaseVersion += 1;
   for (const listener of botPhaseListeners) listener();
+}
+
+/** Register a callback invoked when all frontend bots are reset (halt, killswitch, circuit breaker reset). */
+export function registerBotResetListener(listener: () => void): () => void {
+  botResetListeners.add(listener);
+  return () => {
+    botResetListeners.delete(listener);
+  };
+}
+
+/** Reset all registered strategy bots to idle (stopped). Used on emergency stop / circuit breaker reset. */
+export function stopAllFrontendBots(): void {
+  for (const [key] of botPhaseRegistry) {
+    botPhaseRegistry.set(key, "idle");
+  }
+  botPhaseVersion += 1;
+  for (const listener of botPhaseListeners) listener();
+  for (const reset of botResetListeners) reset();
 }
 
 /** useSyncExternalStore subscribe fn — re-renders consumers on any phase publish. */
@@ -217,6 +236,13 @@ export function useBotLifecycle({ strategyId, symbol, externalOpenPositions }: U
     setPhase("reduce_only");
   }, []);
 
+  // Reset to idle on global stop/reset event
+  useEffect(() => {
+    return registerBotResetListener(() => {
+      setPhase("idle");
+    });
+  }, []);
+
   const stop = useCallback(async () => {
     setPhase("stopping");
     setLastError(null);
@@ -231,22 +257,22 @@ export function useBotLifecycle({ strategyId, symbol, externalOpenPositions }: U
         const residual = flattenResidualMessage(res);
         if (residual !== null) {
           setLastError(residual);
-          setPhase("paused");
+          setPhase("idle");
           return;
         }
         if (ledgerWasStale) {
           setLastError(
             "Signal ledger was unavailable during stop — flatten attempted with no residual; confirm flat before restarting"
           );
-          setPhase("paused");
+          setPhase("idle");
           return;
         }
       }
       setPhase("idle");
     } catch (e) {
       setLastError(e instanceof Error ? e.message : String(e));
-      // Flatten failed — halt entries but keep the incident visible.
-      setPhase("paused");
+      // Flatten failed — halt entries but transition to idle (stopped).
+      setPhase("idle");
     }
   }, [symbol, strategyId, externalOpenPositions]);
 

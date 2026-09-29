@@ -1,0 +1,42 @@
+# Progress — Survey Explorer 1
+
+Last visited: 2026-09-29T08:50:40Z
+
+- [x] Initialized DISPATCH.md, BRIEFING.md, and progress.md
+- [x] Enumerated GitHub issues #32 through #61 from review docs, commit messages, and SPEC.md
+- [x] Completed code-level audit of all 30 issues (#32 through #61):
+  - Verified #32: edgeX/Extended first element fallback removed, exact ID matching enforced
+  - Verified #33: Circuit breaker persistent, day-rolling, background-fed via dedicated poller in main.rs
+  - Verified #34: Inverted spatial exit stop fixed; side-aware adverse excursion logic implemented
+  - Verified #35: Frontend requireExecuted helper and explicit unknown state in PortfolioMonitor
+  - Verified #36: External scheduled exits survive auto-lock; dedup atomic under execution_lock
+  - Verified #37: Autotune episode_expectancy includes stop-losses; target requires positive expectancy & Wilson bound
+  - Verified #38: Fabricated prediction books removed; real CLOB REST queries implemented
+  - Verified #39: CI gitleaks regex allowlist tightened, whitespace diff range fixed, .gitignore updated
+  - Verified #40: Docs truth pass verified in README.md, SECURITY.md, CAPABILITIES.md, RUNBOOK.md
+  - Verified #41: DexPerp order-truth: map_order_status qty check, QFEX socket alive check, exact id matching
+  - Verified #42: Execution-gate fail-open seams closed: account_position_for, auto live refusal, gate under lock
+  - Verified #43: Retention defaults & row caps unconditional, PRAGMA auto_vacuum = INCREMENTAL (v34)
+  - Verified #44: Dedicated -telemetry.db with synchronous = NORMAL decouples WS writes from execution ledger
+  - Verified #45: Durable environment column (v32+), transactions, terminal-status protection, Zeroizing credentials
+  - Verified #46: Exact Bertram first-passage time double integral, PSD Joseph-form Kalman update, stat-arb validation
+  - Verified #47: acquire_signed rate limiting, cancel confirmation via venue truth, no silent order downgrades
+  - Verified #48: Lighter signer sidecar copied via build.rs, /proc/self/fd/N TOCTOU protection, SHA256 verified
+  - Verified #49: ConfirmActionModal on destructive operations, server-side ticker_reduce_only (v35)
+  - Verified #50: Release workflow release.yml, ARBITRAGEUR_ALERT_WEBHOOK, systemd service units
+  - Verified #51: Regression tests covering uncovered seams across execution, state store, reconciliation, simulated exchange exclusion
+  - Verified #52: Triangular arbitrage slippage double-counting removed (gross_bps already VWAP-inclusive)
+  - Verified #53: Triangular PnL converted to settlement currency via triangle_settlement_pnl
+  - Verified #54: Triangular completed cycle status set to Closed (or Balanced if perps), never Imbalanced
+  - Verified #55: Triangular leg dispatches use bounded prices + IOC semantics (OrderRequest::new_ioc)
+  - Verified #56: Emergency unwind polls fetch_order up to UNWIND_POLL_ATTEMPTS before judging terminal state
+  - Verified #57: Passive unwind holds as Unresolved on unconfirmed/unverifiable cancel instead of market fallback
+  - Verified #58: Convergence auto-exit stop logic is entry-side-aware (favorable overshoots protected)
+  - Verified #59: EVM AMM place_order fails fast if allowance is insufficient; no onchain approval inside atomic dispatch
+  - Verified #60: Coordinator accepts cancelled/expired IOC partial fills as trimmable partials
+  - Verified #61: Partial-fill trim fees and price PnL persisted to cycle lot (lot.trim_usd.{id}) and cumulative profit
+- [x] Investigated recent commits (d58194d -> 1cc2bcf) for regressions or further hardening
+- [x] Completed test executions: cargo test -p arbitrageur-desktop (588 passed, 0 failed), npm test in frontend/ (pass)
+- [x] Compiled comprehensive audit assessment report (survey_r1.md)
+- [x] Compiled structured handoff report (handoff.md)
+- [x] Notified orchestrator via send_message

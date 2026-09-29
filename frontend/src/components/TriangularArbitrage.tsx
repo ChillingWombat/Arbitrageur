@@ -360,7 +360,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
           <span className="text-[13px] font-mono font-bold tracking-wider text-slate-900 pr-1">
             Strategy Status
           </span>
-          <BotPhaseBadge phase={bot.phase} />
+          <BotPhaseBadge phase={bot.phase} isPaused={isPaused} />
           <div
             className="ribbon-pill"
             title="Notional per 3-leg cycle — edit in Cycle Guardrails"
@@ -387,12 +387,6 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
             <span className="font-bold text-slate-900 tabular-nums">{maxSlippageBps}</span>
             <span className="text-muted">BPS</span>
           </div>
-
-          {isPaused && (
-            <span className="badge-status-warn">
-              Engine Paused
-            </span>
-          )}
         </div>
 
         <div className="flex items-center space-x-3 shrink-0">

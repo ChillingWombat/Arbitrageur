@@ -28,20 +28,82 @@ interface BtnDef {
   activeClass: string;
 }
 
-/** Phase status badge — rendered by each strategy page inside its
- * "Strategy Status" ribbon next to the parameter chips, so the bot's
- * drain/flatten state reads alongside the parameters it operates under.
- * Returns null for phases with no operator-visible label. */
-export const BotPhaseBadge: React.FC<{ phase: BotPhase }> = ({ phase }) => {
-  const label =
-    phase === "reduce_only" ? "Reduce-Only" : phase === "stopping" ? "Stopping" : null;
-  if (!label) return null;
+export type StrategyBotStatus = "Active" | "Paused" | "Reducing" | "Stopped";
+
+export function resolveBotStatus(
+  phase?: BotPhase,
+  isPaused = false,
+): StrategyBotStatus {
+  if (phase === "running") {
+    return isPaused ? "Paused" : "Active";
+  }
+  if (phase === "paused") {
+    return "Paused";
+  }
+  if (phase === "reduce_only" || phase === "stopping") {
+    return "Reducing";
+  }
+  return "Stopped";
+}
+
+export interface BotPhaseBadgeProps {
+  phase?: BotPhase;
+  isPaused?: boolean;
+  status?: StrategyBotStatus;
+}
+
+/** Standardized strategy bot status badge — rendered by each strategy
+ * page inside its header ribbon immediately to the right of the strategy
+ * title header, before parameter tags. Displays exactly one of:
+ * Active, Paused, Reducing, or Stopped. Never renders "Engine". */
+export const BotPhaseBadge: React.FC<BotPhaseBadgeProps> = ({
+  phase,
+  isPaused = false,
+  status,
+}) => {
+  const currentStatus = status ?? resolveBotStatus(phase, isPaused);
+
+  const config: Record<
+    StrategyBotStatus,
+    { label: string; dotClass: string; badgeClass: string }
+  > = {
+    Active: {
+      label: "Active",
+      dotClass: "bg-profit",
+      badgeClass: "bg-profit-dim text-profit border-profit-border",
+    },
+    Paused: {
+      label: "Paused",
+      dotClass: "bg-warn",
+      badgeClass: "bg-warn-dim text-warn-strong border-warn-border",
+    },
+    Reducing: {
+      label: "Reducing",
+      dotClass: "bg-warn animate-pulse",
+      badgeClass: "bg-warn-dim text-warn-strong border-warn-border",
+    },
+    Stopped: {
+      label: "Stopped",
+      dotClass: "bg-slate-400",
+      badgeClass: "bg-surface-raised text-slate-500 border-surface-border",
+    },
+  };
+
+  const { label, dotClass, badgeClass } = config[currentStatus];
+
   return (
-    <span className="text-xs font-mono font-bold px-2 py-0.5 rounded-md bg-warn-dim text-warn-strong border border-warn-border">
+    <span
+      className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs font-mono font-bold border shadow-2xs ${badgeClass}`}
+      title={`Strategy bot status: ${label}`}
+    >
+      <span className={`w-1.5 h-1.5 rounded-full ${dotClass}`} />
       {label}
     </span>
   );
 };
+
+export const StrategyStatusBadge = BotPhaseBadge;
+
 
 /**
  * Start / Pause / Reduce Only / Stop control group for strategy bots.

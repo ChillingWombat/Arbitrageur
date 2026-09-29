@@ -18,7 +18,7 @@ import {
   X,
 } from "lucide-react";
 import { BotLifecycleControls, BotPhaseBadge } from "./BotLifecycleControls";
-import type { BotPhase } from "../hooks/useBotLifecycle";
+import { registerBotResetListener, type BotPhase } from "../hooks/useBotLifecycle";
 import { BotStatCards } from "./BotStatCards";
 import { InfoTooltip } from "./InfoTooltip";
 import { SaveButton, useSaveButton } from "./SaveButton";
@@ -1264,7 +1264,17 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({
     [botCfg],
   );
 
+  useEffect(() => {
+    return registerBotResetListener(() => {
+      setBotCfg((prev) => {
+        if (!prev) return prev;
+        return { ...prev, enabled: false, mode: "off" };
+      });
+    });
+  }, []);
+
   const handleFlatten = useCallback(async () => {
+    void handleBotMode("off");
     setFlattening(true);
     setFlattenError(null);
     try {
@@ -1276,7 +1286,7 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({
     } finally {
       setFlattening(false);
     }
-  }, []);
+  }, [handleBotMode]);
 
   const cycleStats = useMemo(() => computeBotCycleStats(signals, "radar", fillPnl), [signals, fillPnl]);
 
@@ -1402,7 +1412,7 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({
           <span className="text-[13px] font-mono font-bold tracking-wider text-slate-900 pr-1">
             Strategy Status
           </span>
-          <BotPhaseBadge phase={botPhase} />
+          <BotPhaseBadge phase={botPhase} isPaused={isPaused} />
           <div
             className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-lg"
             title="Engine floor on directional trade win probability — the executable gate also requires the Wilson lower bound to clear a confidence floor. Edit via Configurator."
@@ -1816,75 +1826,67 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({
           </div>
         </div>
 
-        <div className="p-3.5">
+        <div className="p-3.5 h-96 overflow-y-auto">
           {dockTab === "position" ? (
-            <div className="max-h-96 overflow-y-auto">
-              {openPos.length === 0 ? (
-                <EmptyState
-                  plain
-                  title="No Open Radar Positions"
-                  hint="Bot-managed and manual radar entries aggregate here with live deviation and unwind deadline."
-                />
-              ) : (
-                <div className="divide-y divide-surface-border">
-                  {openPos.map((p, i) => {
-                    const remainingSecs = (p.deadlineMs - Date.now()) / 1000;
-                    return (
-                      <div
-                        key={`${p.symbol}-${p.buyVenue}-${p.sellVenue}-${i}`}
-                        className="flex items-center justify-between gap-3 px-2 py-2.5"
-                      >
-                        <div className="min-w-0">
-                          <div className="flex items-center gap-2">
-                            <span className="text-xs font-sans font-bold text-slate-900 truncate">{p.symbol}</span>
-                            {p.unwatched ? (
-                              <span className="px-1.5 py-px rounded-md text-[10px] font-bold border bg-warn-dim text-warn-strong border-warn-border">
-                                unwatched
-                              </span>
-                            ) : p.liveStatus ? (
-                              <span className="px-1.5 py-px rounded-md text-[10px] font-bold border bg-slate-100 text-slate-600 border-slate-200">
-                                {p.liveStatus}
-                              </span>
-                            ) : null}
-                          </div>
-                          <div className="text-[11px] font-sans text-slate-500 truncate">
-                            {p.buyVenue} → {p.sellVenue} · entry {fmtBpsU(p.entryDevBps)} · {fmtTs(p.entryTsMs)}
-                          </div>
+            openPos.length === 0 ? (
+              <EmptyState
+                plain
+                title="No Open Radar Positions"
+                hint="Bot-managed and manual radar entries aggregate here with live deviation and unwind deadline."
+              />
+            ) : (
+              <div className="divide-y divide-surface-border">
+                {openPos.map((p, i) => {
+                  const remainingSecs = (p.deadlineMs - Date.now()) / 1000;
+                  return (
+                    <div
+                      key={`${p.symbol}-${p.buyVenue}-${p.sellVenue}-${i}`}
+                      className="flex items-center justify-between gap-3 px-2 py-2.5"
+                    >
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="text-xs font-sans font-bold text-slate-900 truncate">{p.symbol}</span>
+                          {p.unwatched ? (
+                            <span className="px-1.5 py-px rounded-md text-[10px] font-bold border bg-warn-dim text-warn-strong border-warn-border">
+                              unwatched
+                            </span>
+                          ) : p.liveStatus ? (
+                            <span className="px-1.5 py-px rounded-md text-[10px] font-bold border bg-slate-100 text-slate-600 border-slate-200">
+                              {p.liveStatus}
+                            </span>
+                          ) : null}
                         </div>
-                        <div className="text-right shrink-0">
-                          <div className="text-xs font-sans font-bold tabular-nums text-slate-900">
-                            {p.liveDevBps != null ? <>{fmtBpsU(p.liveDevBps)} live</> : "—"}
-                          </div>
-                          <div className="text-[11px] font-sans text-slate-500 tabular-nums">
-                            {fmtUsd(p.sizeUsd)} ·{" "}
-                            {remainingSecs > 0 ? `${fmtDur(remainingSecs)} left` : "past deadline"}
-                          </div>
+                        <div className="text-[11px] font-sans text-slate-500 truncate">
+                          {p.buyVenue} → {p.sellVenue} · entry {fmtBpsU(p.entryDevBps)} · {fmtTs(p.entryTsMs)}
                         </div>
                       </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
+                      <div className="text-right shrink-0">
+                        <div className="text-xs font-sans font-bold tabular-nums text-slate-900">
+                          {p.liveDevBps != null ? <>{fmtBpsU(p.liveDevBps)} live</> : "—"}
+                        </div>
+                        <div className="text-[11px] font-sans text-slate-500 tabular-nums">
+                          {fmtUsd(p.sizeUsd)} ·{" "}
+                          {remainingSecs > 0 ? `${fmtDur(remainingSecs)} left` : "past deadline"}
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            )
           ) : dockTab === "history" ? (
-            <div className="max-h-96 overflow-y-auto">
-              <TickerTransactionHistory symbol="" logs={radarLogs} matchAllSymbols />
-            </div>
+            <TickerTransactionHistory symbol="" logs={radarLogs} matchAllSymbols />
           ) : dockTab === "opps" ? (
-            <div className="max-h-96 overflow-y-auto">
-              <TickerOpportunityHistory symbol="" />
-            </div>
+            <TickerOpportunityHistory symbol="" />
           ) : (
-            <div className="overflow-y-auto">
-              <TickerLogMonitor
-                symbol=""
-                namespace="spread-radar"
-                strategyName="Spread Radar"
-                executionLogs={radarLogs}
-                matchAllSymbols
-                isPaused={isPaused}
-              />
-            </div>
+            <TickerLogMonitor
+              symbol=""
+              namespace="spread-radar"
+              strategyName="Spread Radar"
+              executionLogs={radarLogs}
+              matchAllSymbols
+              isPaused={isPaused}
+            />
           )}
         </div>
       </div>

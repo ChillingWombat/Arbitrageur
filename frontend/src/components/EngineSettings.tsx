@@ -36,6 +36,7 @@ import { InfoTooltip } from "./InfoTooltip";
 import { SaveButton, useSaveButton } from "./SaveButton";
 import { ArbitrageurLogo } from "./ArbitrageurLogo";
 import { VenueLogo } from "./VenueLogo";
+import { ToggleSwitch } from "./ToggleSwitch";
 import {
   VenueAccountsSection,
   EvmWalletSection,
@@ -209,24 +210,19 @@ export function TransactionHistoryCard({
   const envLabel = tradingMode === "live" ? "Live" : "Testnet";
   return (
     <div className="p-3.5 bg-surface border border-loss-border/40 rounded-lg shadow-2xs space-y-3">
-      <div className="space-y-1 min-w-0">
-        <label className="text-slate-800 font-bold text-xs flex items-center">
-          Transaction History
-          <InfoTooltip
-            position="bottom"
-            text={"Wipes this environment's executed-transaction ledger: traded-opportunity records with their atomic order legs, cycle lots, the execution journal, and the cumulative Net Profit counter.\n\nScoped to the active trading mode — the other environment's history is untouched. Rows without a recorded environment are also removed (they display in every environment's view). Credentials, settings, venue accounts, spread history, and radar data are never touched.\n\nRefuses while any position or open signal exists anywhere — the ledger cannot be deleted out from under live exposure."}
-          />
-        </label>
-        <p className="text-xs text-slate-500">
-          Remove all past transactions recorded in{" "}
-          <span className="font-semibold text-slate-700">{envLabel}</span>{" "}
-          mode — opportunity ledger, atomic fills, and Net Profit reset to $0.00.
-        </p>
-      </div>
-      <div className="flex items-center justify-between gap-3 pt-1 border-t border-surface-border">
-        <p className="text-[11px] text-slate-500 leading-snug">
-          Cannot be undone. Refused while any position is open.
-        </p>
+      <div className="flex items-center justify-between gap-3">
+        <div className="space-y-0.5">
+          <label className="text-slate-800 font-bold text-xs flex items-center">
+            Reset Transaction History
+            <InfoTooltip
+              position="bottom"
+              text={"Wipes this environment's executed-transaction ledger: traded-opportunity records with their atomic order legs, cycle lots, the execution journal, and the cumulative Net Profit counter.\n\nScoped to the active trading mode — the other environment's history is untouched. Rows without a recorded environment are also removed (they display in every environment's view). Credentials, settings, venue accounts, spread history, and radar data are never touched.\n\nRefuses while any position or open signal exists anywhere — the ledger cannot be deleted out from under live exposure."}
+            />
+          </label>
+          <p className="text-[11px] text-slate-500 leading-snug">
+            Cannot be undone. Refused while any position is open.
+          </p>
+        </div>
         <button
           type="button"
           disabled={disabled}
@@ -238,10 +234,10 @@ export function TransactionHistoryCard({
               confirmLabel: "Delete Transaction History",
             })
           }
-          className="btn-danger px-3 py-2 text-xs font-bold flex items-center space-x-1.5 shrink-0 disabled:opacity-50"
+          className="btn-danger px-3 py-1.5 text-xs font-bold flex items-center space-x-1.5 shrink-0 disabled:opacity-50"
         >
           <Trash2 className="w-3.5 h-3.5" />
-          <span>Reset Transaction History</span>
+          <span>Reset</span>
         </button>
       </div>
       {resetMsg && (
@@ -515,13 +511,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
     exchangeFilter,
     favoriteExchanges,
   });
-  // Live-only venues hidden by the current environment (sidebar count note).
-  const liveOnlyHiddenCount =
-    tradingMode === "testnet"
-      ? EXCHANGES_ALPHABETICAL.filter(
-          (ex) => !EVM_AMM_VENUE_IDS.has(ex.id) && !venueHasTestnet(ex.id),
-        ).length
-      : 0;
   // Keep the selection visible: if the active tab is filtered out, fall back
   // to the first visible exchange (or keep it when the filter empties).
   useEffect(() => {
@@ -1563,12 +1552,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                       })}
                     </div>
                   ))}
-                  {liveOnlyHiddenCount > 0 && (
-                    <p className="px-3 pt-2 text-[10px] font-mono text-muted leading-snug">
-                      {liveOnlyHiddenCount} live-only venues hidden in Testnet mode — they have no
-                      demo endpoint. Switch to Live Trading to manage them.
-                    </p>
-                  )}
                 </div>
 
               </div>
@@ -1779,10 +1762,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   </label>
                 </div>
 
-                <p className="text-xs text-warn-strong">
-                  Live Trading enables real-money strategy entries on credentialed, submission-capable venues — spatial pairs, radar manual entries, funding carry, and triangle cycles — alongside account monitoring and risk-reducing closes. Every entry reconciles via venue order polling; a partial fill auto-unwinds.
-                </p>
-
               </div>
 
               <div className="pt-3 border-t border-surface-border space-y-1.5">
@@ -1897,16 +1876,13 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               </div>
               <div className="flex items-center justify-between gap-3">
                 <label className="text-slate-600 block text-xs">Enable limit exits globally</label>
-                <button
-                  type="button"
-                  role="switch"
-                  aria-checked={passiveUnwind.enabled}
+                <ToggleSwitch
+                  size="sm"
+                  ariaLabel="Enable limit exits globally"
+                  checked={passiveUnwind.enabled}
                   disabled={loading}
-                  onClick={() => setPassiveUnwind({ ...passiveUnwind, enabled: !passiveUnwind.enabled })}
-                  className={`relative h-5 w-9 rounded-full transition cursor-pointer ${passiveUnwind.enabled ? "bg-accent" : "bg-slate-300"}`}
-                >
-                  <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all ${passiveUnwind.enabled ? "left-4.5" : "left-0.5"}`} />
-                </button>
+                  onChange={(checked) => setPassiveUnwind({ ...passiveUnwind, enabled: checked })}
+                />
               </div>
               <div className="flex items-center justify-between gap-3 border-t border-surface-border/60 pt-3">
                 <label className="text-slate-600 block text-xs" title="How long a still-open pair position is held before the auto-exit supervisor unwinds it on timeout — convergence and stop exits can close it sooner. Applies to futures-strategy pairs; radar-bot positions use their own Hold timeout ×">
@@ -1921,13 +1897,13 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   <label className="text-slate-600 block text-xs" title="Allow AUTONOMOUS entries into Boros fixed-yield locks (4-leg: perp pair + two YU legs on Arbitrum mainnet). Live-only, and additionally gated on agent-approval validity, gas treasury, Boros margin, lock term, and positive post-cost return. Manual Execute is unaffected.">
                     Auto fixed-yield entries (Boros)
                   </label>
-                  <button type="button" role="switch" aria-checked={autoFixedYield} aria-label="Auto fixed-yield entries"
+                  <ToggleSwitch
+                    size="sm"
+                    ariaLabel="Auto fixed-yield entries"
+                    checked={autoFixedYield}
                     disabled={loading}
-                    onClick={() => setAutoFixedYield(!autoFixedYield)}
-                    className={`relative h-5 w-9 rounded-full transition cursor-pointer ${autoFixedYield ? "bg-accent" : "bg-slate-300"}`}
-                  >
-                    <span className={`absolute top-0.5 h-4 w-4 rounded-full bg-white shadow transition-all ${autoFixedYield ? "left-4.5" : "left-0.5"}`} />
-                  </button>
+                    onChange={(checked) => setAutoFixedYield(checked)}
+                  />
                 </div>
                 <div className={`grid grid-cols-1 sm:grid-cols-2 gap-3 mt-2 ${autoFixedYield ? "" : "opacity-50 pointer-events-none"}`}>
                   <div className="flex items-center justify-between gap-3">
@@ -2080,16 +2056,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
         {/* =================================================================== */}
         {activeTab === "safety" && (
           <div className="max-w-4xl mx-auto w-full space-y-4 text-xs font-mono">
-            <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs space-y-1">
-              <label className="text-slate-800 font-bold text-xs flex items-center gap-2">
-                <ShieldAlert className="w-3.5 h-3.5 text-accent-strong" />
-                Overall Circuit Breaker & Safety Net
-              </label>
-              <p className="text-xs text-slate-500">
-                Global halt + guardrail limits. Applies live on save — no restart. Tightening never trips by itself; the next equity update enforces it.
-              </p>
-            </div>
-
             <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs space-y-3">
               <div className="text-slate-800 font-bold text-xs">Circuit Breaker — Halt Limits</div>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">

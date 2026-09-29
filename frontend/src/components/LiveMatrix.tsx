@@ -950,7 +950,7 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
           <span className="text-[13px] font-mono font-bold tracking-wider text-slate-900 pr-1">
             Strategy Status
           </span>
-          <BotPhaseBadge phase={bot.phase} />
+          <BotPhaseBadge phase={bot.phase} isPaused={isPaused} />
 
           {/* Delta-neutral gate: ticker refuses new orders until the open
               signal's own legs reconcile. */}
@@ -1039,7 +1039,7 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
           />
 
           {/* Signal Trend — standalone gadget above the matrix stage. */}
-          <div className="bg-surface rounded-lg border border-surface-border p-3.5 shadow-2xs">
+          <div className="bg-surface rounded-xl border border-surface-border p-4 shadow-card">
             <SignalTrendGadget
               symbol={sym}
               botWindowSec={windowSeconds}
@@ -1424,32 +1424,26 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
         </div>
 
         {/* Tab Content */}
-        <div className="p-3.5">
+        <div className="p-3.5 h-96 overflow-y-auto">
           {bottomTab === "history" ? (
-            <div className="max-h-96 overflow-y-auto">
-              <TickerTransactionHistory
-                symbol={sym}
-                logs={executionLogs || []}
-                config={currentStrategyConfig}
-                onRefresh={handleHistoryRefresh}
-              />
-            </div>
+            <TickerTransactionHistory
+              symbol={sym}
+              logs={executionLogs || []}
+              config={currentStrategyConfig}
+              onRefresh={handleHistoryRefresh}
+            />
           ) : bottomTab === "opps" ? (
-            <div className="max-h-96 overflow-y-auto">
-              <TickerOpportunityHistory symbol={sym} />
-            </div>
+            <TickerOpportunityHistory symbol={sym} />
           ) : (
-            <div className="overflow-y-auto">
-              <TickerLogMonitor
-                symbol={sym}
-                strategyName="Simple Spread"
-                config={currentStrategyConfig}
-                executionLogs={executionLogs || []}
-                orderbooks={orderbooks}
-                autoBotEnabled={bot.active}
-                isPaused={isPaused}
-              />
-            </div>
+            <TickerLogMonitor
+              symbol={sym}
+              strategyName="Simple Spread"
+              config={currentStrategyConfig}
+              executionLogs={executionLogs || []}
+              orderbooks={orderbooks}
+              autoBotEnabled={bot.active}
+              isPaused={isPaused}
+            />
           )}
         </div>
           </div>
