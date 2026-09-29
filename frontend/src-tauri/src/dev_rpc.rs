@@ -105,6 +105,12 @@ async fn dispatch(line: &str, state: &Arc<AppEngineState>) -> Value {
             crate::commands::set_engine_paused_impl(p, st).map(|v| json!(v))
         }
         "engine_settings" => crate::commands::get_engine_settings_impl(st).map(|v| json!(v)),
+        "acknowledge_signal" => crate::commands::acknowledge_signal_impl(
+            arg(&args, "signal_id").unwrap_or_default(),
+            arg(&args, "resolution").unwrap_or_default(),
+            st,
+        )
+        .map(|v| json!(v)),
         "risk_overview" => crate::execution::get_risk_overview_impl(st)
             .await
             .map(|v| json!(v)),
@@ -217,6 +223,7 @@ async fn dispatch(line: &str, state: &Arc<AppEngineState>) -> Value {
             .await
             .map(|v| json!(v))
         }
+        "pnl_history" => crate::performance::get_pnl_history_impl(st).map(|v| json!(v)),
         "cancel_venue_order" => cancel_order(&args, st).await,
         "flatten_ticker" => {
             let sym = arg(&args, "symbol");
@@ -230,7 +237,25 @@ async fn dispatch(line: &str, state: &Arc<AppEngineState>) -> Value {
             .await
             .map(|v| json!(v))
         }
+        "flatten_trade" => {
+            let Some(tid) = arg(&args, "trade_id") else {
+                return json!({"id": id, "err": "missing trade_id"});
+            };
+            let strat = arg(&args, "strategy_id").unwrap_or("options_parity");
+            crate::execution::flatten_trade_positions_impl(
+                tid,
+                strat,
+                None,
+                arbitrageur_execution::virtual_ledger::CycleStatus::Closed,
+                st,
+            )
+            .await
+            .map(|v| json!(v))
+        }
         "killswitch" => crate::execution::trigger_emergency_killswitch_impl(st).map(|v| json!(v)),
+        "reset_circuit_breaker" => {
+            crate::execution::reset_circuit_breaker_impl(st).map(|v| json!(v))
+        }
         // Repair a leg that lost its venue order identity (e.g. an accepted
         // order whose id never persisted). The reconciler can then poll the
         // real venue state instead of treating the leg as terminally empty.
@@ -289,8 +314,22 @@ async fn dispatch(line: &str, state: &Arc<AppEngineState>) -> Value {
         "radar_bot_config" => radar_bot_config(st),
         "set_radar_bot_config" => set_radar_bot_config(&args, st),
         "options_bot_config" => options_bot_config(&args, st),
+        "options_bot_status" => {
+            let map = st.options_tick_status.lock().clone();
+            Ok(json!(map))
+        }
         "set_options_bot_config" => set_options_bot_config(&args, st),
         "monitor_snapshot" => monitor_snapshot(&args, st),
+        "strategy_params" => {
+            let id = arg(&args, "strategy_id").unwrap_or_default().to_string();
+            crate::strategy_config::get_strategy_params_impl(&id, st).map(|v| json!(v))
+        }
+        "set_strategy_params" => serde_json::from_value::<crate::state::StrategyParamsDto>(
+            args.get("params").cloned().unwrap_or_else(|| json!({})),
+        )
+        .map_err(|e| format!("bad params: {e}"))
+        .and_then(|params| crate::strategy_config::save_strategy_params_impl(params, st))
+        .map(|_| json!(true)),
         "adopt_position" => adopt_position(&args, st),
 
         _ => Err(format!("unknown cmd '{cmd}'")),
@@ -359,15 +398,27 @@ fn open_positions(args: &Value, state: &AppEngineState) -> Result<Value, String>
     }
     let hub = &state.market_data_hub;
     let mut positions = crate::state_store::aggregate_open_positions(&signals, &|venue, symbol| {
-        hub.get_valid_orderbook(&arbitrageur_core::types::VenueId::from(venue), symbol, None)
-            .and_then(|b| b.mid_price())
+        let book = hub.get_valid_orderbook(
+            &arbitrageur_core::types::VenueId::from(venue),
+            symbol,
+            Some(crate::execution::MARK_READ_TTL),
+        );
+        match &book {
+            None => tracing::warn!("open_positions mark miss: {venue}/{symbol} — no fresh hub book"),
+            Some(b) if b.mid_price().or(b.mark_price).is_none() => tracing::warn!(
+                "open_positions mark miss: {venue}/{symbol} — book present but no mid/mark (bids={} asks={} mark={:?})",
+                b.bids.len(),
+                b.asks.len(),
+                b.mark_price
+            ),
+            _ => {}
+        }
+        book.and_then(|b| b.mid_price().or(b.mark_price))
             .and_then(|m| crate::execution::dec_to_f64(m, "mark mid").ok())
+            .and_then(|p| crate::execution::ledger_px_usd(state, venue, symbol, p))
     });
     for p in &mut positions {
-        p.reduce_only = state
-            .state_store
-            .ticker_reduce_only(&p.symbol, &p.strategy_id, state.env().as_str())
-            .map_err(|e| e.to_string())?;
+        p.reduce_only = crate::execution::trade_reduce_only(state, p)?;
     }
     Ok(json!(positions))
 }

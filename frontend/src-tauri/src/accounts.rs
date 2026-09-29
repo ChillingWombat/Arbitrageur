@@ -13,6 +13,7 @@ use arbitrageur_exchanges::evm_amm::{
 };
 use arbitrageur_risk::margin_monitor::MarginHealthStatus;
 use chrono::Utc;
+use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use tauri::State;
@@ -1764,6 +1765,219 @@ pub async fn get_venue_balances_impl(
 
                 if equity_usd.is_finite() {
                     let now_ms = Utc::now().timestamp_millis();
+                    // Non-USD balance currencies needing the venue's own
+                    // settlement index — the rate `fetch_account` actually
+                    // applied (Deribit converts BTC equity at ITS btc_usd
+                    // index; market-book mids don't track it and the
+                    // estimator then misses the real repricing component).
+                    // Awaited BEFORE the check-guard lock so the poll stays
+                    // Send across the await point.
+                    let mut venue_idx: std::collections::HashMap<String, rust_decimal::Decimal> =
+                        std::collections::HashMap::new();
+                    for b in &account.balances {
+                        let ccy = b.currency.to_ascii_uppercase();
+                        if arbitrageur_core::symbol::is_usd_family(&ccy)
+                            || b.total <= dec!(0)
+                            || venue_idx.contains_key(&ccy)
+                        {
+                            continue;
+                        }
+                        // Prefer the index the adapter actually embedded in
+                        // this snapshot's equity — a fresh fetch drifts from
+                        // it and the skew reads as phantom flows.
+                        let used = adapter.last_account_index_usd(&ccy);
+                        match used {
+                            Some(px) if px > dec!(0) => {
+                                venue_idx.insert(ccy, px);
+                            }
+                            _ => {
+                                if let Ok(px) = adapter.index_price_usd(&ccy).await {
+                                    if px > dec!(0) {
+                                        venue_idx.insert(ccy, px);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Several pollers call this path; serialize so two
+                    // concurrent passes can't read one baseline and record
+                    // one delta twice.
+                    let _check_guard = state.equity_check_lock.lock();
+                    // Collateral-FX attribution: estimate how much of any
+                    // equity delta is non-USD balance repricing (BTC/ETH
+                    // collateral × index move since the previous poll).
+                    // Coin-margined venues ride the index every tick;
+                    // without this the classifier dumps those moves into
+                    // `transfer`. `None` when a currency has no price —
+                    // the classifier then keeps the raw ladder.
+                    let repricing_usd = {
+                        use arbitrageur_core::symbol::is_usd_family;
+                        let mut prev = state.equity_fx_prev.lock();
+                        let mut sum = 0.0_f64;
+                        let mut complete = true;
+                        let mut saw_prev = false;
+                        let mut dirty = false;
+                        for b in &account.balances {
+                            let ccy = b.currency.to_ascii_uppercase();
+                            if is_usd_family(&ccy) || b.total <= dec!(0) {
+                                continue;
+                            }
+                            let key = format!("{env_str}-{vid}|{ccy}");
+                            let fx_now = venue_idx
+                                .get(&ccy)
+                                .copied()
+                                .or_else(|| crate::execution::fx_usd_now(state, &ccy));
+                            match (prev.get(&key).copied(), fx_now) {
+                                (Some(p), Some(n)) => {
+                                    let bal = b.total.to_string().parse::<f64>().unwrap_or(0.0);
+                                    sum += bal * (n - p).to_string().parse::<f64>().unwrap_or(0.0);
+                                    saw_prev = true;
+                                }
+                                (None, _) => {}
+                                (Some(_), None) => complete = false,
+                            }
+                            if let Some(n) = fx_now {
+                                dirty |= prev.get(&key) != Some(&n);
+                                prev.insert(key, n);
+                            }
+                        }
+                        if dirty {
+                            if let Ok(json) = serde_json::to_string(&*prev) {
+                                let _ = state.state_store.kv_set("equity.fx_prev", &json);
+                            }
+                        }
+                        if saw_prev && complete {
+                            Some(sum)
+                        } else {
+                            None
+                        }
+                    };
+                    // Mark-to-market component: equity deltas on venues
+                    // holding positions are dominated by Σ uPnL moves, not
+                    // just collateral repricing. Without it, option-book
+                    // mark noise (thousands/sec on Deribit testnet) dumps
+                    // every poll into `deposit`/`withdrawal`.
+                    // Split position components by instrument kind: Deribit
+                    // equity ≈ balance + Σoption mark-value + Σperp fpl, all
+                    // ×index. Option mark-value repricing is NOT reliably in
+                    // `floating_profit_loss` (testnet fpl stayed ~flat while
+                    // equity swung ±$7k) — it gets its own qty×mark tracker.
+                    // Options are EXCLUDED from dupnl to avoid double count
+                    // when the venue does flow their marks through fpl.
+                    let dupnl_usd = {
+                        let upnl_now: f64 = account
+                            .positions
+                            .iter()
+                            .filter(|p| !crate::state_store::symbol_is_fixed_contract(&p.symbol))
+                            .map(|p| p.unrealized_pnl.to_string().parse::<f64>().unwrap_or(0.0))
+                            .sum();
+                        let key = format!("{env_str}-{vid}");
+                        let mut m = state.equity_upnl_prev.lock();
+                        let d = m.insert(key, upnl_now).map(|p| upnl_now - p);
+                        if let Ok(json) = serde_json::to_string(&*m) {
+                            let _ = state.state_store.kv_set("equity.upnl_prev", &json);
+                        }
+                        d
+                    };
+                    let doptval_usd = {
+                        let prefix = format!("{env_str}-{vid}|");
+                        let mut now_map: std::collections::HashMap<String, f64> =
+                            std::collections::HashMap::new();
+                        for p in &account.positions {
+                            if !crate::state_store::symbol_is_fixed_contract(&p.symbol) {
+                                continue;
+                            }
+                            let q: f64 = p.quantity.to_string().parse().unwrap_or(0.0);
+                            let mk: f64 = p.mark_price.to_string().parse().unwrap_or(0.0);
+                            now_map.insert(format!("{prefix}{}|{:?}", p.symbol, p.side), q * mk);
+                        }
+                        let mut prev = state.equity_optval_prev.lock();
+                        let mut d = 0.0_f64;
+                        let mut saw_prev = false;
+                        for (k, v) in &now_map {
+                            if let Some(pv) = prev.get(k) {
+                                saw_prev = true;
+                                d += v - pv;
+                            } else {
+                                // New leg — its value entered equity, but
+                                // the premium paid left balance the same
+                                // poll; not a mark move, exclude.
+                                saw_prev = true;
+                            }
+                        }
+                        for (k, v) in prev.iter() {
+                            if k.starts_with(&prefix) && !now_map.contains_key(k) {
+                                // Leg closed since last poll — value left
+                                // equity; proceeds land in balance.
+                                saw_prev = true;
+                                d -= v;
+                            }
+                        }
+                        prev.retain(|k, _| !k.starts_with(&prefix));
+                        prev.extend(now_map);
+                        if let Ok(json) = serde_json::to_string(&*prev) {
+                            let _ = state.state_store.kv_set("equity.optval_prev", &json);
+                        }
+                        saw_prev.then_some(d)
+                    };
+                    // Balance-delta diagnostic — NOT part of `explained`:
+                    // a real coin-balance change IS an external flow
+                    // (deposit/settlement/funding), so it must not suppress
+                    // classification. Logged as `dbal` so an unexplained
+                    // delta can be read as balance-driven (honest flow) vs
+                    // a still-missing valuation term.
+                    let dbal_usd = {
+                        use arbitrageur_core::symbol::is_usd_family;
+                        let prefix = format!("{env_str}-{vid}|");
+                        let mut prev = state.equity_bal_prev.lock();
+                        let mut now_map: std::collections::HashMap<String, f64> =
+                            std::collections::HashMap::new();
+                        let mut d = 0.0_f64;
+                        let mut saw_prev = false;
+                        for b in &account.balances {
+                            let ccy = b.currency.to_ascii_uppercase();
+                            let bal: f64 = b.total.to_string().parse().unwrap_or(0.0);
+                            // USD-at-poll-time so a vanished currency's drop
+                            // has correct magnitude and the idx move shows
+                            // up inside the balance line (matches how the
+                            // venue reports equity).
+                            let usd_now = if is_usd_family(&ccy) {
+                                bal
+                            } else {
+                                let idx = venue_idx
+                                    .get(&ccy)
+                                    .copied()
+                                    .or_else(|| crate::execution::fx_usd_now(state, &ccy))
+                                    .map(|x| x.to_string().parse::<f64>().unwrap_or(0.0));
+                                match idx {
+                                    Some(i) => bal * i,
+                                    None => continue,
+                                }
+                            };
+                            let key = format!("{prefix}{ccy}");
+                            now_map.insert(key.clone(), usd_now);
+                            if let Some(pb) = prev.get(&key) {
+                                saw_prev = true;
+                                d += usd_now - pb;
+                            }
+                        }
+                        for (k, v) in prev.iter() {
+                            if k.starts_with(&prefix) && !now_map.contains_key(k) {
+                                saw_prev = true;
+                                d -= v;
+                            }
+                        }
+                        prev.retain(|k, _| !k.starts_with(&prefix));
+                        prev.extend(now_map);
+                        if let Ok(json) = serde_json::to_string(&*prev) {
+                            let _ = state.state_store.kv_set("equity.bal_prev", &json);
+                        }
+                        saw_prev.then_some(d)
+                    };
+                    let explained_usd = match (repricing_usd, dupnl_usd, doptval_usd) {
+                        (None, None, None) => None,
+                        (r, u, o) => Some(r.unwrap_or(0.0) + u.unwrap_or(0.0) + o.unwrap_or(0.0)),
+                    };
                     // Equity baselines are namespaced `{env}-{venue}` so
                     // a testnet baseline is never compared against live
                     // account equity (it would log a fake
@@ -1773,15 +1987,35 @@ pub async fn get_venue_balances_impl(
                         equity_usd,
                         &position_signature(&account.positions),
                         now_ms,
+                        explained_usd,
                     ) {
                         Ok(report) => {
                             if let Some(event) = report.event {
+                                // Carry the explained estimate into the log —
+                                // a misclassified delta stays auditable
+                                // (withdrawal-with-big-rep reads differently
+                                // than a genuine external flow).
                                 tracing::warn!(
-                                        "external equity delta on {vid}: {} expected {expected} actual {actual} ({kind}) — baseline rebased",
+                                        "external equity delta on {vid}: {} expected {expected} actual {actual} ({kind}; explained={rep} [collateral_fx={fx} + dupnl={upnl} + doptval={ov}]; dbal={db}) — baseline rebased",
                                         event.delta,
                                         expected = event.expected,
                                         actual = event.actual,
                                         kind = event.kind,
+                                        rep = explained_usd
+                                            .map(|r| format!("{r:.2}"))
+                                            .unwrap_or_else(|| "n/a".into()),
+                                        fx = repricing_usd
+                                            .map(|r| format!("{r:.2}"))
+                                            .unwrap_or_else(|| "n/a".into()),
+                                        upnl = dupnl_usd
+                                            .map(|r| format!("{r:.2}"))
+                                            .unwrap_or_else(|| "n/a".into()),
+                                        ov = doptval_usd
+                                            .map(|r| format!("{r:.2}"))
+                                            .unwrap_or_else(|| "n/a".into()),
+                                        db = dbal_usd
+                                            .map(|r| format!("{r:.2}"))
+                                            .unwrap_or_else(|| "n/a".into()),
                                     );
                             }
                         }

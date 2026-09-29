@@ -495,8 +495,49 @@ impl StateStore {
         Ok(())
     }
 
-    /// One persisted leg that carries a venue order id on a signal that has
-    /// not reached `closed`/`failed` — the reconciliation poll set.
+    /// Persist the engine-owned client order id BEFORE dispatch. The order
+    /// request carries this id onto the venue wire, so writing it here closes
+    /// the crash window between venue acceptance and ack persistence: after a
+    /// restart the reconciler can still locate the order by client id even
+    /// when no venue order id was ever recorded. Does not overwrite an
+    /// existing value — the first persisted locator is authoritative.
+    pub fn record_leg_client_order_id(
+        &self,
+        signal_id: &str,
+        side: LegSide,
+        client_order_id: &str,
+    ) -> anyhow::Result<()> {
+        let signal_id = normalize_id(signal_id)?;
+        let cid = client_order_id.trim();
+        if cid.is_empty() || cid.len() > 256 || cid.chars().any(|c| c.is_control()) {
+            anyhow::bail!("invalid client order id");
+        }
+        let now = Utc::now().to_rfc3339();
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = tx.execute(
+            "UPDATE signal_legs
+             SET client_order_id = COALESCE(NULLIF(client_order_id, ''), ?3),
+                 updated_at = ?4
+             WHERE signal_id = ?1 AND side = ?2",
+            params![signal_id, side.as_str(), cid, now],
+        )?;
+        if changed == 0 {
+            anyhow::bail!("signal {signal_id} has no {side:?} leg");
+        }
+        tx.execute(
+            "UPDATE signal_executions SET updated_at = ?2 WHERE id = ?1",
+            params![signal_id, now],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// One persisted leg that carries a venue order id — or a client order
+    /// id persisted pre-dispatch — on a signal that has not reached
+    /// `closed`/`failed`: the reconciliation poll set. A client-id-only leg
+    /// is a crash-window orphan (venue may hold the order even though the
+    /// ack was never recorded), so it stays pollable.
     /// `sim-%` order ids are SimulatedExchange synthetic ids — paper fills
     /// must never be polled against a real venue.
     /// `environment` scopes the set to one trading environment: legs are
@@ -516,9 +557,28 @@ impl StateStore {
              WHERE (
                  (l.venue_order_id IS NOT NULL AND l.venue_order_id != ''
                   AND l.venue_order_id NOT LIKE 'sim-%')
+                 OR (l.client_order_id IS NOT NULL AND l.client_order_id != '')
                  OR e.status IN ('imbalanced', 'unresolved')
                )
-               AND e.status IN ('in_flight', 'imbalanced', 'unresolved')",
+               AND (
+                 e.status IN ('in_flight', 'imbalanced', 'unresolved')
+                 OR (
+                   -- Settle-gap fills: a `flat-*` close child marked Closed
+                   -- or Failed while its order was still working can leave a
+                   -- live venue order the ledger stopped watching — the leg
+                   -- keeps an order id but zero qty. Poll it for a bounded
+                   -- window so the recorded fill lands (or the venue proves
+                   -- it dead); once `filled_qty > 0` the row self-excludes.
+                   e.status IN ('closed', 'failed')
+                   AND l.filled_qty <= 0
+                   AND (
+                     (l.venue_order_id IS NOT NULL AND l.venue_order_id != ''
+                      AND l.venue_order_id NOT LIKE 'sim-%')
+                     OR (l.client_order_id IS NOT NULL AND l.client_order_id != '')
+                   )
+                   AND datetime(l.updated_at) > datetime('now', '-30 minutes')
+                 )
+               )",
         );
         let mut binds: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         if let Some(env) = environment {

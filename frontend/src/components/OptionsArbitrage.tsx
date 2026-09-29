@@ -185,6 +185,9 @@ interface OptionsArbitrageProps {
   isLive?: boolean;
   /** An options-capable venue (Deribit today) is admitted in this environment. */
   optionsVenueAvailable?: boolean;
+  /** Net premium financing held inside open option packages — options-wide,
+   *  so it surfaces here rather than on the system-wide panels. */
+  premiumOutlayUsd?: number | null;
 }
 
 const fmtUsd = (v: number): string =>
@@ -516,7 +519,7 @@ const SubstrategyRail: React.FC<{
                             {count}
                           </span>
                         )}
-                        <span className="text-[9px] font-bold text-profit">LIVE</span>
+                        <span className="text-[9px] font-bold text-profit">READY</span>
                       </span>
                     ) : (
                       <Clock3 className="w-3 h-3 text-slate-400 shrink-0" />
@@ -540,6 +543,7 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
   isPaused = false,
   isLive = false,
   optionsVenueAvailable = false,
+  premiumOutlayUsd = null,
 }) => {
   const [selected, setSelected] = useState<string>("all");
   const [dirFilter, setDirFilter] = useState<"all" | "conversion" | "reversal">("all");
@@ -639,7 +643,7 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
       if (mode === "auto" && isLive) {
         // Backend refuses the write too — surface the reason immediately.
         setBotError(
-          "Autonomous options entries are testnet-only — run a manual Execute for live.",
+          "Autonomous options entries are disabled in this environment — run a manual Execute.",
         );
         return;
       }
@@ -855,10 +859,21 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
                 )}
               </>
             )}
+            {premiumOutlayUsd != null && Math.abs(premiumOutlayUsd) > 0.005 && (
+              <div
+                className="ribbon-pill"
+                title="Option premiums paid minus received at entry — financing held inside open packages, returned at close/expiry. Kept out of Net Profit."
+              >
+                <span className="text-muted">Premium Outlay</span>
+                <span className="font-bold text-slate-900 tabular-nums">
+                  {fmtUsd(premiumOutlayUsd)}
+                </span>
+              </div>
+            )}
             {isPaused && <span className="badge-status-warn">Engine Paused</span>}
             {isLive && (
               <span className="text-xs text-amber-400 border border-amber-500/40 rounded px-1.5 py-0.5 font-sans">
-                LIVE — manual executes only
+                Manual executes only
               </span>
             )}
           </div>
@@ -1093,13 +1108,13 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
             ? confirmOpp.kind === "parity"
               ? {
                   title: `Execute ${confirmOpp.p.direction} on Deribit?`,
-                  subtitle: isLive ? "Live funds at risk" : "Testnet dispatch",
+                  subtitle: isLive ? "Real funds at risk" : "Venue demo endpoints — simulated funds",
                   body: `This dispatches three bounded IOC orders on Deribit: ${confirmOpp.p.call_leg.action} ${confirmOpp.p.call_leg.instrument}, ${confirmOpp.p.put_leg.action} ${confirmOpp.p.put_leg.instrument}, ${confirmOpp.p.perp_leg.action} ${confirmOpp.p.perp_leg.instrument}. A partially-filled cycle leaves residual exposure that must be flattened manually.`,
                   confirmLabel: "Execute",
                 }
               : {
                   title: `Execute ${confirmOpp.p.label} on Deribit?`,
-                  subtitle: isLive ? "Live funds at risk" : "Testnet dispatch",
+                  subtitle: isLive ? "Real funds at risk" : "Venue demo endpoints — simulated funds",
                   body: `This dispatches ${confirmOpp.p.legs.length} bounded IOC orders on Deribit: ${confirmOpp.p.legs
                     .map(
                       (l) =>

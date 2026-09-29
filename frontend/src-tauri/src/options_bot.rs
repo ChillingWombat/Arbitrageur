@@ -14,8 +14,9 @@
 //! `off`, matching the radar bot's drain-down contract.
 
 use std::cmp::Ordering;
+use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -45,6 +46,10 @@ const DEFAULT_MIN_HOURS_TO_EXPIRY: f64 = 48.0;
 const DEFAULT_MAX_DAYS_TO_EXPIRY: f64 = 60.0;
 const DEFAULT_POLL_SECS: u64 = 30;
 const DEFAULT_MAX_OPEN: u32 = 2;
+/// A refused candidate id cools down this long — an edge that evaporates
+/// on re-verification must not re-dispatch every poll against flickering
+/// testnet books.
+const REFUSAL_COOLDOWN: Duration = Duration::from_secs(600);
 
 /// Validated bot policy derived from the persisted DTO.
 #[derive(Debug, Clone)]
@@ -146,15 +151,57 @@ impl OptionsBotConfigDto {
     }
 }
 
+/// Last-tick telemetry per substrategy — mode, open cycle count, scan
+/// stats, and the latest refusal. Written by `tick_substrategy`; surfaced
+/// through `options_bot_status` so a silent scan loop is distinguishable
+/// from a dead one.
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OptionsBotTickStatus {
+    pub substrategy: String,
+    pub mode: String,
+    pub open_positions: usize,
+    pub max_open_positions: usize,
+    pub last_scan_ms: i64,
+    /// Rows the scanner returned before the `is_executable` gate —
+    /// distinguishes "chain scanned, nothing qualified" from "no data".
+    pub rows_scanned: usize,
+    pub candidates: usize,
+    pub best_edge_usd: Option<f64>,
+    pub last_refusal: Option<String>,
+}
+
 pub struct OptionsBotExecutor {
     shutdown: Mutex<bool>,
+    /// Refused (substrategy, candidate id) pairs with their refusal
+    /// timestamp — in-memory only, so a restart retries immediately.
+    refusal_cooldown: Mutex<HashMap<String, Instant>>,
 }
 
 impl OptionsBotExecutor {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             shutdown: Mutex::new(false),
+            refusal_cooldown: Mutex::new(HashMap::new()),
         })
+    }
+
+    fn cooldown_key(substrategy: &str, id: &str) -> String {
+        format!("{substrategy}:{id}")
+    }
+
+    fn note_refusal(&self, substrategy: &str, id: &str) {
+        self.refusal_cooldown
+            .lock()
+            .insert(Self::cooldown_key(substrategy, id), Instant::now());
+    }
+
+    /// True while the candidate still sits inside its refusal window.
+    #[cfg(test)]
+    fn is_cooling(&self, substrategy: &str, id: &str) -> bool {
+        let cd = self.refusal_cooldown.lock();
+        cd.get(&Self::cooldown_key(substrategy, id))
+            .is_some_and(|t| t.elapsed() < REFUSAL_COOLDOWN)
     }
 
     #[allow(dead_code)]
@@ -219,21 +266,34 @@ impl OptionsBotExecutor {
     fn open_positions(state: &AppEngineState, strategy_id: &str) -> Option<usize> {
         let env = state.env().as_str();
         state.state_store.list_signals(None, None).ok().map(|sigs| {
-            sigs.iter()
-                .filter(|s| {
-                    s.environment.eq_ignore_ascii_case(env)
-                        && s.strategy_id.eq_ignore_ascii_case(strategy_id)
-                        && !matches!(s.status, SignalStatus::Closed | SignalStatus::Failed)
-                })
-                .map(|s| {
+            let mut trades: std::collections::HashMap<String, bool> =
+                std::collections::HashMap::new();
+            for s in sigs.iter().filter(|s| {
+                s.environment.eq_ignore_ascii_case(env)
+                    && s.strategy_id.eq_ignore_ascii_case(strategy_id)
+                    && !matches!(s.status, SignalStatus::Closed | SignalStatus::Failed)
+            }) {
+                let trade =
                     s.id.rsplit_once("-leg")
                         .filter(|(_, tail)| !tail.is_empty())
                         .map(|(prefix, _)| prefix)
                         .unwrap_or(s.id.as_str())
-                        .to_string()
-                })
-                .collect::<std::collections::HashSet<_>>()
-                .len()
+                        .to_string();
+                // A trade counts toward the entry cap only while it still
+                // holds a live package leg. Perp-residual groups (option legs
+                // closed, hedge dust left under the venue minimum) are tracked
+                // exposure — but permanently counting them would strand the
+                // substrategy at cap forever.
+                let has_option_leg = crate::state_store::symbol_is_fixed_contract(&s.symbol)
+                    || s.legs
+                        .iter()
+                        .any(|l| crate::state_store::symbol_is_fixed_contract(&l.symbol));
+                trades
+                    .entry(trade)
+                    .and_modify(|v| *v |= has_option_leg)
+                    .or_insert(has_option_leg);
+            }
+            trades.values().filter(|v| **v).count()
         })
     }
 
@@ -267,18 +327,39 @@ impl OptionsBotExecutor {
         }
     }
 
+    fn note_tick(state: &AppEngineState, st: OptionsBotTickStatus) {
+        state
+            .options_tick_status
+            .lock()
+            .insert(st.substrategy.clone(), st);
+    }
+
     async fn tick_substrategy(&self, state: &AppEngineState, substrategy: &str) -> u64 {
         let (cfg, mode) = Self::load_config(state, substrategy);
         let poll = cfg.poll_interval_secs.max(5);
+        let mut status = OptionsBotTickStatus {
+            substrategy: substrategy.to_string(),
+            mode: format!("{mode:?}").to_lowercase(),
+            open_positions: 0,
+            max_open_positions: cfg.max_open_positions,
+            last_scan_ms: chrono::Utc::now().timestamp_millis(),
+            rows_scanned: 0,
+            candidates: 0,
+            best_edge_usd: None,
+            last_refusal: None,
+        };
         if !mode.exits_allowed() {
+            Self::note_tick(state, status);
             return poll;
         }
         let strategy_id = Self::ledger_strategy_id(substrategy);
         let Some(mut open) = Self::open_positions(state, &strategy_id) else {
             // Ledger unreadable — cannot prove the book is flat; hold mode,
             // skip entries.
+            Self::note_tick(state, status);
             return poll;
         };
+        status.open_positions = open;
         // Flat-book retire — mirrors the radar bot: a reduce_only mode with
         // nothing left to drain drops the persisted config to off.
         if mode == BotMode::ReduceOnly && open == 0 {
@@ -289,9 +370,11 @@ impl OptionsBotExecutor {
                     tracing::warn!("options bot {substrategy}: flat-book retire failed: {e}");
                 }
             }
+            Self::note_tick(state, status);
             return poll;
         }
         if !mode.entries_allowed() || open >= cfg.max_open_positions {
+            Self::note_tick(state, status);
             return poll;
         }
 
@@ -308,16 +391,20 @@ impl OptionsBotExecutor {
                         min_hours_to_expiry: Some(cfg.min_hours_to_expiry),
                         max_days_to_expiry: Some(cfg.max_days_to_expiry),
                         min_edge_bps: Some(cfg.min_edge_bps),
+
+                        limit: None,
                     },
                     state,
                 )
                 .await
                 {
-                    Ok(v) => v
-                        .into_iter()
-                        .filter(|o| o.is_executable)
-                        .map(|o| (o.id, o.currency, o.net_edge_usd))
-                        .collect(),
+                    Ok(v) => {
+                        status.rows_scanned += v.len();
+                        v.into_iter()
+                            .filter(|o| o.is_executable)
+                            .map(|o| (o.id, o.currency, o.net_edge_usd))
+                            .collect()
+                    }
                     Err(e) => {
                         tracing::warn!("options bot {substrategy}: {ccy} scan failed: {e}");
                         continue;
@@ -332,16 +419,20 @@ impl OptionsBotExecutor {
                         min_hours_to_expiry: Some(cfg.min_hours_to_expiry),
                         max_days_to_expiry: Some(cfg.max_days_to_expiry),
                         min_edge_bps: Some(cfg.min_edge_bps),
+
+                        limit: None,
                     },
                     state,
                 )
                 .await
                 {
-                    Ok(v) => v
-                        .into_iter()
-                        .filter(|o| o.is_executable)
-                        .map(|o| (o.id, o.currency, o.net_edge_usd))
-                        .collect(),
+                    Ok(v) => {
+                        status.rows_scanned += v.len();
+                        v.into_iter()
+                            .filter(|o| o.is_executable)
+                            .map(|o| (o.id, o.currency, o.net_edge_usd))
+                            .collect()
+                    }
                     Err(e) => {
                         tracing::warn!("options bot {substrategy}: {ccy} scan failed: {e}");
                         continue;
@@ -352,6 +443,22 @@ impl OptionsBotExecutor {
             };
             let mut opps = opps;
             opps.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(Ordering::Equal));
+            status.candidates += opps.len();
+            if let Some(best) = opps.first().map(|o| o.2) {
+                status.best_edge_usd =
+                    Some(
+                        status
+                            .best_edge_usd
+                            .map_or(best, |b| if best > b { best } else { b }),
+                    );
+            }
+            // Drop candidates still cooling from a prior refusal, then prune
+            // expired cooldown entries so the map stays bounded.
+            {
+                let mut cd = self.refusal_cooldown.lock();
+                cd.retain(|_, t| t.elapsed() < REFUSAL_COOLDOWN);
+                opps.retain(|(id, _, _)| !cd.contains_key(&Self::cooldown_key(substrategy, id)));
+            }
             for (id, _ccy, _edge) in opps {
                 if open >= cfg.max_open_positions {
                     break;
@@ -387,14 +494,20 @@ impl OptionsBotExecutor {
                     .map(|_| ())
                 };
                 match res {
-                    Ok(()) => open += 1,
+                    Ok(()) => {
+                        open += 1;
+                        status.open_positions = open;
+                    }
                     Err(e) => {
                         tracing::warn!("options bot {substrategy}: entry {id} refused: {e}");
+                        status.last_refusal = Some(format!("{id}: {e}"));
+                        self.note_refusal(substrategy, &id);
                         break;
                     }
                 }
             }
         }
+        Self::note_tick(state, status);
         poll
     }
 }
@@ -465,6 +578,22 @@ mod tests {
         assert!(OptionsBotExecutor::save_config(&st, &bad).is_err());
         let (_, mode) = OptionsBotExecutor::load_config(&st, "parity");
         assert_eq!(mode, BotMode::Auto); // previous config untouched
+    }
+
+    #[test]
+    fn refusal_cooldown_scopes_per_substrategy() {
+        let bot = OptionsBotExecutor::new();
+        bot.note_refusal("parity", "opar-BTC-1-2-conversion");
+        assert!(bot.is_cooling("parity", "opar-BTC-1-2-conversion"));
+        // Same id under another substrategy must not share the window.
+        assert!(!bot.is_cooling("box_spread", "opar-BTC-1-2-conversion"));
+        assert!(!bot.is_cooling("parity", "opar-ETH-1-2-conversion"));
+        // An expired entry stops cooling.
+        bot.refusal_cooldown.lock().insert(
+            OptionsBotExecutor::cooldown_key("parity", "old"),
+            Instant::now() - REFUSAL_COOLDOWN - Duration::from_secs(1),
+        );
+        assert!(!bot.is_cooling("parity", "old"));
     }
 
     #[tokio::test]

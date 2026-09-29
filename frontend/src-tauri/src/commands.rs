@@ -71,6 +71,12 @@ pub struct SystemStatusDto {
     pub environment: String,
     pub is_paused: bool,
     pub total_realized_pnl: f64,
+    /// Cumulative option premium cashflow (paid minus received at entry,
+    /// minus fees) for the active env — financing kept out of
+    /// `total_realized_pnl` so Net Profit reflects closed-trade PnL, not
+    /// premium still working inside open packages.
+    #[serde(default)]
+    pub total_premium_outlay_usd: f64,
     pub total_trades_count: usize,
     pub successful_trades_count: usize,
     pub circuit_breaker_status: String,
@@ -79,6 +85,37 @@ pub struct SystemStatusDto {
     pub max_drawdown_usd: f64,
     pub consecutive_failures: u32,
     pub active_venues: Vec<VenueStatusDto>,
+    /// Per-lane WS feed telemetry — attempts, backoff ETA, last connect
+    /// epoch. Lanes missing from this list are not supervised at all.
+    #[serde(default)]
+    pub feed_lanes: Vec<FeedLaneStatusDto>,
+}
+
+/// One supervised WS feed lane's live connection telemetry, reported by
+/// the feed.rs supervisor loop. A lane whose books simply age out of the
+/// hub is otherwise invisible — this is the operator's dead-lane surface.
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct FeedLaneStatusDto {
+    pub venue: String,
+    /// `starting` | `connecting` | `connected` | `backoff` | `disabled`
+    /// | `not-admitted` | `paused` | `stopped`.
+    pub phase: String,
+    /// Total connection attempts since process start.
+    pub attempts: u64,
+    /// Consecutive ended/failed connection cycles.
+    pub consecutive_failures: u32,
+    /// Consecutive cycles that died inside 5s (venue-side rejection
+    /// signature driving the extended ~5min backoff).
+    pub instant_kills: u32,
+    /// Wall-clock ms when the socket last opened. Null when the lane has
+    /// never connected this boot — never fabricated.
+    pub last_connected_ms: Option<i64>,
+    /// Wall-clock ms when the lane last ended or failed.
+    pub last_ended_ms: Option<i64>,
+    /// Wall-clock ms of the next scheduled attempt while backing off.
+    pub backoff_until_ms: Option<i64>,
+    /// Last connection-cycle error; null after a clean end.
+    pub last_error: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -347,6 +384,11 @@ pub struct RiskOverviewDto {
     pub current_drawdown_usd: f64,
     pub max_drawdown_limit_usd: f64,
     pub drawdown_pct: f64,
+    /// USD amount of the current equity total attributable to
+    /// non-USD-collateral repricing vs the UTC-day-start FX — the
+    /// component the drawdown breaker intentionally ignores (coin beta is
+    /// not trading PnL). Positive = coin collateral gained USD value.
+    pub collateral_fx_adjustment_usd: f64,
     pub consecutive_failures: u32,
     pub max_failures_allowed: u32,
     pub total_portfolio_value_usd: f64,
@@ -1386,6 +1428,21 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
         environment: state.env().as_str().to_string(),
         is_paused: *state.is_paused.read(),
         total_realized_pnl: total_pnl,
+        total_premium_outlay_usd: if is_live {
+            state
+                .total_premium_outlay_live
+                .read()
+                .to_string()
+                .parse::<f64>()
+                .unwrap_or(0.0)
+        } else {
+            state
+                .total_premium_outlay
+                .read()
+                .to_string()
+                .parse::<f64>()
+                .unwrap_or(0.0)
+        },
         total_trades_count: total_trades,
         successful_trades_count: success_count,
         circuit_breaker_status: cb_status_str,
@@ -1394,6 +1451,22 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
         max_drawdown_usd: max_drawdown,
         consecutive_failures: cb.consecutive_errors(),
         active_venues: venues,
+        feed_lanes: state
+            .feed_lanes
+            .lock()
+            .iter()
+            .map(|(venue, t)| FeedLaneStatusDto {
+                venue: venue.clone(),
+                phase: t.phase.clone(),
+                attempts: t.attempts,
+                consecutive_failures: t.consecutive_failures,
+                instant_kills: t.instant_kills,
+                last_connected_ms: t.last_connected_ms,
+                last_ended_ms: t.last_ended_ms,
+                backoff_until_ms: t.backoff_until_ms,
+                last_error: t.last_error.clone(),
+            })
+            .collect(),
     })
 }
 
@@ -1528,6 +1601,47 @@ pub(crate) fn enforce_retention_pass(state: &AppEngineState, now_ms: i64) {
     let _ = state.state_store.incremental_vacuum(50_000);
 }
 
+/// Venue-facing fetch spelling for a canonical base. Adapters address
+/// instruments in their own spelling ("BTC-PERPETUAL" on Deribit, which
+/// canonicalizes to itself rather than "BTC"), and option/dated rows share
+/// the underlying's `symbol.base` — matching requires either the
+/// canonical-base form or a linear (perp/spot) instrument carrying the
+/// base, never a derivative that merely references it.
+pub(crate) async fn venue_fetch_symbol(
+    state: &AppEngineState,
+    vid: &str,
+    adapter: &Arc<dyn arbitrageur_core::exchange::ExchangeAdapter>,
+    want_base: &str,
+    fallback: &str,
+) -> String {
+    let Ok(markets) = state.cached_markets(vid, adapter).await else {
+        return fallback.to_string();
+    };
+    markets
+        .iter()
+        .find(|m| m.is_active && m.venue_symbol.eq_ignore_ascii_case(fallback))
+        .or_else(|| {
+            markets.iter().find(|m| {
+                m.is_active
+                    && arbitrageur_core::symbol::canonical_base(&m.venue_symbol)
+                        .eq_ignore_ascii_case(want_base)
+            })
+        })
+        .or_else(|| {
+            markets.iter().find(|m| {
+                m.is_active
+                    && m.symbol.base.eq_ignore_ascii_case(want_base)
+                    && matches!(
+                        m.symbol.market_type,
+                        arbitrageur_core::market::MarketType::Perpetual
+                            | arbitrageur_core::market::MarketType::Spot
+                    )
+            })
+        })
+        .map(|m| m.venue_symbol.clone())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
 pub async fn fetch_orderbooks_impl(
     symbol: &str,
     state: &AppEngineState,
@@ -1555,11 +1669,12 @@ pub async fn fetch_orderbooks_impl(
                 continue;
             }
         }
+        let fetch_sym = venue_fetch_symbol(state, vid, &adapter, &want_base, symbol).await;
         let book = match crate::ws_primary::resolve_book_ws_first(
             &state.market_data_hub,
             &state.orderbook_flights,
             &adapter,
-            symbol,
+            &fetch_sym,
             std::time::Duration::from_millis(350),
         )
         .await
@@ -1787,11 +1902,12 @@ pub async fn fetch_multi_market_quotes_impl(
                     continue;
                 }
             }
+            let fetch_sym = venue_fetch_symbol(state, _vid, adapter, &want_base, &sym).await;
             let book = match crate::ws_primary::resolve_book_ws_first(
                 &state.market_data_hub,
                 &state.orderbook_flights,
                 adapter,
-                &sym,
+                &fetch_sym,
                 std::time::Duration::from_millis(500),
             )
             .await
@@ -1881,13 +1997,40 @@ pub async fn scan_spatial_opportunities_impl(
     }
 
     let mut books = Vec::new();
+    let want_base = arbitrageur_core::symbol::canonical_base(symbol);
     for (vid, vname, adapter) in &venues {
         let venue_id = adapter.venue_id();
+        let fetch_sym = venue_fetch_symbol(state, vid, adapter, &want_base, symbol).await;
+        // Same listing gate as fetch_orderbooks_impl: a venue whose cached
+        // markets provably lack the base can never resolve the book — skip
+        // its REST fallback rather than paying a guaranteed failure per
+        // scan. A fresh hub book already proves listing, so the gate only
+        // guards the REST branch; a failed/absent listing can't disprove.
+        let hub_fresh = state
+            .market_data_hub
+            .get_valid_orderbook(
+                &venue_id,
+                &fetch_sym,
+                Some(std::time::Duration::from_millis(350)),
+            )
+            .is_some();
+        if !hub_fresh {
+            if let Ok(markets) = state.cached_markets(vid, adapter).await {
+                let listed = markets.iter().any(|m| {
+                    m.symbol.base.eq_ignore_ascii_case(&want_base)
+                        || arbitrageur_core::symbol::canonical_base(&m.venue_symbol)
+                            .eq_ignore_ascii_case(&want_base)
+                });
+                if !listed {
+                    continue;
+                }
+            }
+        }
         let book = match crate::ws_primary::resolve_book_ws_first(
             &state.market_data_hub,
             &state.orderbook_flights,
             adapter,
-            symbol,
+            &fetch_sym,
             std::time::Duration::from_millis(350),
         )
         .await
@@ -2449,15 +2592,21 @@ pub async fn execute_spot_arbitrage_impl(
     ) {
         Some(b) => b,
         None => {
-            let b = buy_adapter
-                .fetch_orderbook(&params.symbol)
-                .await
-                .map_err(|e| {
-                    format!(
-                        "No fresh {} orderbook for {}: {}",
-                        params.buy_venue, params.symbol, e
-                    )
-                })?;
+            let want_base = arbitrageur_core::symbol::canonical_base(&params.symbol);
+            let fetch_sym = venue_fetch_symbol(
+                state,
+                &params.buy_venue,
+                &buy_adapter,
+                &want_base,
+                &params.symbol,
+            )
+            .await;
+            let b = buy_adapter.fetch_orderbook(&fetch_sym).await.map_err(|e| {
+                format!(
+                    "No fresh {} orderbook for {}: {}",
+                    params.buy_venue, fetch_sym, e
+                )
+            })?;
             validate_adapter_book(&b, &buy_adapter.venue_id(), &params.symbol)
                 .map_err(|e| format!("Buy-side order book rejected: {e}"))?;
             state.market_data_hub.update_orderbook(b.clone());
@@ -4688,6 +4837,14 @@ pub async fn acknowledge_signal(
     resolution: String,
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<String, String> {
+    acknowledge_signal_impl(&signal_id, &resolution, state.inner().as_ref())
+}
+
+pub fn acknowledge_signal_impl(
+    signal_id: &str,
+    resolution: &str,
+    state: &AppEngineState,
+) -> Result<String, String> {
     let resolution = resolution.trim().to_lowercase();
     let target = match resolution.as_str() {
         "failed" => crate::state_store::SignalStatus::Failed,
@@ -4696,7 +4853,7 @@ pub async fn acknowledge_signal(
     };
     let sig = state
         .state_store
-        .get_signal(&signal_id)
+        .get_signal(signal_id)
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("Signal '{signal_id}' not found"))?;
     let allowed = matches!(
@@ -5261,7 +5418,7 @@ pub(crate) async fn maybe_record_margin_snapshots(state: &AppEngineState, now_ms
         };
         // Feed the drawdown breaker from the background lane too — the
         // halt must not depend on someone watching the Risk Overview.
-        crate::execution::feed_breaker_equity_usd(state, vid, account.equity);
+        crate::execution::feed_breaker_equity_usd(state, vid, account.equity, &account.balances);
         let equity = match account.equity.to_string().parse::<f64>() {
             Ok(v) if v.is_finite() && v >= 0.0 => v,
             _ => continue,
@@ -6490,6 +6647,11 @@ mod tests {
         state.market_data_hub.update_funding(r_hl);
         state.market_data_hub.update_funding(r_lgt);
         seed_test_funding(&state, "vanta", "BTC-USDC");
+        // Carry rows require a fresh two-sided book per leg venue.
+        for venue in ["hyperliquid", "lighter", "vanta"] {
+            seed_test_book(&state, venue, "BTC-USDC", dec!(99_900.0), dec!(100_100.0));
+            seed_test_book(&state, venue, "ETH-USDC", dec!(2_499.0), dec!(2_501.0));
+        }
 
         let opps_btc = scan_funding_opportunities_impl("BTC-USDC", 25000.0, &state)
             .await
@@ -8783,6 +8945,10 @@ mod tests {
         state.market_data_hub.update_funding(r_hl);
         state.market_data_hub.update_funding(r_lgt);
         seed_test_funding(&state, "vanta", "AVAX-USDC");
+        // Carry rows require a fresh two-sided book per leg venue.
+        for venue in ["hyperliquid", "lighter", "vanta"] {
+            seed_test_book(&state, venue, "AVAX-USDC", dec!(28.5), dec!(28.6));
+        }
 
         let opps_avax = scan_funding_opportunities_impl("AVAX-USDC", 10000.0, &state)
             .await
@@ -9343,6 +9509,7 @@ mod tests {
                 .get_valid_orderbook(&arbitrageur_core::types::VenueId::from(venue), symbol, None)
                 .and_then(|b| b.mid_price())
                 .and_then(|m| dec_to_f64(m, "mark mid").ok())
+                .and_then(|p| crate::execution::ledger_px_usd(&state, venue, symbol, p))
         });
         let funding_pos = positions
             .iter()
@@ -10605,8 +10772,10 @@ mod tests {
         let hl_paper = state.get_paper_exchange("hyperliquid").expect("hl paper");
 
         // Drive the paper account into critical margin utilization directly:
-        // open 1.5 BTC at 5x (IM 18000), then drop leverage to 1x so the
-        // position's initial margin becomes 90000 against 100k equity (90%)
+        // open 7.5 BTC at 5x so initial margin is ~90k against 100k equity
+        // (90%). The execution path now applies target leverage BEFORE the
+        // margin snapshot, so the fixture must stay critical even at the
+        // resolved target — 7.5 BTC at 5x does exactly that.
         let mut big_book = arbitrageur_core::quote::OrderBook::new(
             arbitrageur_core::types::VenueId::new("hyperliquid"),
             "BTC-USDC".to_string(),
@@ -10627,7 +10796,7 @@ mod tests {
                 "BTC-USDC",
                 Side::Buy,
                 dec!(60000.0),
-                dec!(1.5),
+                dec!(7.5),
             ))
             .await
             .expect("direct paper order");
@@ -12236,7 +12405,6 @@ mod tests {
         p.funding_max_entry_spread_bps = 30.0;
         p.funding_auto_exit_spread_pct = Some(5.0);
         p.funding_liq_trim_pct = Some(15.0);
-        p.funding_auto_rebalance = true;
         p.funding_rotation_threshold_bps = Some(10.0);
         save_strategy_params_impl(p, &state).expect("valid funding guards save");
         let got = get_strategy_params_impl("funding", &state).expect("read back");
@@ -12244,7 +12412,6 @@ mod tests {
         assert_eq!(got.funding_max_entry_spread_bps, 30.0);
         assert_eq!(got.funding_auto_exit_spread_pct, Some(5.0));
         assert_eq!(got.funding_liq_trim_pct, Some(15.0));
-        assert!(got.funding_auto_rebalance);
         assert_eq!(got.funding_rotation_threshold_bps, Some(10.0));
         // None disables each optional guard.
         let mut p = StrategyParamsDto::defaults_for("funding");
@@ -13731,9 +13898,19 @@ mod tests {
             "free margin must decrease after open: {}",
             after.margin_health.margin_balance_usd
         );
+        // Positions carry no liq prices, but the venue reports account-level
+        // maintenance margin — the portfolio-margin distance is measurable,
+        // so SAFE with a real distance is honest here. UNKNOWN_LIQUIDATION
+        // now only fires when neither level can measure.
         assert_eq!(
-            after.margin_health.status, "UNKNOWN_LIQUIDATION",
-            "open positions without liquidation prices must not report SAFE"
+            after.margin_health.status, "SAFE",
+            "account-level maintenance margin must cover positions without liq prices: {:?}",
+            after.margin_health
+        );
+        assert!(
+            after.margin_health.liquidation_distance_pct > 0.0,
+            "account-level distance must be reported: {}",
+            after.margin_health.liquidation_distance_pct
         );
         let btc = after
             .net_deltas
@@ -14545,6 +14722,63 @@ mod tests {
             .await
             .expect("risk zero start");
         assert_eq!(risk.drawdown_pct, 0.0);
+    }
+
+    /// Two venue adapters backed by one economic account (e.g. AMM venues
+    /// on a shared EVM wallet) must count once — portfolio equity, margin,
+    /// and the breaker feed all key on the shared account, not the venue.
+    #[tokio::test]
+    async fn test_risk_overview_dedups_shared_economic_account() {
+        let state = setup_test_state_with_venues();
+        // hyperliquid + lighter sims pretend to be two adapters on one wallet.
+        for v in ["hyperliquid", "lighter"] {
+            state
+                .test_sim(v)
+                .expect("sim installed")
+                .set_shared_account_key("shared-wallet-1");
+        }
+        let risk = get_risk_overview_impl(&state).await.expect("risk");
+        // 5 venues → 4 economic accounts (hl+lighter share) → 400k.
+        assert_eq!(risk.total_portfolio_value_usd, 400000.0);
+        // The breaker's per-account map carries one bucket for the shared
+        // account, not one per venue id.
+        let map = state.breaker_venue_equity.lock().clone();
+        let shared = map
+            .iter()
+            .filter(|(k, _)| k.ends_with("shared-wallet-1"))
+            .count();
+        assert_eq!(shared, 1, "shared wallet must occupy one breaker bucket");
+        assert_eq!(
+            map.len(),
+            4,
+            "breaker tracks 4 economic accounts, not 5 venue ids"
+        );
+        assert_eq!(
+            map.values().sum::<rust_decimal::Decimal>(),
+            rust_decimal::Decimal::new(400_000, 0)
+        );
+    }
+
+    /// A venue removed from admission must not keep contributing equity to
+    /// the breaker total — its bucket is pruned on the next feed.
+    #[tokio::test]
+    async fn test_breaker_prunes_unadmitted_venue_equity() {
+        let state = setup_test_state_with_venues();
+        let _ = get_risk_overview_impl(&state).await.expect("risk");
+        assert_eq!(state.breaker_venue_equity.lock().len(), 5);
+        // Disable a venue: its stale bucket must drop out of the total.
+        state.settings.write().arcus_enabled = false;
+        let risk = get_risk_overview_impl(&state).await.expect("risk");
+        assert_eq!(risk.total_portfolio_value_usd, 400000.0);
+        assert_eq!(state.breaker_venue_equity.lock().len(), 4);
+        assert!(
+            !state
+                .breaker_venue_equity
+                .lock()
+                .keys()
+                .any(|k| k.ends_with("-arcus")),
+            "disabled venue's equity must not ghost the portfolio total"
+        );
     }
 
     fn seed_samples(state: &AppEngineState, symbol: &str, ts_ms: i64, mids: &[(&str, f64)]) {

@@ -300,23 +300,8 @@ export const ExternalPositionsGadget: React.FC = () => {
             <HandCoins className="w-5 h-5 text-accent-strong" />
             <span>External Positions — Close via Bot</span>
           </h2>
-          <p className="text-xs text-slate-600 font-mono mt-1">
-            Manual (non-system) holdings found on exchanges, minus the bot's own legs. Close reduce-only with live depth pricing.
-          </p>
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          {data?.environment && (
-            <span
-              className={`px-2 py-1 rounded-lg text-[10px] font-mono font-bold border ${
-                data.environment === "live"
-                  ? "bg-loss-dim/40 text-loss border-loss-border/60"
-                  : "bg-accent/10 text-accent-strong border-accent/30"
-              }`}
-              title={data.environment === "live" ? "Live environment — real venue state, real money" : "Testnet environment — real venue demo endpoints"}
-            >
-              {data.environment === "live" ? "LIVE" : "TESTNET"}
-            </span>
-          )}
           <div className="flex gap-1.5" title="Group positions by ticker (net view) or venue (ops view)">
             <button type="button" onClick={() => setGroupBy("ticker")} className={tabCls(groupBy === "ticker")}>
               By Ticker

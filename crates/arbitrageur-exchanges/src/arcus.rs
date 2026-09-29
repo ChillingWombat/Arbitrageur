@@ -47,13 +47,37 @@ pub struct ArcusAdapter {
 }
 
 /// Order-routing parameters for one Arcus market — the `marketId` plus the
-/// top-level `tickSize`/`stepSize` needed to express price and quantity as
-/// the signed integer ticks/quantums the venue requires.
-#[derive(Clone, Copy, Debug)]
+/// tick/step grid needed to express price and quantity as the signed
+/// integer ticks/quantums the venue requires.
+///
+/// Arcus markets carry *dynamic* price tiers (`tickTiers`): the applicable
+/// tick depends on the wire price's band. Each entry is
+/// `(upToPrice, tick)` with `upToPrice` an EXCLUSIVE upper bound; the last
+/// tier omits the bound (applies to every higher price). `tick_size`
+/// retains the top-level `tickSize` only as a legacy fallback when the
+/// venue omits `tickTiers` entirely.
+#[derive(Clone, Debug)]
 struct ArcusMarketSpec {
     market_id: u64,
     tick_size: Decimal,
     step_size: Decimal,
+    /// Ascending by `upToPrice` (`None` last = unbounded). Empty → always
+    /// the top-level `tick_size`.
+    tick_tiers: Vec<(Option<Decimal>, Decimal)>,
+}
+
+impl ArcusMarketSpec {
+    /// Tick for the band containing `price`. `upToPrice` is exclusive:
+    /// a price exactly on a bound belongs to the NEXT tier.
+    fn tick_size_at(&self, price: Decimal) -> Decimal {
+        for (bound, tick) in &self.tick_tiers {
+            match bound {
+                Some(up) if price >= *up => continue,
+                _ => return *tick,
+            }
+        }
+        self.tick_size
+    }
 }
 
 impl ArcusAdapter {
@@ -151,13 +175,13 @@ impl ArcusAdapter {
     /// miss (the same fetch populates `market_specs` for all markets).
     async fn market_spec(&self, market: &str) -> anyhow::Result<ArcusMarketSpec> {
         if let Some(spec) = self.market_specs.read().get(market) {
-            return Ok(*spec);
+            return Ok(spec.clone());
         }
         self.fetch_markets().await?;
         self.market_specs
             .read()
             .get(market)
-            .copied()
+            .cloned()
             .ok_or_else(|| anyhow::anyhow!("Arcus market {market} not listed on /v1/markets"))
     }
 
@@ -218,6 +242,29 @@ impl ArcusAdapter {
             (Side::Sell, true) | (Side::Buy, false) => ticks.floor(),
         };
         snapped * tick_size
+    }
+
+    /// Snap `price` using the tick of the band the SNAPPED result lands in
+    /// — the tier is resolved from the wire price, not the request price.
+    /// Iterates because a snap can cross a tier bound (e.g. a looser market
+    /// bound pushed up into a coarser band); bounded at 4 passes, and
+    /// `exact_units` downstream still fails closed if a malformed tier list
+    /// never converges.
+    fn snap_price_tiered(
+        price: Decimal,
+        spec: &ArcusMarketSpec,
+        side: Side,
+        loosen: bool,
+    ) -> Decimal {
+        let mut p = price;
+        for _ in 0..4 {
+            let snapped = Self::snap_to_tick(p, spec.tick_size_at(p), side, loosen);
+            if snapped == p {
+                return p;
+            }
+            p = snapped;
+        }
+        Self::snap_to_tick(p, spec.tick_size_at(p), side, loosen)
     }
 
     /// Exact integer ticks/quantums: `value / step` must be integral or the
@@ -535,12 +582,46 @@ impl ExchangeAdapter for ArcusAdapter {
                 str_dec("tickSize").filter(|t| *t > dec!(0)),
                 str_dec("stepSize").filter(|s| *s > dec!(0)),
             ) {
+                // Dynamic price bands: `tickTiers` entries carry a `tick`
+                // plus an optional `upToPrice` (EXCLUSIVE upper bound; the
+                // final tier omits it). Sort ascending with the unbounded
+                // tier last; keep only positive ticks — a malformed entry
+                // narrows to the top-level tick rather than misquantizing.
+                let mut tick_tiers: Vec<(Option<Decimal>, Decimal)> = m
+                    .get("tickTiers")
+                    .and_then(|t| t.as_array())
+                    .map(|tiers| {
+                        tiers
+                            .iter()
+                            .filter_map(|t| {
+                                let tick = t
+                                    .get("tick")
+                                    .and_then(|v| v.as_str())
+                                    .and_then(|s| Decimal::from_str_exact(s).ok())
+                                    .filter(|x| *x > dec!(0))?;
+                                let up = t
+                                    .get("upToPrice")
+                                    .and_then(|v| v.as_str())
+                                    .and_then(|s| Decimal::from_str_exact(s).ok())
+                                    .filter(|x| *x > dec!(0));
+                                Some((up, tick))
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                tick_tiers.sort_by(|(a, _), (b, _)| match (a, b) {
+                    (None, None) => std::cmp::Ordering::Equal,
+                    (None, Some(_)) => std::cmp::Ordering::Greater,
+                    (Some(_), None) => std::cmp::Ordering::Less,
+                    (Some(x), Some(y)) => x.cmp(y),
+                });
                 self.market_specs.write().insert(
                     display.to_string(),
                     ArcusMarketSpec {
                         market_id: id,
                         tick_size: tick,
                         step_size: step,
+                        tick_tiers,
                     },
                 );
             }
@@ -865,8 +946,8 @@ impl ExchangeAdapter for ArcusAdapter {
         // mid when the caller didn't supply a bound — snapped looser
         // (buy up / sell down) so the signed tick integer stays aligned.
         let price = match order.price {
-            Some(p) if !is_market => Self::snap_to_tick(p, spec.tick_size, order.side, false),
-            Some(p) => Self::snap_to_tick(p, spec.tick_size, order.side, true),
+            Some(p) if !is_market => Self::snap_price_tiered(p, &spec, order.side, false),
+            Some(p) => Self::snap_price_tiered(p, &spec, order.side, true),
             None if is_market => {
                 let mids = self.fetch_market_prices().await?;
                 let mid = *mids.get(&market).ok_or_else(|| {
@@ -878,12 +959,12 @@ impl ExchangeAdapter for ArcusAdapter {
                     Side::Buy => mid * dec!(1.05),
                     Side::Sell => mid * dec!(0.95),
                 };
-                Self::snap_to_tick(bound, spec.tick_size, order.side, true)
+                Self::snap_price_tiered(bound, &spec, order.side, true)
             }
             None => anyhow::bail!("Arcus limit order requires a price"),
         };
 
-        let p = Self::exact_units(price, spec.tick_size, "price", &market)?;
+        let p = Self::exact_units(price, spec.tick_size_at(price), "price", &market)?;
         // Quantities floor to the step grid — never size up on the wire.
         let qty = (order.quantity / spec.step_size).floor() * spec.step_size;
         let q = Self::exact_units(qty, spec.step_size, "quantity", &market)?;
@@ -1365,6 +1446,81 @@ mod tests {
         assert_eq!(
             ArcusAdapter::snap_to_tick(dec!(84568.0), tick, Side::Buy, false),
             dec!(84568.0)
+        );
+    }
+
+    #[test]
+    fn tick_size_at_resolves_exclusive_price_bands() {
+        let spec = ArcusMarketSpec {
+            market_id: 1,
+            tick_size: dec!(0.01),
+            step_size: dec!(0.001),
+            tick_tiers: vec![
+                (Some(dec!(100)), dec!(0.01)),
+                (Some(dec!(1000)), dec!(0.1)),
+                (None, dec!(1)),
+            ],
+        };
+        // Below the first bound -> base-band tick.
+        assert_eq!(spec.tick_size_at(dec!(0.0004)), dec!(0.01));
+        assert_eq!(spec.tick_size_at(dec!(99.999)), dec!(0.01));
+        // `upToPrice` is EXCLUSIVE: exactly on the bound -> next tier.
+        assert_eq!(spec.tick_size_at(dec!(100)), dec!(0.1));
+        assert_eq!(spec.tick_size_at(dec!(999.9)), dec!(0.1));
+        assert_eq!(spec.tick_size_at(dec!(1000)), dec!(1));
+        assert_eq!(spec.tick_size_at(dec!(50_000)), dec!(1));
+    }
+
+    #[test]
+    fn tick_size_at_falls_back_to_top_level_tick_without_tiers() {
+        let spec = ArcusMarketSpec {
+            market_id: 1,
+            tick_size: dec!(0.05),
+            step_size: dec!(0.01),
+            tick_tiers: vec![],
+        };
+        assert_eq!(spec.tick_size_at(dec!(3.1415)), dec!(0.05));
+    }
+
+    #[test]
+    fn snap_price_tiered_uses_the_snapped_price_band() {
+        let spec = ArcusMarketSpec {
+            market_id: 1,
+            tick_size: dec!(0.01),
+            step_size: dec!(0.001),
+            tick_tiers: vec![
+                (Some(dec!(100)), dec!(0.01)),
+                (Some(dec!(1000)), dec!(0.1)),
+                (None, dec!(1)),
+            ],
+        };
+        // Limit buy just under the 100 bound: ticks at 0.01, stays in-band.
+        assert_eq!(
+            ArcusAdapter::snap_price_tiered(dec!(99.996), &spec, Side::Buy, false),
+            dec!(99.99)
+        );
+        // Loosened buy bound crossing the bound: 99.995 -> ceil to 100.00,
+        // re-resolves to the 0.1 band and stays aligned on it.
+        assert_eq!(
+            ArcusAdapter::snap_price_tiered(dec!(99.995), &spec, Side::Buy, true),
+            dec!(100.0)
+        );
+        // Loosened buy bound just under 1000: lands on 1000.0, re-resolves
+        // to the 1.0 band.
+        assert_eq!(
+            ArcusAdapter::snap_price_tiered(dec!(999.95), &spec, Side::Buy, true),
+            dec!(1000)
+        );
+        // Limit sell above 1000 must never go below the caller bound:
+        // 1050.3 already aligns on the 1.0 grid.
+        assert_eq!(
+            ArcusAdapter::snap_price_tiered(dec!(1050.3), &spec, Side::Sell, false),
+            dec!(1051)
+        );
+        // Market-guard sell loosens DOWN onto the coarser band.
+        assert_eq!(
+            ArcusAdapter::snap_price_tiered(dec!(1050.3), &spec, Side::Sell, true),
+            dec!(1050)
         );
     }
 

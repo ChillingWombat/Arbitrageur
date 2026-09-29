@@ -449,3 +449,101 @@ pub async fn run_wfo_calibration(
 }
 
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+
+/// One point on a portfolio time series (unix-ms timestamp, USD value).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PnlHistoryPointDto {
+    pub ts_ms: i64,
+    pub value_usd: f64,
+}
+
+/// Series feed for the Portfolio P&L gadget: the net-equity walk plus the
+/// external balance operations (deposits/withdrawals/transfers — account
+/// equity moves no strategy order produced). Strategy-side realized P&L is
+/// already served by `list_traded_opportunities`; the frontend joins them.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PnlHistoryDto {
+    /// Net equity across venues — each venue contributes its most recent
+    /// snapshot, so the walk is last-known-carry-forward per venue.
+    pub equity: Vec<PnlHistoryPointDto>,
+    /// External operations, one point per classified delta.
+    pub external: Vec<PnlHistoryPointDto>,
+}
+
+/// Equity-event kinds that are external operations — flows into/out of the
+/// account rather than market repricing of positions we hold. `funding` and
+/// `mark_repricing` stay out: those are position-driven (our strategies put
+/// the positions there).
+const EXTERNAL_EVENT_KINDS: [&str; 3] = ["deposit", "withdrawal", "transfer"];
+
+/// Merge per-venue/account margin snapshots into a net-equity walk:
+/// sorted oldest-first in, carry each account's last-known equity forward,
+/// emit the running total at each snapshot timestamp. Downsamples to at
+/// most `cap` points by keeping the last point per time bucket.
+pub(crate) fn net_equity_walk(
+    snapshots: &[crate::state_store::MarginSnapshot],
+    cap: usize,
+) -> Vec<PnlHistoryPointDto> {
+    let mut latest: std::collections::HashMap<(&str, &str), f64> = Default::default();
+    let mut out: Vec<PnlHistoryPointDto> = Vec::new();
+    for s in snapshots {
+        latest.insert((&s.venue, &s.account_id), s.equity);
+        let total: f64 = latest.values().sum();
+        out.push(PnlHistoryPointDto {
+            ts_ms: s.ts_ms,
+            value_usd: total,
+        });
+    }
+    if cap > 0 && out.len() > cap {
+        // Bucket downsample: keep the last point of each bucket so the last
+        // tick still carries the freshest total.
+        let span = (out.last().unwrap().ts_ms - out.first().unwrap().ts_ms).max(1);
+        let bucket_w = span / cap as i64 + 1;
+        let mut kept = Vec::with_capacity(cap + 1);
+        let mut cur_bucket = i64::MIN;
+        for p in out {
+            let b = p.ts_ms / bucket_w;
+            if b != cur_bucket {
+                kept.push(p);
+                cur_bucket = b;
+            } else {
+                *kept.last_mut().unwrap() = p;
+            }
+        }
+        return kept;
+    }
+    out
+}
+
+pub fn get_pnl_history_impl(state: &AppEngineState) -> Result<PnlHistoryDto, String> {
+    let env = state.env().as_str().to_string();
+    let snaps = state
+        .state_store
+        .list_margin_snapshots_env(0, &env)
+        .map_err(|e| e.to_string())?;
+    let events = state
+        .state_store
+        .list_equity_events_env(&env, &EXTERNAL_EVENT_KINDS, 0, 5000)
+        .map_err(|e| e.to_string())?;
+    Ok(PnlHistoryDto {
+        equity: net_equity_walk(&snaps, 1200),
+        external: events
+            .into_iter()
+            .map(|e| PnlHistoryPointDto {
+                ts_ms: e.ts_ms,
+                value_usd: e.delta,
+            })
+            .collect(),
+    })
+}
+
+/// P&L/equity history for the Portfolio gadget, scoped to the active env.
+#[tauri::command]
+pub async fn get_pnl_history(
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<PnlHistoryDto, String> {
+    get_pnl_history_impl(&state)
+}

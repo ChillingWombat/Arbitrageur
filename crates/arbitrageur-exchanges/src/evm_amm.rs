@@ -1795,6 +1795,16 @@ impl ExchangeAdapter for EvmAmmAdapter {
         self.venue_id.clone()
     }
 
+    fn economic_account_key(&self) -> Option<String> {
+        // AMM adapters on the same chain trade from the same wallet — the
+        // (chain, wallet) pair is the economic account, so portfolio sums
+        // deduplicate adapters sharing it. The chain id stays in the key:
+        // one key controls the same address on every EVM chain but each
+        // chain's balances are a separate account.
+        self.wallet_address_hex()
+            .map(|w| format!("evm-wallet:{}:{}", self.spec.chain_id, w.to_lowercase()))
+    }
+
     fn name(&self) -> &str {
         self.name
     }

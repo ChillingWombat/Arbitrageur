@@ -31,12 +31,21 @@ impl DeltaGuard {
     /// Signed base quantities are netted first, then the residual quantity is
     /// valued at the maximum positive mark observed for that base, so equal
     /// long/short quantities remain delta-neutral even when venue marks differ.
+    ///
+    /// Option legs are parity-netted per (expiry, strike): put-call parity
+    /// makes `Δ_call − Δ_put = 1` identically, so an opposite-sign C/P pair
+    /// contributes exactly ±1 per unit of base regardless of greeks — a
+    /// conversion (short C + long P) is exactly −1, matching the +1 perp leg
+    /// it hedges. Unmatched option residuals count ±1 by type (call +1 /
+    /// put −1) — the deep-ITM bound, conservative for guard purposes.
     pub fn calculate_net_delta(
         &self,
         positions: &[Position],
     ) -> HashMap<String, (Decimal, Decimal)> {
         let mut delta_map: HashMap<String, (Decimal, Decimal)> = HashMap::new();
         let mut max_mark: HashMap<String, Decimal> = HashMap::new();
+        // (base, expiry, strike) -> (net signed call qty, net signed put qty)
+        let mut opt_pairs: HashMap<(String, String, String), (Decimal, Decimal)> = HashMap::new();
 
         for pos in positions {
             let base = pos
@@ -45,13 +54,44 @@ impl DeltaGuard {
                 .next()
                 .unwrap_or(&pos.symbol)
                 .to_uppercase();
-            let entry = delta_map.entry(base.clone()).or_insert((dec!(0), dec!(0)));
-            entry.0 += pos.signed_quantity();
+            delta_map.entry(base.clone()).or_insert((dec!(0), dec!(0)));
             if pos.mark_price > dec!(0) {
-                let m = max_mark.entry(base).or_insert(dec!(0));
+                let m = max_mark.entry(base.clone()).or_insert(dec!(0));
                 if pos.mark_price > *m {
                     *m = pos.mark_price;
                 }
+            }
+            if let Some((expiry, strike, is_call)) = parse_option_key(&pos.symbol) {
+                let e = opt_pairs
+                    .entry((base, expiry, strike))
+                    .or_insert((dec!(0), dec!(0)));
+                if is_call {
+                    e.0 += pos.signed_quantity();
+                } else {
+                    e.1 += pos.signed_quantity();
+                }
+            } else {
+                delta_map.entry(base).or_insert((dec!(0), dec!(0))).0 += pos.signed_quantity();
+            }
+        }
+
+        for ((base, _, _), (calls, puts)) in opt_pairs {
+            // Opposite-sign pairing: a synthetic forward is C − P. Where call
+            // and put nets oppose, the matched portion is exactly ±m of base
+            // delta — venue greeks cannot improve on the parity identity.
+            // `paired` is signed: negative = conversion-like (short C + long
+            // P → −m), positive = reversal-like (long C + short P → +m).
+            let paired = if calls < dec!(0) && puts > dec!(0) {
+                -(-calls).min(puts)
+            } else if calls > dec!(0) && puts < dec!(0) {
+                calls.min(-puts)
+            } else {
+                dec!(0)
+            };
+            let (res_calls, res_puts) = (calls - paired, puts + paired);
+            let contribution = paired + res_calls - res_puts;
+            if contribution != dec!(0) {
+                delta_map.entry(base).or_insert((dec!(0), dec!(0))).0 += contribution;
             }
         }
 
@@ -151,6 +191,29 @@ impl DeltaGuard {
     }
 }
 
+/// Parse a Deribit-style option symbol (`BTC-27NOV26-112000-C`) into
+/// (expiry, strike, is_call). Same four-part shape as the fixed-contract
+/// detector used by the samples pipeline: ≥4 dash parts, last part `C`/`P`,
+/// penultimate part numeric. Anything else returns `None` and counts as a
+/// plain linear position.
+fn parse_option_key(symbol: &str) -> Option<(String, String, bool)> {
+    let parts: Vec<&str> = symbol.split('-').collect();
+    if parts.len() < 4 {
+        return None;
+    }
+    let is_call = match *parts.last()? {
+        "C" => true,
+        "P" => false,
+        _ => return None,
+    };
+    let strike = parts[parts.len() - 2];
+    strike.parse::<f64>().ok()?;
+    // Everything between base and strike is the expiry key — keeps pairs
+    // grouped across tenor spellings without validating the date itself.
+    let expiry = parts[1..parts.len() - 2].join("-");
+    Some((expiry, strike.to_string(), is_call))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -213,6 +276,66 @@ mod tests {
         let (net_qty, exposure) = deltas["BTC"];
         assert_eq!(net_qty, dec!(0));
         assert_eq!(exposure, dec!(0));
+    }
+
+    #[test]
+    fn test_conversion_package_nets_to_zero_delta() {
+        // Short call + long put at the same strike/expiry + long perp is a
+        // delta-neutral conversion. Put-call parity makes the option pair
+        // exactly −1 per unit — the +1 perp must cancel it precisely.
+        let guard = DeltaGuard::new(dec!(1000.0));
+        let pos = |sym: &str, side: Side, qty: Decimal, mark: Decimal| Position {
+            venue: "v".into(),
+            symbol: sym.into(),
+            side,
+            quantity: qty,
+            entry_price: mark,
+            mark_price: mark,
+            unrealized_pnl: dec!(0),
+            realized_pnl: dec!(0),
+            liquidation_price: None,
+            leverage: dec!(5),
+            initial_margin: dec!(0),
+            maintenance_margin: dec!(0),
+            updated_at: chrono::Utc::now(),
+        };
+        let deltas = guard.calculate_net_delta(&[
+            pos("BTC-27NOV26-112000-C", Side::Sell, dec!(1.0), dec!(274.0)),
+            pos("BTC-27NOV26-112000-P", Side::Buy, dec!(1.0), dec!(28586.0)),
+            pos("BTC-PERPETUAL", Side::Buy, dec!(0.99983), dec!(82984.0)),
+        ]);
+        let (qty, _) = deltas["BTC"];
+        assert!(qty.abs() < dec!(0.001), "conversion must net ~0, got {qty}");
+    }
+
+    #[test]
+    fn test_unpaired_option_counts_by_type() {
+        // Lone options without a parity partner stay conservative: calls +1,
+        // puts −1 per unit (deep-ITM bound). A straddle nets ~0.
+        let guard = DeltaGuard::new(dec!(1000.0));
+        let pos = |sym: &str, side: Side, qty: Decimal| Position {
+            venue: "v".into(),
+            symbol: sym.into(),
+            side,
+            quantity: qty,
+            entry_price: dec!(1),
+            mark_price: dec!(50000),
+            unrealized_pnl: dec!(0),
+            realized_pnl: dec!(0),
+            liquidation_price: None,
+            leverage: dec!(1),
+            initial_margin: dec!(0),
+            maintenance_margin: dec!(0),
+            updated_at: chrono::Utc::now(),
+        };
+        let lone_call =
+            guard.calculate_net_delta(&[pos("BTC-27NOV26-112000-C", Side::Buy, dec!(0.5))]);
+        assert_eq!(lone_call["BTC"].0, dec!(0.5));
+        let straddle = guard.calculate_net_delta(&[
+            pos("BTC-27NOV26-112000-C", Side::Buy, dec!(1.0)),
+            pos("BTC-27NOV26-112000-P", Side::Buy, dec!(1.0)),
+        ]);
+        assert_eq!(straddle["BTC"].0, dec!(0));
     }
 
     #[test]

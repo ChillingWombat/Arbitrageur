@@ -1344,12 +1344,14 @@ impl ExchangeAdapter for DecibelAdapter {
         let owner = self.resolve_owner(&configured).await?;
         let subaccount = self.primary_subaccount(&owner).await?;
 
-        // 2. Balances via the official `/api/v1/account_overviews`.
+        // 2. Balances via the official `/api/v1/account_overviews`. A failed
+        // read must propagate — swallowing it would report equity=0 as venue
+        // truth (observed: a rate-limit flake logged a phantom withdrawal,
+        // and a fabricated zero could read as a drawdown to risk callers).
         let overview = self
             .get_json(&format!("/api/v1/account_overviews?account={subaccount}"))
             .await
-            .map(|v| envelope_data(&v).clone())
-            .unwrap_or(serde_json::Value::Null);
+            .map(|v| envelope_data(&v).clone())?;
         let total_equity = dec_f64(overview.get("perp_equity_balance")).unwrap_or(dec!(0));
         let free_margin = dec_f64(overview.get("usdc_cross_withdrawable_balance"))
             .or_else(|| dec_f64(overview.get("usdc_cross_balance")))

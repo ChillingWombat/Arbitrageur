@@ -57,6 +57,35 @@
   resting orders; never claim fills from submit acknowledgements.
 - Venue truth via `fetch_order` polling; order identity is durable state.
 - Emergency exits stay market. Everything else follows the configured policy.
+- **Symbol matching:** ledger legs may persist bare engine symbols (`BTC`)
+  while venue account rows arrive normalized (`BTC-USDC`,
+  `PERP_BTC_USDC`). Any ledger↔venue symbol comparison must go through
+  `canonical_base` — never `eq_ignore_ascii_case`. A position lookup
+  returning `Ok(None)` means "venue confirmed flat"; an error or missing
+  account means "undetermined" — never flatten-as-zero.
+- **Client order ids:** venue limits differ — Orderly/Vanta caps at 36
+  chars. Mint bounded wire ids; keep the descriptive form on the ledger id.
+
+## Operational (testnet/desktop)
+
+- The release binary runs as a transient user service:
+  `systemctl --user restart arbitrageur-testnet.service` (Restart=on-failure,
+  MemoryMax cgroup cap, journald logs). Never `pkill -f arbitrageur` from a
+  shell whose own command line contains the pattern — it kills your shell.
+- Dev RPC: set `ARBITRAGEUR_DEV_SOCK=/tmp/arb-dev.sock` at launch; then
+  `echo '{"cmd":"unlock_vault","args":{"password":"…"}}' | socat - UNIX-CONNECT:/tmp/arb-dev.sock`.
+  Args live under `"args"`. Useful cmds: `system_status`, `open_positions`,
+  `external_positions` (slow — serial `fetch_account` per venue, can exceed
+  3min), `reconcile_orders`, `flatten_ticker`, `cancel_venue_order`,
+  `acknowledge_signal`, `signal_executions`, `radar_bot_status`,
+  `monitor_snapshot`, `strategy_params`/`set_strategy_params`.
+- Ledger: `sqlite3 ~/.arbitrageur/state.sqlite3` — `signal_executions`,
+  `signal_legs`, `monitor_signal_events` (bot_decision `economics_json`
+  carries `skipReason`), `exchange_accounts`, `account_equity_events`.
+- Lighter testnet reaps accounts silently — an account index that worked
+  yesterday can `400 not found` today. A disabled or non-default
+  `exchange_accounts` row means the adapter binds no credentials: the
+  venue is silently unreadable, not even flagged.
 
 ## Verification
 

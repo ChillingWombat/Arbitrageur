@@ -86,10 +86,6 @@ export const RebalanceEstimatorGadget: React.FC<Props> = ({ venueBalances = null
           <ArrowRightLeft className="w-5 h-5 text-accent-strong" />
           <span>Rebalance Friction Estimator</span>
         </h2>
-        <p className="text-xs text-slate-600 font-mono mt-1">
-          Cost of moving funds venue → venue: withdraw + gas + deposit + swap.
-          Fees marked ~ are researched estimates — re-check the venue withdraw page before moving size.
-        </p>
       </div>
 
       {/* Form: from / to / amount / profit + route + swap toggles. All controls share h-9. */}

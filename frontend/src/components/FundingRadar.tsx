@@ -3,6 +3,9 @@ import { SlidersHorizontal, X, ChevronDown, Check } from "lucide-react";
 import type { FundingOpportunityDto, FundingTrendDto, ExecutionLogEntry, OpenPositionDto, FixedYieldMaturityDto, FixedYieldExitQuoteDto, TradedOpportunityDto } from "../types";
 import { api, describeCommandError } from "../services/api";
 import type { PerpTicker } from "../types/tickers";
+import { formatStrategyName } from "../types/tickers";
+import { formatDuration } from "../services/matrixQuant";
+import { formatQty } from "./PositionsPanel";
 import { BotLifecycleControls, BotPhaseBadge } from "./BotLifecycleControls";
 import { TickerTransactionHistory } from "./TickerTransactionHistory";
 import { TickerLogMonitor } from "./TickerLogMonitor";
@@ -1087,6 +1090,15 @@ export const fundingAutoEligible = (
   minAprPct: number,
 ): boolean => o.net_apr_pct >= minAprPct && o.kind !== "fixed_yield";
 
+/** Signed venue rows → display legs for the position table: positive netQty is
+ *  the long side, negative the short side, `legQty` the column's max |qty|. */
+export function splitFundingLegs(venues: { venue: string; symbol: string; netQty: number }[]) {
+  const longLegs = venues.filter((v) => v.netQty > 0);
+  const shortLegs = venues.filter((v) => v.netQty < 0);
+  const legQty = Math.max(...venues.map((v) => Math.abs(v.netQty)), 0);
+  return { longLegs, shortLegs, legQty };
+}
+
 export const FundingRadar: React.FC<FundingRadarProps> = ({
   opportunities,
   availableTickers: _availableTickers,
@@ -1338,9 +1350,9 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
           {isLive && bot.entriesAllowed && (
             <span
               className="text-xs font-mono text-amber-700 max-w-56"
-              title="Autonomous entries stay testnet-only in live mode — use manual Execute"
+              title="Autonomous entries are disabled in this environment — use manual Execute"
             >
-              Live: auto-carry off, manual only
+              Auto-carry off — manual only
             </span>
           )}
           {bot.lastError && (
@@ -1698,35 +1710,88 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
                 hint="Carry/basis fills aggregate here per symbol with live PnL after execution. Live entries dispatch on venues with credentials in the unlocked vault and adapter order polling."
               />
             ) : (
-              <div className="divide-y divide-surface-border">
-                {fundingPositions.map((pos) => {
-                  const pnl = pos.unrealizedPnlUsd;
-                  return (
-                    <button
-                      key={pos.key}
-                      type="button"
-                      onClick={() => setDetailPosKey(pos.key)}
-                      className="w-full flex items-center justify-between gap-3 px-2 py-2.5 rounded-lg hover:bg-slate-50 transition cursor-pointer text-left"
-                      title="Click for position details and PnL trend"
-                    >
-                      <div className="min-w-0">
-                        <div className="text-xs font-sans font-bold text-slate-900 truncate">{pos.symbol}</div>
-                        <div className="text-[11px] font-sans text-slate-500 truncate">
-                          {pos.venues.map((v) => v.venue).join(" / ") || pos.strategyId}
-                        </div>
-                      </div>
-                      <div className="text-right shrink-0">
-                        <div className={`text-xs font-sans font-bold tabular-nums ${pnl != null && pnl < 0 ? "text-loss" : "text-profit"}`}>
-                          {pnl != null ? `${pnl >= 0 ? "+" : "-"}$${Math.abs(pnl).toFixed(2)}` : "—"}
-                        </div>
-                        <div className="text-[11px] font-sans text-slate-500 tabular-nums">
+              <table className="w-full text-left text-xs font-mono tabular-nums">
+                <thead>
+                  <tr className="border-b border-surface-border text-slate-500 text-xs font-semibold tracking-wider">
+                    <th className="py-2.5 px-3">Position</th>
+                    <th className="py-2.5 px-3">Long Leg</th>
+                    <th className="py-2.5 px-3">Short Leg</th>
+                    <th className="py-2.5 px-3 text-right">Qty</th>
+                    <th className="py-2.5 px-3 text-right">Notional</th>
+                    <th className="py-2.5 px-3 text-right">Unrealized</th>
+                    <th className="py-2.5 px-3 text-right">Exp. Net</th>
+                    <th className="py-2.5 px-3 text-right">Fees</th>
+                    <th className="py-2.5 px-3 text-right">Age</th>
+                    <th className="py-2.5 px-3 text-right">Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-surface-border">
+                  {fundingPositions.map((pos) => {
+                    const pnl = pos.unrealizedPnlUsd;
+                    const { longLegs, shortLegs, legQty } = splitFundingLegs(pos.venues);
+                    const t0 = Date.parse(pos.openedAt);
+                    const ageSecs = Number.isFinite(t0) ? Math.max(0, (Date.now() - t0) / 1000) : null;
+                    const legCell = (legs: typeof pos.venues, signCls: string) =>
+                      legs.length === 0 ? (
+                        <span className="text-slate-400">—</span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1.5 whitespace-nowrap">
+                          {legs.map((v) => (
+                            <span key={v.venue + v.symbol} className="inline-flex items-center gap-1">
+                              <VenueLogo venueId={v.venue} name={v.venue} size={13} />
+                              <span className="text-slate-700">{v.venue}</span>
+                              <span className={signCls}>{v.netQty > 0 ? "+" : ""}{formatQty(v.netQty)}</span>
+                            </span>
+                          ))}
+                        </span>
+                      );
+                    return (
+                      <tr
+                        key={pos.key}
+                        onClick={() => setDetailPosKey(pos.key)}
+                        className="hover:bg-surface-raised/60 transition cursor-pointer"
+                        title="Click for position details and PnL trend"
+                      >
+                        <td className="py-2.5 px-3 whitespace-nowrap">
+                          <div className="font-bold text-slate-900">{pos.symbol}</div>
+                          <div className="text-[10px] text-slate-500">{formatStrategyName(pos.strategyId)}</div>
+                        </td>
+                        <td className="py-2.5 px-3">{legCell(longLegs, "text-profit")}</td>
+                        <td className="py-2.5 px-3">{legCell(shortLegs, "text-loss")}</td>
+                        <td className="py-2.5 px-3 text-right text-slate-700">
+                          {legQty > 0 ? formatQty(legQty) : "—"}
+                        </td>
+                        <td className="py-2.5 px-3 text-right text-slate-700">
                           {pos.notionalUsd != null ? `$${pos.notionalUsd.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : "—"}
-                        </div>
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
+                        </td>
+                        <td className={`py-2.5 px-3 text-right font-bold ${pnl != null && pnl < 0 ? "text-loss" : "text-profit"}`}>
+                          {pnl != null ? `${pnl >= 0 ? "+" : "-"}$${Math.abs(pnl).toFixed(2)}` : "—"}
+                        </td>
+                        <td className={`py-2.5 px-3 text-right ${pos.expectedNetUsd != null && pos.expectedNetUsd < 0 ? "text-loss" : "text-slate-700"}`}>
+                          {pos.expectedNetUsd != null ? `${pos.expectedNetUsd >= 0 ? "+" : "-"}$${Math.abs(pos.expectedNetUsd).toFixed(2)}` : "—"}
+                        </td>
+                        <td className="py-2.5 px-3 text-right text-slate-500">
+                          {pos.feesUsd !== 0 ? `−$${Math.abs(pos.feesUsd).toFixed(2)}` : "—"}
+                        </td>
+                        <td className="py-2.5 px-3 text-right text-slate-600 whitespace-nowrap">
+                          {ageSecs != null ? formatDuration(ageSecs) : "—"}
+                        </td>
+                        <td className="py-2.5 px-3 text-right whitespace-nowrap">
+                          {pos.reduceOnly ? (
+                            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold border border-warn-border bg-warn-dim/40 text-warn-strong">
+                              Reduce-only
+                            </span>
+                          ) : (
+                            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold border border-profit-border bg-profit-dim/40 text-profit">
+                              Working
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             )}
             </>
           ) : dockTab === "history" ? (

@@ -752,6 +752,29 @@ pub async fn execute_triangle_arbitrage_impl(
             ));
         }
     }
+    let (target_leverage, _account_cap) = resolve_effective_leverage(
+        state,
+        "futures",
+        "futures",
+        &plan.leg_symbols[0],
+        &params.venue,
+        &params.venue,
+        None,
+    )?;
+    // Apply leverage BEFORE the account snapshot so the margin bound
+    // prices what the venue proved. A leg whose set fails (or whose venue
+    // cannot set leverage) degrades to 1x — full notional collateral —
+    // never silently assumed at the desired value.
+    let mut proven_lev = target_leverage.max(1);
+    for sym in &plan.leg_symbols {
+        if let Err(e) = adapter.set_leverage(sym, target_leverage).await {
+            tracing::warn!(
+                "triangle set_leverage {target_leverage}x on {} {sym} failed: {e} — sizing margin at the conservative 1x bound",
+                params.venue
+            );
+            proven_lev = 1;
+        }
+    }
     let pre_acc = adapter
         .fetch_account()
         .await
@@ -770,21 +793,13 @@ pub async fn execute_triangle_arbitrage_impl(
         }
     }
 
-    let (target_leverage, _account_cap) = resolve_effective_leverage(
-        state,
-        "futures",
-        "futures",
-        &plan.leg_symbols[0],
-        &params.venue,
-        &params.venue,
-        None,
-    )?;
     // Margin check runs in venue settlement units: the USD trade size is
     // a USDC notional on the venue at the venue-local rate.
     let size_dec = Decimal::from_f64_retain(params.trade_size_usd / usdc_rate)
         .ok_or_else(|| "Invalid trade size".to_string())?;
-    // Conservative margin bound: three full-notional legs against free margin.
-    let total_im = size_dec * dec!(3) / Decimal::from(target_leverage);
+    // Conservative margin bound: three full-notional legs against free
+    // margin, at the leverage every leg PROVED.
+    let total_im = size_dec * dec!(3) / Decimal::from(proven_lev);
     if total_im > pre_acc.free_margin {
         return Err(format!(
             "Insufficient free margin on {}: required {total_im} > available {}",
@@ -930,6 +945,21 @@ pub async fn execute_triangle_arbitrage_impl(
             qty,
         );
         let client_oid = order.client_order_id.clone();
+        // Persist the client order id BEFORE dispatch: the id rides the
+        // venue wire, so a crash between accept and ack write keeps the
+        // reconciler a locator. Without it the dispatch is unrecoverable.
+        if let Err(e) =
+            state
+                .state_store
+                .record_leg_client_order_id(&leg_signal_id, leg_side, &client_oid)
+        {
+            mark_failed(&leg_signal_id, &format!("client id persist failed: {e}"));
+            leg_error = Some(format!(
+                "leg {} on {sym} client id persist failed: {e}",
+                idx + 1
+            ));
+            break;
+        }
         let mut resp = match adapter.place_order(order).await {
             Ok(r) => r,
             Err(e) => {
@@ -1061,7 +1091,12 @@ pub async fn execute_triangle_arbitrage_impl(
             record_errors.push(format!("leg {} has no persisted signal", idx + 1));
             continue;
         };
-        let px_f = match dec_to_f64(fill_px, "triangle fill price") {
+        let px_f = match dec_to_f64(fill_px, "triangle fill price")
+            .map_err(|e| e.to_string())
+            .and_then(|v| {
+                crate::execution::ledger_px_usd(state, &resp.venue.to_string(), &resp.symbol, v)
+                    .ok_or_else(|| format!("leg {} fill lacks USD conversion", idx + 1))
+            }) {
             Ok(v) => v,
             Err(e) => {
                 record_errors.push(e);

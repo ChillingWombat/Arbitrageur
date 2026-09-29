@@ -750,11 +750,36 @@ async fn scan_funding_opportunities_for_symbol(
         if perp_books.contains_key(*vid) {
             continue;
         }
-        if let Some(book) = state.market_data_hub.get_valid_orderbook(
+        let book = match state.market_data_hub.get_valid_orderbook(
             &VenueId::from(*vid),
             symbol,
             Some(std::time::Duration::from_secs(120)),
         ) {
+            Some(b) => Some(b),
+            // The hub keys books under the venue-native spelling — under
+            // `separate` quote mode that spelling (e.g. robinhood's
+            // `JUP-PERP`) does not alias to the scan symbol. Resolve the
+            // venue's fetch spelling before declaring the book absent.
+            None => {
+                let native = match state.get_adapter(vid) {
+                    Some(adapter) => {
+                        crate::commands::venue_fetch_symbol(state, vid, &adapter, symbol, symbol)
+                            .await
+                    }
+                    None => symbol.to_string(),
+                };
+                if native.eq_ignore_ascii_case(symbol) {
+                    None
+                } else {
+                    state.market_data_hub.get_valid_orderbook(
+                        &VenueId::from(*vid),
+                        &native,
+                        Some(std::time::Duration::from_secs(120)),
+                    )
+                }
+            }
+        };
+        if let Some(book) = book {
             perp_books.insert(
                 vid.to_string(),
                 (parse_levels(&book.asks), parse_levels(&book.bids)),
@@ -780,15 +805,22 @@ async fn scan_funding_opportunities_for_symbol(
             let (id_a, _name_a, ref r_a) = rates[i];
             let (id_b, _name_b, ref r_b) = rates[j];
 
-            if let (Some(ma), Some(mb)) =
+            // Both legs must have a fresh two-sided book — a venue can
+            // publish a funding print for a market it has no executable
+            // quotes on (observed: robinhood JUP-USDC, 677% APR row with an
+            // empty book). Listing the pair would show phantom capacity and
+            // churn auto-exec into refusals; the collision check below then
+            // also becomes unconditional.
+            let (Some(ma), Some(mb)) =
                 (top_mid(perp_books.get(id_a)), top_mid(perp_books.get(id_b)))
-            {
-                if (ma / mb).max(mb / ma) > 2.0 {
-                    tracing::warn!(
-                        "funding: refusing {symbol} pair {id_a}/{id_b} — mid mismatch {ma} vs {mb} (symbol collision)"
-                    );
-                    continue;
-                }
+            else {
+                continue;
+            };
+            if (ma / mb).max(mb / ma) > 2.0 {
+                tracing::warn!(
+                    "funding: refusing {symbol} pair {id_a}/{id_b} — mid mismatch {ma} vs {mb} (symbol collision)"
+                );
+                continue;
             }
 
             let Some(fee_total) = funding_round_trip_fee_bps(
@@ -2303,8 +2335,11 @@ pub async fn execute_funding_carry_impl(
     }
 
     // Leverage is per leg: a spot leg books at 1x, perp legs at the
-    // resolved funding leverage. Venue-side set is best-effort — a rejected
-    // change is not fatal but must be visible.
+    // resolved funding leverage. A failed or unimplemented `set_leverage`
+    // degrades that leg's IM pricing to the proven bound (1x — full
+    // notional collateral), so margin is never priced for leverage the
+    // venue may not have applied. Fail-closed; a conservative refusal
+    // beats a one-legged fill.
     let (target_leverage, _account_cap) = resolve_effective_leverage(
         state,
         "funding",
@@ -2314,21 +2349,39 @@ pub async fn execute_funding_carry_impl(
         short_canon,
         None,
     )?;
-    let long_lev: u32 = if is_basis { 1 } else { target_leverage };
-    let short_lev: u32 = target_leverage;
-    for (adapter, lev, exact, canon) in [
-        (&long_adapter, long_lev, long_sym.as_str(), long_canon),
-        (&short_adapter, short_lev, short_sym.as_str(), short_canon),
+    let want_long_lev: u32 = if is_basis { 1 } else { target_leverage };
+    let want_short_lev: u32 = target_leverage;
+    let mut long_lev = 1u32;
+    let mut short_lev = 1u32;
+    for (adapter, want, proven, exact, canon) in [
+        (
+            &long_adapter,
+            want_long_lev,
+            &mut long_lev,
+            long_sym.as_str(),
+            long_canon,
+        ),
+        (
+            &short_adapter,
+            want_short_lev,
+            &mut short_lev,
+            short_sym.as_str(),
+            short_canon,
+        ),
     ] {
-        if let Err(e) = adapter.set_leverage(exact, lev).await {
-            tracing::warn!(
-                "funding set_leverage {lev}x on {canon} {exact} failed: {e} — order will submit at the venue's existing leverage"
-            );
+        match adapter.set_leverage(exact, want).await {
+            Ok(()) => *proven = want,
+            Err(e) => {
+                tracing::warn!(
+                    "funding set_leverage {want}x on {canon} {exact} failed: {e} — sizing margin at the conservative 1x bound"
+                );
+            }
         }
     }
 
     // Initial margin aggregates by canonical venue: a same-venue pair must
-    // cover the spot leg's full notional plus the perp leg's IM.
+    // cover the spot leg's full notional plus the perp leg's IM. Each leg
+    // prices at the leverage it PROVED, never the desired value alone.
     let long_im = (qty * long_vwap) / Decimal::from(long_lev.max(1));
     let short_im = (qty * short_vwap) / Decimal::from(short_lev.max(1));
     let acc_long = acc_long_pre;
@@ -2509,6 +2562,23 @@ pub async fn execute_funding_carry_impl(
         short_bid,
         qty,
     );
+    // Persist each leg's client order id BEFORE dispatch so a crash between
+    // venue accept and ack persistence still leaves the reconciler a locator.
+    // A failed write means dispatch would be unrecoverable — refuse it.
+    for (side, order) in [(LegSide::Long, &order_long), (LegSide::Short, &order_short)] {
+        if let Err(e) =
+            state
+                .state_store
+                .record_leg_client_order_id(&signal_id, side, &order.client_order_id)
+        {
+            let _ = state.state_store.update_signal_status(
+                &signal_id,
+                crate::state_store::SignalStatus::Failed,
+                Some("client order id persistence failed — dispatch refused"),
+            );
+            return Err(format!("Failed to persist client order id: {e}"));
+        }
+    }
     let started = std::time::Instant::now();
     let res = state
         .coordinator
@@ -2735,6 +2805,24 @@ pub async fn execute_funding_carry_impl(
                         *bound_dec,
                         *qty_dec,
                     );
+                    // Persist the client order id BEFORE dispatch so a crash
+                    // between venue accept and ack write keeps a locator.
+                    let leg_side = if leg.yu_side == "long" {
+                        crate::state_store::LegSide::Long
+                    } else {
+                        crate::state_store::LegSide::Short
+                    };
+                    if let Err(e) = state.state_store.record_leg_client_order_id(
+                        &yu_signal_id,
+                        leg_side,
+                        &req.client_order_id,
+                    ) {
+                        yu_fatal = Some(format!(
+                            "YU leg {} client id persist failed — dispatch refused: {e}",
+                            leg.yu_symbol
+                        ));
+                        break;
+                    }
                     let step = async {
                         let mut resp = boros_adapter
                             .place_order(req)
@@ -2816,6 +2904,14 @@ pub async fn execute_funding_carry_impl(
                     let px = fill
                         .avg_fill_price
                         .and_then(|p| p.to_string().parse::<f64>().ok())
+                        .and_then(|p| {
+                            crate::execution::ledger_px_usd(
+                                state,
+                                &fill.venue.to_string(),
+                                &fill.symbol,
+                                p,
+                            )
+                        })
                         .unwrap_or(0.0);
                     if filled > 0.0 && px > 0.0 {
                         let fee = fill
@@ -3068,6 +3164,14 @@ pub async fn execute_funding_carry_impl(
                     let px = f
                         .avg_fill_price
                         .and_then(|p| p.to_string().parse::<f64>().ok())
+                        .and_then(|p| {
+                            crate::execution::ledger_px_usd(
+                                state,
+                                &f.venue.to_string(),
+                                &f.symbol,
+                                p,
+                            )
+                        })
                         .unwrap_or(0.0);
                     let fee = f
                         .fee
@@ -3607,6 +3711,19 @@ pub async fn execute_fixed_yield_exit_impl(
             bound,
             qty_dec,
         );
+        // Persist the client order id BEFORE dispatch so a crash between
+        // venue accept and ack write keeps a locator for the reconciler.
+        if let Err(e) =
+            state
+                .state_store
+                .record_leg_client_order_id(&close_id, leg.side, &req.client_order_id)
+        {
+            fatal = Some(format!(
+                "YU exit leg {} client id persist failed — dispatch refused: {e}",
+                leg.symbol
+            ));
+            break;
+        }
         let step = async {
             let mut resp = boros_adapter
                 .place_order(req)
@@ -3660,6 +3777,9 @@ pub async fn execute_fixed_yield_exit_impl(
         let px = fill
             .avg_fill_price
             .and_then(|p| p.to_string().parse::<f64>().ok())
+            .and_then(|p| {
+                crate::execution::ledger_px_usd(state, &fill.venue.to_string(), &fill.symbol, p)
+            })
             .unwrap_or(0.0);
         if filled > 0.0 && px > 0.0 {
             let fee = fill
@@ -3950,6 +4070,7 @@ mod tests {
                 asks: vec![BookLevel::new(self.ask, dec!(10000))],
                 timestamp: Utc::now(),
                 sequence: 1,
+                mark_price: None,
             }
         }
     }

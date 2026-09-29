@@ -445,6 +445,9 @@ test("duration helpers decompose, convert, format, and parse canonical durations
   assert.equal(formatDuration(1_800), "30m");
   assert.equal(formatDuration(10), "10s");
   assert.equal(formatDuration(90), "90s");
+  // Non-round measured windows render in a human unit, not raw seconds.
+  assert.equal(formatDuration(3_251), "54m");
+  assert.equal(formatDuration(5_401), "1.5h");
 
   assert.equal(parseDuration("24h"), 86_400);
   assert.equal(parseDuration("30m"), 1_800);

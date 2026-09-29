@@ -470,6 +470,7 @@ impl ExchangeAdapter for AlpacaAdapter {
                 asks,
                 timestamp: Utc::now(),
                 sequence: 0,
+                mark_price: None,
             });
         }
         // Equities: Alpaca serves top-of-quote only (no public L2) — a
@@ -501,6 +502,7 @@ impl ExchangeAdapter for AlpacaAdapter {
             }],
             timestamp: Utc::now(),
             sequence: 0,
+            mark_price: None,
         })
     }
 

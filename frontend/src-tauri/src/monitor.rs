@@ -573,6 +573,77 @@ fn pair_in_funding_mask(ts_ms: i64, buy_v: &str, sell_v: &str) -> bool {
     in_funding_mask(ts_ms, &intervals)
 }
 
+/// Shared flatten dispatch for every funding-supervisor exit gate.
+async fn flatten_funding_signal(
+    state: &AppEngineState,
+    sig: &crate::state_store::SignalExecution,
+    gate: &str,
+    detail: &str,
+) {
+    tracing::warn!(
+        "monitor: funding {gate} exit {} — {detail} — flattening",
+        sig.id
+    );
+    match crate::commands::flatten_ticker_positions_impl(
+        Some(&sig.symbol),
+        "funding",
+        arbitrageur_execution::virtual_ledger::CycleStatus::StoppedOut,
+        state,
+    )
+    .await
+    {
+        Ok(res) => tracing::info!(
+            "monitor: funding exit {} flattened ({} closed, {} residual)",
+            sig.id,
+            res.signals_closed,
+            res.residual_signals
+        ),
+        Err(e) => tracing::error!(
+            "monitor: funding exit {} flatten failed: {e} — retrying next pass",
+            sig.id
+        ),
+    }
+}
+
+/// Basis-convergence exit for spot/perp funding pairs: `Some(reason)` when
+/// the live perp-over-spot spread falls below `threshold_pct`. Only pairs
+/// whose long leg is a `*-SPOT` instrument qualify — perp/perp carries have
+/// no meaningful price spread to converge (mids are ~equal by construction,
+/// so a spread gate would insta-fire). Missing or stale (>120s) books yield
+/// `None` — never a decision on stale data.
+fn funding_basis_exit_reason(
+    state: &AppEngineState,
+    long_leg: &crate::state_store::SignalLeg,
+    short_leg: &crate::state_store::SignalLeg,
+    threshold_pct: f64,
+) -> Option<String> {
+    if !long_leg.symbol.to_uppercase().ends_with("-SPOT") {
+        return None;
+    }
+    let book = |venue: &str, symbol: &str| {
+        state
+            .market_data_hub
+            .get_valid_orderbook(
+                &arbitrageur_core::types::VenueId::new(venue),
+                symbol,
+                Some(Duration::from_secs(120)),
+            )
+            .and_then(|b| b.mid_price())
+            .and_then(dec_opt_f64)
+            .filter(|m| m.is_finite() && *m > 0.0)
+    };
+    let (Some(spot_mid), Some(perp_mid)) = (
+        book(&long_leg.venue, &long_leg.symbol),
+        book(&short_leg.venue, &short_leg.symbol),
+    ) else {
+        return None;
+    };
+    let spread_pct = (perp_mid - spot_mid) / spot_mid * 100.0;
+    (spread_pct < threshold_pct).then(|| {
+        format!("perp/spot spread {spread_pct:.3}% below the {threshold_pct:.3}% exit floor (spot mid {spot_mid}, perp mid {perp_mid})")
+    })
+}
+
 /// Resolved session inputs for one ordered pair at one timestamp.
 /// Provisional or missing aggregates degrade every multiplier to neutral.
 #[derive(Debug, Clone)]
@@ -720,6 +791,27 @@ const RATIO_EWMA_ALPHA: f64 = 0.005;
 /// A learned ratio older than this is unverifiable — the member lane
 /// stops emitting group samples rather than convert on stale truth.
 const RATIO_MAX_AGE: Duration = Duration::from_secs(6 * 3600);
+
+/// Refresh cadence for symbols backing open signal legs. The fair-share
+/// interval can stretch to tens of minutes on venues listing their whole
+/// option chain — far too slow to keep a held leg's mark honest.
+const HELD_SYMBOL_INTERVAL: Duration = Duration::from_secs(45);
+
+/// Modal quote across a lane's learned key→quote map — the surviving
+/// lane's settlement currency, used for held legs injected without a
+/// market-metadata row to name their quote.
+fn default_quote_of(quote_by_key: &HashMap<String, String>) -> String {
+    quote_by_key
+        .values()
+        .fold(HashMap::<String, usize>::new(), |mut acc, q| {
+            *acc.entry(q.clone()).or_default() += 1;
+            acc
+        })
+        .into_iter()
+        .max_by_key(|(_, n)| *n)
+        .map(|(q, _)| q)
+        .unwrap_or_else(|| "USD".into())
+}
 
 /// The lane through which a venue serves a tracking group — the member
 /// instrument it lists, the watchlist key that member's books and funding
@@ -1242,6 +1334,10 @@ struct VenueLane {
     fail_streak: u32,
     /// Next allowed funding fetch (bulk endpoint, low cadence).
     next_funding_at: Instant,
+    /// Lane symbols backing open signal legs — a held book must mark far
+    /// tighter than the fair-share interval (a venue listing its whole
+    /// option chain would otherwise take ~20min to rotate onto a leg).
+    held: std::collections::HashSet<String>,
 }
 
 impl VenueLane {
@@ -1300,27 +1396,41 @@ impl VenueLane {
         Duration::from_secs_f64(secs)
     }
 
-    /// Symbols whose book is due for a refresh, in round-robin order.
+    /// Symbols whose book is due for a refresh, held positions first.
     /// The fair-share interval carries ±20% jitter so lanes sharing an IP
     /// do not poll in lockstep; `symbol_interval` itself stays pure.
+    /// Held-position symbols ride `HELD_SYMBOL_INTERVAL` *and jump the
+    /// due queue* — on a venue listing its whole option chain, the
+    /// round-robin due list is hundreds deep and a held leg would wait
+    /// ~10min behind symbols nobody needs, exactly the staleness the held
+    /// cadence exists to prevent.
     fn due_symbols(&mut self, cfg: &MonitorConfigDto) -> Vec<String> {
-        let interval = arbitrageur_exchanges::ws::jittered_duration_20(self.symbol_interval(cfg));
+        let fair = arbitrageur_exchanges::ws::jittered_duration_20(self.symbol_interval(cfg));
+        let held_iv = arbitrageur_exchanges::ws::jittered_duration_20(HELD_SYMBOL_INTERVAL);
         let now = Instant::now();
         let n = self.symbols.len();
+        let mut held_due = Vec::new();
         let mut due = Vec::new();
         for k in 0..n {
             let idx = (self.cursor + k) % n;
             let sym = &self.symbols[idx];
+            let is_held = self.held.contains(sym);
+            let interval = if is_held { held_iv } else { fair };
             let stale = self
                 .last_fetch
                 .get(sym)
                 .map(|t| now.duration_since(*t) >= interval)
                 .unwrap_or(true);
             if stale {
-                due.push(sym.clone());
+                if is_held {
+                    held_due.push(sym.clone());
+                } else {
+                    due.push(sym.clone());
+                }
             }
         }
-        due
+        held_due.extend(due);
+        held_due
     }
 }
 
@@ -1818,6 +1928,30 @@ impl SpreadMonitorEngine {
         let venues = state.get_venues();
         let mut venue_bases: HashMap<String, Vec<String>> = HashMap::new();
         let mut new_lanes: Vec<VenueLane> = Vec::new();
+        // Held legs get a tighter book cadence — a live position's mark is
+        // position truth, not background telemetry, and on venues listing
+        // whole option chains the fair-share interval runs ~20min.
+        let mut held_by_venue: HashMap<String, std::collections::HashSet<String>> = HashMap::new();
+        match state
+            .state_store
+            .list_open_signals(Some(state.env().as_str()))
+        {
+            Ok(open) => {
+                for sig in &open {
+                    for leg in &sig.legs {
+                        if leg.filled_qty > 0.0 {
+                            held_by_venue
+                                .entry(leg.venue.clone())
+                                .or_default()
+                                .insert(leg.symbol.clone());
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::debug!("monitor: held-leg set unreadable, held cadence off: {e}");
+            }
+        }
         let s_flags = state.settings.read().clone();
         for (vid, _name, adapter) in venues {
             let tiers = state
@@ -1890,7 +2024,7 @@ impl SpreadMonitorEngine {
                         .unwrap_or_else(|| "USD".to_string());
                     self.settlement_quotes
                         .lock()
-                        .insert(vid.to_string(), default_quote);
+                        .insert(vid.to_string(), default_quote.clone());
                     let mut bases: Vec<String> = by_key.keys().cloned().collect();
                     bases.sort();
                     let mut fetch_symbol = HashMap::with_capacity(bases.len());
@@ -1992,6 +2126,33 @@ impl SpreadMonitorEngine {
                             })
                             .unwrap_or_default()
                     };
+                    // Held-position legs missing from the market-derived
+                    // bases still join the lane (identity fetch — the leg
+                    // symbol is the venue-native execution spelling), so a
+                    // held book is never unpollable just because the market
+                    // listing omitted it. `bases`/`venue_bases` pairing
+                    // semantics stay market-derived.
+                    let held = held_by_venue.remove(vid).unwrap_or_default();
+                    for sym in &held {
+                        if !bases.iter().any(|b| b == sym) {
+                            match markets
+                                .iter()
+                                .find(|m| m.is_active && m.venue_symbol == *sym)
+                            {
+                                Some(m) => {
+                                    fetch_symbol.insert(sym.clone(), m.venue_symbol.clone());
+                                    quote_by_key.insert(sym.clone(), m.symbol.quote.clone());
+                                }
+                                None => {
+                                    fetch_symbol.insert(sym.clone(), sym.clone());
+                                    quote_by_key.insert(sym.clone(), default_quote.clone());
+                                }
+                            }
+                            bases.push(sym.clone());
+                        }
+                    }
+                    bases.sort();
+
                     new_lanes.push(VenueLane {
                         venue: vid.to_string(),
                         adapter,
@@ -2007,6 +2168,7 @@ impl SpreadMonitorEngine {
                         backoff_until,
                         fail_streak,
                         next_funding_at: Instant::now(),
+                        held,
                     });
                 }
                 Err(e) => {
@@ -2035,12 +2197,29 @@ impl SpreadMonitorEngine {
                 if !new_lanes.iter().any(|n| n.venue == l.venue)
                     && venue_bases.contains_key(&l.venue)
                 {
+                    let held = held_by_venue.remove(&l.venue).unwrap_or_default();
+                    // Held legs that arrived since this lane's last market
+                    // refresh still join — the leg symbol is already the
+                    // venue-native fetch spelling.
+                    let mut symbols = l.symbols.clone();
+                    let mut fetch_symbol = l.fetch_symbol.clone();
+                    let mut quote_by_key = l.quote_by_key.clone();
+                    for sym in &held {
+                        if !symbols.iter().any(|s| s == sym) {
+                            symbols.push(sym.clone());
+                            fetch_symbol.insert(sym.clone(), sym.clone());
+                            quote_by_key
+                                .entry(sym.clone())
+                                .or_insert_with(|| default_quote_of(&l.quote_by_key));
+                        }
+                    }
+                    symbols.sort();
                     new_lanes.push(VenueLane {
                         venue: l.venue.clone(),
                         adapter: l.adapter.clone(),
-                        symbols: l.symbols.clone(),
-                        fetch_symbol: l.fetch_symbol.clone(),
-                        quote_by_key: l.quote_by_key.clone(),
+                        symbols,
+                        fetch_symbol,
+                        quote_by_key,
                         requests: l.requests.clone(),
                         budget_per_min: l.budget_per_min,
                         usable_per_min: l.usable_per_min,
@@ -2050,6 +2229,7 @@ impl SpreadMonitorEngine {
                         backoff_until: l.backoff_until,
                         fail_streak: l.fail_streak,
                         next_funding_at: l.next_funding_at,
+                        held,
                     });
                 }
             }
@@ -2624,6 +2804,61 @@ impl SpreadMonitorEngine {
                     if let Some(lane) = self.lanes.lock().iter_mut().find(|l| l.venue == venue) {
                         lane.note_success();
                     }
+                    let mut rates = rates;
+                    if rates.is_empty() {
+                        // No bulk endpoint — the trait's empty default is the
+                        // documented signal to fall back to per-symbol reads.
+                        // Each request is charged to the lane's read budget so
+                        // a long watchlist can't starve book refreshes.
+                        let syms: Vec<String> = {
+                            let lanes = self.lanes.lock();
+                            lanes
+                                .iter()
+                                .find(|l| l.venue == venue)
+                                .map(|l| {
+                                    l.symbols
+                                        .iter()
+                                        .filter_map(|k| {
+                                            l.fetch_symbol
+                                                .get(k)
+                                                .cloned()
+                                                .or_else(|| Some(k.clone()))
+                                        })
+                                        .collect()
+                                })
+                                .unwrap_or_default()
+                        };
+                        for sym in syms {
+                            let budgeted = {
+                                let mut lanes = self.lanes.lock();
+                                match lanes.iter_mut().find(|l| l.venue == venue) {
+                                    Some(l) => {
+                                        if l.can_spend() {
+                                            l.spend();
+                                            true
+                                        } else {
+                                            false
+                                        }
+                                    }
+                                    _ => false,
+                                }
+                            };
+                            if !budgeted {
+                                break;
+                            }
+                            if state.env() != dispatch_env {
+                                break;
+                            }
+                            match adapter.fetch_funding_rate(&sym).await {
+                                Ok(fr) => rates.push(fr),
+                                Err(e) => {
+                                    tracing::debug!(
+                                        "monitor: per-symbol funding fetch failed {venue}/{sym}: {e}"
+                                    );
+                                }
+                            }
+                        }
+                    }
                     let mut ema = self.funding_ema.lock();
                     for fr in rates {
                         // Funding is per-instrument: under `separate` the
@@ -2683,6 +2918,96 @@ impl SpreadMonitorEngine {
         };
         let now = Instant::now();
         let ema = self.funding_ema.lock().clone();
+        let funding_params = state.strategy_params.read().get("funding").cloned();
+        let liq_trim_pct = funding_params
+            .as_ref()
+            .and_then(|p| p.funding_liq_trim_pct)
+            .filter(|t| t.is_finite() && *t > 0.0 && *t <= 100.0);
+        let exit_spread_pct = funding_params
+            .as_ref()
+            .and_then(|p| p.funding_auto_exit_spread_pct)
+            .filter(|t| t.is_finite() && *t > 0.0);
+        let rotation_bps = funding_params
+            .as_ref()
+            .and_then(|p| p.funding_rotation_threshold_bps)
+            .filter(|t| t.is_finite() && *t > 0.0);
+        // Best alternative net carry across the EMA universe: per symbol,
+        // max(venue rate) − min(venue rate), converted to APR %. Only
+        // computed when rotation is configured; fresh samples only.
+        // A candidate is an alternative only if it is EXECUTABLE: both
+        // venues credentialed and holding a fresh two-sided book — a
+        // theoretical span on an untradeable venue must never flatten a
+        // real position (observed: a live carry churned out chasing a
+        // funding gap whose short venue had an empty book).
+        let best_alt_apr = if rotation_bps.is_some() {
+            let mut span: HashMap<&String, (f64, &String, f64, &String)> = HashMap::new();
+            for ((venue, base), (rate, ts)) in ema.iter() {
+                if now.duration_since(*ts) >= Duration::from_secs(300) {
+                    continue;
+                }
+                let e = span.entry(base).or_insert((*rate, venue, *rate, venue));
+                if *rate > e.0 {
+                    e.0 = *rate;
+                    e.1 = venue;
+                }
+                if *rate < e.2 {
+                    e.2 = *rate;
+                    e.3 = venue;
+                }
+            }
+            let mut spans: Vec<(&String, f64, &String, f64, &String)> = span
+                .into_iter()
+                .map(|(base, (hi, hi_v, lo, lo_v))| (base, hi, hi_v, lo, lo_v))
+                .collect();
+            spans.sort_by(|a, b| {
+                (b.1 - b.3)
+                    .partial_cmp(&(a.1 - a.3))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let mut best: Option<f64> = None;
+            for (base, hi, hi_v, lo, lo_v) in spans {
+                let span_apr = (hi - lo) * 8760.0 * 100.0;
+                if best.is_some_and(|b| span_apr <= b) {
+                    break;
+                }
+                let mut executable = true;
+                for v in [hi_v, lo_v] {
+                    let executable_venue = match state.get_adapter(v) {
+                        Some(adapter)
+                            if adapter.live_order_submission_implemented()
+                                && adapter.has_live_credentials() =>
+                        {
+                            let sym =
+                                crate::commands::venue_fetch_symbol(state, v, &adapter, base, base)
+                                    .await;
+                            state
+                                .market_data_hub
+                                .get_valid_orderbook(
+                                    &arbitrageur_core::types::VenueId::from(v.as_str()),
+                                    &sym,
+                                    Some(Duration::from_secs(120)),
+                                )
+                                .is_some_and(|b| {
+                                    b.best_bid_price().is_some_and(|p| p > dec!(0))
+                                        && b.best_ask_price().is_some_and(|p| p > dec!(0))
+                                })
+                        }
+                        _ => false,
+                    };
+                    if !executable_venue {
+                        executable = false;
+                        break;
+                    }
+                }
+                if executable {
+                    best = Some(span_apr);
+                    break;
+                }
+            }
+            best
+        } else {
+            None
+        };
         for sig in signals.iter().filter(|s| {
             s.strategy_id.eq_ignore_ascii_case("funding")
                 && s.status == crate::state_store::SignalStatus::Balanced
@@ -2700,6 +3025,31 @@ impl SpreadMonitorEngine {
             let (Some(long_leg), Some(short_leg)) = (long_leg, short_leg) else {
                 continue;
             };
+            // Liquidation-distance trim first — it reads cached venue
+            // positions, not EMA freshness, so it must not sit behind the
+            // rate gate.
+            if let Some(trim_pct) = liq_trim_pct {
+                if let Some((_, trigger, reason, _)) =
+                    crate::execution::maybe_liq_trim_pair(state, sig, long_leg, short_leg, trim_pct)
+                        .await
+                {
+                    tracing::warn!(
+                        "monitor: funding {} liq trim fired ({trigger}): {reason}",
+                        sig.id
+                    );
+                    continue;
+                }
+            }
+            // Basis-convergence exit: same-venue spot long + perp short —
+            // flatten when the live perp/spot spread falls below the
+            // configured pct. Books older than 120s never decide.
+            if let Some(th_pct) = exit_spread_pct {
+                if let Some(detail) = funding_basis_exit_reason(state, long_leg, short_leg, th_pct)
+                {
+                    flatten_funding_signal(state, sig, "basis-convergence", &detail).await;
+                    continue;
+                }
+            }
             // net carry = short_leg rate − long_leg rate (same convention
             // as the entry scanner).
             let merge_usd = state.usd_merge_quotes();
@@ -2710,32 +3060,31 @@ impl SpreadMonitorEngine {
                 continue;
             };
             let net_apr_pct = (sr - lr) * 8760.0 * 100.0;
-            if net_apr_pct < min_apr {
-                tracing::warn!(
-                    "monitor: funding carry {} net APR {:.1}% below the {:.1}% exit hurdle — flattening",
-                    sig.id,
-                    net_apr_pct,
-                    min_apr
-                );
-                match crate::commands::flatten_ticker_positions_impl(
-                    Some(&sig.symbol),
-                    "funding",
-                    arbitrageur_execution::virtual_ledger::CycleStatus::StoppedOut,
-                    state,
-                )
-                .await
-                {
-                    Ok(res) => tracing::info!(
-                        "monitor: funding exit {} flattened ({} closed, {} residual)",
-                        sig.id,
-                        res.signals_closed,
-                        res.residual_signals
-                    ),
-                    Err(e) => tracing::error!(
-                        "monitor: funding exit {} flatten failed: {e} — retrying next pass",
-                        sig.id
-                    ),
+            // Yield rotation: a different symbol/venue pairing exceeds this
+            // carry by more than the configured bps — exit so the scanner
+            // re-deploys the capital. The threshold is the churn allowance.
+            if let (Some(th_bps), Some(best)) = (rotation_bps, best_alt_apr) {
+                if best > net_apr_pct + th_bps / 100.0 {
+                    flatten_funding_signal(
+                        state,
+                        sig,
+                        "rotation",
+                        &format!(
+                            "net APR {net_apr_pct:.1}% trails best alternative {best:.1}% by more than {th_bps}bps"
+                        ),
+                    )
+                    .await;
+                    continue;
                 }
+            }
+            if net_apr_pct < min_apr {
+                flatten_funding_signal(
+                    state,
+                    sig,
+                    "carry-hurdle",
+                    &format!("net APR {net_apr_pct:.1}% below the {min_apr:.1}% exit hurdle"),
+                )
+                .await;
             }
         }
     }
@@ -3445,6 +3794,24 @@ impl SpreadMonitorEngine {
                 }
                 None => gate_reasons.push(format!("coverage unknown < floor {cov_floor:.2}")),
             }
+        }
+        if exit_uncostable {
+            gate_reasons.push("exit side not costable".into());
+        }
+        if !variation_ok {
+            gate_reasons.push("window variation under friction".into());
+        }
+        if p_win.is_none() {
+            gate_reasons.push("win estimate uncomputable".into());
+        }
+        if funding_unknown {
+            gate_reasons.push("funding rates unknown".into());
+        }
+        if depth_curve.is_empty() {
+            gate_reasons.push("no executable depth".into());
+        }
+        if !session_conf_ok {
+            gate_reasons.push("session win rate below floor".into());
         }
 
         let status = if !books_ok {
@@ -4260,6 +4627,7 @@ mod tests {
             backoff_until: None,
             fail_streak: 0,
             next_funding_at: Instant::now(),
+            held: Default::default(),
         };
         // Fair-share interval: 3 symbols * 60s / 45 = 4s -> below 5s floor.
         let iv = lane.symbol_interval(&cfg);
@@ -4302,6 +4670,7 @@ mod tests {
                 backoff_until: None,
                 fail_streak: 0,
                 next_funding_at: Instant::now(),
+                held: Default::default(),
             });
         }
         state
@@ -4579,6 +4948,395 @@ mod tests {
             sig.status,
             SignalStatus::Balanced,
             "carry above the floor must be held (got {:?})",
+            sig.status
+        );
+    }
+
+    fn funding_leg(
+        venue: &str,
+        side: crate::state_store::LegSide,
+        symbol: &str,
+    ) -> crate::state_store::SignalLeg {
+        crate::state_store::SignalLeg {
+            id: String::new(),
+            signal_id: String::new(),
+            account_id: None,
+            venue: venue.into(),
+            side,
+            symbol: symbol.into(),
+            intended_qty: 0.0,
+            filled_qty: 0.0,
+            fill_price: None,
+            fee_usd: 0.0,
+            venue_order_id: None,
+            client_order_id: None,
+            intended_price: None,
+            unit_scale: 1.0,
+            created_at: String::new(),
+            updated_at: String::new(),
+        }
+    }
+
+    #[test]
+    fn funding_basis_exit_reason_scopes_to_spot_perp_pairs() {
+        use crate::state_store::LegSide;
+
+        let state = AppEngineState::new();
+        // Converged basis: perp mid 10_001 vs spot mid 10_000 → 0.01%
+        // spread, below a 0.05% floor.
+        state
+            .market_data_hub
+            .update_orderbook(book("lighter", "BTC-SPOT", 9_999.0, 10_001.0, 1));
+        state
+            .market_data_hub
+            .update_orderbook(book("lighter", "BTC-USDC", 10_000.0, 10_002.0, 1));
+        let long = funding_leg("lighter", LegSide::Long, "BTC-SPOT");
+        let short = funding_leg("lighter", LegSide::Short, "BTC-USDC");
+        assert!(
+            funding_basis_exit_reason(&state, &long, &short, 0.05).is_some(),
+            "converged basis below the floor must exit"
+        );
+        assert!(
+            funding_basis_exit_reason(&state, &long, &short, 0.001).is_none(),
+            "spread above the floor must hold"
+        );
+        // Perp/perp carries never trigger a price-spread gate.
+        let perp_long = funding_leg("kraken", LegSide::Long, "BTC-USDC");
+        assert!(
+            funding_basis_exit_reason(&state, &perp_long, &short, 100.0).is_none(),
+            "no -SPOT leg means no basis exit, even with a huge threshold"
+        );
+    }
+
+    #[test]
+    fn funding_basis_exit_reason_refuses_stale_or_missing_books() {
+        use crate::state_store::LegSide;
+
+        let state = AppEngineState::new();
+        let long = funding_leg("lighter", LegSide::Long, "BTC-SPOT");
+        let short = funding_leg("lighter", LegSide::Short, "BTC-USDC");
+        assert!(
+            funding_basis_exit_reason(&state, &long, &short, 5.0).is_none(),
+            "no books at all must produce no decision"
+        );
+        // One side only — still no decision.
+        state
+            .market_data_hub
+            .update_orderbook(book("lighter", "BTC-SPOT", 9_999.0, 10_001.0, 1));
+        assert!(
+            funding_basis_exit_reason(&state, &long, &short, 5.0).is_none(),
+            "one-sided market data must produce no decision"
+        );
+    }
+
+    #[tokio::test]
+    async fn supervise_funding_exits_rotates_to_better_carry() {
+        use crate::state_store::{LegSide, NewSignalExecution, NewSignalLeg, SignalStatus};
+
+        let state = AppEngineState::new();
+        state.install_test_sim("lighter");
+        state.install_test_sim("hyperliquid");
+        for (venue, sym) in [("lighter", "BTC-USDC"), ("hyperliquid", "BTC-USDC")] {
+            let mut b = book(venue, sym, 99_900.0, 100_100.0, 5);
+            b.timestamp = Utc::now();
+            if let Some(sim) = state
+                .test_sims
+                .read()
+                .ok()
+                .and_then(|m| m.get(venue).cloned())
+            {
+                let _ = sim.replace_orderbook(b);
+            }
+        }
+        // The rotation gate only chases EXECUTABLE alternatives — the ETH
+        // pairing must carry fresh two-sided books on both venues: the hub
+        // proves executability, the sim book makes `venue_fetch_symbol`
+        // resolve the venue spelling.
+        for venue in ["lighter", "hyperliquid"] {
+            let mut b = book(venue, "ETH-USDC", 2_999.0, 3_001.0, 5);
+            b.timestamp = Utc::now();
+            state.market_data_hub.update_orderbook(b.clone());
+            if let Some(sim) = state
+                .test_sims
+                .read()
+                .ok()
+                .and_then(|m| m.get(venue).cloned())
+            {
+                let _ = sim.replace_orderbook(b);
+            }
+        }
+        // Rotation armed at 100bps (1 APR point of improvement).
+        let mut params = crate::state::StrategyParamsDto::defaults_for("funding");
+        params.funding_rotation_threshold_bps = Some(100.0);
+        state
+            .strategy_params
+            .write()
+            .insert("funding".into(), params);
+
+        let sig_id = "sig-funding-supervise-rotate";
+        state
+            .state_store
+            .record_signal_execution(
+                &NewSignalExecution {
+                    id: sig_id.into(),
+                    strategy_id: "funding".into(),
+                    symbol: "BTC-USDC".into(),
+                    route_id: None,
+                    expected_net_usd: Some(1.0),
+                    note: None,
+                    legs: vec![
+                        NewSignalLeg {
+                            account_id: None,
+                            venue: "lighter".into(),
+                            side: LegSide::Long,
+                            symbol: Some("BTC-USDC".into()),
+                            intended_qty: 0.01,
+                            intended_price: Some(100_000.0),
+                            unit_scale: None,
+                        },
+                        NewSignalLeg {
+                            account_id: None,
+                            venue: "hyperliquid".into(),
+                            side: LegSide::Short,
+                            symbol: Some("BTC-USDC".into()),
+                            intended_qty: 0.01,
+                            intended_price: Some(100_000.0),
+                            unit_scale: None,
+                        },
+                    ],
+                },
+                "testnet",
+            )
+            .expect("record funding signal");
+        for side in [LegSide::Long, LegSide::Short] {
+            state
+                .state_store
+                .apply_leg_fill(sig_id, side, 0.01, 100_000.0, 0.0, None)
+                .expect("leg fill");
+        }
+        state
+            .state_store
+            .update_signal_status(sig_id, SignalStatus::Balanced, None)
+            .expect("mark balanced");
+
+        let engine = SpreadMonitorEngine::new(&state);
+        {
+            let mut ema = engine.funding_ema.lock();
+            // Current carry: +0.02%/h ≈ 175% APR — comfortably above the 8%
+            // hurdle, so only rotation can fire.
+            ema.insert(("lighter".into(), "BTC".into()), (0.0, Instant::now()));
+            ema.insert(
+                ("hyperliquid".into(), "BTC".into()),
+                (0.0002, Instant::now()),
+            );
+            // ETH carries a far better pairing: +0.05% − (−0.05%) ≈ 876% APR.
+            ema.insert(("lighter".into(), "ETH".into()), (-0.0005, Instant::now()));
+            ema.insert(
+                ("hyperliquid".into(), "ETH".into()),
+                (0.0005, Instant::now()),
+            );
+        }
+        engine.supervise_funding_exits(&state).await;
+
+        let sigs = state
+            .state_store
+            .list_signals(Some("BTC-USDC"), None)
+            .expect("list");
+        let sig = sigs.iter().find(|s| s.id == sig_id).expect("signal");
+        assert_eq!(
+            sig.status,
+            SignalStatus::Closed,
+            "a pairing clearing the rotation hurdle must flatten the position (got {:?})",
+            sig.status
+        );
+    }
+
+    #[tokio::test]
+    async fn supervise_funding_exits_holds_when_rotation_below_hurdle() {
+        use crate::state_store::{LegSide, NewSignalExecution, NewSignalLeg, SignalStatus};
+
+        let state = AppEngineState::new();
+        let mut params = crate::state::StrategyParamsDto::defaults_for("funding");
+        params.funding_rotation_threshold_bps = Some(100.0);
+        state
+            .strategy_params
+            .write()
+            .insert("funding".into(), params);
+
+        let sig_id = "sig-funding-supervise-rotate-hold";
+        state
+            .state_store
+            .record_signal_execution(
+                &NewSignalExecution {
+                    id: sig_id.into(),
+                    strategy_id: "funding".into(),
+                    symbol: "BTC-USDC".into(),
+                    route_id: None,
+                    expected_net_usd: Some(1.0),
+                    note: None,
+                    legs: vec![
+                        NewSignalLeg {
+                            account_id: None,
+                            venue: "lighter".into(),
+                            side: LegSide::Long,
+                            symbol: Some("BTC-USDC".into()),
+                            intended_qty: 0.01,
+                            intended_price: Some(100_000.0),
+                            unit_scale: None,
+                        },
+                        NewSignalLeg {
+                            account_id: None,
+                            venue: "hyperliquid".into(),
+                            side: LegSide::Short,
+                            symbol: Some("BTC-USDC".into()),
+                            intended_qty: 0.01,
+                            intended_price: Some(100_000.0),
+                            unit_scale: None,
+                        },
+                    ],
+                },
+                "testnet",
+            )
+            .expect("record funding signal");
+        for side in [LegSide::Long, LegSide::Short] {
+            state
+                .state_store
+                .apply_leg_fill(sig_id, side, 0.01, 100_000.0, 0.0, None)
+                .expect("leg fill");
+        }
+        state
+            .state_store
+            .update_signal_status(sig_id, SignalStatus::Balanced, None)
+            .expect("mark balanced");
+
+        let engine = SpreadMonitorEngine::new(&state);
+        {
+            let mut ema = engine.funding_ema.lock();
+            // Current carry 175% APR; the best alternative span is only
+            // ~87% APR better — under the 100bps hurdle → hold.
+            ema.insert(("lighter".into(), "BTC".into()), (0.0, Instant::now()));
+            ema.insert(
+                ("hyperliquid".into(), "BTC".into()),
+                (0.0002, Instant::now()),
+            );
+            ema.insert(("lighter".into(), "ETH".into()), (0.0, Instant::now()));
+            ema.insert(
+                ("hyperliquid".into(), "ETH".into()),
+                (0.0003, Instant::now()),
+            );
+        }
+        engine.supervise_funding_exits(&state).await;
+
+        let sigs = state
+            .state_store
+            .list_signals(Some("BTC-USDC"), None)
+            .expect("list");
+        let sig = sigs.iter().find(|s| s.id == sig_id).expect("signal");
+        assert_eq!(
+            sig.status,
+            SignalStatus::Balanced,
+            "rotation under the hurdle must hold (got {:?})",
+            sig.status
+        );
+    }
+
+    #[tokio::test]
+    async fn supervise_funding_exits_flattens_converged_basis() {
+        use crate::state_store::{LegSide, NewSignalExecution, NewSignalLeg, SignalStatus};
+
+        let state = AppEngineState::new();
+        state.install_test_sim("lighter");
+        for sym in ["BTC-SPOT", "BTC-USDC"] {
+            let mut b = book("lighter", sym, 99_900.0, 100_100.0, 5);
+            b.timestamp = Utc::now();
+            if let Some(sim) = state
+                .test_sims
+                .read()
+                .ok()
+                .and_then(|m| m.get("lighter").cloned())
+            {
+                let _ = sim.replace_orderbook(b);
+            }
+        }
+        let mut params = crate::state::StrategyParamsDto::defaults_for("funding");
+        params.funding_auto_exit_spread_pct = Some(0.05);
+        state
+            .strategy_params
+            .write()
+            .insert("funding".into(), params);
+
+        let sig_id = "sig-funding-supervise-basis";
+        state
+            .state_store
+            .record_signal_execution(
+                &NewSignalExecution {
+                    id: sig_id.into(),
+                    strategy_id: "funding".into(),
+                    symbol: "BTC-USDC".into(),
+                    route_id: None,
+                    expected_net_usd: Some(1.0),
+                    note: Some("funding basis BTC".into()),
+                    legs: vec![
+                        NewSignalLeg {
+                            account_id: None,
+                            venue: "lighter".into(),
+                            side: LegSide::Long,
+                            symbol: Some("BTC-SPOT".into()),
+                            intended_qty: 0.01,
+                            intended_price: Some(100_000.0),
+                            unit_scale: None,
+                        },
+                        NewSignalLeg {
+                            account_id: None,
+                            venue: "lighter".into(),
+                            side: LegSide::Short,
+                            symbol: Some("BTC-USDC".into()),
+                            intended_qty: 0.01,
+                            intended_price: Some(100_000.0),
+                            unit_scale: None,
+                        },
+                    ],
+                },
+                "testnet",
+            )
+            .expect("record funding signal");
+        for side in [LegSide::Long, LegSide::Short] {
+            state
+                .state_store
+                .apply_leg_fill(sig_id, side, 0.01, 100_000.0, 0.0, None)
+                .expect("leg fill");
+        }
+        state
+            .state_store
+            .update_signal_status(sig_id, SignalStatus::Balanced, None)
+            .expect("mark balanced");
+
+        // Converged basis on the hub: spot mid 10_000, perp mid 10_001 →
+        // 0.01% < the 0.05% floor. Carry stays healthy so only the basis
+        // gate can fire.
+        state
+            .market_data_hub
+            .update_orderbook(book("lighter", "BTC-SPOT", 9_999.0, 10_001.0, 1));
+        state
+            .market_data_hub
+            .update_orderbook(book("lighter", "BTC-USDC", 10_000.0, 10_002.0, 1));
+
+        let engine = SpreadMonitorEngine::new(&state);
+        {
+            let mut ema = engine.funding_ema.lock();
+            ema.insert(("lighter".into(), "BTC".into()), (0.0002, Instant::now()));
+        }
+        engine.supervise_funding_exits(&state).await;
+
+        let sigs = state
+            .state_store
+            .list_signals(Some("BTC-USDC"), None)
+            .expect("list");
+        let sig = sigs.iter().find(|s| s.id == sig_id).expect("signal");
+        assert_eq!(
+            sig.status,
+            SignalStatus::Closed,
+            "converged basis must flatten through the supervisor (got {:?})",
             sig.status
         );
     }

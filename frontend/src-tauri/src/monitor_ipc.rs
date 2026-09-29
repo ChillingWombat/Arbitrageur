@@ -210,10 +210,14 @@ pub(crate) async fn execute_monitor_opportunity_impl(
             let adapter = state
                 .get_adapter(buy_venue)
                 .ok_or_else(|| format!("Venue '{buy_venue}' is not admitted for execution"))?;
+            let want_base = arbitrageur_core::symbol::canonical_base(&sym);
+            let fetch_sym =
+                crate::commands::venue_fetch_symbol(state, buy_venue, &adapter, &want_base, &sym)
+                    .await;
             let b = adapter
-                .fetch_orderbook(&sym)
+                .fetch_orderbook(&fetch_sym)
                 .await
-                .map_err(|e| format!("No fresh {buy_venue} orderbook for {sym}: {e}"))?;
+                .map_err(|e| format!("No fresh {buy_venue} orderbook for {fetch_sym}: {e}"))?;
             validate_adapter_book(&b, &buy_vid, &sym)
                 .map_err(|e| format!("Buy-side order book rejected: {e}"))?;
             state.market_data_hub.update_orderbook(b.clone());

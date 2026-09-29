@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { fundingAutoEligible } from "./FundingRadar.tsx";
+import { fundingAutoEligible, splitFundingLegs } from "./FundingRadar.tsx";
 import type { FundingOpportunityDto } from "../types";
 
 const baseOpp = (over: Partial<FundingOpportunityDto>): FundingOpportunityDto =>
@@ -44,4 +44,31 @@ test("fixed-yield rows are never auto-eligible (live-only legs)", () => {
   assert.ok(
     fundingAutoEligible(baseOpp({ net_apr_pct: 40, kind: undefined }), 10),
   );
+});
+
+test("splitFundingLegs: positive netQty is the long leg, negative the short, legQty is max |qty|", () => {
+  const { longLegs, shortLegs, legQty } = splitFundingLegs([
+    { venue: "lighter", symbol: "BTC-USDC", netQty: 0.00477 },
+    { venue: "hyperliquid", symbol: "BTC-USDC", netQty: -0.00477 },
+  ]);
+  assert.equal(longLegs.length, 1);
+  assert.equal(longLegs[0].venue, "lighter");
+  assert.equal(shortLegs.length, 1);
+  assert.equal(shortLegs[0].venue, "hyperliquid");
+  assert.equal(legQty, 0.00477);
+});
+
+test("splitFundingLegs: single-sided exposure reports one leg and no partner", () => {
+  const { longLegs, shortLegs, legQty } = splitFundingLegs([
+    { venue: "hyperliquid", symbol: "BTC-USDC", netQty: -0.00477 },
+  ]);
+  assert.equal(longLegs.length, 0);
+  assert.equal(shortLegs.length, 1);
+  assert.equal(legQty, 0.00477);
+});
+
+test("splitFundingLegs: empty venues yield no legs and zero qty", () => {
+  const { longLegs, shortLegs, legQty } = splitFundingLegs([]);
+  assert.equal(longLegs.length + shortLegs.length, 0);
+  assert.equal(legQty, 0);
 });

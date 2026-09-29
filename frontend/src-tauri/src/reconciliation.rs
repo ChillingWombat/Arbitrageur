@@ -55,6 +55,11 @@ const MAX_RESIDUAL_ATTEMPTS: usize = 3;
 /// hard cap: once venue readiness returns the residual must always be
 /// retryable.
 const RESIDUAL_RETRY_SECS: i64 = 30;
+/// A terminal flatten child whose close order stays working — or stays
+/// unverifiable — past this age escalates the parent to `unresolved`:
+/// suppression is the right answer for a live close, but an operator
+/// must eventually hear about it instead of silence.
+const RESIDUAL_ORDER_GRACE_SECS: i64 = 1800;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -232,6 +237,64 @@ fn derive_signal_status(
     )
 }
 
+/// Recover a leg's venue order id through the venue's client-order-id
+/// lookup — the crash-recovery path for orders whose client id was
+/// persisted before dispatch but whose ack never landed. On success the
+/// venue id is persisted so later passes poll it like any other leg.
+/// `None` means the locator could not be verified — never assumed terminal.
+async fn adopt_venue_order_id(
+    state: &AppEngineState,
+    leg: &crate::state_store::SignalLeg,
+    client_order_id: &str,
+) -> Option<String> {
+    let adapter = state.get_adapter(&leg.venue)?;
+    if !adapter.has_live_credentials() {
+        return None;
+    }
+    let resp = adapter
+        .fetch_order(&leg.symbol, "", Some(client_order_id))
+        .await
+        .ok()?;
+    // The response must identify THIS leg's order — venue and symbol exact,
+    // and when the venue echoes a client id it must be ours.
+    let oid = resp.order_id.trim();
+    if oid.is_empty()
+        || !resp.venue.as_str().eq_ignore_ascii_case(&leg.venue)
+        || !resp.symbol.eq_ignore_ascii_case(&leg.symbol)
+        || (!resp.client_order_id.trim().is_empty()
+            && resp.client_order_id.trim() != client_order_id)
+    {
+        tracing::error!(
+            "reconcile: {} client-id lookup returned mismatched order (id={} venue={} symbol={} cid={}) vs leg (venue={} symbol={} cid={})",
+            leg.venue,
+            resp.order_id,
+            resp.venue.as_str(),
+            resp.symbol,
+            resp.client_order_id,
+            leg.venue,
+            leg.symbol,
+            client_order_id
+        );
+        return None;
+    }
+    if let Err(e) =
+        state
+            .state_store
+            .record_leg_order_id(&leg.signal_id, leg.side, oid, Some(client_order_id))
+    {
+        tracing::warn!(
+            "reconcile: client-id recovery found order {oid} on {} but persist failed: {e}",
+            leg.venue
+        );
+        return None;
+    }
+    tracing::warn!(
+        "reconcile: recovered {} order {oid} via persisted client id — ack was lost post-submit",
+        leg.venue
+    );
+    Some(oid.to_string())
+}
+
 /// One reconciliation pass. Returns counts for the monitor feed.
 pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummary {
     let _guard = match state.reconcile_lock.try_lock() {
@@ -288,15 +351,41 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
             .or_insert_with(|| (exec.strategy_id.clone(), exec.legs.len(), age));
         let legs_out = outcomes.entry(exec.id.clone()).or_default();
 
-        let Some(order_id) = leg.venue_order_id.as_deref().filter(|s| !s.is_empty()) else {
-            // Order identity is persisted at submission. On post-submission
-            // signals (imbalanced/unresolved — the only states whose no-id
-            // legs the query returns) a missing id means the venue rejected
-            // the order outright: terminally empty, not merely unverifiable.
-            // Counting it as terminal-empty lets a filled sibling surface as
-            // Imbalanced so residual auto-flatten covers the naked leg.
-            legs_out.push(LegPoll::CancelledEmpty);
-            continue;
+        // Resolve the order locator. `venue_order_id` is preferred; when it
+        // was never recorded but a client order id was persisted
+        // pre-dispatch (crash between venue accept and ack write), the
+        // venue's client-id lookup recovers the venue id — adopted durably
+        // so this and later passes poll the venue id like any other leg.
+        let adopted_id: String;
+        let order_id: &str = match leg.venue_order_id.as_deref().filter(|s| !s.is_empty()) {
+            Some(oid) => oid,
+            None => match leg.client_order_id.as_deref().filter(|s| !s.is_empty()) {
+                Some(cid) => match adopt_venue_order_id(state, leg, cid).await {
+                    Some(oid) => {
+                        adopted_id = oid;
+                        adopted_id.as_str()
+                    }
+                    // A persisted client id the venue cannot resolve is
+                    // unproven, not terminal-empty — hold for the deadline
+                    // escalation rather than guessing the order never lived.
+                    None => {
+                        legs_out.push(LegPoll::Unknown);
+                        continue;
+                    }
+                },
+                None => {
+                    // Order identity is persisted at submission. On
+                    // post-submission signals (imbalanced/unresolved — the
+                    // only states whose no-id legs the query returns) a
+                    // missing id means the venue rejected the order
+                    // outright: terminally empty, not merely unverifiable.
+                    // Counting it as terminal-empty lets a filled sibling
+                    // surface as Imbalanced so residual auto-flatten covers
+                    // the naked leg.
+                    legs_out.push(LegPoll::CancelledEmpty);
+                    continue;
+                }
+            },
         };
         // A leg already fully recorded needs no venue call.
         if leg.filled_qty >= leg.intended_qty && leg.filled_qty > 0.0 {
@@ -363,7 +452,10 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
                 }
                 let price = resp
                     .avg_fill_price
-                    .and_then(|p| p.to_string().parse::<f64>().ok());
+                    .and_then(|p| p.to_string().parse::<f64>().ok())
+                    .and_then(|p| {
+                        crate::execution::ledger_px_usd(state, &leg.venue, &leg.symbol, p)
+                    });
                 if filled < leg.filled_qty || fee < leg.fee_usd {
                     // Venue reports less than the recorded fill — the store
                     // keeps the cumulative max, but a venue disagreeing with
@@ -425,7 +517,25 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
                     }
                 }
                 let intended = Decimal::from_f64_retain(leg.intended_qty).unwrap_or(Decimal::ZERO);
-                let poll = classify_response(&resp, intended);
+                let mut poll = classify_response(&resp, intended);
+                // A venue-terminated order whose fill lands short of the
+                // intended size may still be COMPLETE: the residue can sit
+                // below the venue's minimum order increment (Deribit's $10
+                // contract step), unfillable by construction. Proving the
+                // shortfall is sub-wire keeps the signal on the filled path
+                // instead of stranding it unresolved over dust it can never
+                // trade. Default wire_base_qty is identity → the residue
+                // stays actionable → PartialTerminal stands (fail closed).
+                if poll == LegPoll::PartialTerminal && resp.remaining_qty <= Decimal::ZERO {
+                    let shortfall = intended - resp.filled_qty;
+                    if shortfall > Decimal::ZERO {
+                        if let Ok(wire) = adapter.wire_base_qty(&leg.symbol, shortfall).await {
+                            if wire <= Decimal::ZERO {
+                                poll = LegPoll::Filled;
+                            }
+                        }
+                    }
+                }
                 // Terminal legs can never retry — drop the cancel-attempt
                 // counter so resolved orders don't accumulate kv rows.
                 if poll != LegPoll::Working {
@@ -473,6 +583,32 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
         // `external` closes stay unresolved for the operator.
         let is_flatten_child = signal_id.starts_with("flat-") || signal_id.starts_with("trim-");
         let is_close_signal = strategy_id == "external" || is_flatten_child;
+        // Terminal is terminal: this same pass may have just resolved a
+        // `flat-{id}-*` child and closed the parent above — a stale leg
+        // poll must never reopen Closed/Failed (HashMap outcome order is
+        // arbitrary). Unresolved/imbalanced stay revisable by design.
+        // Evaluated before derive so the terminal guard also covers signals
+        // whose pending legs are all-Working this pass (derive → None).
+        let current = state.state_store.get_signal(signal_id).ok().flatten();
+        let already_terminal = current
+            .as_ref()
+            .map(|s| matches!(s.status, SignalStatus::Closed | SignalStatus::Failed))
+            .unwrap_or(false);
+        if already_terminal {
+            // A terminal flat/trim child can still have landed its fill this
+            // pass (leg state persists before status derivation) — re-check
+            // parent coverage so a failed close whose order filled late
+            // still resolves the parent. Idempotent: the parent already
+            // closed or uncovered → early return.
+            if let Some(parent_id) = signal_id
+                .strip_prefix("flat-")
+                .or_else(|| signal_id.strip_prefix("trim-"))
+                .and_then(|s| s.rsplit_once('-').map(|(p, _)| p.to_string()))
+            {
+                resolve_flattened_parent(state, &parent_id);
+            }
+            continue;
+        }
         let (new_status, note): (Option<SignalStatus>, Option<String>) = derive_signal_status(
             polls,
             *leg_count,
@@ -482,18 +618,6 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
             cancel_notes.get(signal_id),
         );
         if let Some(status) = new_status {
-            // Terminal is terminal: this same pass may have just resolved a
-            // `flat-{id}-*` child and closed the parent above — a stale leg
-            // poll must never reopen Closed/Failed (HashMap outcome order is
-            // arbitrary). Unresolved/imbalanced stay revisable by design.
-            let current = state.state_store.get_signal(signal_id).ok().flatten();
-            let already_terminal = current
-                .as_ref()
-                .map(|s| matches!(s.status, SignalStatus::Closed | SignalStatus::Failed))
-                .unwrap_or(false);
-            if already_terminal {
-                continue;
-            }
             // Idempotent escalation: rewriting identical status+note every
             // pass bumps `updated_at` and re-counts the escalation forever —
             // persist only real changes. The dispatch/resolve hooks still
@@ -624,7 +748,8 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
             let filled = resp.filled_qty.to_string().parse::<f64>().unwrap_or(0.0);
             let price = resp
                 .avg_fill_price
-                .and_then(|p| p.to_string().parse::<f64>().ok());
+                .and_then(|p| p.to_string().parse::<f64>().ok())
+                .and_then(|p| crate::execution::ledger_px_usd(state, &leg.venue, &leg.symbol, p));
             if let Err(e) = state
                 .state_store
                 .apply_leg_order_state(&exec.id, leg.side, filled, price, fee)
@@ -885,6 +1010,171 @@ async fn dispatch_residual_flatten(state: &AppEngineState, signal_id: &str) {
     if children.iter().any(|c| c.status.counts_as_open()) {
         return;
     }
+    // Venue truth before another dispatch: a terminal (`failed`/`closed`)
+    // child's close order may still be live even though the ledger wrote it
+    // off — a cancel-ack that raced a fill, or an ack that never arrived.
+    // The ledger sees zero covered qty for it, so without this check the
+    // dispatcher would stack a second close on top of a working one. Each
+    // uncertain leg goes through `fetch_order`:
+    //   Working        → suppress this dispatch (the order IS the close).
+    //   Filled/partial → book the late fill; coverage may dissolve the
+    //                    residual without any new order.
+    //   Provably dead  → fall through; redispatch is safe.
+    //   Unverifiable   → suppress this pass; aged ambiguity escalates the
+    //                    parent instead of stacking on guesswork.
+    for c in &children {
+        if c.status.counts_as_open() {
+            continue;
+        }
+        let child_age_secs = chrono::DateTime::parse_from_rfc3339(&c.created_at)
+            .map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds())
+            .unwrap_or(i64::MAX);
+        for leg in &c.legs {
+            let order_id = leg
+                .venue_order_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            if (order_id.is_none() && leg.client_order_id.is_none())
+                || leg.filled_qty + 1e-9 >= leg.intended_qty
+            {
+                continue;
+            }
+            let Some(adapter) = state.get_adapter(&leg.venue) else {
+                tracing::warn!(
+                    "reconcile: {signal_id} flatten child {} leg on {} unverifiable (no adapter) — suppressing dispatch",
+                    c.id,
+                    leg.venue
+                );
+                if child_age_secs > RESIDUAL_ORDER_GRACE_SECS {
+                    let _ = state.state_store.update_signal_status(
+                        signal_id,
+                        SignalStatus::Unresolved,
+                        Some("flatten child's close order unverifiable — adapter gone"),
+                    );
+                }
+                return;
+            };
+            if !adapter.has_live_credentials() {
+                tracing::warn!(
+                    "reconcile: {signal_id} flatten child {} leg on {} unverifiable (credentials) — suppressing dispatch",
+                    c.id,
+                    leg.venue
+                );
+                if child_age_secs > RESIDUAL_ORDER_GRACE_SECS {
+                    let _ = state.state_store.update_signal_status(
+                        signal_id,
+                        SignalStatus::Unresolved,
+                        Some("flatten child's close order unverifiable — credentials missing"),
+                    );
+                }
+                return;
+            }
+            let resp = adapter
+                .fetch_order(
+                    &leg.symbol,
+                    order_id.unwrap_or(""),
+                    leg.client_order_id.as_deref(),
+                )
+                .await;
+            match resp {
+                Ok(resp)
+                    if (order_id.is_none() && !resp.order_id.is_empty()
+                        || order_id == Some(resp.order_id.as_str()))
+                        && resp.venue.as_str().eq_ignore_ascii_case(&leg.venue)
+                        && resp.symbol.eq_ignore_ascii_case(&leg.symbol) =>
+                {
+                    if order_id.is_none() {
+                        // Crash-window orphan: only the client id was ever
+                        // persisted — adopt the venue order id now so the
+                        // poll seam can keep watching it directly.
+                        let _ = state.state_store.record_leg_order_id(
+                            &c.id,
+                            leg.side,
+                            &resp.order_id,
+                            leg.client_order_id.as_deref(),
+                        );
+                    }
+                    match classify_response(
+                        &resp,
+                        Decimal::from_f64_retain(leg.intended_qty).unwrap_or_default(),
+                    ) {
+                        LegPoll::Working => {
+                            tracing::warn!(
+                                "reconcile: {signal_id} flatten child {} close order still working on {} — suppressing residual dispatch",
+                                c.id,
+                                leg.venue
+                            );
+                            if child_age_secs > RESIDUAL_ORDER_GRACE_SECS {
+                                let _ = state.state_store.update_signal_status(
+                                    signal_id,
+                                    SignalStatus::Unresolved,
+                                    Some("flatten child's close order still working past grace — manual check required"),
+                                );
+                            }
+                            return;
+                        }
+                        LegPoll::Filled | LegPoll::PartialTerminal => {
+                            let filled = resp.filled_qty.to_string().parse::<f64>().unwrap_or(0.0);
+                            let fee = resp
+                                .fee
+                                .map(|v| v.to_string().parse::<f64>().unwrap_or(0.0))
+                                .unwrap_or(0.0);
+                            let price = resp
+                                .avg_fill_price
+                                .and_then(|p| p.to_string().parse::<f64>().ok())
+                                .and_then(|p| {
+                                    crate::execution::ledger_px_usd(
+                                        state,
+                                        &leg.venue,
+                                        &leg.symbol,
+                                        p,
+                                    )
+                                });
+                            if filled > leg.filled_qty || fee > leg.fee_usd {
+                                let _ = state
+                                    .state_store
+                                    .apply_leg_order_state(&c.id, leg.side, filled, price, fee);
+                            }
+                        }
+                        LegPoll::CancelledEmpty | LegPoll::Unknown => {}
+                    }
+                }
+                Ok(_) => {
+                    // Identity mismatch — venue answered for a different
+                    // order than the ledger recorded. Unverifiable.
+                    tracing::error!(
+                        "reconcile: {signal_id} flatten child {} order on {} returned mismatched identity — suppressing dispatch",
+                        c.id,
+                        leg.venue
+                    );
+                    if child_age_secs > RESIDUAL_ORDER_GRACE_SECS {
+                        let _ = state.state_store.update_signal_status(
+                            signal_id,
+                            SignalStatus::Unresolved,
+                            Some("flatten child's close order identity unverifiable"),
+                        );
+                    }
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "reconcile: {signal_id} flatten child {} order check on {} failed ({e}) — suppressing dispatch",
+                        c.id,
+                        leg.venue
+                    );
+                    if child_age_secs > RESIDUAL_ORDER_GRACE_SECS {
+                        let _ = state.state_store.update_signal_status(
+                            signal_id,
+                            SignalStatus::Unresolved,
+                            Some("flatten child's close order unverifiable — venue read failing"),
+                        );
+                    }
+                    return;
+                }
+            }
+        }
+    }
     // The attempt cap bounds residual-flatten retries only — `trim-`
     // children count toward coverage and the open-dedup above, but a prior
     // liquidation trim is not a failed residual attempt and must not consume
@@ -1126,6 +1416,19 @@ async fn dispatch_residual_flatten(state: &AppEngineState, signal_id: &str) {
                 // refuses an oversell itself, same guarantee.
                 req.reduce_only = adapter.supports_reduce_only(&leg.symbol);
                 let client_order_id = req.client_order_id.clone();
+                // Persist the client order id BEFORE dispatch: a crash
+                // between venue accept and ack write keeps the locator.
+                if let Err(e) = state.state_store.record_leg_client_order_id(
+                    &close_id,
+                    child_side,
+                    &client_order_id,
+                ) {
+                    tracing::error!(
+                        "reconcile: residual flatten {close_id} client id persist failed — dispatch refused: {e}"
+                    );
+                    note_err(format!("client id persist failed: {e}"));
+                    continue;
+                }
                 match adapter.place_order(req).await {
                     Ok(resp) => (resp, client_order_id),
                     Err(e) => {
@@ -1158,12 +1461,23 @@ async fn dispatch_residual_flatten(state: &AppEngineState, signal_id: &str) {
             let px_f = resp
                 .avg_fill_price
                 .and_then(|p| p.to_string().parse::<f64>().ok())
-                .unwrap_or(0.0);
+                .and_then(|p| crate::execution::ledger_px_usd(state, &leg.venue, &leg.symbol, p));
             let oid = (!resp.order_id.trim().is_empty()).then_some(resp.order_id.as_str());
-            if qty_f > 0.0 && px_f > 0.0 {
-                let _ = state
-                    .state_store
-                    .apply_leg_fill(&close_id, child_side, qty_f, px_f, fee_f, oid);
+            match px_f.filter(|p| *p > 0.0) {
+                Some(px_f) if qty_f > 0.0 => {
+                    let _ = state
+                        .state_store
+                        .apply_leg_fill(&close_id, child_side, qty_f, px_f, fee_f, oid);
+                }
+                _ if qty_f > 0.0 => {
+                    // Conversion required but no rate available — record the
+                    // quantity, leave the price cell empty (never store a
+                    // coin value under the ledger's USD label).
+                    let _ = state
+                        .state_store
+                        .apply_leg_order_state(&close_id, child_side, qty_f, None, fee_f);
+                }
+                _ => {}
             }
         }
     }
@@ -1654,12 +1968,19 @@ mod tests {
     struct MockVenue {
         venue: &'static str,
         responses: std::sync::Mutex<std::collections::VecDeque<Result<OrderResponse, String>>>,
+        /// Per-order-id scripted answers — two legs sharing one venue
+        /// (e.g. an entry leg and a later close) can answer differently.
+        /// Checked before the shared queue.
+        by_order: std::sync::Mutex<HashMap<String, Result<OrderResponse, String>>>,
         cancels: std::sync::Mutex<Vec<String>>,
         cancel_error: std::sync::Mutex<Option<String>>,
         placed: std::sync::Mutex<Vec<OrderRequest>>,
         place_response: std::sync::Mutex<Option<OrderResponse>>,
         fetch_calls: std::sync::Mutex<usize>,
         no_reduce_only: bool,
+        /// When false, an empty `order_id` fetch (client-id lookup) bails —
+        /// mirrors venues that cannot resolve orders by client id.
+        cid_lookup: bool,
         positions: Vec<arbitrageur_core::position::Position>,
         balances: Vec<arbitrageur_core::position::Balance>,
     }
@@ -1669,12 +1990,14 @@ mod tests {
             Self {
                 venue,
                 responses: std::sync::Mutex::new(responses.into()),
+                by_order: std::sync::Mutex::new(HashMap::new()),
                 cancels: std::sync::Mutex::new(Vec::new()),
                 cancel_error: std::sync::Mutex::new(None),
                 placed: std::sync::Mutex::new(Vec::new()),
                 place_response: std::sync::Mutex::new(None),
                 fetch_calls: std::sync::Mutex::new(0),
                 no_reduce_only: false,
+                cid_lookup: true,
                 positions: Vec::new(),
                 balances: Vec::new(),
             }
@@ -1685,6 +2008,15 @@ mod tests {
                 no_reduce_only: true,
                 ..Self::new(venue, responses)
             }
+        }
+
+        /// Pin an order-id-keyed response — wins over the shared queue.
+        fn with_order_response(self, order_id: &str, r: Result<OrderResponse, String>) -> Self {
+            self.by_order
+                .lock()
+                .unwrap()
+                .insert(order_id.to_string(), r);
+            self
         }
 
         /// Seed a derivative position the residual-flatten verification can
@@ -1810,6 +2142,29 @@ mod tests {
             _cid: Option<&str>,
         ) -> anyhow::Result<OrderResponse> {
             *self.fetch_calls.lock().unwrap() += 1;
+            // Client-id-only lookup (crash recovery): venues that support it
+            // resolve the order id; others reject.
+            if order_id.is_empty() {
+                let Some(cid) = _cid.filter(|c| !c.is_empty()) else {
+                    anyhow::bail!("order id required");
+                };
+                if !self.cid_lookup {
+                    anyhow::bail!("client-id lookup unsupported");
+                }
+                let mut r = resp(OrderStatus::Filled, dec!(1), dec!(0));
+                r.order_id = format!("oid-resolved-{cid}");
+                r.client_order_id = cid.to_string();
+                r.symbol = symbol.to_string();
+                r.venue = VenueId::new(self.venue);
+                return Ok(r);
+            }
+            if let Some(r) = self.by_order.lock().unwrap().get(order_id) {
+                let mut r = r.clone().map_err(|e| anyhow::anyhow!(e))?;
+                r.order_id = order_id.to_string();
+                r.symbol = symbol.to_string();
+                r.venue = VenueId::new(self.venue);
+                return Ok(r);
+            }
             let mut q = self.responses.lock().unwrap();
             let r = if q.len() > 1 {
                 q.pop_front().unwrap()
@@ -1911,6 +2266,164 @@ mod tests {
         let sig = state.state_store.get_signal(&sid).unwrap().unwrap();
         assert_eq!(sig.status, SignalStatus::Balanced);
         assert!(sig.legs.iter().all(|l| l.filled_qty == 1.0));
+    }
+
+    /// Crash window: the client order id was persisted BEFORE dispatch and
+    /// the venue accepted the order, but the process died before the ack's
+    /// venue id was recorded. The leg is still pollable — the reconciler
+    /// resolves the venue id through the client-id lookup and settles it.
+    #[tokio::test]
+    async fn e2e_client_id_only_leg_recovers_via_client_lookup() {
+        let state = test_state();
+        state.settings.write().passive_unwind.timeout_secs = 0;
+        let sid = format!("sig-{}", rand::random::<u32>());
+        state
+            .state_store
+            .record_signal_execution(
+                &crate::state_store::NewSignalExecution {
+                    id: sid.clone(),
+                    strategy_id: "futures".into(),
+                    symbol: "BTC-USD".into(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: vec![
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "kraken".into(),
+                            side: LegSide::Long,
+                            symbol: Some("BTC-USD".into()),
+                            intended_qty: 1.0,
+                            intended_price: None,
+                            unit_scale: None,
+                        },
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "aster".into(),
+                            side: LegSide::Short,
+                            symbol: Some("BTC-USD".into()),
+                            intended_qty: 1.0,
+                            intended_price: None,
+                            unit_scale: None,
+                        },
+                    ],
+                },
+                "testnet",
+            )
+            .unwrap();
+        // Orphan: client id persisted pre-dispatch, ack never landed.
+        state
+            .state_store
+            .record_leg_client_order_id(&sid, LegSide::Long, "cid-kraken")
+            .unwrap();
+        state
+            .state_store
+            .record_leg_order_id(&sid, LegSide::Short, "oid-aster", Some("cid-aster"))
+            .unwrap();
+
+        let kraken = MockVenue::new("kraken", vec![Ok(mock_filled())]);
+        state
+            .test_adapters
+            .write()
+            .unwrap()
+            .insert("kraken".to_string(), Arc::new(kraken));
+        state.test_adapters.write().unwrap().insert(
+            "aster".to_string(),
+            Arc::new(MockVenue::new("aster", vec![Ok(mock_filled())])),
+        );
+
+        let sum = reconcile_pending_orders(&state).await;
+        assert_eq!(sum.resolved, 1);
+        let sig = state.state_store.get_signal(&sid).unwrap().unwrap();
+        assert_eq!(sig.status, SignalStatus::Balanced);
+        // The orphan leg's recovered venue id is now durable — later passes
+        // poll it directly, no client-id lookup needed.
+        let long_leg = sig.legs.iter().find(|l| l.side == LegSide::Long).unwrap();
+        assert_eq!(
+            long_leg.venue_order_id.as_deref(),
+            Some("oid-resolved-cid-kraken")
+        );
+        assert_eq!(long_leg.filled_qty, 1.0);
+    }
+
+    /// A persisted client id on a venue that cannot look orders up by it:
+    /// the leg is unproven, not terminally empty — it must stay pending for
+    /// escalation rather than resolving the signal off a guess.
+    #[tokio::test]
+    async fn e2e_unresolvable_client_id_stays_pending() {
+        let state = test_state();
+        state.settings.write().passive_unwind.timeout_secs = 0;
+        let sid = format!("sig-{}", rand::random::<u32>());
+        state
+            .state_store
+            .record_signal_execution(
+                &crate::state_store::NewSignalExecution {
+                    id: sid.clone(),
+                    strategy_id: "futures".into(),
+                    symbol: "BTC-USD".into(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: vec![
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "kraken".into(),
+                            side: LegSide::Long,
+                            symbol: Some("BTC-USD".into()),
+                            intended_qty: 1.0,
+                            intended_price: None,
+                            unit_scale: None,
+                        },
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "aster".into(),
+                            side: LegSide::Short,
+                            symbol: Some("BTC-USD".into()),
+                            intended_qty: 1.0,
+                            intended_price: None,
+                            unit_scale: None,
+                        },
+                    ],
+                },
+                "testnet",
+            )
+            .unwrap();
+        state
+            .state_store
+            .record_leg_client_order_id(&sid, LegSide::Long, "cid-kraken")
+            .unwrap();
+        state
+            .state_store
+            .record_leg_order_id(&sid, LegSide::Short, "oid-aster", Some("cid-aster"))
+            .unwrap();
+
+        let mut kraken = MockVenue::new("kraken", vec![Ok(mock_filled())]);
+        kraken.cid_lookup = false;
+        state
+            .test_adapters
+            .write()
+            .unwrap()
+            .insert("kraken".to_string(), Arc::new(kraken));
+        state.test_adapters.write().unwrap().insert(
+            "aster".to_string(),
+            Arc::new(MockVenue::new("aster", vec![Ok(mock_filled())])),
+        );
+
+        let sum = reconcile_pending_orders(&state).await;
+        // The aster leg polled+filled; the kraken leg is unproven, so the
+        // signal cannot resolve — it stays in_flight for the deadline
+        // escalation, never assumed empty.
+        assert_eq!(sum.resolved, 0);
+        let sig = state.state_store.get_signal(&sid).unwrap().unwrap();
+        assert_eq!(sig.status, SignalStatus::InFlight);
+        assert_eq!(
+            sig.legs
+                .iter()
+                .find(|l| l.side == LegSide::Long)
+                .unwrap()
+                .filled_qty,
+            0.0
+        );
     }
 
     #[tokio::test]
@@ -2575,5 +3088,452 @@ mod tests {
             1,
             "enrichment is one-shot per boot"
         );
+    }
+
+    /// Settle-gap on a FAILED close: a `flat-*` child marked Failed while
+    /// its cancel/fill state was unverifiable can leave a live venue order
+    /// the ledger stopped watching. The zero-fill leg must stay pollable —
+    /// when the venue reports the late fill, coverage completes and the
+    /// parent resolves, while the child's own status stays terminal.
+    #[tokio::test]
+    async fn e2e_failed_flat_child_late_fill_resolves_parent() {
+        let (state, parent) = seeded_state(
+            "funding",
+            vec![("kraken", LegSide::Long), ("aster", LegSide::Short)],
+        );
+        // Parent entry fully filled → balanced.
+        for side in [LegSide::Long, LegSide::Short] {
+            state
+                .state_store
+                .apply_leg_order_state(&parent, side, 1.0, Some(100.0), 0.5)
+                .unwrap();
+        }
+        state
+            .state_store
+            .update_signal_status(&parent, SignalStatus::Balanced, None)
+            .unwrap();
+
+        // Failed flat child: aster close filled at dispatch, kraken close
+        // order accepted-but-unverifiable (live order id, zero recorded
+        // fill) — exactly the "order may still be working" case.
+        let child = format!("flat-{parent}-0001");
+        state
+            .state_store
+            .record_signal_execution(
+                &crate::state_store::NewSignalExecution {
+                    id: child.clone(),
+                    strategy_id: "funding".into(),
+                    symbol: "BTC-USD".into(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: vec![
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "kraken".into(),
+                            side: LegSide::Short,
+                            symbol: Some("BTC-USD".into()),
+                            intended_qty: 1.0,
+                            intended_price: None,
+                            unit_scale: None,
+                        },
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "aster".into(),
+                            side: LegSide::Long,
+                            symbol: Some("BTC-USD".into()),
+                            intended_qty: 1.0,
+                            intended_price: None,
+                            unit_scale: None,
+                        },
+                    ],
+                },
+                "testnet",
+            )
+            .unwrap();
+        state
+            .state_store
+            .record_leg_order_id(
+                &child,
+                LegSide::Short,
+                "oid-kraken-close",
+                Some("cid-kraken-close"),
+            )
+            .unwrap();
+        state
+            .state_store
+            .apply_leg_order_state(&child, LegSide::Long, 1.0, Some(100.0), 0.5)
+            .unwrap();
+        state
+            .state_store
+            .update_signal_status(
+                &child,
+                SignalStatus::Failed,
+                Some("cancel/fill state unverifiable"),
+            )
+            .unwrap();
+
+        state.test_adapters.write().unwrap().insert(
+            "kraken".into(),
+            Arc::new(MockVenue::new("kraken", vec![Ok(mock_filled())])),
+        );
+
+        let sum = reconcile_pending_orders(&state).await;
+        // Only the failed child's empty kraken leg is pending — parent legs
+        // are filled, the child's filled aster leg self-excludes.
+        assert_eq!(sum.polled, 1);
+        let child_sig = state.state_store.get_signal(&child).unwrap().unwrap();
+        // Terminal is never reopened — but the late fill still books.
+        assert_eq!(child_sig.status, SignalStatus::Failed);
+        let kraken_leg = child_sig.legs.iter().find(|l| l.venue == "kraken").unwrap();
+        assert_eq!(kraken_leg.filled_qty, 1.0);
+        // Coverage complete → the parent resolves instead of hanging
+        // `balanced` over a venue-flat position.
+        let parent_sig = state.state_store.get_signal(&parent).unwrap().unwrap();
+        assert_eq!(parent_sig.status, SignalStatus::Closed);
+    }
+
+    /// Issue #82: a `failed` flatten child whose venue close order is still
+    /// WORKING must suppress any new residual dispatch — the ledger counts
+    /// zero covered qty for it, so without the venue-truth check the
+    /// dispatcher would stack a second close on top of the live one.
+    #[tokio::test]
+    async fn e2e_failed_flat_child_working_order_suppresses_dispatch() {
+        // Parent: kraken entry filled, aster entry empty → imbalanced, one
+        // naked long side to close.
+        let (state, parent) = seeded_state(
+            "funding",
+            vec![("kraken", LegSide::Long), ("aster", LegSide::Short)],
+        );
+        state
+            .state_store
+            .apply_leg_order_state(&parent, LegSide::Long, 1.0, Some(100.0), 0.5)
+            .unwrap();
+        state
+            .state_store
+            .update_signal_status(&parent, SignalStatus::Imbalanced, None)
+            .unwrap();
+
+        // Failed flat child: a single kraken close leg with a live order id.
+        let child = format!("flat-{parent}-0002");
+        state
+            .state_store
+            .record_signal_execution(
+                &crate::state_store::NewSignalExecution {
+                    id: child.clone(),
+                    strategy_id: "funding".into(),
+                    symbol: "BTC-USD".into(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: vec![crate::state_store::NewSignalLeg {
+                        account_id: None,
+                        venue: "kraken".into(),
+                        side: LegSide::Short,
+                        symbol: Some("BTC-USD".into()),
+                        intended_qty: 1.0,
+                        intended_price: None,
+                        unit_scale: None,
+                    }],
+                },
+                "testnet",
+            )
+            .unwrap();
+        state
+            .state_store
+            .record_leg_order_id(
+                &child,
+                LegSide::Short,
+                "oid-kraken-close",
+                Some("cid-kraken-close"),
+            )
+            .unwrap();
+        state
+            .state_store
+            .update_signal_status(
+                &child,
+                SignalStatus::Failed,
+                Some("cancel/fill state unverifiable"),
+            )
+            .unwrap();
+
+        // kraken says the close order is still working; aster stays
+        // working so the parent remains imbalanced.
+        state.test_adapters.write().unwrap().insert(
+            "kraken".into(),
+            Arc::new(MockVenue::new(
+                "kraken",
+                vec![Ok(resp(OrderStatus::New, dec!(0), dec!(1)))],
+            )),
+        );
+        state.test_adapters.write().unwrap().insert(
+            "aster".into(),
+            Arc::new(MockVenue::new(
+                "aster",
+                vec![Ok(resp(OrderStatus::New, dec!(0), dec!(1)))],
+            )),
+        );
+
+        reconcile_pending_orders(&state).await;
+
+        let siblings = state
+            .state_store
+            .list_signals(None, None)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| crate::state_store::is_flatten_child_id(&s.id, &parent))
+            .count();
+        assert_eq!(siblings, 1, "working close order must suppress redispatch");
+        let parent_sig = state.state_store.get_signal(&parent).unwrap().unwrap();
+        assert_eq!(
+            parent_sig.status,
+            SignalStatus::Imbalanced,
+            "suppression inside grace window keeps the parent open, not escalated"
+        );
+    }
+
+    /// Issue #82: the same `failed` child whose close order is provably
+    /// dead (cancelled empty) must NOT block redispatch — the residual is
+    /// still uncovered, so a fresh flatten submits.
+    #[tokio::test]
+    async fn e2e_failed_flat_child_dead_order_allows_dispatch() {
+        let (state, parent) = seeded_state(
+            "funding",
+            vec![("kraken", LegSide::Long), ("aster", LegSide::Short)],
+        );
+        state
+            .state_store
+            .apply_leg_order_state(&parent, LegSide::Long, 1.0, Some(100.0), 0.5)
+            .unwrap();
+        state
+            .state_store
+            .update_signal_status(&parent, SignalStatus::Imbalanced, None)
+            .unwrap();
+
+        let child = format!("flat-{parent}-0003");
+        state
+            .state_store
+            .record_signal_execution(
+                &crate::state_store::NewSignalExecution {
+                    id: child.clone(),
+                    strategy_id: "funding".into(),
+                    symbol: "BTC-USD".into(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: vec![crate::state_store::NewSignalLeg {
+                        account_id: None,
+                        venue: "kraken".into(),
+                        side: LegSide::Short,
+                        symbol: Some("BTC-USD".into()),
+                        intended_qty: 1.0,
+                        intended_price: None,
+                        unit_scale: None,
+                    }],
+                },
+                "testnet",
+            )
+            .unwrap();
+        state
+            .state_store
+            .record_leg_order_id(
+                &child,
+                LegSide::Short,
+                "oid-kraken-close",
+                Some("cid-kraken-close"),
+            )
+            .unwrap();
+        state
+            .state_store
+            .update_signal_status(
+                &child,
+                SignalStatus::Failed,
+                Some("cancel/fill state unverifiable"),
+            )
+            .unwrap();
+        // Backdate past the residual-retry throttle so this pass
+        // redispatches; still inside the grace bound so no escalation.
+        state.state_store.force_signal_age_for_test(
+            &child,
+            &(Utc::now() - chrono::Duration::seconds(120)).to_rfc3339(),
+        );
+
+        // kraken: the old close order is cancelled-empty (dead) — pinned
+        // per order id so the parent's entry-leg poll stays filled while
+        // the child's close order reads dead for both the settle-gap poll
+        // and the dispatcher's venue-truth check. The residual clamp needs
+        // the venue-side long position to verify the redispatch quantity;
+        // place_order accepts the new close.
+        let kraken = MockVenue::new("kraken", vec![Ok(mock_filled())])
+            .with_order_response(
+                "oid-kraken-close",
+                Ok(resp(OrderStatus::Cancelled, dec!(0), dec!(1))),
+            )
+            .with_position("BTC-USD", Side::Buy, dec!(1));
+        *kraken.place_response.lock().unwrap() = Some(resp(OrderStatus::New, dec!(0), dec!(1)));
+        state
+            .test_adapters
+            .write()
+            .unwrap()
+            .insert("kraken".into(), Arc::new(kraken));
+        // aster's empty entry leg reads cancelled — (filled, empty) entry
+        // derives imbalanced, the residual-dispatch precondition.
+        state.test_adapters.write().unwrap().insert(
+            "aster".into(),
+            Arc::new(MockVenue::new(
+                "aster",
+                vec![Ok(resp(OrderStatus::Cancelled, dec!(0), dec!(1)))],
+            )),
+        );
+
+        reconcile_pending_orders(&state).await;
+
+        let siblings = state
+            .state_store
+            .list_signals(None, None)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| crate::state_store::is_flatten_child_id(&s.id, &parent))
+            .count();
+        assert_eq!(
+            siblings, 2,
+            "a provably dead close order must not block the residual retry"
+        );
+    }
+
+    /// Issue #82: an unverifiable child order suppresses dispatch, and once
+    /// the child ages past the grace bound the parent escalates to
+    /// `unresolved` — bounded silence, never a stacked close on guesswork.
+    #[tokio::test]
+    async fn e2e_failed_flat_child_unverifiable_order_escalates_after_grace() {
+        let (state, parent) = seeded_state(
+            "funding",
+            vec![("kraken", LegSide::Long), ("aster", LegSide::Short)],
+        );
+        state
+            .state_store
+            .apply_leg_order_state(&parent, LegSide::Long, 1.0, Some(100.0), 0.5)
+            .unwrap();
+        state
+            .state_store
+            .update_signal_status(&parent, SignalStatus::Imbalanced, None)
+            .unwrap();
+
+        let child = format!("flat-{parent}-0004");
+        state
+            .state_store
+            .record_signal_execution(
+                &crate::state_store::NewSignalExecution {
+                    id: child.clone(),
+                    strategy_id: "funding".into(),
+                    symbol: "BTC-USD".into(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: vec![crate::state_store::NewSignalLeg {
+                        account_id: None,
+                        venue: "kraken".into(),
+                        side: LegSide::Short,
+                        symbol: Some("BTC-USD".into()),
+                        intended_qty: 1.0,
+                        intended_price: None,
+                        unit_scale: None,
+                    }],
+                },
+                "testnet",
+            )
+            .unwrap();
+        state
+            .state_store
+            .record_leg_order_id(
+                &child,
+                LegSide::Short,
+                "oid-kraken-close",
+                Some("cid-kraken-close"),
+            )
+            .unwrap();
+        state
+            .state_store
+            .update_signal_status(
+                &child,
+                SignalStatus::Failed,
+                Some("cancel/fill state unverifiable"),
+            )
+            .unwrap();
+        // Older than the grace bound: suppression must escalate, not keep
+        // mute-waiting forever on a venue that cannot prove the order dead.
+        state.state_store.force_signal_age_for_test(
+            &child,
+            &(Utc::now() - chrono::Duration::seconds(RESIDUAL_ORDER_GRACE_SECS + 60)).to_rfc3339(),
+        );
+
+        // The child's close order id returns only errors — provably
+        // unverifiable — while the entry leg still polls filled.
+        let kraken = MockVenue::new("kraken", vec![Ok(mock_filled())])
+            .with_order_response("oid-kraken-close", Err("venue read timeout".to_string()));
+        state
+            .test_adapters
+            .write()
+            .unwrap()
+            .insert("kraken".into(), Arc::new(kraken));
+        state.test_adapters.write().unwrap().insert(
+            "aster".into(),
+            Arc::new(MockVenue::new(
+                "aster",
+                vec![Ok(resp(OrderStatus::Cancelled, dec!(0), dec!(1)))],
+            )),
+        );
+
+        reconcile_pending_orders(&state).await;
+
+        let siblings = state
+            .state_store
+            .list_signals(None, None)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| crate::state_store::is_flatten_child_id(&s.id, &parent))
+            .count();
+        assert_eq!(siblings, 1, "unverifiable order must suppress redispatch");
+        let parent_sig = state.state_store.get_signal(&parent).unwrap().unwrap();
+        assert_eq!(
+            parent_sig.status,
+            SignalStatus::Unresolved,
+            "aged unverifiable close order must surface, not sit mute"
+        );
+    }
+
+    #[tokio::test]
+    async fn account_position_for_bare_base_matches_quoted_row() {
+        // Radar legs persist bare-base symbols ("BTC") while venue account
+        // rows normalize to quoted spellings ("BTC-USDC"). A miss reads live
+        // exposure as flat and "no residual" verifiers close families over
+        // real positions — this is what stranded the sig-…08d269ae legs.
+        let venue =
+            MockVenue::new("mock", vec![]).with_position("BTC-USDC", Side::Buy, dec!(0.00119));
+        let acc = venue.fetch_account().await.unwrap();
+        let pos = venue
+            .account_position_for(&acc, "BTC")
+            .unwrap()
+            .expect("bare BTC must match the sole normalized BTC-USDC row");
+        assert_eq!(pos.quantity, dec!(0.00119));
+        assert_eq!(pos.side, Side::Buy);
+    }
+
+    #[tokio::test]
+    async fn account_position_for_exact_spelling_wins_over_base_twin() {
+        // Exact spelling resolves its own row even when a same-base twin
+        // exists — a USDC-quoted request must pick the USDC row, not fail
+        // ambiguous against the USDT twin.
+        let venue = MockVenue::new("mock", vec![])
+            .with_position("BTC-USDC", Side::Buy, dec!(0.1))
+            .with_position("BTC-USDT", Side::Sell, dec!(0.2));
+        let acc = venue.fetch_account().await.unwrap();
+        let pos = venue
+            .account_position_for(&acc, "BTC-USDC")
+            .unwrap()
+            .expect("exact USDC row resolves despite the USDT twin");
+        assert_eq!(pos.quantity, dec!(0.1));
+        // …but a bare base spanning both rows is ambiguous — fail closed.
+        assert!(venue.account_position_for(&acc, "BTC").is_err());
     }
 }

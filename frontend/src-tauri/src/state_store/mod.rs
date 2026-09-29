@@ -549,19 +549,33 @@ pub struct PositionVenueDto {
     pub net_qty: f64,
 }
 
-/// Aggregated current open position for one signal-type identity:
-/// (strategy, symbol/event, venue set). Built from every signal execution
-/// that still counts as open; partial-flatten children net against their
-/// parents because they share the same grouping key.
+/// Aggregated current open position for one executed trade:
+/// (strategy, trade id). A trade is the shared cycle prefix of `-legN`
+/// sibling signals (one options package's 8 leg signals = one card), or
+/// the signal's own id for single-signal executions; partial-flatten
+/// children net against their parents because they resolve to the
+/// parent's trade.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OpenPositionDto {
-    /// Stable grouping identity: `strategy_id|symbol|venue_a+venue_b`.
+    /// Stable grouping identity: `strategy_id|trade_id`.
     pub key: String,
+    /// Executed-trade identity: the shared cycle prefix for `-legN`
+    /// sibling signals, else the signal's own id.
+    pub trade_id: String,
     pub strategy_id: String,
+    /// Display label — the shared instrument for single-instrument
+    /// trades; for multi-instrument packages the longest common
+    /// `-`-segment prefix over fixed-contract legs (e.g.
+    /// `BTC-30OCT26-88000` for a conversion), else the underlying.
     pub symbol: String,
+    /// Distinct leg instruments across the trade's member signals —
+    /// reduce-only checks and trade-scoped exits resolve against these,
+    /// never against the display `symbol`.
+    pub leg_symbols: Vec<String>,
     pub signal_count: usize,
-    /// Per-venue signed net quantity; long (positive) rows first.
+    /// Per-venue signed net quantity per leg instrument; long (positive)
+    /// rows first.
     pub venues: Vec<PositionVenueDto>,
     /// Sum of entry-time expected net USD where signals carried an estimate.
     pub expected_net_usd: Option<f64>,
@@ -579,8 +593,52 @@ pub struct OpenPositionDto {
     pub reduce_only: bool,
 }
 
-/// Group open signal executions into per-(strategy, symbol, venue-set)
-/// positions. `mark` supplies a fresh current mid for (venue, symbol); when it
+/// The executed-trade identity of a signal: `-legN` siblings share their
+/// cycle prefix (`opar-BTC-…-leg2` → `opar-BTC-…`), so one package's leg
+/// signals collapse into one trade card; every other signal is its own
+/// trade. The `-leg` tail must be numeric so a coincidental `-leg` inside
+/// an id cannot forge a shared prefix.
+fn signal_trade_id(id: &str) -> &str {
+    match id.rsplit_once("-leg") {
+        Some((prefix, tail))
+            if !prefix.is_empty()
+                && !tail.is_empty()
+                && tail.bytes().all(|b| b.is_ascii_digit()) =>
+        {
+            prefix
+        }
+        _ => id,
+    }
+}
+
+/// Display label for a multi-instrument trade: the longest common
+/// `-`-segment prefix over its fixed-contract (option) legs — a conversion
+/// yields `BTC-30OCT26-88000`, a strike-spanning package the underlying
+/// `BTC`. `None` when the trade holds no option legs.
+fn option_legs_common_prefix(members: &[&SignalExecution]) -> Option<String> {
+    let mut acc: Option<String> = None;
+    for s in members {
+        for l in &s.legs {
+            if !symbol_is_fixed_contract(&l.symbol) {
+                continue;
+            }
+            acc = Some(match acc.take() {
+                None => l.symbol.clone(),
+                Some(prev) => prev
+                    .split('-')
+                    .zip(l.symbol.split('-'))
+                    .take_while(|(a, b)| a == b)
+                    .map(|(a, _)| a)
+                    .collect::<Vec<_>>()
+                    .join("-"),
+            });
+        }
+    }
+    acc.filter(|p| !p.is_empty())
+}
+
+/// Group open signal executions into per-(strategy, trade) positions.
+/// `mark` supplies a fresh current mid for (venue, symbol); when it
 /// returns `None` for a filled leg the group's unrealized PnL stays `None`
 /// rather than being marked at a stale or invented price.
 pub fn aggregate_open_positions(
@@ -590,25 +648,15 @@ pub fn aggregate_open_positions(
     use std::collections::BTreeMap;
 
     const EPS: f64 = 1e-9;
-    let mut groups: BTreeMap<(String, String, String), Vec<&SignalExecution>> = BTreeMap::new();
+    let mut groups: BTreeMap<(String, String), Vec<&SignalExecution>> = BTreeMap::new();
     // Flatten children carry `flat-{parent}-xxxx` ids and single-venue legs —
     // their fills offset the PARENT's exposure, so they must join the parent's
-    // group rather than form a separate (usually zero-fill) card.
+    // trade rather than form a separate (usually zero-fill) card.
     let by_id: std::collections::HashMap<&str, &SignalExecution> =
         signals.iter().map(|s| (s.id.as_str(), s)).collect();
-    let venue_key_of = |s: &SignalExecution| -> String {
-        let mut segs: Vec<String> = s
-            .legs
-            .iter()
-            .map(|l| format!("{}:{}", l.venue.to_lowercase(), l.symbol))
-            .collect();
-        segs.sort();
-        segs.dedup();
-        segs.join("+")
-    };
     for s in signals {
         // A `flat-*` child's fills offset its parent's exposure — count them
-        // whenever the parent group is open, even if the child itself has
+        // whenever the parent trade is open, even if the child itself has
         // already closed (its fills are real reductions). An open parent's
         // own fills count while the parent is open.
         let owner: &SignalExecution = match s
@@ -631,19 +679,17 @@ pub fn aggregate_open_positions(
                 s
             }
         };
-        let venue_key = venue_key_of(owner);
         groups
             .entry((
                 owner.strategy_id.to_lowercase(),
-                owner.symbol.clone(),
-                venue_key,
+                signal_trade_id(&owner.id).to_string(),
             ))
             .or_default()
             .push(s);
     }
 
     let mut out = Vec::with_capacity(groups.len());
-    for ((strategy_id, symbol, venue_key), members) in groups {
+    for ((strategy_id, trade_id), members) in groups {
         let mut nets: BTreeMap<(String, String), f64> = BTreeMap::new();
         let mut fees = 0.0f64;
         let mut expected_sum = 0.0f64;
@@ -693,8 +739,8 @@ pub fn aggregate_open_positions(
         }
 
         // Zero-net rows (a venue flattened to flat by an offsetting child
-        // signal) carry no current exposure — drop them; if the whole group
-        // nets flat (e.g. unfilled in-flight signal) keep the venues at zero.
+        // signal) carry no current exposure — drop them; if the whole trade
+        // nets flat (e.g. unfilled in-flight signal) keep its legs at zero.
         let mut venue_rows: Vec<PositionVenueDto> = nets
             .iter()
             .filter(|(_, q)| q.abs() > EPS)
@@ -705,15 +751,18 @@ pub fn aggregate_open_positions(
             })
             .collect();
         if venue_rows.is_empty() {
-            venue_rows = venue_key
-                .split('+')
-                .filter_map(|seg| seg.split_once(':'))
-                .map(|(v, s)| PositionVenueDto {
-                    venue: v.to_string(),
-                    symbol: s.to_string(),
-                    net_qty: 0.0,
-                })
-                .collect();
+            let mut seen = std::collections::BTreeSet::new();
+            for s in &members {
+                for l in &s.legs {
+                    if seen.insert((l.venue.to_lowercase(), l.symbol.clone())) {
+                        venue_rows.push(PositionVenueDto {
+                            venue: l.venue.clone(),
+                            symbol: l.symbol.clone(),
+                            net_qty: 0.0,
+                        });
+                    }
+                }
+            }
         }
         // Long (positive) rows on top, short (negative) rows below.
         venue_rows.sort_by(|a, b| {
@@ -724,10 +773,29 @@ pub fn aggregate_open_positions(
                 .then_with(|| a.venue.cmp(&b.venue))
         });
 
+        let leg_symbols: Vec<String> = {
+            let mut set: std::collections::BTreeSet<String> = members
+                .iter()
+                .flat_map(|s| s.legs.iter().map(|l| l.symbol.clone()))
+                .collect();
+            set.extend(members.iter().map(|s| s.symbol.clone()));
+            set.into_iter().collect()
+        };
+        let member_syms: std::collections::BTreeSet<&str> =
+            members.iter().map(|s| s.symbol.as_str()).collect();
+        let symbol = if member_syms.len() == 1 {
+            member_syms.into_iter().next().unwrap().to_string()
+        } else {
+            option_legs_common_prefix(&members)
+                .unwrap_or_else(|| member_syms.iter().copied().collect::<Vec<_>>().join("+"))
+        };
+
         out.push(OpenPositionDto {
-            key: format!("{strategy_id}|{symbol}|{venue_key}"),
+            key: format!("{strategy_id}|{trade_id}"),
+            trade_id,
             strategy_id,
             symbol,
+            leg_symbols,
             signal_count: members.len(),
             venues: venue_rows,
             expected_net_usd: expected_any.then_some(expected_sum),
@@ -1825,6 +1893,36 @@ PRAGMA user_version = 41;
 COMMIT;
 PRAGMA foreign_keys = ON;";
 
+/// v42 widens the equity-event kind CHECK to admit 'mark_repricing' — the
+/// collateral-FX attribution added alongside frozen-FX drawdown. Rows whose
+/// deltas are explained by coin-price repricing of non-USD collateral were
+/// rejected by the v15 CHECK and silently dropped, so every mark-swing read
+/// as 'transfer'/'deposit'/'withdrawal'. Rebuild mirrors v41.
+const MIGRATION_V42_SQL: &str = "\
+PRAGMA foreign_keys = OFF;
+BEGIN IMMEDIATE;
+CREATE TABLE account_equity_events_v42 (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id TEXT NOT NULL CHECK(length(account_id) BETWEEN 1 AND 128),
+    ts_ms INTEGER NOT NULL CHECK(ts_ms >= 0),
+    expected REAL NOT NULL,
+    actual REAL NOT NULL,
+    delta REAL NOT NULL,
+    kind TEXT NOT NULL CHECK(kind IN ('deposit', 'withdrawal', 'transfer', 'funding', 'mark_repricing')),
+    note TEXT NOT NULL DEFAULT ''
+);
+INSERT INTO account_equity_events_v42
+    (account_id, ts_ms, expected, actual, delta, kind, note)
+    SELECT account_id, ts_ms, expected, actual, delta, kind, note
+    FROM account_equity_events;
+DROP TABLE account_equity_events;
+ALTER TABLE account_equity_events_v42 RENAME TO account_equity_events;
+CREATE INDEX ix_account_equity_events_account_ts
+    ON account_equity_events(account_id, ts_ms);
+PRAGMA user_version = 42;
+COMMIT;
+PRAGMA foreign_keys = ON;";
+
 const MIGRATION_V38_SQL: &str = "\
 PRAGMA foreign_keys = OFF;
 BEGIN IMMEDIATE;
@@ -2280,6 +2378,7 @@ pub(crate) fn normalize_environment(raw: &str) -> anyhow::Result<String> {
 // Quote-policy-aware key sets — `separate` mode restricts reads to the
 // exact pair key, merged modes return the full USD-family alias set.
 pub(crate) use samples::sample_keys;
+pub(crate) use samples::symbol_is_fixed_contract;
 
 /// Every storage key that may hold samples for one asset. Background paths
 /// (monitor lanes, WS feed) record under the canonical base ("BTC") while
@@ -2691,7 +2790,7 @@ impl StateStore {
 
     fn migrate(conn: &Connection) -> anyhow::Result<()> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 41 {
+        if version > 42 {
             anyhow::bail!("unsupported state store schema version: {version}");
         }
         if version == 0 {
@@ -2936,6 +3035,12 @@ impl StateStore {
         }
         if version <= 40 {
             if let Err(err) = conn.execute_batch(MIGRATION_V41_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 41 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V42_SQL) {
                 let _ = conn.execute_batch("ROLLBACK;");
                 return Err(err.into());
             }

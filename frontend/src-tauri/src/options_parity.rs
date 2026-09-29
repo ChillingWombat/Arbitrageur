@@ -123,6 +123,10 @@ pub struct OptionsParityScanParams {
     pub max_days_to_expiry: Option<f64>,
     #[serde(default)]
     pub min_edge_bps: Option<f64>,
+    /// Result cap — a display concern. Execution re-scans pass usize::MAX so
+    /// a candidate cannot fall out of the top-N cut between scans.
+    #[serde(default)]
+    pub limit: Option<usize>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -447,7 +451,7 @@ pub async fn scan_options_parity_impl(
         });
     }
     out.sort_by(|a, b| b.net_edge_usd.total_cmp(&a.net_edge_usd));
-    out.truncate(MAX_RESULTS);
+    out.truncate(params.limit.unwrap_or(MAX_RESULTS));
     Ok(out)
 }
 
@@ -505,6 +509,9 @@ pub async fn execute_options_parity_impl(
             min_hours_to_expiry: Some(0.0),
             max_days_to_expiry: Some(365.0),
             min_edge_bps: params.min_edge_bps,
+            // Re-verify must see the whole board: the display cap could drop
+            // a live edge when borderline candidates reshuffle between scans.
+            limit: Some(usize::MAX),
         },
         state,
     )
@@ -588,15 +595,29 @@ pub async fn execute_options_parity_impl(
         .await
         .map_err(|e| format!("account read on deribit failed: {e}"))?;
     for sym in &leg_symbols {
-        if adapter
+        if let Some(p) = adapter
             .account_position_for(&pre_acc, sym)
-            .ok()
-            .flatten()
-            .is_some_and(|p| p.quantity > dec!(0))
+            .map_err(|e| format!("position read on deribit failed for {sym}: {e}"))?
+            .filter(|p| p.quantity > dec!(0))
         {
-            return Err(format!(
-                "An open position already exists for {sym}; flatten it before cycling"
-            ));
+            // A residual below the venue's wire minimum cannot be flattened
+            // — refusing on it strands the substrategy forever. Only an
+            // actionable position blocks re-entry.
+            let actionable = adapter
+                .wire_base_qty(sym, p.quantity)
+                .await
+                .ok()
+                .is_some_and(|q| q > dec!(0));
+            if actionable {
+                return Err(format!(
+                    "An open position already exists for {sym} (qty {}); flatten it before cycling",
+                    p.quantity
+                ));
+            }
+            tracing::warn!(
+                "options parity: {sym} carries a sub-minimum residual position ({}); proceeding — it is not flattenable",
+                p.quantity
+            );
         }
     }
 
@@ -737,6 +758,20 @@ pub async fn execute_options_parity_impl(
         let order =
             arbitrageur_core::order::OrderRequest::new_ioc(vid.clone(), sym, side, bound_px, qty);
         let client_oid = order.client_order_id.clone();
+        // Persist the client order id BEFORE dispatch so a crash between
+        // venue accept and ack write keeps the reconciler a locator.
+        if let Err(e) =
+            state
+                .state_store
+                .record_leg_client_order_id(&leg_signal_id, leg_side, &client_oid)
+        {
+            mark_failed(&leg_signal_id, &format!("client id persist failed: {e}"));
+            leg_error = Some(format!(
+                "leg {} ({sym}) client id persist failed: {e}",
+                idx + 1
+            ));
+            break;
+        }
         let mut resp = match adapter.place_order(order).await {
             Ok(r) => r,
             Err(e) => {
@@ -957,10 +992,21 @@ pub async fn execute_options_parity_impl(
             }
         }
     }
-    let attempt_pnl = premium_pnl - fee_total;
-    let attempt_pnl_f = attempt_pnl.to_string().parse::<f64>().unwrap_or(0.0);
+    let attempt_pnl_f = premium_pnl.to_string().parse::<f64>().unwrap_or(0.0);
+    // Premium cashflow is financing, not realized PnL — the conversion's
+    // true PnL lands at close via per-leg deltas. Book it to the dedicated
+    // outlay counter so Net Profit isn't showing a −premium "loss" for the
+    // whole hold. Fees are different: they're a real cost paid at fill,
+    // not inventory — they book to realized immediately.
     let total_f =
-        crate::execution::accumulate_realized_profit(state, state.is_live(), attempt_pnl_f);
+        crate::execution::accumulate_premium_outlay(state, state.is_live(), attempt_pnl_f);
+    if fee_total > Decimal::ZERO {
+        crate::execution::accumulate_realized_profit(
+            state,
+            state.is_live(),
+            -fee_total.to_string().parse::<f64>().unwrap_or(0.0),
+        );
+    }
     let fee_total_f = fee_total.to_string().parse::<f64>().unwrap_or(0.0);
     let direction = format!(
         "{} {}/{} {}",
@@ -1600,6 +1646,8 @@ mod tests {
                 min_hours_to_expiry: Some(0.0),
                 max_days_to_expiry: Some(60.0),
                 min_edge_bps: Some(0.0),
+
+                limit: None,
             },
             &state,
         )
@@ -1628,6 +1676,8 @@ mod tests {
                 min_hours_to_expiry: None,
                 max_days_to_expiry: None,
                 min_edge_bps: None,
+
+                limit: None,
             },
             &state,
         )
@@ -1647,6 +1697,8 @@ mod tests {
                 min_hours_to_expiry: Some(0.0),
                 max_days_to_expiry: Some(60.0),
                 min_edge_bps: Some(0.0),
+
+                limit: None,
             },
             &state,
         )
@@ -1709,6 +1761,8 @@ mod tests {
                 min_hours_to_expiry: Some(0.0),
                 max_days_to_expiry: Some(60.0),
                 min_edge_bps: Some(0.0),
+
+                limit: None,
             },
             &state,
         )

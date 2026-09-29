@@ -94,6 +94,41 @@ impl StateStore {
         Ok(rows)
     }
 
+    /// Every venue's margin snapshots in one environment at or after
+    /// `since_ms`, oldest first — the cross-venue feed for the net-equity
+    /// walk. Callers merge per venue; this accessor does not sum.
+    pub fn list_margin_snapshots_env(
+        &self,
+        since_ms: i64,
+        environment: &str,
+    ) -> anyhow::Result<Vec<MarginSnapshot>> {
+        let environment = normalize_environment(environment)?;
+        if since_ms < 0 {
+            anyhow::bail!("margin snapshot window start must be non-negative");
+        }
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT venue, account_id, ts_ms, equity, used_margin, rate_pct, environment
+             FROM margin_snapshots
+             WHERE ts_ms >= ?1 AND environment = ?2
+             ORDER BY ts_ms ASC, id ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![since_ms, environment], |r| {
+                Ok(MarginSnapshot {
+                    venue: r.get(0)?,
+                    account_id: r.get(1)?,
+                    ts_ms: r.get(2)?,
+                    equity: r.get(3)?,
+                    used_margin: r.get(4)?,
+                    rate_pct: r.get(5)?,
+                    environment: r.get(6)?,
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(rows)
+    }
+
     /// Delete snapshots older than `before_ms` (the shared retention-days
     /// cutoff). Returns rows removed.
     pub fn prune_margin_snapshots(&self, before_ms: i64) -> anyhow::Result<usize> {
@@ -191,6 +226,7 @@ impl StateStore {
         actual: f64,
         pos_sig: &str,
         now_ms: i64,
+        repricing_usd: Option<f64>,
     ) -> anyhow::Result<EquityCheckReport> {
         let account_id = normalize_id(account_id)?;
         if now_ms < 0 {
@@ -201,9 +237,13 @@ impl StateStore {
             .as_ref()
             .map(|(_, _, last_poll)| now_ms.saturating_sub(*last_poll));
         let expected = prev.as_ref().map(|(e, _, _)| *e);
-        let positions_changed = prev
-            .as_ref()
-            .is_some_and(|(_, sig, _)| sig.as_str() != pos_sig);
+        // Fuzzy compare: derived quantities (USD size ÷ mark) drift with
+        // marks on coin-settled venues — a raw string diff flags a
+        // position change on every poll and dumps mark deltas into
+        // `transfer`.
+        let positions_changed = prev.as_ref().is_some_and(|(_, sig, _)| {
+            crate::equity_attribution::position_signature_differ(sig.as_str(), pos_sig)
+        });
         let positions_open = !pos_sig.is_empty();
         let outcome = crate::equity_attribution::check_equity_delta(
             expected,
@@ -211,6 +251,7 @@ impl StateStore {
             positions_changed,
             positions_open,
             gap_ms,
+            repricing_usd,
         );
         if outcome.rebased && actual.is_finite() {
             self.set_equity_expectation(&account_id, actual, pos_sig, now_ms)?;
@@ -268,6 +309,49 @@ impl StateStore {
             for r in rows {
                 out.push(r?);
             }
+        }
+        Ok(out)
+    }
+
+    /// Env-scoped external-delta events of the given kinds, oldest first.
+    /// The event table predates environment columns, so scoping rides on
+    /// the `<env>-` account-id prefix — rows from pre-env accounts (no
+    /// prefix) belong to no environment and are never guessed into one.
+    /// `limit` clamps to 1..=5000; `kinds` empty returns nothing.
+    pub fn list_equity_events_env(
+        &self,
+        environment: &str,
+        kinds: &[&str],
+        since_ms: i64,
+        limit: u32,
+    ) -> anyhow::Result<Vec<AccountEquityEvent>> {
+        let environment = normalize_environment(environment)?;
+        if kinds.is_empty() || since_ms < 0 {
+            anyhow::bail!("equity event query needs a kind and a non-negative window start");
+        }
+        let limit = limit.clamp(1, 5000) as i64;
+        let prefix = format!("{environment}-%");
+        let marks = std::iter::repeat_n("?", kinds.len())
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT id, account_id, ts_ms, expected, actual, delta, kind, note
+             FROM account_equity_events
+             WHERE account_id LIKE ?1 AND ts_ms >= ?2 AND kind IN ({marks})
+             ORDER BY ts_ms ASC, id ASC LIMIT {limit}"
+        );
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(&sql)?;
+        let mut bind: Vec<Box<dyn rusqlite::types::ToSql>> =
+            vec![Box::new(prefix), Box::new(since_ms)];
+        for k in kinds {
+            bind.push(Box::new(k.to_string()));
+        }
+        let refs: Vec<&dyn rusqlite::types::ToSql> = bind.iter().map(|b| b.as_ref()).collect();
+        let rows = stmt.query_map(refs.as_slice(), equity_event_from_row)?;
+        let mut out = Vec::new();
+        for r in rows {
+            out.push(r?);
         }
         Ok(out)
     }

@@ -45,19 +45,24 @@ pub fn index_alias_siblings(canonical: &str) -> &'static [&'static str] {
     }
 }
 
-/// Instrument-class suffixes: `-PERP`/`-SWAP` reduce away entirely while
-/// `-SPOT` survives on the canonical base so spot books stay distinct
-/// from perp books. Shared by [`canonical_base`] and [`symbol_quote`].
-const CLASS_SUFFIXES: &[&str] = &["-PERP", "-SWAP", "-SPOT"];
+/// Instrument-class suffixes: `-PERP`/`-SWAP`/`_PERP` reduce away
+/// entirely while `-SPOT`/`_SPOT` survives on the canonical base so spot
+/// books stay distinct from perp books. Shared by [`canonical_base`] and
+/// [`symbol_quote`]. The `_` variants cover Orderly/Gate-style spellings
+/// (`PERP_BTC_USDC`, `BTC_USDT_PERP`).
+const CLASS_SUFFIXES: &[&str] = &["-PERP", "-SWAP", "-SPOT", "_PERP", "_SWAP", "_SPOT"];
 
-/// Separated USD-family quote suffixes ("-USDT", "/USDC", …), covering
-/// every member of [`USD_QUOTE_FAMILY`]. Shared by [`canonical_base`]
-/// (strips them) and [`symbol_quote`] (reads them) so the two can never
-/// disagree about whether a suffix is a quote. The leading `-`/`/`
-/// anchors every match, so ordering is for readability only.
+/// Separated USD-family quote suffixes ("-USDT", "/USDC", "_USDT", …),
+/// covering every member of [`USD_QUOTE_FAMILY`]. Shared by
+/// [`canonical_base`] (strips them) and [`symbol_quote`] (reads them) so
+/// the two can never disagree about whether a suffix is a quote. The
+/// leading `-`/`/`/`_` anchors every match, so ordering is for
+/// readability only.
 const SEPARATED_USD_SUFFIXES: &[&str] = &[
     "-FDUSD", "-PYUSD", "-USDT", "-USDC", "-USD1", "-USDG", "-USDE", "-TUSD", "-USDS", "-USDP",
-    "-BUSD", "-DAI", "-USD", "-U", "/FDUSD", "/USDT", "/USDC", "/DAI", "/USD",
+    "-BUSD", "-DAI", "-USD", "-U", "/FDUSD", "/USDT", "/USDC", "/DAI", "/USD", "_FDUSD", "_PYUSD",
+    "_USDT", "_USDC", "_USD1", "_USDG", "_USDE", "_TUSD", "_USDS", "_USDP", "_BUSD", "_DAI",
+    "_USD",
 ];
 
 /// Bare (Binance-style) USD-family quote suffixes, longest first so e.g.
@@ -85,7 +90,23 @@ const BARE_USD_SUFFIXES: &[&str] = &[
 /// Nasdaq-100 index perps, so they pair, group, and net together instead of
 /// appearing as two unrelated tickers.
 pub fn canonical_base(raw: &str) -> String {
-    let up = raw.trim().to_uppercase();
+    let raw_up = raw.trim().to_uppercase();
+    // Orderly-family class prefix: `PERP_<BASE>_<USD quote>` (e.g.
+    // `PERP_ADA_USDC`) is the same market as `<BASE>` — the leading
+    // `PERP_` is an instrument-class marker, not part of the base.
+    // Require a second underscore inside the remainder and a USD-family
+    // quote tail so `PERP_USDC` (a PERP-token pair) and `PERP_USDT_PERP`
+    // (class-suffixed PERP token) are untouched. Rewriting to the
+    // `-`-separated spelling lets the normal suffix loop below reduce
+    // the quote (`PERP_ADA_USDC` -> `ADA-USDC` -> `ADA`).
+    let up = match raw_up.strip_prefix("PERP_") {
+        Some(rest)
+            if rest.contains('_') && SEPARATED_USD_SUFFIXES.iter().any(|s| rest.ends_with(s)) =>
+        {
+            rest.replace('_', "-")
+        }
+        _ => raw_up,
+    };
     // Strip instrument-class and quote suffixes until stable so compound
     // venue spellings (`BTC-USDT-SWAP`, `BTC-USD-PERP`) fully reduce.
     let mut stripped = up.as_str();
@@ -96,7 +117,7 @@ pub fn canonical_base(raw: &str) -> String {
         for suf in CLASS_SUFFIXES {
             if stripped.len() > suf.len() && stripped.ends_with(suf) {
                 stripped = &stripped[..stripped.len() - suf.len()];
-                spot |= *suf == "-SPOT";
+                spot |= suf.ends_with("SPOT");
                 again = true;
                 break;
             }
@@ -179,7 +200,7 @@ pub fn symbol_quote(raw: &str) -> Option<String> {
         }
         for suf in SEPARATED_USD_SUFFIXES {
             if s.len() > suf.len() && s.ends_with(suf) {
-                return Some(suf.trim_start_matches(['-', '/']).to_string());
+                return Some(suf.trim_start_matches(['-', '/', '_']).to_string());
             }
         }
         break;
@@ -256,6 +277,30 @@ mod tests {
         // The stablecoin ticker itself never collapses.
         assert_eq!(canonical_base("TUSD"), "TUSD");
         assert_eq!(symbol_quote("TUSD-PERP"), None);
+    }
+
+    #[test]
+    fn orderly_perp_prefix_reduces_to_base() {
+        // Orderly/Vanta venue-native `PERP_<BASE>_<USD quote>` spelling is
+        // the same market as the canonical base — the prefix is an
+        // instrument-class marker, not part of the base.
+        assert_eq!(canonical_base("PERP_ADA_USDC"), "ADA");
+        assert_eq!(canonical_base("PERP_BTC_USDC"), "BTC");
+        assert_eq!(canonical_base("PERP_1000PEPE_USDC"), "1000PEPE");
+        assert_eq!(canonical_base("PERP_ETH_USDT"), "ETH");
+        // The PERP token itself survives: `PERP_USDC` is a spot-style
+        // PERP/USDC pair, `PERP_USDT_PERP` a class-suffixed PERP token —
+        // both reduce to the PERP base, never to `USDC`/`USDT`.
+        assert_eq!(canonical_base("PERP_USDC"), "PERP");
+        assert_eq!(canonical_base("PERP_USDT_PERP"), "PERP");
+        // Orderly spelling of the PERP token's own perp reduces too.
+        assert_eq!(canonical_base("PERP_PERP_USDC"), "PERP");
+        // Plain underscore pair spellings (Gate-style) reduce as well.
+        assert_eq!(canonical_base("BTC_USDT"), "BTC");
+        assert_eq!(canonical_base("ETH_USDT_PERP"), "ETH");
+        // Quote still reads the USD tail.
+        assert_eq!(symbol_quote("PERP_ADA_USDC").as_deref(), Some("USDC"));
+        assert_eq!(symbol_quote("BTC_USDT").as_deref(), Some("USDT"));
     }
 
     #[test]

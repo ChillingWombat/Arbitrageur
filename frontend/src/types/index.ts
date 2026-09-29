@@ -3,6 +3,9 @@ export interface SystemStatusDto {
   environment: string;
   is_paused?: boolean;
   total_realized_pnl: number;
+  /** Cumulative option premium cashflow (paid − received at entry) —
+   *  financing kept out of realized PnL; lands via close-path leg deltas. */
+  total_premium_outlay_usd?: number;
   total_trades_count: number;
   successful_trades_count: number;
   circuit_breaker_status: string;
@@ -11,6 +14,29 @@ export interface SystemStatusDto {
   max_drawdown_usd: number;
   consecutive_failures: number;
   active_venues: VenueStatusDto[];
+  /** Per-lane WS feed telemetry; absent lanes are not supervised at all. */
+  feed_lanes?: FeedLaneStatusDto[];
+}
+
+export interface FeedLaneStatusDto {
+  venue: string;
+  phase:
+    | "starting"
+    | "connecting"
+    | "connected"
+    | "backoff"
+    | "disabled"
+    | "not-admitted"
+    | "paused"
+    | "stopped"
+    | string;
+  attempts: number;
+  consecutive_failures: number;
+  instant_kills: number;
+  last_connected_ms: number | null;
+  last_ended_ms: number | null;
+  backoff_until_ms: number | null;
+  last_error: string | null;
 }
 
 export interface VenueStatusDto {
@@ -235,14 +261,13 @@ export interface StrategyParamsDto {
   fundingMaxSlippageBps: number;
   predictionMaxSlippageBps: number;
   // Funding configurator: max allowed gap (bps) between venues' execution
-  // prices at entry; auto-exit when live inter-venue spread (percent) drops
-  // below threshold; trim both legs when either nears liquidation; optional
-  // rebalance-to-neutral; rotation on net-of-friction improvement (bps).
+  // prices at entry; auto-exit when the live perp/spot basis (percent,
+  // spot-perp pairs only) drops below threshold; trim both legs when either
+  // nears liquidation; rotation on net-of-friction improvement (bps).
   // Null = gate off.
   fundingMaxEntrySpreadBps: number;
   fundingAutoExitSpreadPct: number | null;
   fundingLiqTrimPct: number | null;
-  fundingAutoRebalance: boolean;
   fundingRotationThresholdBps: number | null;
   // Same-exchange spot-vs-perp basis (cash-and-carry) switch + signed
   // min-basis floor in bps (null = no floor; APR still gates downstream).
@@ -657,6 +682,9 @@ export interface RiskOverviewDto {
   current_drawdown_usd: number;
   max_drawdown_limit_usd: number;
   drawdown_pct: number;
+  /** USD amount of the equity total attributable to non-USD collateral
+   * repricing vs the UTC-day-start FX — ignored by the drawdown breaker. */
+  collateral_fx_adjustment_usd: number;
   consecutive_failures: number;
   max_failures_allowed: number;
   total_portfolio_value_usd: number;
@@ -1364,12 +1392,23 @@ export interface PositionVenueDto {
  *  executions that still count as open. `unrealizedPnlUsd` is null when
  *  mark-to-market is impossible — never fabricated. */
 export interface OpenPositionDto {
-  /** Stable grouping identity: `strategyId|symbol|venueA+venueB`. */
+  /** Stable grouping identity: `strategyId|tradeId` — one card per
+   * executed trade (`-legN` sibling signals share a cycle prefix). */
   key: string;
+  /** Executed-trade identity: shared cycle prefix for leg siblings,
+   * else the signal's own id. */
+  tradeId: string;
   strategyId: string;
+  /** Display label — the shared instrument, or the longest common
+   * `-`-prefix across option legs (e.g. `BTC-30OCT26-88000`), else the
+   * underlying for strike-spanning packages. */
   symbol: string;
+  /** Distinct leg instruments in this trade — reduce-only/exits resolve
+   * against these, not the display symbol. */
+  legSymbols: string[];
   signalCount: number;
-  /** Per-venue signed net quantity; long (positive) rows first. */
+  /** Per-venue, per-instrument signed net quantity — the trade's leg
+   * breakdown; long (positive) rows first. */
   venues: PositionVenueDto[];
   expectedNetUsd: number | null;
   unrealizedPnlUsd: number | null;
@@ -1927,6 +1966,18 @@ export interface AccountEquityEventDto {
   delta: number;
   kind: "deposit" | "withdrawal" | "transfer" | "funding" | string;
   note: string;
+}
+
+/** One point on a portfolio time series (unix-ms, USD). */
+export interface PnlHistoryPointDto {
+  tsMs: number;
+  valueUsd: number;
+}
+
+/** P&L gadget feed: net-equity walk + external balance operations. */
+export interface PnlHistoryDto {
+  equity: PnlHistoryPointDto[];
+  external: PnlHistoryPointDto[];
 }
 
 export interface MonitorConfigDto {

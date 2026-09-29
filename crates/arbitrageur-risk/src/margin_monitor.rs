@@ -104,6 +104,20 @@ impl MarginMonitor {
             MarginHealthStatus::Unknown
         }
     }
+
+    /// Portfolio-margin liquidation distance: the fraction of account equity
+    /// that can evaporate before equity reaches the maintenance requirement
+    /// and the venue liquidates. Venues like Deribit never emit per-position
+    /// liq prices — liquidation strikes at the account level — so this is
+    /// the honest distance for books that hold them. `None` when equity is
+    /// non-positive (already at/inside the boundary) or the venue reported
+    /// no maintenance figure at all.
+    pub fn account_liquidation_distance(account: &AccountSnapshot) -> Option<Decimal> {
+        if account.equity <= dec!(0) || account.maintenance_margin <= dec!(0) {
+            return None;
+        }
+        Some((account.equity - account.maintenance_margin) / account.equity)
+    }
 }
 
 #[cfg(test)]
@@ -122,6 +136,25 @@ mod tests {
             positions: vec![],
             timestamp: chrono::Utc::now(),
         }
+    }
+
+    #[test]
+    fn account_liq_distance_uses_equity_vs_maintenance() {
+        let mut acc = empty_account();
+        acc.equity = dec!(1000);
+        acc.maintenance_margin = dec!(200);
+        // Liquidation when equity falls to maintenance: (1000-200)/1000 = 80%.
+        assert_eq!(
+            MarginMonitor::account_liquidation_distance(&acc),
+            Some(dec!(0.8))
+        );
+        // No maintenance figure → cannot compute.
+        acc.maintenance_margin = dec!(0);
+        assert_eq!(MarginMonitor::account_liquidation_distance(&acc), None);
+        // Equity already at/under the boundary → no distance to report.
+        acc.equity = dec!(0);
+        acc.maintenance_margin = dec!(200);
+        assert_eq!(MarginMonitor::account_liquidation_distance(&acc), None);
     }
 
     #[test]

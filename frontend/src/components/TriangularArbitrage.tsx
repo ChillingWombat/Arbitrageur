@@ -418,9 +418,9 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
           {isLive && bot.entriesAllowed && (
             <span
               className="text-xs font-mono text-amber-700 max-w-56"
-              title="Autonomous entries stay testnet-only in live mode — use manual Deploy"
+              title="Autonomous entries are disabled in this environment — use manual Deploy"
             >
-              Live: auto off, manual only
+              Auto off — manual only
             </span>
           )}
           {bot.lastError && (

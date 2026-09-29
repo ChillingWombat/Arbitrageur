@@ -5,6 +5,9 @@ import { renderToStaticMarkup } from "react-dom/server";
 import {
   TradedOpportunityDetailModal,
   TradedOpportunitiesTable,
+  filterTradedOpps,
+  statusCategory,
+  strategyCategory,
 } from "./TradedOpportunitiesGadget.tsx";
 import type { AtomicTransactionDto, TradedOpportunityDto } from "../types/index.ts";
 
@@ -92,6 +95,53 @@ test("table renders every traded opportunity with status and realized PnL", () =
   assert.match(html, /hyperliquid ↔ lighter/);
   // Each row exposes a real focusable button that opens the detail modal.
   assert.equal(html.match(/aria-label="Open opportunity details/g)?.length, 2);
+});
+
+test("strategyCategory collapses options substrategies under Options", () => {
+  assert.equal(strategyCategory("options_parity"), "Options");
+  assert.equal(strategyCategory("options_box_spread"), "Options");
+  assert.equal(strategyCategory("options_jelly_roll"), "Options");
+  assert.equal(strategyCategory("options_convexity"), "Options");
+  assert.equal(strategyCategory("funding"), "Funding Rate");
+  assert.equal(strategyCategory("futures"), "Simple Spread");
+  // Unknown future ids surface verbatim rather than dropping out.
+  assert.equal(strategyCategory("brand_new"), "brand_new");
+});
+
+test("statusCategory groups raw statuses into filter buckets", () => {
+  assert.equal(statusCategory("in_flight"), "open");
+  assert.equal(statusCategory("balanced"), "open");
+  assert.equal(statusCategory("imbalanced"), "attention");
+  assert.equal(statusCategory("unresolved"), "attention");
+  assert.equal(statusCategory("closed"), "closed");
+  assert.equal(statusCategory("failed"), "failed");
+});
+
+test("filterTradedOpps applies strategy and status categories", () => {
+  const rows = [
+    opp({ signalId: "s-opt", strategyId: "options_box_spread", status: "balanced" }),
+    opp({ signalId: "s-fund", strategyId: "funding", status: "closed" }),
+    opp({ signalId: "s-fut", strategyId: "futures", status: "failed" }),
+    opp({ signalId: "s-opt2", strategyId: "options_parity", status: "unresolved" }),
+  ];
+  assert.equal(filterTradedOpps(rows, "all", "all").length, 4);
+  // Large strategy category: both options substrategies match "Options".
+  assert.deepEqual(
+    filterTradedOpps(rows, "Options", "all").map((o) => o.signalId),
+    ["s-opt", "s-opt2"],
+  );
+  // Status category: open = balanced + in_flight.
+  assert.deepEqual(
+    filterTradedOpps(rows, "all", "open").map((o) => o.signalId),
+    ["s-opt"],
+  );
+  assert.deepEqual(
+    filterTradedOpps(rows, "all", "attention").map((o) => o.signalId),
+    ["s-opt2"],
+  );
+  // Combined.
+  assert.equal(filterTradedOpps(rows, "Funding Rate", "closed").length, 1);
+  assert.equal(filterTradedOpps(rows, "Options", "failed").length, 0);
 });
 
 test("empty ledger renders the honest empty state", () => {
