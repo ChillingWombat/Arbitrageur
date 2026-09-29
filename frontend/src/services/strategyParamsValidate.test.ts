@@ -14,7 +14,6 @@ test("normalizeStrategyParams defaults the per-strategy slippage and funding gua
   assert.equal(p.fundingMaxEntrySpreadBps, 50.0);
   assert.equal(p.fundingAutoExitSpreadPct, null);
   assert.equal(p.fundingLiqTrimPct, null);
-  assert.equal(p.fundingAutoRebalance, false);
   assert.equal(p.fundingRotationThresholdBps, null);
   assert.equal(p.futuresLiqTrimPct, null);
   assert.equal(p.spotLiqTrimPct, null);
@@ -30,7 +29,6 @@ test("normalizeStrategyParams maps snake_case guard fields and preserves each tr
     funding_max_entry_spread_bps: 40.0,
     funding_auto_exit_spread_pct: 5.0,
     funding_liq_trim_pct: 15.0,
-    funding_auto_rebalance: true,
     funding_rotation_threshold_bps: 10.0,
     futures_liq_trim_pct: 12.5,
     spot_liq_trim_pct: 8.0,
@@ -42,7 +40,6 @@ test("normalizeStrategyParams maps snake_case guard fields and preserves each tr
   assert.equal(p.fundingMaxEntrySpreadBps, 40.0);
   assert.equal(p.fundingAutoExitSpreadPct, 5.0);
   assert.equal(p.fundingLiqTrimPct, 15.0);
-  assert.equal(p.fundingAutoRebalance, true);
   assert.equal(p.fundingRotationThresholdBps, 10.0);
   assert.equal(p.futuresLiqTrimPct, 12.5);
   assert.equal(p.spotLiqTrimPct, 8.0);

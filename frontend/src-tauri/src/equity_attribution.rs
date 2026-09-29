@@ -53,15 +53,70 @@ pub struct EquityCheckOutcome {
     pub note: Option<String>,
 }
 
-/// Classify a nonzero delta by sign with a position-delta cross-check: a
-/// changed position signature means the move rode alongside position
-/// changes (transfer/funding); otherwise the sign decides deposit vs
-/// withdrawal, with dust-scale moves on open positions read as funding.
+/// Fuzzy "did the position set actually change" behind
+/// `positions_changed`. Signatures carry `symbol:side:quantity` parts; on
+/// venues where quantity is *derived* from a USD-denominated size and a
+/// moving mark (Deribit futures report `size` in USD → qty = size/mark),
+/// mark drift alone rewrites the qty on every poll. Comparing raw strings
+/// flags a position change every read and dumps every mark delta into
+/// `transfer`. A real change is: a different symbol set, or a shared
+/// symbol's quantity moved more than ~2% (with a dust floor so sub-lot
+/// residuals don't flip the bit).
+pub fn position_signature_differ(prev: &str, next: &str) -> bool {
+    use std::collections::HashMap;
+    if prev == next {
+        return false;
+    }
+    let parse = |s: &str| -> Option<HashMap<(String, String), f64>> {
+        if s.is_empty() {
+            return Some(HashMap::new());
+        }
+        let mut m = HashMap::new();
+        for part in s.split('|') {
+            // `symbol:side:qty` — symbols contain '-' but never ':'.
+            let mut it = part.rsplitn(3, ':');
+            let qty = it.next()?.parse::<f64>().ok()?;
+            let side = it.next()?.to_string();
+            let sym = it.next()?.to_string();
+            m.insert((sym, side), qty);
+        }
+        Some(m)
+    };
+    match (parse(prev), parse(next)) {
+        (Some(a), Some(b)) => {
+            if a.len() != b.len() {
+                return true;
+            }
+            a.iter().any(|(k, qa)| match b.get(k) {
+                None => true,
+                Some(qb) => {
+                    let tol = (qa.abs().max(qb.abs()) * 0.02).max(1e-4);
+                    (qa - qb).abs() > tol
+                }
+            })
+        }
+        _ => true,
+    }
+}
+
+/// Classify a nonzero delta: a collateral-FX estimate that explains the
+/// move (`repricing_usd` covers ≥75% within the noise floor) reads as
+/// `mark_repricing` — a coin-margined account's index move is not an
+/// external flow. Otherwise a changed position signature implies a
+/// transfer/settlement, funding-scale moves on open positions read as
+/// funding, and the sign decides deposit vs withdrawal on flat accounts.
 pub fn classify_equity_delta(
     delta: f64,
     positions_changed: bool,
     positions_open: bool,
+    repricing_usd: Option<f64>,
 ) -> &'static str {
+    if let Some(rep) = repricing_usd.filter(|r| r.is_finite() && *r != 0.0) {
+        let residual = delta - rep;
+        if residual.abs() <= (delta.abs() * 0.25).max(EQUITY_DELTA_EPS_USD) {
+            return "mark_repricing";
+        }
+    }
     if positions_changed {
         return "transfer";
     }
@@ -85,6 +140,7 @@ pub fn check_equity_delta(
     positions_changed: bool,
     positions_open: bool,
     gap_ms: Option<i64>,
+    repricing_usd: Option<f64>,
 ) -> EquityCheckOutcome {
     if !actual.is_finite() {
         return EquityCheckOutcome {
@@ -132,7 +188,8 @@ pub fn check_equity_delta(
     EquityCheckOutcome {
         delta,
         event_kind: Some(
-            classify_equity_delta(delta, positions_changed, positions_open).to_string(),
+            classify_equity_delta(delta, positions_changed, positions_open, repricing_usd)
+                .to_string(),
         ),
         rebased: true,
         note: None,
@@ -145,7 +202,7 @@ mod tests {
 
     #[test]
     fn no_expected_baseline_initializes_without_event() {
-        let out = check_equity_delta(None, 100.0, false, false, Some(1000));
+        let out = check_equity_delta(None, 100.0, false, false, Some(1000), None);
         assert_eq!(out.event_kind, None);
         assert!(out.rebased);
         assert!(out.note.is_some());
@@ -155,7 +212,7 @@ mod tests {
     fn fills_only_equity_produces_no_event() {
         // Zero delta: no event; the baseline silently re-pins to actual so
         // reporting noise can't random-walk the stored expectation.
-        let out = check_equity_delta(Some(100_000.0), 100_000.0, false, false, Some(1000));
+        let out = check_equity_delta(Some(100_000.0), 100_000.0, false, false, Some(1000), None);
         assert_eq!(out.event_kind, None);
         assert!(out.rebased);
         assert_eq!(out.note, None);
@@ -163,7 +220,7 @@ mod tests {
 
     #[test]
     fn manual_deposit_detected_and_rebased() {
-        let out = check_equity_delta(Some(100_000.0), 105_000.0, false, false, Some(1000));
+        let out = check_equity_delta(Some(100_000.0), 105_000.0, false, false, Some(1000), None);
         assert_eq!(out.event_kind.as_deref(), Some("deposit"));
         assert!(out.rebased);
         assert!((out.delta - 5000.0).abs() < 1e-9);
@@ -171,7 +228,7 @@ mod tests {
 
     #[test]
     fn withdrawal_detected() {
-        let out = check_equity_delta(Some(100_000.0), 97_500.0, false, false, Some(1000));
+        let out = check_equity_delta(Some(100_000.0), 97_500.0, false, false, Some(1000), None);
         assert_eq!(out.event_kind.as_deref(), Some("withdrawal"));
         assert!(out.rebased);
     }
@@ -181,7 +238,14 @@ mod tests {
         // $11.1M account drifting ~0.001% between polls — index repricing,
         // not a withdrawal. The flat $0.25 band alone would emit a phantom
         // withdrawal every poll.
-        let out = check_equity_delta(Some(11_133_435.1), 11_133_322.6, false, true, Some(7000));
+        let out = check_equity_delta(
+            Some(11_133_435.1),
+            11_133_322.6,
+            false,
+            true,
+            Some(7000),
+            None,
+        );
         assert_eq!(out.event_kind, None);
         assert!(out.rebased, "noise still re-pins the baseline");
     }
@@ -190,19 +254,26 @@ mod tests {
     fn large_account_real_flow_still_detected() {
         // The band widens to ~$5.1k at $11.1M; a deliberate transfer is far
         // above that and must still surface.
-        let out = check_equity_delta(Some(11_133_435.1), 11_083_435.1, false, true, Some(7000));
+        let out = check_equity_delta(
+            Some(11_133_435.1),
+            11_083_435.1,
+            false,
+            true,
+            Some(7000),
+            None,
+        );
         assert_eq!(out.event_kind.as_deref(), Some("withdrawal"));
     }
 
     #[test]
     fn position_change_cross_check_yields_transfer() {
-        let out = check_equity_delta(Some(100_000.0), 100_050.0, true, true, Some(1000));
+        let out = check_equity_delta(Some(100_000.0), 100_050.0, true, true, Some(1000), None);
         assert_eq!(out.event_kind.as_deref(), Some("transfer"));
     }
 
     #[test]
     fn dust_scale_move_with_open_positions_read_as_funding() {
-        let out = check_equity_delta(Some(100_000.0), 99_997.5, false, true, Some(1000));
+        let out = check_equity_delta(Some(100_000.0), 99_997.5, false, true, Some(1000), None);
         assert_eq!(out.event_kind.as_deref(), Some("funding"));
     }
 
@@ -214,6 +285,7 @@ mod tests {
             false,
             false,
             Some(EQUITY_POLL_GAP_MAX_MS + 1),
+            None,
         );
         assert_eq!(out.event_kind, None);
         assert!(out.rebased);
@@ -222,7 +294,7 @@ mod tests {
 
     #[test]
     fn unreadable_actual_leaves_baseline_untouched() {
-        let out = check_equity_delta(Some(100.0), f64::NAN, false, false, Some(1));
+        let out = check_equity_delta(Some(100.0), f64::NAN, false, false, Some(1), None);
         assert_eq!(out.event_kind, None);
         assert!(!out.rebased);
     }
@@ -233,13 +305,83 @@ mod tests {
         // oscillation must not be written as a deposit/withdrawal, but the
         // baseline silently re-pins to actual so noise can't accumulate.
         for actual in [516.10, 516.14, 516.09, 516.32] {
-            let out = check_equity_delta(Some(516.11), actual, false, false, Some(1000));
+            let out = check_equity_delta(Some(516.11), actual, false, false, Some(1000), None);
             assert_eq!(out.event_kind, None, "actual={actual}");
             assert!(out.rebased, "sub-band reads rebase silently");
         }
         // A real move above the band still classifies and rebases.
-        let out = check_equity_delta(Some(516.11), 516.40, false, false, Some(1000));
+        let out = check_equity_delta(Some(516.11), 516.40, false, false, Some(1000), None);
         assert_eq!(out.event_kind.as_deref(), Some("deposit"));
         assert!(out.rebased);
+    }
+
+    #[test]
+    fn collateral_repricing_explains_delta_as_mark_not_transfer() {
+        // Deribit-style book: 130 BTC collateral, positions open, BTC
+        // index fell — the balance×Δfx term explains the equity move.
+        // Without the repricing estimate this classifies `transfer` on
+        // every poll (derived qty drifts → signature churn).
+        let out = check_equity_delta(
+            Some(11_020_000.0),
+            11_013_000.0,
+            false,
+            true,
+            Some(60_000),
+            Some(-6_900.0), // 130 BTC × −$53 index move
+        );
+        assert_eq!(out.event_kind.as_deref(), Some("mark_repricing"));
+        assert!(out.rebased);
+        // Unexplained residual beyond 25% of the delta does NOT classify
+        // as repricing — a real flow riding under collateral noise still
+        // surfaces via the raw ladder.
+        let out = check_equity_delta(
+            Some(11_020_000.0),
+            11_013_000.0,
+            false,
+            true,
+            Some(60_000),
+            Some(-3_000.0), // explains only ~43%
+        );
+        assert_eq!(out.event_kind.as_deref(), Some("withdrawal"));
+        // Opposite-sign estimates never classify.
+        let out = check_equity_delta(
+            Some(11_020_000.0),
+            11_013_000.0,
+            false,
+            true,
+            Some(60_000),
+            Some(6_900.0),
+        );
+        assert_eq!(out.event_kind.as_deref(), Some("withdrawal"));
+    }
+
+    #[test]
+    fn position_signature_differ_ignores_mark_derived_qty_drift() {
+        // USD-size ÷ mark derived qty drifts ~0.5% — not a position change.
+        assert!(!position_signature_differ(
+            "BTC-PERPETUAL:Buy:0.1007|BTC-30OCT26-88000-P:Buy:0.1",
+            "BTC-PERPETUAL:Buy:0.1002|BTC-30OCT26-88000-P:Buy:0.1",
+        ));
+        // Same drift on a second row — still quiet.
+        assert!(!position_signature_differ("", ""));
+        // A real fill (+0.1 on the perp) flips the bit.
+        assert!(position_signature_differ(
+            "BTC-PERPETUAL:Buy:0.1007",
+            "BTC-PERPETUAL:Buy:0.2007",
+        ));
+        // A new instrument row flips the bit.
+        assert!(position_signature_differ(
+            "BTC-PERPETUAL:Buy:0.1",
+            "BTC-PERPETUAL:Buy:0.1|ETH-PERPETUAL:Buy:1.0",
+        ));
+        // Dust-scale residual drift (the observed 0.00018 BTC-PERP wedge)
+        // stays under the floor.
+        assert!(!position_signature_differ(
+            "BTC-PERPETUAL:Buy:0.10068",
+            "BTC-PERPETUAL:Buy:0.10050",
+        ));
+        // Unparseable signatures fall back to strict difference.
+        assert!(position_signature_differ("garbage", "other"));
+        assert!(!position_signature_differ("garbage", "garbage"));
     }
 }

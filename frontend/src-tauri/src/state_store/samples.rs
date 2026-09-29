@@ -45,8 +45,16 @@ impl StateStore {
         // so its first cells still bind the instrument freely. The anchor
         // is environment-scoped: a testnet scale must not arbitrate live
         // rows (and pre-v38 'unknown' rows arbitrate nothing).
-        let anchor =
-            self.incumbent_anchor_cached(&conn, &sample_keys(&symbol, merge_usd), &environment)?;
+        // Fully-specified option contracts skip arbitration: the anchor
+        // guards binding drift and their binding is fixed by construction —
+        // but their premium legitimately drifts far past 3x over the
+        // contract's life. See `symbol_is_fixed_contract`.
+        let fixed_contract = symbol_is_fixed_contract(&symbol);
+        let anchor = if fixed_contract {
+            None
+        } else {
+            self.incumbent_anchor_cached(&conn, &sample_keys(&symbol, merge_usd), &environment)?
+        };
         // Writes normally land past every cached window's watermark (append
         // order = ts order), so the check is a no-op in the hot path. A
         // backdated or same-ts write would be invisible to an incremental
@@ -206,6 +214,12 @@ impl StateStore {
         // first bound to *in this environment*. A window of pure intruder
         // data reads self-consistent at the wrong scale, so the incumbent
         // must arbitrate even when nothing inside the window looks split.
+        // Fixed-maturity option symbols skip arbitration entirely — their
+        // premium is expected to drift far past the collision ratio; the
+        // series' own rows are the honest series. See the write gate.
+        if symbol_is_fixed_contract(&symbol) {
+            return Ok(rows.into_iter().filter(valid_sample).collect());
+        }
         let anchor = self.incumbent_anchor_cached(&conn, &keys, &environment)?;
         Ok(filter_symbol_consistency(rows, anchor))
     }
@@ -822,6 +836,22 @@ fn median_f64(vals: &mut [f64]) -> Option<f64> {
 fn within_consensus(mid: f64, consensus: f64) -> bool {
     let r = (mid / consensus).max(consensus / mid);
     r <= CONSISTENCY_MAX_RATIO
+}
+
+/// Whether `symbol` fully specifies a fixed-maturity option contract —
+/// `BASE-<expiry>-<strike>-{C,P}` (e.g. `ETH-28SEP26-2600-P`). The
+/// incumbent anchor guards *binding drift*: a symbol quietly re-pointing
+/// at a different instrument. A fully-specified option name IS the
+/// instrument — its binding cannot move — while its premium legitimately
+/// decays or rallies orders of magnitude over the contract's life.
+/// Anchoring such a series to its first-seen scale permanently rejects
+/// every real row past 3x drift (observed: an ETH put series frozen at
+/// its first print). Ambiguous tickers keep full protection.
+pub(crate) fn symbol_is_fixed_contract(symbol: &str) -> bool {
+    let parts: Vec<&str> = symbol.split('-').collect();
+    parts.len() >= 4
+        && matches!(parts.last(), Some(&"C") | Some(&"P"))
+        && parts[parts.len() - 2].parse::<f64>().is_ok()
 }
 
 fn valid_sample(r: &SpreadSample) -> bool {

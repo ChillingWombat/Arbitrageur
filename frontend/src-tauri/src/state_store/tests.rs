@@ -51,7 +51,7 @@ fn test_file_store_config_and_permissions() {
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 41);
+        assert_eq!(version, 42);
         let mode: String = conn
             .query_row("PRAGMA journal_mode", [], |r| r.get(0))
             .unwrap();
@@ -747,7 +747,7 @@ fn test_leg_symbol_none_resolves_to_root_and_some_is_exact() {
         .lock()
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(version, 41);
+    assert_eq!(version, 42);
     store
         .record_signal_execution(
             &NewSignalExecution {
@@ -1289,7 +1289,7 @@ fn test_migration_v27_intended_price_defaults_null() {
     let v: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 41);
+    assert_eq!(v, 42);
     let ip: Option<f64> = conn
         .query_row(
             "SELECT intended_price FROM signal_legs WHERE id = 'leg-pre'",
@@ -2029,7 +2029,7 @@ fn test_kv_survives_reopen() {
             .lock()
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 41);
+        assert_eq!(version, 42);
     }
     let _ = fs::remove_dir_all(dir);
 }
@@ -2298,6 +2298,60 @@ fn test_spread_samples_write_gate_rejects_off_scale() {
             .len(),
         4
     );
+}
+
+#[test]
+fn test_spread_samples_option_premium_drift_survives() {
+    // Regression for the ETH-28SEP26-2600-P freeze: a fully-specified
+    // option symbol IS its instrument identity — the binding cannot move,
+    // while the premium legitimately drifts far past the collision ratio
+    // over the contract's life. The incumbent anchor must not gate it.
+    let store = StateStore::open_in_memory().unwrap();
+    let b = 600_000i64;
+    // First prints bind the series near 0.0006 BTC.
+    for i in 0..4 {
+        store
+            .record_spread_samples(
+                "ETH-28SEP26-2600-P",
+                i * b,
+                &[sample("deribit", 0.0006)],
+                "live",
+            )
+            .unwrap();
+    }
+    // A 3x+ decay (and later a 10x rally) are real option behavior, not a
+    // collision — every row must persist AND read back.
+    store
+        .record_spread_samples(
+            "ETH-28SEP26-2600-P",
+            4 * b,
+            &[sample("deribit", 0.0002)],
+            "live",
+        )
+        .unwrap();
+    store
+        .record_spread_samples(
+            "ETH-28SEP26-2600-P",
+            5 * b,
+            &[sample("deribit", 0.006)],
+            "live",
+        )
+        .unwrap();
+    let rows = store
+        .spread_samples("ETH-28SEP26-2600-P", 0, i64::MAX, "live")
+        .unwrap();
+    assert_eq!(rows.len(), 6, "option rows must never be dropped: {rows:?}");
+    // Same-day ambiguity protection still applies to non-option tickers.
+    for i in 0..3 {
+        store
+            .record_spread_samples("SPX900", i * b, &[sample("vanta", 7_600.0)], "live")
+            .unwrap();
+    }
+    store
+        .record_spread_samples("SPX900", 3 * b, &[sample("binance", 0.5)], "live")
+        .unwrap();
+    let rows = store.spread_samples("SPX900", 0, i64::MAX, "live").unwrap();
+    assert_eq!(rows.len(), 3, "off-scale spot write must still drop");
 }
 
 #[test]
@@ -2661,7 +2715,7 @@ fn test_migration_v20_rescales_lighter_funding_history() {
     let v: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 41);
+    assert_eq!(v, 42);
 
     let mut stmt = conn
             .prepare("SELECT venue_id, rate_8h, interval_hours FROM funding_rate_samples ORDER BY venue_id, ts_ms")
@@ -2781,7 +2835,7 @@ fn test_migration_v7_to_v8_preserves_data() {
     let v10: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v10, 41);
+    assert_eq!(v10, 42);
     // v19 remaps the renamed lifecycle statuses on the way through.
     let remapped: String = conn
         .query_row(
@@ -3064,10 +3118,11 @@ fn test_unknown_leg_side_fails_closed_instead_of_defaulting_long() {
 }
 
 #[test]
-fn test_aggregate_open_positions_groups_by_venue_pair() {
+fn test_aggregate_open_positions_groups_by_trade() {
     let store = StateStore::open_in_memory().unwrap();
     // BTC traded twice on hyperliquid-vs-lighter, once on
-    // hyperliquid-vs-arcus: two cards, first aggregates both signals.
+    // hyperliquid-vs-arcus: three cards — every executed signal is its
+    // own trade, so repeated opens of the same pair stay separate.
     filled_two_leg(
         &store,
         "s1",
@@ -3104,23 +3159,66 @@ fn test_aggregate_open_positions_groups_by_venue_pair() {
 
     let signals = store.list_signals(None, None).unwrap();
     let positions = aggregate_open_positions(&signals, &|_, _| None);
-    assert_eq!(positions.len(), 2, "A-vs-B merges, A-vs-C stays separate");
+    assert_eq!(positions.len(), 3, "each executed signal is its own trade");
 
-    let hl_lt = positions
-        .iter()
-        .find(|p| p.venues.len() == 2 && p.venues[1].venue == "lighter")
-        .unwrap();
-    assert_eq!(hl_lt.signal_count, 2);
-    assert_eq!(hl_lt.symbol, "BTC-USDC");
-    // Long row on top (+1.5 on hyperliquid), short row below.
-    assert_eq!(hl_lt.venues[0].venue, "hyperliquid");
-    assert!((hl_lt.venues[0].net_qty - 1.5).abs() < 1e-9);
-    assert_eq!(hl_lt.venues[1].venue, "lighter");
-    assert!((hl_lt.venues[1].net_qty + 1.5).abs() < 1e-9);
+    let s1 = positions.iter().find(|p| p.trade_id == "s1").unwrap();
+    assert_eq!(s1.symbol, "BTC-USDC");
+    assert_eq!(s1.signal_count, 1);
+    // Long row on top (+1.0 on hyperliquid), short row below.
+    assert_eq!(s1.venues[0].venue, "hyperliquid");
+    assert!((s1.venues[0].net_qty - 1.0).abs() < 1e-9);
+    assert_eq!(s1.venues[1].venue, "lighter");
+    assert!((s1.venues[1].net_qty + 1.0).abs() < 1e-9);
     // No marks supplied -> PnL honestly unavailable, not fabricated zero.
-    assert!(hl_lt.unrealized_pnl_usd.is_none());
-    assert!(hl_lt.notional_usd.is_some());
-    assert_eq!(hl_lt.expected_net_usd, Some(25.0));
+    assert!(s1.unrealized_pnl_usd.is_none());
+    assert!(s1.notional_usd.is_some());
+    assert_eq!(s1.expected_net_usd, Some(12.5));
+    let s2 = positions.iter().find(|p| p.trade_id == "s2").unwrap();
+    assert!((s2.venues[0].net_qty - 0.5).abs() < 1e-9);
+}
+
+#[test]
+fn test_aggregate_open_positions_leg_siblings_merge_into_one_trade() {
+    // Options-package legs are sibling signals `{cycle}-legN` — one
+    // executed trade must render as ONE card carrying every leg's net.
+    let store = StateStore::open_in_memory().unwrap();
+    for (i, sym, side) in [
+        (0, "BTC-30OCT26-88000-C", LegSide::Short),
+        (1, "BTC-30OCT26-88000-P", LegSide::Long),
+        (2, "BTC-PERPETUAL", LegSide::Long),
+    ] {
+        let sig_id = format!("opar-BTC-1766707200000-88000-deadbeef-leg{i}");
+        let mut s = two_leg_signal(&sig_id, sym, None, None);
+        s.strategy_id = "options_parity".into();
+        s.legs.truncate(1);
+        s.legs[0].venue = "deribit".into();
+        s.legs[0].symbol = Some(sym.to_string());
+        s.legs[0].side = side;
+        s.legs[0].intended_qty = 0.1;
+        store.record_signal_execution(&s, "testnet").unwrap();
+        store
+            .apply_leg_fill(&sig_id, side, 0.1, 100.0, 0.0, None)
+            .unwrap();
+    }
+
+    let signals = store.list_signals(None, None).unwrap();
+    let positions = aggregate_open_positions(&signals, &|_, _| None);
+    assert_eq!(positions.len(), 1, "leg siblings collapse to one trade");
+    let p = &positions[0];
+    assert_eq!(p.trade_id, "opar-btc-1766707200000-88000-deadbeef");
+    // Conversion legs share expiry+strike — the label is the structure,
+    // not a single instrument.
+    assert_eq!(p.symbol.to_uppercase(), "BTC-30OCT26-88000");
+    assert_eq!(p.venues.len(), 3);
+    assert!(p
+        .leg_symbols
+        .iter()
+        .any(|s| s.eq_ignore_ascii_case("BTC-30OCT26-88000-C")));
+    assert!(p
+        .leg_symbols
+        .iter()
+        .any(|s| s.eq_ignore_ascii_case("BTC-PERPETUAL")));
+    assert_eq!(p.signal_count, 3);
 }
 
 #[test]
@@ -3464,7 +3562,7 @@ fn test_equity_expectation_baseline_init_then_quiet() {
     let store = StateStore::open_in_memory().unwrap();
     assert_eq!(store.get_equity_expectation("hyperliquid").unwrap(), None);
     let first = store
-        .check_account_equity("hyperliquid", 100_000.0, "", 1_000)
+        .check_account_equity("hyperliquid", 100_000.0, "", 1_000, None)
         .unwrap();
     assert_eq!(first.event, None);
     assert!(first.note.is_some(), "init must leave a coverage note");
@@ -3476,7 +3574,7 @@ fn test_equity_expectation_baseline_init_then_quiet() {
     assert_eq!(sig, "");
     assert_eq!(poll, 1_000);
     let quiet = store
-        .check_account_equity("hyperliquid", 100_000.0, "", 2_000)
+        .check_account_equity("hyperliquid", 100_000.0, "", 2_000, None)
         .unwrap();
     assert_eq!(quiet.event, None);
     assert_eq!(quiet.note, None);
@@ -3490,10 +3588,10 @@ fn test_equity_expectation_baseline_init_then_quiet() {
 fn test_equity_manual_deposit_detected_and_rebased() {
     let store = StateStore::open_in_memory().unwrap();
     store
-        .check_account_equity("lighter", 50_000.0, "", 1_000)
+        .check_account_equity("lighter", 50_000.0, "", 1_000, None)
         .unwrap();
     let report = store
-        .check_account_equity("lighter", 55_000.0, "", 2_000)
+        .check_account_equity("lighter", 55_000.0, "", 2_000, None)
         .unwrap();
     let event = report.event.expect("deposit event");
     assert_eq!(event.kind, "deposit");
@@ -3517,17 +3615,17 @@ fn test_equity_manual_deposit_detected_and_rebased() {
 fn test_equity_withdrawal_and_transfer_guess() {
     let store = StateStore::open_in_memory().unwrap();
     store
-        .check_account_equity("vanta", 20_000.0, "", 1_000)
+        .check_account_equity("vanta", 20_000.0, "", 1_000, None)
         .unwrap();
     let out = store
-        .check_account_equity("vanta", 19_000.0, "", 2_000)
+        .check_account_equity("vanta", 19_000.0, "", 2_000, None)
         .unwrap();
     assert_eq!(
         out.event.as_ref().map(|e| e.kind.as_str()),
         Some("withdrawal")
     );
     let moved = store
-        .check_account_equity("vanta", 19_050.0, "BTC-USDC:Buy:1", 3_000)
+        .check_account_equity("vanta", 19_050.0, "BTC-USDC:Buy:1", 3_000, None)
         .unwrap();
     assert_eq!(
         moved.event.as_ref().map(|e| e.kind.as_str()),
@@ -3540,11 +3638,11 @@ fn test_equity_withdrawal_and_transfer_guess() {
 fn test_equity_missed_poll_gap_produces_no_event() {
     let store = StateStore::open_in_memory().unwrap();
     store
-        .check_account_equity("grvt", 10_000.0, "", 1_000)
+        .check_account_equity("grvt", 10_000.0, "", 1_000, None)
         .unwrap();
     let gap = crate::equity_attribution::EQUITY_POLL_GAP_MAX_MS + 1;
     let report = store
-        .check_account_equity("grvt", 99_000.0, "", 1_000 + gap)
+        .check_account_equity("grvt", 99_000.0, "", 1_000 + gap, None)
         .unwrap();
     assert_eq!(report.event, None);
     assert!(report.note.unwrap_or_default().contains("gap"));
@@ -3560,9 +3658,11 @@ fn test_equity_missed_poll_gap_produces_no_event() {
 fn test_equity_events_ipc_listing_filters_and_limits() {
     let store = StateStore::open_in_memory().unwrap();
     for (acct, base) in [("hyperliquid", 10_000.0), ("lighter", 20_000.0)] {
-        store.check_account_equity(acct, base, "", 1_000).unwrap();
         store
-            .check_account_equity(acct, base + 100.0, "", 2_000)
+            .check_account_equity(acct, base, "", 1_000, None)
+            .unwrap();
+        store
+            .check_account_equity(acct, base + 100.0, "", 2_000, None)
             .unwrap();
     }
     let all = store.list_equity_events(None, 100).unwrap();
@@ -3731,7 +3831,7 @@ fn test_migration_v24_admits_external_and_preserves_rows() {
     let v: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(v, 41);
+    assert_eq!(v, 42);
     let kept: String = conn
         .query_row(
             "SELECT strategy_id FROM signal_executions WHERE id = 'sig-keep'",

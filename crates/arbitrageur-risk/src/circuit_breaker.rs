@@ -181,7 +181,15 @@ impl CircuitBreaker {
     /// Trip circuit breaker manually or automatically.
     pub fn trip(&self, reason: impl Into<String>) {
         let r = reason.into();
-        error!("🚨 CIRCUIT BREAKER TRIPPED! Reason: {}", r);
+        // Log once on the transition into halted — a breached condition
+        // re-trips every evaluation cycle, and hundreds of identical ERROR
+        // lines bury the original trip reason. The persisted snapshot still
+        // refreshes each call so `tripped_at` tracks the latest breach.
+        if !self.is_tripped.load(Ordering::SeqCst) {
+            error!("🚨 CIRCUIT BREAKER TRIPPED! Reason: {}", r);
+        } else {
+            tracing::debug!("circuit breaker still tripped: {}", r);
+        }
         let was_tripped;
         {
             *self.trip_reason.write() = Some(r.clone());
@@ -378,6 +386,41 @@ impl CircuitBreaker {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn snapshot_serde_roundtrip_under_arbitrary_precision() {
+        // Regression for a real startup failure: with serde_json's
+        // arbitrary_precision unified into the desktop build graph (via
+        // aptos-sdk), every JSON number reaches Decimal's visitor as a
+        // private map token — bare-Decimal snapshot fields could not read
+        // their own writes ("invalid type: map") and the breaker re-armed
+        // fresh at every restart. rust_decimal's serde-with-arbitrary-precision
+        // feature adds visit_map while keeping the plain-number wire format.
+        let snap = CircuitBreakerSnapshot {
+            tripped: true,
+            trip_reason: Some("dd".into()),
+            tripped_at: Some(chrono::Utc::now()),
+            day_start_equity: dec!(200000.5),
+            current_equity: dec!(198000.25),
+            peak_equity: dec!(200100.75),
+            day_key: Some(chrono::Utc::now().date_naive()),
+            consecutive_errors: 3,
+        };
+        let json = serde_json::to_string(&snap).unwrap();
+        // Wire format stays plain numbers — no private-token maps persisted.
+        assert!(json.contains("\"day_start_equity\":200000.5"), "{json}");
+        let back: CircuitBreakerSnapshot = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.day_start_equity, dec!(200000.5));
+        // Rows written while AP was NOT on rust_decimal (plain numbers) read
+        // fine, and a private-token map row (the exact failure shape) must
+        // ALSO read now — deserialize_any hands it to visit_map.
+        let token_row = json.replace(
+            "\"day_start_equity\":200000.5",
+            "\"day_start_equity\":{\"$serde_json::private::Number\":\"200000.5\"}",
+        );
+        let back2: CircuitBreakerSnapshot = serde_json::from_str(&token_row).unwrap();
+        assert_eq!(back2.day_start_equity, dec!(200000.5));
+    }
 
     #[test]
     fn test_reset_reanchors_drawdown_baseline() {

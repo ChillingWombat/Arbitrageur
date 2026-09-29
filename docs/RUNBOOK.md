@@ -180,3 +180,111 @@ To prove a venue pair with one minimal real-money entry:
 Expected cost is the spread + taker fees on both legs — typically a
 few cents at minimal size. Any `imbalanced`/`unresolved` outcome blocks the
 ticker, appears on the radar attention strip, and is handled per §2.2.
+
+---
+
+## 3. 2026-09-29 Session: Fail-Closed Incidents Found & Fixed on Testnet
+
+Real testnet run of the release binary (systemd-managed, `custom-protocol`
+build). Every item below was observed on live testnet venues, not simulation.
+
+### 3.1 Symbol-spelling mismatches read live exposure as flat (fixed)
+
+- **Symptom:** flatten pass logged `no residual venue position` while venues
+  held both legs of a radar entry (`vanta +0.00119`, `hyperliquid −0.00119`
+  BTC ~$198; and a crashed-dispatch ADA entry `+376/−376` with zero ledger
+  rows). `external_positions` showed a system-owned position as fully
+  external (`sys −0.0`).
+- **Root cause:** ledger legs persist bare engine symbols (`BTC`, `ADA`);
+  venue account rows arrive normalized (`BTC-USDC`, `ADA-USDC`, Orderly
+  `PERP_ADA_USDC`). Exact-string matching in `account_position_for`,
+  `system_qty_for` (external-position attribution), and the shared-symbol
+  venue-excess sweep all missed.
+- **Fix:** `ExchangeAdapter::account_position_for` now matches by
+  `canonical_base` after exact match, and **errors on ambiguity** (two
+  venue rows resolving to the requested base) rather than guessing;
+  `system_qty_for` and the shared-symbol sweep compare canonical bases;
+  `canonical_base`/`symbol_quote` learned `_`-separated spellings
+  (`BTC_USDT`, `PERP_ADA_USDC`) — previously every underscore form was
+  broken (`PERP_USDC` → `PERP_`), not just Orderly's.
+- **Rule:** any comparison of ledger-leg symbols to venue-reported
+  symbols must go through `canonical_base`; never `eq_ignore_ascii_case`.
+  A lookup returning `Ok(None)` is "venue confirmed flat"; an error or a
+  missing account is "undetermined" — never flattened as zero.
+
+### 3.2 Lighter testnet account wipe → naked hedge, invisible (fixed operationally, tracked in #85)
+
+- **Symptom:** `400 /api/v1/account?by=index&value=423` repeated; the
+  funding carry `lighter +0.00477 / HL −0.00477` kept logging
+  `flattened (0 closed, 1 residual)` every ~60s.
+- **Root cause:** the configured account index 423 was reaped by the
+  testnet (worked 18:01, dead by 01:09). The ledger still said `balanced`
+  — the HL short was actually naked (~$498). The flatten's family-wide
+  undetermined gate correctly refused to close blind.
+- **Resolution:** user re-provisioned a fresh testnet credential
+  (account index 39; `accountsByL1Address`-style probing confirmed it
+  empty). The profile row must also be `enabled=1`/`is_default=1` or the
+  adapter binds no credentials and the venue is *silently* unreadable
+  (not even flagged — worse than an error). After restart: lighter leg
+  read flat (positive venue answer), the stale working close child
+  partially filled (`0.00023`), the reconciler settled it, a successor
+  flatten child filled the remainder (`0.00454 @ 83428`), parent `closed`.
+- **Standing gap** (Issue #85): nothing detects ledger-open legs whose
+  venue reports flat (VANISHED) or venues that error (UNREADABLE), and
+  the `unresolved` close was only clearable by hand-editing SQLite —
+  `acknowledge_signal` is now also reachable on the dev RPC socket.
+
+### 3.3 Orderly/Vanta client-order-id length bound (fixed)
+
+- **Symptom:** external close rejected: `Client order id length can not
+  exceed 36`; signal parked `unresolved`.
+- **Fix:** readable signal id (`extclose-…`) kept for the ledger row, but
+  the submitted `client_order_id` is minted bounded ≤36 chars.
+
+### 3.4 Process survival (ops fix)
+
+- systemd-oomd killed the desktop scope during a dispatch. The binary
+  now runs as `arbitrageur-testnet.service` (transient,
+  `MemoryHigh`/`MemoryMax` cgroup caps, `Restart=on-failure`, journald
+  logs). Manage with `systemctl --user restart arbitrageur-testnet.service`
+  — never `pkill -f` from a shell whose own command line matches.
+- Memory footprint observed ~1.7–4.0G during warmup+operation; caps set
+  4G/5G. The footprint itself needs investigation (feed/subscription
+  retention suspected).
+
+### 3.5 Dev RPC quick reference (operational)
+
+Socket `/tmp/arb-dev.sock` when `ARBITRAGEUR_DEV_SOCK` is set at launch.
+Requests are JSON lines; args go under `"args"`:
+
+```
+echo '{"cmd":"unlock_vault","args":{"password":"…"}}' | socat - UNIX-CONNECT:/tmp/arb-dev.sock
+echo '{"cmd":"system_status"}' | socat - UNIX-CONNECT:/tmp/arb-dev.sock
+echo '{"cmd":"open_positions"}' | socat - UNIX-CONNECT:/tmp/arb-dev.sock
+echo '{"cmd":"external_positions"}' | socat - UNIX-CONNECT:/tmp/arb-dev.sock   # slow: serial fetch_account per venue
+echo '{"cmd":"reconcile_orders"}' | socat - UNIX-CONNECT:/tmp/arb-dev.sock
+echo '{"cmd":"flatten_ticker","args":{"symbol":"BTC-USDC","strategy_id":"funding"}}' | socat - ...
+echo '{"cmd":"cancel_venue_order","args":{"venue":"hyperliquid","symbol":"BTC-USDC","order_id":"…"}}' | socat - ...
+echo '{"cmd":"acknowledge_signal","args":{"signal_id":"…","resolution":"failed|closed"}}' | socat - ...
+echo '{"cmd":"signal_executions"}' | socat - UNIX-CONNECT:/tmp/arb-dev.sock
+echo '{"cmd":"radar_bot_status"}' / '"cmd":"monitor_snapshot"' / '"cmd":"strategy_params"' …
+```
+
+Ledger inspection without the app: `sqlite3 ~/.arbitrageur/state.sqlite3`
+(tables: `signal_executions`, `signal_legs`, `monitor_signal_events`,
+`exchange_accounts`, `account_equity_events`, `funding_rate_samples`).
+
+### 3.6 Radar/execution economics divergence (Issue #84, evidenced live)
+
+Matrix rows qualify `ready` on estimated edge (+0.9…+25bps) then dispatch
+rejects at route friction (−9…−36bps) — production `bot_skip` event:
+`expectedProfitBps +1.61` vs `net spread −22.66 BPS after route friction`.
+Phantom `ready` rows on venues that cannot serve books (alpaca ADA 404)
+occupy the qualification set. Spec: matrix must consume the dispatcher's
+`compute_route_economics` at configured size.
+
+### 3.7 Funding settlement attribution (Issue #83, evidenced live)
+
+The carry lived ~9h across a settlement window; venue-side funding cash
+never reaches `realized_pnl` — there is no accrual table. Open positions
+continue to render `balanced` from legs while funding P&L is invisible.

@@ -102,8 +102,8 @@ test("selector: rail renders All Strategies plus every catalogued substrategy", 
     );
   }
   // The catalog is broader than crypto perps — pending rows carry their
-  // unblock requirement on the row tooltip, live rows carry a LIVE badge.
-  assert.match(html, />LIVE</);
+  // unblock requirement on the row tooltip, wired rows carry a READY badge.
+  assert.match(html, />READY</);
   assert.match(html, /IBKR/);
 });
 

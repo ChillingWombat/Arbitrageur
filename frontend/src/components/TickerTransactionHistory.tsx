@@ -7,6 +7,26 @@ import {
 import type { ExecutionLogEntry, TickerStrategyConfigDto } from "../types";
 import { formatCurrencyPnl } from "../types/tickers";
 import { EmptyState } from "./EmptyState";
+import { VenueLogo } from "./VenueLogo";
+
+const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** Direction strings embed ticker + venue spellings
+ *  ("LONG BTC-USDC@lighter / SHORT BTC-USDC@hyperliquid"). The table carries
+ *  ticker and venues in dedicated columns, so strip them for the badge. */
+export function actionLabel(log: ExecutionLogEntry): string {
+  const raw = log.direction || "Divergence Entry";
+  let s = raw.replace(/@\S+/g, "");
+  for (const tok of [log.venue_a, log.venue_b, log.symbol]) {
+    if (tok) s = s.replace(new RegExp(`\\b${escapeRe(tok)}\\b`, "gi"), "");
+  }
+  s = s
+    .replace(/\s*\/\s*/g, " / ")
+    .replace(/\s{2,}/g, " ")
+    .replace(/^[ /]+|[ /]+$/g, "")
+    .trim();
+  return s || raw;
+}
 
 interface TickerTransactionHistoryProps {
   symbol: string;
@@ -70,11 +90,6 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
           <span className="text-xs font-bold text-slate-800 font-mono tracking-wide">
             Transaction Records
           </span>
-          {(tickerLogs[0] ?? logs[0])?.is_live === false && (
-            <span className="px-1.5 py-0.5 rounded-md bg-slate-100 border border-slate-200 text-slate-600 text-[10px] font-mono font-bold uppercase tracking-wider">
-              Testnet Trading
-            </span>
-          )}
         </div>
 
         {/* Filter & Search Bar */}
@@ -137,7 +152,8 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
           <thead>
             <tr className="border-b border-surface-border text-slate-500 text-[11px] font-semibold tracking-wider bg-surface-raised/60">
               <th className="py-2.5 px-3">DateTime</th>
-              <th className="py-2.5 px-3">Direction & Action</th>
+              <th className="py-2.5 px-3">Ticker</th>
+              <th className="py-2.5 px-3">Action</th>
               <th className="py-2.5 px-3">Venues (Buy ➔ Sell)</th>
               <th className="py-2.5 px-3 text-right">Trigger Spread</th>
               <th className="py-2.5 px-3 text-right">Signal Baseline (Mean & Δ)</th>
@@ -150,7 +166,7 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
           <tbody className="divide-y divide-surface-border">
             {tickerLogs.length === 0 ? (
               <tr>
-                <td colSpan={9}>
+                <td colSpan={10}>
                   <EmptyState
                     title="No Transactions Found"
                     hint={<>No execution records for <span className="font-medium text-slate-700">{symbol}</span> matching the active filters.</>}
@@ -198,7 +214,12 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
                       <div className="text-[11px] text-muted">{dateFormatted}</div>
                     </td>
 
-                    {/* Direction & Action */}
+                    {/* Ticker */}
+                    <td className="py-2.5 px-3 whitespace-nowrap">
+                      <span className="font-semibold text-slate-900">{log.symbol}</span>
+                    </td>
+
+                    {/* Action */}
                     <td className="py-2.5 px-3 whitespace-nowrap">
                       <div className="flex items-center space-x-1.5">
                         <span
@@ -209,8 +230,9 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
                               ? "bg-purple-50 text-purple-700 border-purple-200"
                               : "bg-blue-50 text-blue-700 border-blue-200"
                           }`}
+                          title={log.direction}
                         >
-                          {log.direction || "Divergence Entry"}
+                          {actionLabel(log)}
                         </span>
                       </div>
                     </td>
@@ -218,8 +240,10 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
                     {/* Venues */}
                     <td className="py-2.5 px-3 whitespace-nowrap text-slate-800">
                       <div className="flex items-center space-x-1.5">
+                        <VenueLogo venueId={log.venue_a.toLowerCase()} name={log.venue_a} size={14} />
                         <span className="font-semibold text-slate-900">{log.venue_a}</span>
                         <ArrowRight className="w-3 h-3 text-muted" />
+                        <VenueLogo venueId={log.venue_b.toLowerCase()} name={log.venue_b} size={14} />
                         <span className="font-semibold text-slate-900">{log.venue_b}</span>
                       </div>
                     </td>

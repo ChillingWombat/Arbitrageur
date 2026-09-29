@@ -451,7 +451,6 @@ impl VantaAdapter {
         }
     }
 
-    #[allow(dead_code)]
     fn from_vanta_symbol(vanta_symbol: &str) -> String {
         vanta_symbol
             .strip_prefix("PERP_")
@@ -562,13 +561,19 @@ impl VantaAdapter {
                 _ => anyhow::bail!("Vanta unsupported signed method {method}"),
             };
             req = req
-                .header("Content-Type", "application/json")
                 .header("orderly-account-id", &account_id)
                 .header("orderly-key", &key)
                 .header("orderly-timestamp", ts.to_string())
                 .header("orderly-signature", &sig);
             if !body.is_empty() {
-                req = req.body(body.to_string());
+                req = req
+                    .header("Content-Type", "application/json")
+                    .body(body.to_string());
+            } else if method == "DELETE" {
+                // Orderly rejects bodyless DELETEs carrying JSON content-type
+                // AND DELETEs carrying none — cancels must declare form
+                // encoding.
+                req = req.header("Content-Type", "application/x-www-form-urlencoded");
             }
             let resp = req.send().await.map_err(|e| {
                 self.rate_limiter.record_failure(false);
@@ -838,6 +843,33 @@ impl ExchangeAdapter for VantaAdapter {
         parse_funding_data(&self.venue_id, symbol, &vanta_sym, &data)
     }
 
+    async fn fetch_funding_rates(&self) -> anyhow::Result<Vec<FundingRate>> {
+        let data = self
+            .public_query(serde_json::json!({"type": "marketSummary"}))
+            .await?;
+        let markets = data
+            .get("markets")
+            .and_then(|m| m.as_array())
+            .ok_or_else(|| anyhow::anyhow!("Vanta marketSummary response missing data.markets"))?;
+        Ok(markets
+            .iter()
+            .filter_map(|m| {
+                let vanta_sym = m.get("symbol").and_then(|s| s.as_str())?;
+                let rate = dec_from_json(m.get("last_funding_rate"))?;
+                let next_funding_time = ts_from_json(m.get("next_funding_time"))?;
+                Some(FundingRate {
+                    venue: self.venue_id.clone(),
+                    symbol: Self::from_vanta_symbol(vanta_sym),
+                    rate,
+                    predicted_rate: dec_from_json(m.get("est_funding_rate")),
+                    interval_hours: 8,
+                    next_funding_time,
+                    timestamp: Utc::now(),
+                })
+            })
+            .collect())
+    }
+
     async fn fetch_volumes_24h(&self) -> anyhow::Result<HashMap<String, Decimal>> {
         let data = match self
             .public_query(serde_json::json!({"type": "marketSummary"}))
@@ -1062,7 +1094,9 @@ impl ExchangeAdapter for VantaAdapter {
             // per-order `data.status` carries the truth. Accept only an
             // explicit CANCELLED; a missing status is unconfirmed.
             match v.pointer("/data/status").and_then(|s| s.as_str()) {
-                Some("CANCELLED") | Some("CANCELLED_PENDING") => Ok(()),
+                // CANCEL_SENT is Orderly's ack that the cancel is queued —
+                // the next fetch_order poll observes the terminal state.
+                Some("CANCELLED") | Some("CANCELLED_PENDING") | Some("CANCEL_SENT") => Ok(()),
                 other => anyhow::bail!("Vanta cancel not confirmed — data.status={other:?}: {v}"),
             }
         };
@@ -1586,6 +1620,52 @@ mod tests {
             .account_position_for(&account, "ETH-USDC")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn account_position_for_bare_base_matches_normalized_row() {
+        let adapter = VantaAdapter::new(None, None, None, None);
+        let data = serde_json::json!({
+            "total_collateral_value": "100",
+            "rows": [{
+                "symbol": "PERP_BTC_USDC",
+                "position_qty": "0.00119",
+                "average_open_price": "83350.4",
+                "mark_price": "82909.6"
+            }]
+        });
+        let account = parse_orderly_account_data(&VenueId::new("vanta"), &data).unwrap();
+        // Ledger legs persist bare-base spellings ("BTC"); the normalized
+        // venue row is "BTC-USDC". A miss reads live exposure as flat and
+        // lets flatten claim "no residual venue position" over real risk.
+        let pos = adapter
+            .account_position_for(&account, "BTC")
+            .unwrap()
+            .expect("bare-base request must match the normalized BTC-USDC row");
+        assert_eq!(pos.quantity, dec!(0.00119));
+    }
+
+    #[test]
+    fn account_position_for_bare_base_ambiguous_rows_fail_closed() {
+        let adapter = VantaAdapter::new(None, None, None, None);
+        let data = serde_json::json!({
+            "total_collateral_value": "100",
+            "rows": [{
+                "symbol": "PERP_BTC_USDC",
+                "position_qty": "0.1",
+                "average_open_price": "65000.0",
+                "mark_price": "65500.0"
+            }, {
+                "symbol": "BTC-USDC",
+                "position_qty": "0.2",
+                "average_open_price": "65000.0",
+                "mark_price": "65500.0"
+            }]
+        });
+        let account = parse_orderly_account_data(&VenueId::new("vanta"), &data).unwrap();
+        // Both rows normalize to BTC-USDC — a bare "BTC" request is
+        // ambiguous and must refuse rather than pick one.
+        assert!(adapter.account_position_for(&account, "BTC").is_err());
     }
 
     #[test]

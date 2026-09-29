@@ -6,9 +6,11 @@ import { PositionsPanel } from "./PositionsPanel.tsx";
 import type { OpenPositionDto } from "../types/index.ts";
 
 const position: OpenPositionDto = {
-  key: "futures|BTC-USDC|hyperliquid+lighter",
+  key: "futures|s1",
+  tradeId: "s1",
   strategyId: "futures",
   symbol: "BTC-USDC",
+  legSymbols: ["BTC-USDC"],
   signalCount: 2,
   venues: [
     { venue: "hyperliquid", symbol: "BTC-USDC", netQty: 1.5 },
@@ -31,21 +33,26 @@ const baseProps = {
   onOpenTickerExplorer: () => {},
 };
 
-test("position card renders identity, strategy chip under the name, and PnL under the sizes", () => {
+test("position card renders identity, strategy chip, per-leg nets, and PnL", () => {
   const html = renderToStaticMarkup(React.createElement(PositionsPanel, baseProps));
-  // Strategy chip renders AFTER (below) the ticker, PnL sits under the
-  // long/short sums in the right column.
+  // Strategy chip renders AFTER (below) the ticker — the card footer pairs
+  // it with the bare PnL figure (no "PnL" prefix).
   const chip = html.indexOf(">SPREAD<");
   const sym = html.indexOf(">BTC-USDC<");
   assert.ok(sym >= 0 && chip > sym, "strategy chip renders below the symbol");
-  const longIdx = html.indexOf(">Long<");
-  const shortIdx = html.indexOf(">Short<");
-  const pnlIdx = html.indexOf("PnL +$4.20");
-  assert.ok(longIdx >= 0 && shortIdx > longIdx, "long sum renders above short sum");
-  assert.ok(pnlIdx > shortIdx, "PnL renders under the position sizes");
-  assert.match(html, /PnL \+\$4\.20/);
-  assert.match(html, /\+1\.5/);
-  assert.match(html, /-1\.5/);
+  assert.match(html, /\+\$4\.20/);
+  assert.doesNotMatch(html, /PnL \+\$/);
+  // Per-(venue, side) rows carry the venue name on the left and the bare
+  // signed qty on the right — no "@venue" suffix, no per-instrument
+  // labels. Anchor on element boundaries — "-1.5" alone collides with
+  // the `space-x-1.5` utility class earlier in the markup.
+  const longLeg = html.indexOf(">+1.5<");
+  const shortLeg = html.indexOf(">-1.5<");
+  assert.ok(longLeg >= 0 && shortLeg > longLeg, "long leg renders above short leg");
+  assert.match(html, /hyperliquid/);
+  assert.match(html, /lighter/);
+  assert.doesNotMatch(html, /@hyperliquid/);
+  assert.doesNotMatch(html, /@lighter/);
   assert.doesNotMatch(html, /1\.5000/);
   assert.doesNotMatch(html, /HL BTC-USDC/);
 });
@@ -68,8 +75,11 @@ test("unavailable PnL renders an em dash, never a fabricated zero", () => {
       positions: [{ ...position, unrealizedPnlUsd: null }],
     }),
   );
-  assert.match(html, /PnL —/);
-  assert.doesNotMatch(html, /PnL \$0\.00/);
+  // The footer P&L figure is an em dash, never a fabricated zero — anchored
+  // to the card footer (strategy chip → PnL span), not panel-wide markup.
+  assert.match(html, /SPREAD<\/span><span[^>]*>—<\/span>/);
+  assert.doesNotMatch(html, /SPREAD<\/span><span[^>]*>[+-]?\$0\.00/);
+  assert.doesNotMatch(html, />PnL —/);
 });
 
 test("empty state is explicit and honest", () => {
@@ -89,6 +99,37 @@ test("current-strategy scope disables gracefully on strategy-less tabs", () => {
   );
   // The scope button renders disabled with the explanatory tooltip.
   assert.match(html, /This page has no single-strategy scope/);
+});
+
+test("options card collapses legs into Σ Long / Σ Short rows and hides instruments", () => {
+  const optPos: OpenPositionDto = {
+    ...position,
+    key: "options_jelly_roll|s2",
+    strategyId: "options_jelly_roll",
+    symbol: "BTC",
+    venues: [
+      { venue: "deribit", symbol: "BTC-30OCT26-91000-C", netQty: 0.1 },
+      { venue: "deribit", symbol: "BTC-30OCT26-92000-P", netQty: 0.1 },
+      { venue: "deribit", symbol: "BTC-30SEP26-91000-P", netQty: -0.1 },
+      { venue: "deribit", symbol: "BTC-30SEP26-92000-C", netQty: -0.1 },
+      { venue: "deribit", symbol: "BTC-30OCT26-91000-P", netQty: 0.1 },
+      { venue: "deribit", symbol: "BTC-30SEP26-92000-P", netQty: -0.1 },
+      { venue: "deribit", symbol: "BTC-30OCT26-92000-C", netQty: 0.1 },
+      { venue: "deribit", symbol: "BTC-30SEP26-91000-C", netQty: -0.1 },
+    ],
+  };
+  const html = renderToStaticMarkup(
+    React.createElement(PositionsPanel, { ...baseProps, positions: [optPos] }),
+  );
+  // Venue named on the left of each aggregate row, bare signed totals on
+  // the right — no "@venue" suffix and no Σ Long/Σ Short labels.
+  assert.match(html, /deribit/);
+  assert.match(html, />JELLY ROLL</);
+  assert.doesNotMatch(html, /@deribit/);
+  assert.doesNotMatch(html, />Σ Long<|>Σ Short</);
+  // Two aggregate rows only — no strike-level instrument names on the card.
+  assert.doesNotMatch(html, /30OCT26-91000-C/);
+  assert.doesNotMatch(html, /more legs/);
 });
 
 test("position card has right-click context menu hint", () => {

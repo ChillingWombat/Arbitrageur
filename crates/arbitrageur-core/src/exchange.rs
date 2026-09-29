@@ -73,6 +73,24 @@ pub trait ExchangeAdapter: Send + Sync {
     /// Fetch consolidated account balance, equity and positions.
     async fn fetch_account(&self) -> anyhow::Result<AccountSnapshot>;
 
+    /// USD price of the venue's settlement-currency index — the conversion
+    /// rate a coin-margined adapter applied when normalizing account fields
+    /// (e.g. Deribit's `btc_usd` index). Default errors: USD-settled venues
+    /// expose no such rate; callers fall back to market-book fx.
+    async fn index_price_usd(&self, _currency: &str) -> anyhow::Result<Decimal> {
+        anyhow::bail!("venue exposes no settlement index price")
+    }
+
+    /// The index value the adapter actually applied in its most recent
+    /// `fetch_account` conversion. Equity-attribution math must use THIS
+    /// rate — a fresh index fetched seconds later drifts from the rate the
+    /// venue-converted equity embeds, and on coin-margined books the skew
+    /// (balance × drift) reads as phantom external flows. Default `None`:
+    /// adapters that don't convert through an index expose nothing.
+    fn last_account_index_usd(&self, _currency: &str) -> Option<Decimal> {
+        None
+    }
+
     /// Normalize one venue-native account row into the engine/canonical
     /// symbol and quantity units that `OrderRequest` uses. `Ok(None)` means
     /// the row belongs to a market class this adapter intentionally does not
@@ -90,29 +108,52 @@ pub trait ExchangeAdapter: Send + Sync {
         symbol: &str,
     ) -> anyhow::Result<Option<Position>> {
         let requested = symbol.trim();
+        // Venue rows normalize to quoted/classed spellings (`BTC-USDC`,
+        // `BTC-PERPETUAL`) while ledger legs may carry the bare base (`BTC`).
+        // Two passes, exact spelling first: a `BTC-USDC` request on a venue
+        // holding both `BTC-USDC` and `BTC-USDT` rows must pick its exact
+        // twin, not fail ambiguous. Only when no row spells the request do
+        // we merge on canonical base — a bare `BTC` leg must still match the
+        // sole normalized `BTC-USDC` row, or live exposure reads as flat and
+        // "no residual" verifiers close families over real positions.
+        // Multiple rows sharing that base (e.g. USDC + USDT twins answering
+        // a bare `BTC`) stay ambiguous and fail closed in the second pass.
+        let requested_base = crate::symbol::canonical_base(requested);
         let mut matched: Option<Position> = None;
-        for raw in &account.positions {
-            let Some(position) = self.normalize_account_position(raw)? else {
-                continue;
-            };
-            // Zero is flat; any nonzero magnitude is exposure. Convention is
-            // unsigned `quantity` + `side`, but a negative row must still
-            // block entries rather than read as flat.
-            if position.quantity == Decimal::ZERO
-                || !position.symbol.eq_ignore_ascii_case(requested)
-            {
-                continue;
+        for base_pass in [false, true] {
+            for raw in &account.positions {
+                let Some(position) = self.normalize_account_position(raw)? else {
+                    continue;
+                };
+                // Zero is flat; any nonzero magnitude is exposure. Convention
+                // is unsigned `quantity` + `side`, but a negative row must
+                // still block entries rather than read as flat.
+                if position.quantity == Decimal::ZERO {
+                    continue;
+                }
+                let hit = if base_pass {
+                    !position.symbol.eq_ignore_ascii_case(requested)
+                        && crate::symbol::canonical_base(&position.symbol) == requested_base
+                } else {
+                    position.symbol.eq_ignore_ascii_case(requested)
+                };
+                if !hit {
+                    continue;
+                }
+                if matched.is_some() {
+                    anyhow::bail!(
+                        "{} account has multiple positions resolving to {}; refusing to guess exposure",
+                        self.venue_id(),
+                        requested
+                    );
+                }
+                let mut position = position;
+                position.symbol = requested.to_string();
+                matched = Some(position);
             }
             if matched.is_some() {
-                anyhow::bail!(
-                    "{} account has multiple positions resolving to {}; refusing to guess exposure",
-                    self.venue_id(),
-                    requested
-                );
+                break;
             }
-            let mut position = position;
-            position.symbol = requested.to_string();
-            matched = Some(position);
         }
         Ok(matched)
     }
@@ -254,5 +295,15 @@ pub trait ExchangeAdapter: Send + Sync {
     /// Whether authenticated live trading credentials are loaded in memory for this adapter.
     fn has_live_credentials(&self) -> bool {
         false
+    }
+
+    /// Stable identity of the economic account this adapter trades from —
+    /// e.g. an EVM wallet address shared by several AMM venue adapters.
+    /// `None` means the venue id is the finest-grained account identity the
+    /// system can prove (one account per adapter). Portfolio-risk sums key
+    /// on this so two adapters backed by the same wallet never double-count
+    /// equity, margin, or positions.
+    fn economic_account_key(&self) -> Option<String> {
+        None
     }
 }

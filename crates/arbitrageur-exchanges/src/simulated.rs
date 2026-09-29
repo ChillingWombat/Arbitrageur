@@ -34,6 +34,10 @@ pub struct SimulatedExchange {
     /// Market class this sim advertises in `fetch_markets`. Default
     /// `Perpetual`; spot sims report seeded books as `Symbol::spot`.
     market_type: RwLock<arbitrageur_core::market::MarketType>,
+    /// When set, the sim reports this shared economic-account identity so
+    /// tests can model multiple venue adapters backed by one account
+    /// (e.g. AMM venues on one EVM wallet) and exercise dedup paths.
+    shared_account_key: RwLock<Option<String>>,
 }
 
 impl SimulatedExchange {
@@ -76,7 +80,14 @@ impl SimulatedExchange {
             initial_equity: RwLock::new(initial_equity),
             max_leverage_cap: RwLock::new(None),
             market_type: RwLock::new(arbitrageur_core::market::MarketType::Perpetual),
+            shared_account_key: RwLock::new(None),
         }
+    }
+
+    /// Report a shared economic-account identity — tests model two venue
+    /// adapters trading one account by giving both sims the same key.
+    pub fn set_shared_account_key(&self, key: impl Into<String>) {
+        *self.shared_account_key.write() = Some(key.into());
     }
 
     /// Set the market class reported by `fetch_markets` — tests install a
@@ -246,6 +257,10 @@ impl SimulatedExchange {
 impl ExchangeAdapter for SimulatedExchange {
     fn venue_id(&self) -> VenueId {
         self.venue_id.clone()
+    }
+
+    fn economic_account_key(&self) -> Option<String> {
+        self.shared_account_key.read().clone()
     }
 
     fn name(&self) -> &str {

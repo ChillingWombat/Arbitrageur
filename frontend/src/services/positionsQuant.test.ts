@@ -11,8 +11,10 @@ const pos = (
   notional: number | null,
 ): OpenPositionDto => ({
   key,
+  tradeId: key.split("|")[1] ?? key,
   strategyId,
   symbol,
+  legSymbols: [symbol],
   signalCount: 1,
   venues: [
     { venue: "hyperliquid", symbol, netQty: 1 },

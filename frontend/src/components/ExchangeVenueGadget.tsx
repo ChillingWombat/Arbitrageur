@@ -29,9 +29,6 @@ export const ExchangeVenueGadget: React.FC<{ rows: ExchangeRowStats[] | null }> 
           <Building2 className="w-5 h-5 text-accent-strong" />
           <span>Per-Exchange Stats</span>
         </h2>
-        <p className="text-xs text-slate-600 font-mono mt-1">
-          Two-leg trades count on both venues · totals sum fee-inclusive net profit · utilisation is used margin / equity.
-        </p>
       </div>
       <span className="text-xs font-mono font-bold text-slate-600">
         {rows == null ? "—" : `${rows.length} ${rows.length === 1 ? "Venue" : "Venues"}`}

@@ -32,6 +32,9 @@ pub struct DeribitAdapter {
     testnet: bool,
     rate_limiter: AccountRequestCoordinator,
     instruments_cache: tokio::sync::Mutex<HashMap<String, CachedInstruments>>,
+    /// Settlement index value applied inside the last `fetch_account`, per
+    /// currency — the exact rate embedded in the returned USD equity.
+    account_index_used: RwLock<HashMap<String, Decimal>>,
 }
 
 struct DeribitToken {
@@ -194,6 +197,7 @@ impl DeribitAdapter {
             testnet: false,
             rate_limiter: AccountRequestCoordinator::new("deribit", 200, 3000, 500, 15000),
             instruments_cache: tokio::sync::Mutex::new(HashMap::new()),
+            account_index_used: RwLock::new(HashMap::new()),
         }
     }
 
@@ -954,6 +958,14 @@ impl ExchangeAdapter for DeribitAdapter {
             }
         }
         book.sequence = v.get("change_id").and_then(|c| c.as_u64()).unwrap_or(0);
+        // The venue's model mark rides the same response — keep it for
+        // valuation so one-sided option books (bids-empty far strikes)
+        // still carry the venue's own price instead of no mark at all.
+        // A zero mark is real data for a dead option but a broken feed on
+        // a future — accept `0` only when the instrument is an option.
+        let is_option = matches!(instrument.rsplit('-').next(), Some("C") | Some("P"));
+        book.mark_price = dec_from_json(v.get("mark_price"))
+            .filter(|m| *m > dec!(0) || (is_option && *m >= dec!(0)));
         Ok(book)
     }
 
@@ -1011,6 +1023,14 @@ impl ExchangeAdapter for DeribitAdapter {
         Ok(out)
     }
 
+    async fn index_price_usd(&self, currency: &str) -> anyhow::Result<Decimal> {
+        DeribitAdapter::index_price_usd(self, currency).await
+    }
+
+    fn last_account_index_usd(&self, currency: &str) -> Option<Decimal> {
+        self.account_index_used.read().get(currency).copied()
+    }
+
     async fn fetch_account(&self) -> anyhow::Result<AccountSnapshot> {
         if !self.has_credentials() {
             anyhow::bail!(
@@ -1024,6 +1044,7 @@ impl ExchangeAdapter for DeribitAdapter {
         let mut positions = Vec::new();
         for ccy in SUPPORTED_CURRENCIES {
             let idx = self.index_price_usd(ccy).await?;
+            self.account_index_used.write().insert(ccy.to_string(), idx);
             let summary = self
                 .private_get(&format!(
                     "/private/get_account_summary?currency={ccy}&extended=true"
@@ -1053,8 +1074,11 @@ impl ExchangeAdapter for DeribitAdapter {
                     .await?;
                 for p in rows.as_array().cloned().unwrap_or_default() {
                     let dir = p.get("direction").and_then(|d| d.as_str()).unwrap_or("");
-                    let size = dec_from_json(p.get("size")).unwrap_or(dec!(0));
-                    if dir == "zero" || size <= dec!(0) {
+                    // Deribit reports short-position `size` as NEGATIVE —
+                    // `size <= 0` here would drop every short option/future
+                    // and read the account as flat on live exposure.
+                    let size = dec_from_json(p.get("size")).unwrap_or(dec!(0)).abs();
+                    if dir == "zero" || size == dec!(0) {
                         continue;
                     }
                     let name = p
@@ -1145,13 +1169,14 @@ impl ExchangeAdapter for DeribitAdapter {
             .to_string();
         let index = self.index_price_usd(&currency).await.ok();
 
-        // Reference USD price for futures sizing/rounding: the limit price
-        // when present, else the venue mark.
+        // Reference USD price for futures sizing: ALWAYS the venue mark, not
+        // the order's limit price. USD amount = qty_base × px determines the
+        // base delivered (fills at fill_px convert amount/fill_px), so pegging
+        // the conversion to an aggressive limit systematically over-fills —
+        // observed ~0.6% long-side overshoot (qty 1.0 → 1.006 base) that then
+        // strands as unexplained residual at close.
         let ref_price_usd = match meta.kind {
-            DeribitKind::Future => match order.price.filter(|p| *p > dec!(0)) {
-                Some(p) => Some(p),
-                None => Some(self.mark_price(&instrument).await?),
-            },
+            DeribitKind::Future => Some(self.mark_price(&instrument).await?),
             DeribitKind::Option => index,
         };
         let mut amount = self

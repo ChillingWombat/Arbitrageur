@@ -12,6 +12,8 @@ import {
   Triangle,
   Ban,
   Eye,
+  Boxes,
+  Radar,
 } from "lucide-react";
 import { SpreadGapIcon } from "./icons";
 import { EmptyState } from "./EmptyState";
@@ -21,7 +23,8 @@ import { ExchangeVenueGadget } from "./ExchangeVenueGadget";
 import { RebalanceEstimatorGadget } from "./RebalanceEstimatorGadget";
 import { ExternalPositionsGadget } from "./ExternalPositionsGadget";
 import { TradedOpportunitiesGadget } from "./TradedOpportunitiesGadget";
-import { formatStrategyName } from "../types/tickers";
+import { NetPnlChartGadget } from "./NetPnlChartGadget";
+import { formatStrategyName, ledgerStrategyId } from "../types/tickers";
 import { api } from "../services/api";
 import { computeExchangeStats } from "../services/exchangeStats";
 import type {
@@ -30,6 +33,7 @@ import type {
   RiskOverviewDto,
   SystemStatusDto,
   StrategyMetrics,
+  TradedOpportunityDto,
   UtilisationHistory,
   VenueBalanceInfo,
 } from "../types";
@@ -102,6 +106,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
 }) => {
   const [showHaltConfirm, setShowHaltConfirm] = useState(false);
   const [metrics, setMetrics] = useState<StrategyMetrics[]>([]);
+  const [tradedOpps, setTradedOpps] = useState<TradedOpportunityDto[]>([]);
   const [strategyFilter, setStrategyFilter] = useState<string>("all");
   // Per-venue inputs for the exchange gadget. Null until the first
   // successful read (never an empty fake).
@@ -122,6 +127,15 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
       setMetrics(Array.isArray(data) ? data : []);
     } catch (err) {
       console.error("Failed to load strategy performance:", err);
+    }
+  };
+
+  const loadTradedOpps = async () => {
+    try {
+      const data = await api.listTradedOpportunities();
+      setTradedOpps(Array.isArray(data) ? data : []);
+    } catch (err) {
+      console.error("Failed to load traded opportunities:", err);
     }
   };
 
@@ -157,9 +171,11 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
   useEffect(() => {
     loadStrategyMetrics();
     loadExchangeInputs();
+    loadTradedOpps();
     const interval = setInterval(() => {
       loadStrategyMetrics();
       loadExchangeInputs();
+      loadTradedOpps();
     }, 3000);
     return () => clearInterval(interval);
   }, []);
@@ -219,18 +235,74 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
   const overallWinRate = totalCompleted > 0 ? (totalWinning / totalCompleted) * 100 : 0;
   const totalPnlAll = totalPnlUsd + unrealizedUsd;
 
-  // Open positions grouped by strategy for the attribution cards.
-  const openByStrategy = useMemo(() => {
-    const map = new Map<string, { count: number; unrealized: number }>();
-    for (const p of openPositions) {
-      const key = (p.strategyId ?? "unknown").toLowerCase();
-      const slot = map.get(key) ?? { count: 0, unrealized: 0 };
-      slot.count += 1;
-      if (p.unrealizedPnlUsd != null) slot.unrealized += p.unrealizedPnlUsd;
-      map.set(key, slot);
+  // One row per ledger strategy namespace: union of cycle-metric rows,
+  // dispatched signals, and live open positions. Signal ids normalize into
+  // their lot namespace (futures→spatial_spread, funding→funding_rate) so a
+  // strategy's metrics, signals, and positions land on one row — strategies
+  // like the options substrategies appear even without cycle metrics.
+  const strategyRows = useMemo(() => {
+    interface Row {
+      ledgerId: string;
+      signals: number;
+      openCount: number;
+      realizedUsd: number;
+      metricsPnlUsd: number | null;
+      unrealizedUsd: number;
+      cycles: number | null;
+      wins: number | null;
+      sharpe: number | null;
+      apr: number | null;
+      lastActivityMs: number | null;
     }
-    return map;
-  }, [openPositions]);
+    const rows = new Map<string, Row>();
+    const slot = (rawId: string): Row => {
+      const id = ledgerStrategyId(rawId);
+      let r = rows.get(id);
+      if (!r) {
+        r = {
+          ledgerId: id, signals: 0, openCount: 0, realizedUsd: 0,
+          metricsPnlUsd: null, unrealizedUsd: 0, cycles: null, wins: null,
+          sharpe: null, apr: null, lastActivityMs: null,
+        };
+        rows.set(id, r);
+      }
+      return r;
+    };
+    for (const m of metrics) {
+      const r = slot(m.strategy_id);
+      r.metricsPnlUsd = m.total_pnl_usd;
+      r.cycles = m.total_cycles_completed;
+      r.wins = m.winning_cycles;
+      r.sharpe = m.sharpe_ratio;
+      r.apr = m.annualized_apr_pct;
+    }
+    for (const o of tradedOpps) {
+      const r = slot(o.strategyId);
+      r.signals += 1;
+      if (o.realizedPnlUsd != null) r.realizedUsd += o.realizedPnlUsd;
+      const ts = Date.parse(o.closedAt ?? o.createdAt);
+      if (Number.isFinite(ts)) r.lastActivityMs = Math.max(r.lastActivityMs ?? ts, ts);
+    }
+    for (const p of openPositions) {
+      const r = slot(p.strategyId ?? "unknown");
+      r.openCount += 1;
+      if (p.unrealizedPnlUsd != null) r.unrealizedUsd += p.unrealizedPnlUsd;
+    }
+    return [...rows.values()].sort(
+      (a, b) =>
+        (b.openCount > 0 ? 1 : 0) - (a.openCount > 0 ? 1 : 0) ||
+        Math.abs(b.realizedUsd) + Math.abs(b.unrealizedUsd) - (Math.abs(a.realizedUsd) + Math.abs(a.unrealizedUsd)) ||
+        b.signals - a.signals,
+    );
+  }, [metrics, tradedOpps, openPositions]);
+
+  const visibleStrategyRows = useMemo(
+    () =>
+      strategyFilter === "all"
+        ? strategyRows
+        : strategyRows.filter((r) => r.ledgerId === ledgerStrategyId(strategyFilter)),
+    [strategyRows, strategyFilter],
+  );
 
   // --- Attention items: what needs the user right now ----------------------------
   const attention: AttentionItem[] = useMemo(() => {
@@ -309,21 +381,29 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
   );
 
   const getStrategyIcon = (id: string) => {
+    if (id.startsWith("options_"))
+      return <Boxes className="w-4 h-4 text-violet-600" />;
     switch (id) {
       case "spatial_spread":
+      case "futures":
         return <SpreadGapIcon className="w-4 h-4 text-blue-600" />;
+      case "funding":
       case "funding_rate":
         return <Percent className="w-4 h-4 text-emerald-700" />;
       case "spot_trade":
       case "spot_arb":
+      case "spot":
         return <Coins className="w-4 h-4 text-amber-700" />;
       case "triangular_arb":
       case "triangle":
         return <Triangle className="w-4 h-4 text-teal-700" />;
+      case "prediction":
       case "prediction_parity":
         return <Target className="w-4 h-4 text-purple-600" />;
       case "stat_arb":
         return <Sigma className="w-4 h-4 text-indigo-600" />;
+      case "radar":
+        return <Radar className="w-4 h-4 text-sky-600" />;
       default:
         return <Activity className="w-4 h-4 text-slate-600" />;
     }
@@ -522,7 +602,11 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
 
       {/* 3c. Traded opportunities: Net Profit + every dispatched signal with
           its atomic order trail (click row → detail popup). */}
-      <TradedOpportunitiesGadget status={status} />
+      <TradedOpportunitiesGadget />
+
+      {/* 3d. P&L/equity through time: realized P&L by strategy family plus
+          external account flows, and the whole-account net equity walk. */}
+      <NetPnlChartGadget />
 
       {/* 4. Risk detail: DeltaGuard neutrality + margin + breaker controls */}
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
@@ -534,9 +618,6 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
                 <ShieldCheck className="w-5 h-5 text-accent-strong" />
                 <span>DeltaGuard Cross-Exchange Signed Net Exposure</span>
               </h2>
-              <p className="text-xs text-slate-600 font-mono mt-1">
-                Aggregates all open legs across venues to enforce delta-neutrality ($200 USD strict unhedged tolerance).
-              </p>
             </div>
           </div>
 
@@ -721,78 +802,97 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
               <TrendingUp className="w-5 h-5 text-accent-strong" />
               <span>Multi-Strategy PnL & Cycle Attribution</span>
             </h2>
-            <p className="text-xs text-slate-600 font-mono mt-1">
-              Closed cycle attribution, live open positions, and annualized metrics across active trading strategies.
-            </p>
           </div>
           <span className="text-xs font-mono font-bold text-slate-600">
-            {visibleMetrics.length} {strategyFilter === "all" ? "Strategies" : "Strategy"} Active
+            {visibleStrategyRows.length} {visibleStrategyRows.length === 1 ? "Strategy" : "Strategies"} Active
           </span>
         </div>
 
-        {visibleMetrics.length > 0 ? (
-          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
-            {visibleMetrics.map((m) => {
-              const winRate = m.total_cycles_completed > 0 ? (m.winning_cycles / m.total_cycles_completed) * 100 : 0;
-              const open = openByStrategy.get(m.strategy_id.toLowerCase()) ?? openByStrategy.get(m.strategy_id);
-              return (
-                <div key={m.strategy_id} className="bg-surface-raised/60 border border-surface-border rounded-xl p-3.5 space-y-2.5 shadow-2xs">
-                  <div className="flex items-center space-x-3">
-                    <div className="p-2 bg-surface rounded-lg border border-surface-border shadow-xs">
-                      {getStrategyIcon(m.strategy_id)}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <h3 className="text-[13px] font-bold font-mono tracking-wider text-slate-900" title={formatStrategyName(m.strategy_id)}>
-                        {formatStrategyName(m.strategy_id)}
-                      </h3>
-                      <span className="text-xs font-mono text-muted capitalize">{m.strategy_id.replace("_", " ")}</span>
-                    </div>
-                    {open && open.count > 0 && (
-                      <span
-                        className="px-1.5 py-0.5 rounded-md text-[11px] font-mono font-bold min-w-[16px] text-center leading-tight bg-accent-dim text-accent-strong border border-accent-line/60"
-                        title={`${open.count} open position(s)`}
-                      >
-                        {open.count} open
-                      </span>
-                    )}
-                  </div>
-
-                  <div className="space-y-2 pt-1 text-xs font-mono tabular-nums">
-                    <div className="flex justify-between">
-                      <span className="text-slate-500">Realized PnL:</span>
-                      <span className={`font-bold ${pnlTone(m.total_pnl_usd)}`}>
-                        {usd(m.total_pnl_usd)}
-                      </span>
-                    </div>
-                    {open && open.count > 0 && (
-                      <div className="flex justify-between">
-                        <span className="text-slate-500">Unrealized:</span>
-                        <span className={`font-bold ${open.unrealized >= 0 ? "text-profit" : "text-loss"}`}>
-                          {usd(open.unrealized)}
-                        </span>
-                      </div>
-                    )}
-                    <div className="flex justify-between">
-                      <span className="text-slate-500">Win Rate:</span>
-                      <span className="font-bold text-slate-800">{winRate.toFixed(1)}% ({m.winning_cycles}/{m.total_cycles_completed})</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-slate-500">Sharpe Ratio:</span>
-                      <span className="font-bold text-accent-strong">{m.sharpe_ratio.toFixed(2)}</span>
-                    </div>
-                    <div className="flex justify-between">
-                      <span className="text-slate-500">APR:</span>
-                      <span className="font-semibold text-slate-700">{m.annualized_apr_pct.toFixed(1)}%</span>
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
+        {visibleStrategyRows.length > 0 ? (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs font-mono tabular-nums">
+              <thead className="bg-surface-raised/60">
+                <tr className="border-b border-surface-border text-slate-500 text-xs font-semibold tracking-wider">
+                  <th className="py-2.5 px-3">Strategy</th>
+                  <th className="py-2.5 px-3 text-right" title="Dispatched signals in the traded-opportunity ledger">Signals</th>
+                  <th className="py-2.5 px-3 text-right" title="Live open legs attributed to this strategy">Open</th>
+                  <th className="py-2.5 px-3 text-right" title="Fee-inclusive net P&L across closed ledger rows">Realized P&L</th>
+                  <th className="py-2.5 px-3 text-right" title="Unrealized P&L on live open legs">Unrealized</th>
+                  <th className="py-2.5 px-3 text-right" title="Winning / completed cycles (cycle-ledger strategies only)">Win Rate</th>
+                  <th className="py-2.5 px-3 text-right">Sharpe</th>
+                  <th className="py-2.5 px-3 text-right">APR</th>
+                  <th className="py-2.5 px-3 text-right" title="Most recent signal dispatch or close">Last Activity</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-surface-border">
+                {visibleStrategyRows.map((r) => {
+                  const realized = r.signals > 0 || r.metricsPnlUsd == null ? r.realizedUsd : r.metricsPnlUsd;
+                  const winRate =
+                    r.cycles != null && r.cycles > 0 && r.wins != null
+                      ? (r.wins / r.cycles) * 100
+                      : null;
+                  return (
+                    <tr key={r.ledgerId} className="hover:bg-surface-raised/40 transition">
+                      <td className="py-2.5 px-3">
+                        <div className="flex items-center space-x-2.5">
+                          <span className="p-1.5 bg-surface rounded-md border border-surface-border shadow-xs">
+                            {getStrategyIcon(r.ledgerId)}
+                          </span>
+                          <div className="min-w-0">
+                            <div className="font-bold text-[13px] text-slate-900 truncate">{formatStrategyName(r.ledgerId)}</div>
+                            <div className="text-[11px] text-muted">{r.ledgerId}</div>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="py-2.5 px-3 text-right text-slate-700">{r.signals}</td>
+                      <td className="py-2.5 px-3 text-right">
+                        {r.openCount > 0 ? (
+                          <span className="px-1.5 py-0.5 rounded-md text-[11px] font-bold bg-accent-dim text-accent-strong border border-accent-line/60">
+                            {r.openCount} open
+                          </span>
+                        ) : (
+                          <span className="text-slate-400">0</span>
+                        )}
+                      </td>
+                      <td className="py-2.5 px-3 text-right">
+                        <span className={`font-bold ${pnlTone(realized)}`}>{usd(realized)}</span>
+                      </td>
+                      <td className="py-2.5 px-3 text-right">
+                        {r.openCount > 0 ? (
+                          <span className={`font-bold ${pnlTone(r.unrealizedUsd)}`}>{usd(r.unrealizedUsd)}</span>
+                        ) : (
+                          <span className="text-muted">—</span>
+                        )}
+                      </td>
+                      <td className="py-2.5 px-3 text-right text-slate-800">
+                        {winRate != null ? `${winRate.toFixed(1)}% (${r.wins}/${r.cycles})` : "—"}
+                      </td>
+                      <td className="py-2.5 px-3 text-right text-accent-strong font-bold">
+                        {r.sharpe != null ? r.sharpe.toFixed(2) : "—"}
+                      </td>
+                      <td className="py-2.5 px-3 text-right text-slate-700">
+                        {r.apr != null ? `${r.apr.toFixed(1)}%` : "—"}
+                      </td>
+                      <td className="py-2.5 px-3 text-right text-muted">
+                        {r.lastActivityMs != null
+                          ? new Date(r.lastActivityMs).toLocaleString(undefined, {
+                              month: "short",
+                              day: "numeric",
+                              hour: "2-digit",
+                              minute: "2-digit",
+                            })
+                          : "—"}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </div>
         ) : (
           <EmptyState
             title="No Strategy Activity"
-            hint="Closed cycles will attribute realized PnL here per strategy."
+            hint="Signals, open positions, or closed cycles will attribute here per strategy."
           />
         )}
       </div>

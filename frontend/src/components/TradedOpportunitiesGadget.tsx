@@ -1,15 +1,11 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { X, ReceiptText, ChevronRight } from "lucide-react";
 import { EmptyState } from "./EmptyState";
-import { VenueLogo } from "./VenueLogo";
 import { DetailField, DetailSection } from "./DetailBits";
+import { AtomicTransactionsTable, fmtTime, statusChip, lotChip } from "./AtomicTransactionsTable";
 import { api } from "../services/api";
-import { formatStrategyName } from "../types/tickers";
-import type {
-  AtomicTransactionDto,
-  SystemStatusDto,
-  TradedOpportunityDto,
-} from "../types";
+import { formatStrategyName, STRATEGY_DISPLAY_NAMES } from "../types/tickers";
+import type { TradedOpportunityDto } from "../types";
 
 const usd = (v: number, digits = 2) => {
   if (!Number.isFinite(v)) return "—";
@@ -24,83 +20,7 @@ const pnlTone = (v: number | null | undefined) =>
       ? "text-profit"
       : "text-loss";
 
-const fmtTime = (ts: string) => {
-  const t = Date.parse(ts);
-  if (!Number.isFinite(t)) return ts || "—";
-  return new Date(t).toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-};
 
-const fmtQty = (v: number) => {
-  if (!Number.isFinite(v)) return "—";
-  const abs = Math.abs(v);
-  const d = abs >= 1000 ? 2 : abs >= 1 ? 4 : 6;
-  return v.toLocaleString("en-US", { maximumFractionDigits: d });
-};
-
-const fmtPx = (v: number | null | undefined) =>
-  v == null || !Number.isFinite(v) || v <= 0
-    ? "—"
-    : `$${v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: Math.abs(v) >= 100 ? 2 : 6 })}`;
-
-/** Signal row status — the durable ledger truth, not a derived guess. */
-const statusChip = (status: TradedOpportunityDto["status"]) => {
-  switch (status) {
-    case "closed":
-      return { label: "Closed", cls: "bg-profit-dim text-profit border-profit-border" };
-    case "balanced":
-      return { label: "Open", cls: "bg-accent-dim text-accent-strong border-accent-line/60" };
-    case "in_flight":
-      return { label: "In Flight", cls: "bg-accent-dim text-accent-strong border-accent-line/60" };
-    case "imbalanced":
-      return { label: "Imbalanced", cls: "bg-warn-dim text-warn-strong border-warn-border" };
-    case "unresolved":
-      return { label: "Unresolved", cls: "bg-loss-dim text-loss border-loss-border" };
-    case "failed":
-      return { label: "Failed", cls: "bg-loss-dim text-loss border-loss-border" };
-  }
-};
-
-const lotChip = (lot: TradedOpportunityDto["lotStatus"]) => {
-  switch (lot) {
-    case "open":
-      return { label: "Lot Open", cls: "bg-accent-dim text-accent-strong border-accent-line/60" };
-    case "closed":
-      return { label: "Lot Closed", cls: "bg-profit-dim text-profit border-profit-border" };
-    case "stopped_out":
-      return { label: "Stopped Out", cls: "bg-warn-dim text-warn-strong border-warn-border" };
-    case "timed_out":
-      return { label: "Timed Out", cls: "bg-warn-dim text-warn-strong border-warn-border" };
-    default:
-      return null;
-  }
-};
-
-const roleChip = (role: AtomicTransactionDto["role"]) => {
-  switch (role) {
-    case "entry":
-      return { label: "ENTRY", cls: "bg-accent-dim text-accent-strong border-accent-line/60" };
-    case "flatten":
-      return { label: "FLATTEN", cls: "bg-warn-dim text-warn-strong border-warn-border" };
-    case "trim":
-      return { label: "TRIM", cls: "bg-warn-dim text-warn-strong border-warn-border" };
-  }
-};
-
-const fillChip = (state: AtomicTransactionDto["fillState"]) => {
-  switch (state) {
-    case "filled":
-      return { label: "Filled", cls: "bg-profit-dim text-profit border-profit-border" };
-    case "partial":
-      return { label: "Partial", cls: "bg-warn-dim text-warn-strong border-warn-border" };
-    case "no_fill":
-      return { label: "No Fill", cls: "bg-surface-hover text-slate-500 border-border" };
-  }
-};
 
 /** Detail popup: opportunity facts, expected-vs-realized economics, and the
  *  full atomic transaction trail (entry orders + every flatten/trim order). */
@@ -226,98 +146,56 @@ export const TradedOpportunityDetailModal: React.FC<{
             gridClassName="block"
             tip="Every dispatched venue order for this opportunity — entry legs plus all flatten/trim children, in chronological order."
           >
-            <div className="overflow-x-auto -mx-3.5">
-              <table className="w-full text-left text-xs font-mono tabular-nums">
-                <thead className="bg-surface-raised/60">
-                  <tr className="border-b border-surface-border text-slate-500 text-xs font-semibold tracking-wider">
-                    <th className="py-2 px-3">Time</th>
-                    <th className="py-2 px-3">Role</th>
-                    <th className="py-2 px-3">Venue</th>
-                    <th className="py-2 px-3">Order</th>
-                    <th className="py-2 px-3">Instrument</th>
-                    <th className="py-2 px-3 text-right">Qty Filled / Intended</th>
-                    <th className="py-2 px-3 text-right">Fill / Intended Px</th>
-                    <th className="py-2 px-3 text-right">Fee</th>
-                    <th className="py-2 px-3 text-right">State</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-surface-border">
-                  {opp.transactions.map((tx) => {
-                    const role = roleChip(tx.role);
-                    const fill = fillChip(tx.fillState);
-                    const scaled = Math.abs(tx.unitScale - 1) > 1e-9;
-                    return (
-                      <tr key={tx.legId} className="hover:bg-surface-raised/40 transition">
-                        <td className="py-2 px-3 text-slate-600 whitespace-nowrap">{fmtTime(tx.createdAt)}</td>
-                        <td className="py-2 px-3">
-                          <span className={`px-1.5 py-0.5 rounded-md text-[10px] font-bold border ${role.cls}`}>
-                            {role.label}
-                          </span>
-                        </td>
-                        <td className="py-2 px-3 whitespace-nowrap">
-                          <span className="inline-flex items-center gap-1">
-                            <VenueLogo venueId={(tx.venue ?? "").toLowerCase()} name={tx.venue} size={13} />
-                            {tx.venue}
-                          </span>
-                        </td>
-                        <td className="py-2 px-3">
-                          <span className={tx.orderSide === "buy" ? "text-profit font-bold" : "text-loss font-bold"}>
-                            {tx.orderSide.toUpperCase()}
-                          </span>
-                          <span className="text-slate-400"> /{tx.side}</span>
-                        </td>
-                        <td className="py-2 px-3 text-slate-700 whitespace-nowrap">
-                          {tx.symbol}
-                          {scaled && (
-                            <span className="text-slate-400" title={`${tx.unitScale} venue-units per parent unit`}>
-                              ×{tx.unitScale.toPrecision(3)}
-                            </span>
-                          )}
-                        </td>
-                        <td className="py-2 px-3 text-right text-slate-700 whitespace-nowrap">
-                          {fmtQty(tx.filledQty)} / {fmtQty(tx.intendedQty)}
-                        </td>
-                        <td className="py-2 px-3 text-right text-slate-700 whitespace-nowrap">
-                          {fmtPx(tx.fillPrice)} / {fmtPx(tx.intendedPrice)}
-                        </td>
-                        <td className="py-2 px-3 text-right text-slate-700 whitespace-nowrap">
-                          {tx.feeUsd > 0 ? `-$${tx.feeUsd.toFixed(3)}` : "$0"}
-                        </td>
-                        <td className="py-2 px-3 text-right whitespace-nowrap">
-                          <span className={`px-1.5 py-0.5 rounded-md text-[10px] font-bold border ${fill.cls}`}>
-                            {fill.label}
-                          </span>
-                        </td>
-                      </tr>
-                    );
-                  })}
-                  {opp.transactions.length === 0 && (
-                    <tr>
-                      <td colSpan={9}>
-                        <EmptyState plain title="No orders persisted for this signal." />
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
-            <div className="space-y-1 pt-1">
-              {opp.transactions
-                .filter((tx) => tx.venueOrderId || tx.clientOrderId)
-                .map((tx) => (
-                  <div key={`${tx.legId}-ids`} className="text-[10px] font-mono text-slate-400 flex flex-wrap gap-x-3">
-                    <span>{tx.venue}:{tx.symbol}</span>
-                    {tx.venueOrderId && <span>venue {tx.venueOrderId}</span>}
-                    {tx.clientOrderId && <span>client {tx.clientOrderId}</span>}
-                  </div>
-                ))}
-            </div>
+            <AtomicTransactionsTable transactions={opp.transactions} />
           </DetailSection>
         </div>
       </div>
     </div>
   );
 };
+
+/** Coarse strategy family for filtering: the four options substrategies
+ *  collapse into one "Options" category (the nav-tab grouping); every other
+ *  id keeps its display name, so unmapped future ids surface as themselves. */
+export const strategyCategory = (strategyId: string): string =>
+  strategyId.startsWith("options_")
+    ? "Options"
+    : (STRATEGY_DISPLAY_NAMES[strategyId] ?? strategyId);
+
+/** Status roll-up matching the chip semantics: live rows are "open",
+ *  stranded ones need attention, terminal ones split closed/failed. */
+export type StatusCategory = "open" | "attention" | "closed" | "failed";
+export const statusCategory = (
+  status: TradedOpportunityDto["status"],
+): StatusCategory => {
+  switch (status) {
+    case "in_flight":
+    case "balanced":
+      return "open";
+    case "imbalanced":
+    case "unresolved":
+      return "attention";
+    case "closed":
+      return "closed";
+    case "failed":
+      return "failed";
+  }
+};
+
+/** Pure row filter — exported for tests. `all` passes everything. */
+export const filterTradedOpps = (
+  opps: TradedOpportunityDto[],
+  strategy: string,
+  status: string,
+): TradedOpportunityDto[] =>
+  opps.filter(
+    (o) =>
+      (strategy === "all" || strategyCategory(o.strategyId) === strategy) &&
+      (status === "all" || statusCategory(o.status) === status),
+  );
+
+const selectClass =
+  "px-2 py-1 bg-surface border border-surface-border rounded-md text-[11px] font-mono text-slate-800 focus:outline-none focus:ring-1 focus:ring-accent cursor-pointer";
 
 /** The traded-opportunity rows table — exported for static render tests.
  *  `opps === null` renders the loading state. */
@@ -332,9 +210,9 @@ export const TradedOpportunitiesTable: React.FC<{
         Traded-opportunity ledger read failed — showing last state is not truthful here; check backend.
       </div>
     )}
-    <div className="overflow-x-auto">
+    <div className="overflow-auto max-h-[26rem]">
       <table className="w-full text-left text-xs font-mono tabular-nums">
-        <thead className="bg-surface-raised/60">
+        <thead className="sticky top-0 z-10 bg-surface-raised">
           <tr className="border-b border-surface-border text-slate-500 text-xs font-semibold tracking-wider">
             <th className="py-2.5 px-3">Dispatched</th>
             <th className="py-2.5 px-3">Opportunity</th>
@@ -422,19 +300,15 @@ export const TradedOpportunitiesTable: React.FC<{
   </>
 );
 
-interface TradedOpportunitiesGadgetProps {
-  status: SystemStatusDto | null;
-}
-
-/** Net Profit + every opportunity the system actually dispatched (durable
- *  signal ledger — observed-but-untraded radar rows never appear). Each row
- *  opens a detail popup with the full atomic transaction trail. */
-export const TradedOpportunitiesGadget: React.FC<TradedOpportunitiesGadgetProps> = ({
-  status,
-}) => {
+/** Every opportunity the system actually dispatched (durable signal
+ *  ledger — observed-but-untraded radar rows never appear). Each row opens
+ *  a detail popup with the full atomic transaction trail. */
+export const TradedOpportunitiesGadget: React.FC = () => {
   const [opps, setOpps] = useState<TradedOpportunityDto[] | null>(null);
   const [failed, setFailed] = useState(false);
   const [selected, setSelected] = useState<TradedOpportunityDto | null>(null);
+  const [strategyFilter, setStrategyFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("all");
 
   useEffect(() => {
     let alive = true;
@@ -467,21 +341,25 @@ export const TradedOpportunitiesGadget: React.FC<TradedOpportunitiesGadgetProps>
     [selected, opps],
   );
 
-  const netProfit = status?.total_realized_pnl;
   const totals = useMemo(() => {
     const rows = opps ?? [];
-    let realized = 0;
-    let realizedKnown = false;
     let open = 0;
     for (const o of rows) {
-      if (o.realizedPnlUsd != null) {
-        realized += o.realizedPnlUsd;
-        realizedKnown = true;
-      }
       if (o.status !== "closed" && o.status !== "failed") open += 1;
     }
-    return { count: rows.length, realized, realizedKnown, open };
+    return { count: rows.length, open };
   }, [opps]);
+
+  // Filter choices derive from the data itself — a category only appears
+  // once it has at least one row to show.
+  const strategyCategories = useMemo(
+    () =>
+      [...new Set((opps ?? []).map((o) => strategyCategory(o.strategyId)))].sort(),
+    [opps],
+  );
+  const filtered =
+    opps == null ? null : filterTradedOpps(opps, strategyFilter, statusFilter);
+  const filtersActive = strategyFilter !== "all" || statusFilter !== "all";
 
   return (
     <div className="bg-surface rounded-xl border border-surface-border p-4 shadow-card space-y-3">
@@ -491,31 +369,70 @@ export const TradedOpportunitiesGadget: React.FC<TradedOpportunitiesGadgetProps>
             <ReceiptText className="w-5 h-5 text-accent-strong" />
             <span>Traded Opportunities</span>
           </h2>
-          <p className="text-xs text-slate-600 font-mono mt-1">
-            Every signal the engine dispatched — click a row for the atomic order trail.
-          </p>
         </div>
-        <div className="flex items-center gap-4 shrink-0">
-          {totals.open > 0 && (
-            <span className="px-1.5 py-0.5 rounded-md text-[11px] font-mono font-bold bg-accent-dim text-accent-strong border border-accent-line/60">
-              {totals.open} open
-            </span>
-          )}
-          <div className="text-right">
-            <div className="text-[10px] font-mono uppercase tracking-wider text-slate-500">Net Profit</div>
-            <div className={`text-lg font-bold font-mono tabular-nums leading-tight ${pnlTone(netProfit)}`}>
-              {netProfit != null ? usd(netProfit) : "—"}
-            </div>
-            {totals.realizedKnown && (
-              <div className="text-[10px] font-mono text-slate-400 tabular-nums" title="Sum of realized P&L over the listed opportunities. Header Net Profit is the engine counter and includes unattributed trims.">
-                rows {usd(totals.realized)}
-              </div>
-            )}
-          </div>
-        </div>
+        {totals.open > 0 && (
+          <span className="px-1.5 py-0.5 rounded-md text-[11px] font-mono font-bold bg-accent-dim text-accent-strong border border-accent-line/60 shrink-0">
+            {totals.open} open
+          </span>
+        )}
       </div>
 
-      <TradedOpportunitiesTable opps={opps} failed={failed} onSelect={setSelected} />
+      <div className="flex items-center gap-2 flex-wrap">
+        <select
+          value={strategyFilter}
+          onChange={(e) => setStrategyFilter(e.target.value)}
+          className={selectClass}
+          aria-label="Filter by strategy category"
+          title="Filter rows by strategy family (options substrategies group under Options)"
+        >
+          <option value="all">All strategies</option>
+          {strategyCategories.map((c) => (
+            <option key={c} value={c}>
+              {c}
+            </option>
+          ))}
+        </select>
+        <select
+          value={statusFilter}
+          onChange={(e) => setStatusFilter(e.target.value)}
+          className={selectClass}
+          aria-label="Filter by status"
+          title="Filter rows by lifecycle state"
+        >
+          <option value="all">All statuses</option>
+          <option value="open">Open</option>
+          <option value="attention">Needs Attention</option>
+          <option value="closed">Closed</option>
+          <option value="failed">Failed</option>
+        </select>
+        {filtersActive && (
+          <button
+            type="button"
+            onClick={() => {
+              setStrategyFilter("all");
+              setStatusFilter("all");
+            }}
+            className="px-2 py-1 rounded-md text-[11px] font-mono text-slate-500 hover:text-slate-800 hover:bg-surface-raised transition cursor-pointer"
+          >
+            Clear
+          </button>
+        )}
+        {filtered != null && (
+          <span className="ml-auto text-[10px] font-mono text-slate-400 tabular-nums">
+            {filtersActive
+              ? `${filtered.length} of ${totals.count} shown`
+              : `${totals.count} rows`}
+          </span>
+        )}
+      </div>
+
+      {filtered != null && filtered.length === 0 && filtersActive ? (
+        <div className="rounded-lg border border-surface-border bg-surface-raised/40 px-3 py-4 text-center text-xs font-mono text-slate-500">
+          No opportunities match the current filters.
+        </div>
+      ) : (
+        <TradedOpportunitiesTable opps={filtered} failed={failed} onSelect={setSelected} />
+      )}
 
       {selectedFresh && (
         <TradedOpportunityDetailModal opp={selectedFresh} onClose={() => setSelected(null)} />

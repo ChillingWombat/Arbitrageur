@@ -26,6 +26,14 @@ pub struct OrderBook {
     pub asks: Vec<BookLevel>,
     pub timestamp: DateTime<Utc>,
     pub sequence: u64,
+    /// Venue-published model mark (e.g. Deribit `mark_price`), when the
+    /// venue reports one — *valuation only*. Never executable truth: the
+    /// execution path reads bids/asks and rejects one-sided books, while
+    /// position valuation may legitimately fall back to the venue mark
+    /// for instruments whose book has no real mid (e.g. a bids-empty
+    /// far-out option).
+    #[serde(default)]
+    pub mark_price: Option<Decimal>,
 }
 
 impl OrderBook {
@@ -37,6 +45,7 @@ impl OrderBook {
             asks: Vec::new(),
             timestamp: Utc::now(),
             sequence: 0,
+            mark_price: None,
         }
     }
 

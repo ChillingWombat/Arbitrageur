@@ -310,8 +310,10 @@ pub struct StrategyParamsDto {
     // execution prices at entry; wider gaps refuse.
     #[serde(default = "default_funding_max_entry_spread")]
     pub funding_max_entry_spread_bps: f64,
-    // Funding auto-exit: exit when the live inter-venue spread (percent)
-    // falls below this value. None disables the gate.
+    // Funding auto-exit for spot/perp basis pairs: flatten when the live
+    // perp-over-spot spread (percent, mid-based) falls below this value.
+    // Applies only to pairs whose long leg is a `*-SPOT` instrument —
+    // perp/perp carries have no price spread to converge. None disables.
     #[serde(default)]
     pub funding_auto_exit_spread_pct: Option<f64>,
     // Funding liquidation-distance trim: when EITHER leg comes within this
@@ -321,9 +323,6 @@ pub struct StrategyParamsDto {
     // universal trim block (same semantics, shared helper).
     #[serde(default)]
     pub funding_liq_trim_pct: Option<f64>,
-    // Funding auto-rebalance: reduce the overweight leg back to neutral.
-    #[serde(default)]
-    pub funding_auto_rebalance: bool,
     // Funding opportunity rotation: exit the current position for a
     // higher-yield one only when the net-of-friction improvement exceeds
     // this (bps). None disables rotation.
@@ -411,7 +410,6 @@ impl StrategyParamsDto {
             funding_max_entry_spread_bps: default_funding_max_entry_spread(),
             funding_auto_exit_spread_pct: None,
             funding_liq_trim_pct: None,
-            funding_auto_rebalance: false,
             funding_rotation_threshold_bps: None,
             funding_enable_basis: true,
             funding_min_basis_bps: None,
@@ -1328,6 +1326,33 @@ type MarketPricesCache = Mutex<
     >,
 >;
 
+/// Live telemetry for one supervised WS feed lane — written by feed.rs
+/// supervisors, surfaced read-only on `get_system_status`. All timestamps
+/// are wall-clock ms since epoch so the DTO maps field-for-field.
+#[derive(Clone, Debug, Default)]
+pub struct FeedLaneTelemetry {
+    /// Total connection attempts since process start.
+    pub attempts: u64,
+    /// Consecutive ended/failed connection cycles (the supervisor's
+    /// fail_streak, capped at its backoff depth).
+    pub consecutive_failures: u32,
+    /// Consecutive cycles that died inside 5s — the venue-side rejection
+    /// signature that drives the extended ~5min backoff.
+    pub instant_kills: u32,
+    /// When the lane's socket last opened. `None` = never connected this
+    /// boot — never fabricated.
+    pub last_connected_ms: Option<i64>,
+    /// When the lane last ended or failed.
+    pub last_ended_ms: Option<i64>,
+    /// Next scheduled attempt while backing off. `None` when not sleeping.
+    pub backoff_until_ms: Option<i64>,
+    /// Last connection-cycle error string; cleared on a clean end.
+    pub last_error: Option<String>,
+    /// Current phase: `connecting` | `connected` | `backoff` | `disabled`
+    /// | `not-admitted` | `paused` | `stopped`.
+    pub phase: String,
+}
+
 #[allow(dead_code)]
 /// Cached Boros market-data snapshot (public REST, no credentials).
 #[derive(Clone)]
@@ -1427,8 +1452,68 @@ pub struct AppEngineState {
     /// lane that reads an account (risk overview, margin poller) so the
     /// breaker is fed even while nobody polls the UI.
     pub breaker_venue_equity: Mutex<std::collections::HashMap<String, Decimal>>,
+    /// Frozen-FX anchor for the drawdown breaker: non-USD balances are
+    /// revalued at the UTC-day-start FX rather than the live price, so a
+    /// coin-margined account's USD-equity swing from index beta alone does
+    /// not read as a trading drawdown. Coin-denominated PnL lands inside
+    /// equity itself and still moves the measure. Persisted in kv
+    /// `cb.fx_anchor`; rolls on the same UTC-day boundary as the breaker's
+    /// own day_key.
+    pub breaker_fx_anchor: Mutex<crate::execution::BreakerFxAnchor>,
+    /// Latest per-account collateral-FX adjustment applied to the breaker
+    /// feed, keyed `{env}-{account}` like `breaker_venue_equity`. Surfaced
+    /// on the risk overview so the operator can see how much of the raw
+    /// equity move was index repricing rather than trading PnL.
+    pub breaker_fx_adj: Mutex<std::collections::HashMap<String, Decimal>>,
+    /// Last-observed USD FX per `{env}-{venue}|{ccy}` for non-USD account
+    /// balances — the per-poll counterpart of `breaker_fx_anchor`. The
+    /// equity-attribution checker uses it to estimate how much of an
+    /// equity delta is collateral repricing (vs a real external flow);
+    /// persisted (`equity.fx_prev`) so a restart's first poll still
+    /// attributes instead of emitting one misclassified event.
+    pub equity_fx_prev: Mutex<std::collections::HashMap<String, Decimal>>,
+    /// Last-observed Σ position unrealized-PnL (USD) per `{env}-{venue}` —
+    /// the mark-to-market counterpart of `equity_fx_prev`. Coin-margined
+    /// venues holding option books swing equity by thousands of dollars on
+    /// mark noise alone; tracking ΔuPnL lets the attribution checker explain
+    /// that component instead of misclassifying it as an external flow.
+    /// Persisted (`equity.upnl_prev`). Option positions are excluded — their
+    /// equity contribution is mark VALUE, not uPnL; `equity_optval_prev`
+    /// tracks `qty × mark` per option leg instead.
+    pub equity_upnl_prev: Mutex<std::collections::HashMap<String, f64>>,
+    /// Last-observed mark value (USD) per option position,
+    /// `{env}-{venue}|{symbol}|{side} -> qty × mark`. Option equity
+    /// contribution is the position's mark value — it reprices every poll
+    /// without necessarily moving `floating_profit_loss`, so it needs its
+    /// own tracker to attribute option-book mark noise. Persisted
+    /// (`equity.optval_prev`).
+    pub equity_optval_prev: Mutex<std::collections::HashMap<String, f64>>,
+    /// Last-observed balance per `{env}-{venue}|{ccy}` (native units).
+    /// Diagnostic only — logged as `dbal` next to `explained` so an
+    /// unexplained equity delta can be read as a real balance flow
+    /// (funding/settlement → deposit/withdrawal is honest) vs a valuation
+    /// term the estimator still misses. Persisted (`equity.bal_prev`).
+    pub equity_bal_prev: Mutex<std::collections::HashMap<String, f64>>,
+    /// Serializes the equity-attribution check: `get_venue_balances` is
+    /// called from several pollers, and two concurrent passes read the
+    /// same baseline and double-record one delta as two events.
+    pub equity_check_lock: Mutex<()>,
+    /// Last options-bot tick per substrategy — mode, open cycles, scan
+    /// counts. Read by `options_bot_status`; runtime-only.
+    pub options_tick_status:
+        Mutex<std::collections::HashMap<String, crate::options_bot::OptionsBotTickStatus>>,
+    /// Live telemetry for each supervised WS feed lane, keyed by venue.
+    /// Written by feed.rs supervisors; surfaced read-only on
+    /// `get_system_status` so a silently-dead lane is observable instead of
+    /// just aging out of the hub.
+    pub feed_lanes: Mutex<std::collections::BTreeMap<String, FeedLaneTelemetry>>,
     pub total_realized_profit: RwLock<Decimal>,
     pub total_realized_profit_live: RwLock<Decimal>,
+    /// Cumulative option premium cashflow (bought − sold at entry) per env.
+    /// Kept out of `total_realized_profit`: premium paid at entry is
+    /// financing that converts into leg PnL only at close/expiry.
+    pub total_premium_outlay: RwLock<Decimal>,
+    pub total_premium_outlay_live: RwLock<Decimal>,
     pub execution_logs: RwLock<Vec<ExecutionLogEntry>>,
     pub sim_step_counter: RwLock<usize>,
     pub settings: RwLock<EngineSettingsDto>,
@@ -1496,6 +1581,9 @@ pub struct AppEngineState {
     /// Throttles the vault-locked risk-overview pause warnings — one per
     /// 5 min while locked instead of one per venue per poll cycle.
     pub risk_locked_warn_at: Mutex<Option<std::time::Instant>>,
+    /// Per-venue throttle for stale-figure warnings in the risk overview:
+    /// a sustained venue outage is one anomaly, not one per poll tick.
+    pub risk_stale_warn_at: Mutex<std::collections::HashMap<String, std::time::Instant>>,
     /// Failed vault-unlock attempts and the next permitted try. Exponential
     /// backoff throttles online password guessing (the KDF still bounds
     /// offline attempts); in-memory is sufficient — a restart resets the
@@ -2092,7 +2180,10 @@ impl AppEngineState {
                         );
                         cb.restore(&snap);
                     } else {
-                        tracing::warn!("circuit breaker snapshot unreadable, starting fresh: {e}");
+                        tracing::warn!(
+                            "circuit breaker snapshot unreadable, starting fresh: {e}; raw={}",
+                            &raw[..raw.len().min(200)]
+                        );
                     }
                 }
             }
@@ -2105,6 +2196,15 @@ impl AppEngineState {
                 }
             }));
         }
+        // Frozen-FX day anchor for collateral-beta isolation (see
+        // `breaker_fx_anchor` field docs). Missing/corrupt state simply
+        // re-seeds on the first feed of the day — never blocks startup.
+        let initial_fx_anchor = state_store
+            .kv_get("cb.fx_anchor")
+            .ok()
+            .flatten()
+            .and_then(|raw| serde_json::from_str::<crate::execution::BreakerFxAnchor>(&raw).ok())
+            .unwrap_or_default();
         // Shared with the breaker's trip hook (below) so out-of-band
         // alerts carry the live environment even after a runtime switch.
         let environment = Arc::new(RwLock::new(TradingEnvironment::from_mode(
@@ -2298,8 +2398,90 @@ impl AppEngineState {
                 .and_then(|v| Decimal::from_str_exact(&v).ok())
                 .unwrap_or(dec!(0))
         };
-        let initial_pnl_testnet = load_pnl("pnl.total.testnet");
-        let initial_pnl_live = load_pnl("pnl.total.live");
+        let mut initial_pnl_testnet = load_pnl("pnl.total.testnet");
+        let mut initial_pnl_live = load_pnl("pnl.total.live");
+        // Option premium cashflow is tracked apart from realized PnL —
+        // premium paid at entry is financing, not loss; the trade's true
+        // PnL lands through close-path leg deltas.
+        let mut initial_premium_testnet = load_pnl("pnl.premium_outlay.testnet");
+        let mut initial_premium_live = load_pnl("pnl.premium_outlay.live");
+        // One-time rebalance: option entries dispatched before the counter
+        // split booked their premium cashflow into `pnl.total.{env}` — the
+        // close path also books full leg deltas, so leaving it there would
+        // double-count. Move the still-open families' premium (recomputed
+        // from durable leg fills — ledger prices are USD) into the outlay
+        // counter. Closed families are untouched: their history can't be
+        // unambiguously reconstructed.
+        if state_store
+            .kv_get("pnl.premium_outlay.migrated_v1")
+            .ok()
+            .flatten()
+            .is_none()
+        {
+            let mut moved = std::collections::HashMap::<String, Decimal>::new();
+            if let Ok(open) = state_store.list_open_signals(None) {
+                for sig in &open {
+                    if !sig.strategy_id.starts_with("options")
+                        || sig.id.starts_with("flat-")
+                        || sig.id.starts_with("trim-")
+                    {
+                        continue;
+                    }
+                    if sig.environment != "testnet" && sig.environment != "live" {
+                        continue;
+                    }
+                    let premium: Decimal = sig
+                        .legs
+                        .iter()
+                        .filter(|l| crate::state_store::symbol_is_fixed_contract(&l.symbol))
+                        .filter_map(|l| l.fill_price.map(|px| (l.side, px, l.filled_qty)))
+                        .filter(|(_, px, q)| *px > 0.0 && *q > 0.0)
+                        .map(|(side, px, q)| {
+                            let usd = Decimal::from_f64_retain(px * q).unwrap_or(dec!(0));
+                            match side {
+                                crate::state_store::LegSide::Short => usd,
+                                crate::state_store::LegSide::Long => -usd,
+                            }
+                        })
+                        .sum();
+                    if premium != dec!(0) {
+                        *moved.entry(sig.environment.clone()).or_default() += premium;
+                    }
+                }
+            }
+            for (env, premium) in moved {
+                let from_key = format!("pnl.total.{env}");
+                let to_key = format!("pnl.premium_outlay.{env}");
+                let cur: Decimal = state_store
+                    .kv_get(&from_key)
+                    .ok()
+                    .flatten()
+                    .and_then(|v| Decimal::from_str_exact(&v).ok())
+                    .unwrap_or(dec!(0));
+                let cur_to: Decimal = state_store
+                    .kv_get(&to_key)
+                    .ok()
+                    .flatten()
+                    .and_then(|v| Decimal::from_str_exact(&v).ok())
+                    .unwrap_or(dec!(0));
+                let _ = state_store.kv_set(&from_key, &(cur - premium).to_string());
+                let _ = state_store.kv_set(&to_key, &(cur_to + premium).to_string());
+                if env == "testnet" {
+                    initial_pnl_testnet -= premium;
+                    initial_premium_testnet += premium;
+                } else {
+                    initial_pnl_live -= premium;
+                    initial_premium_live += premium;
+                }
+                tracing::info!(
+                    "premium-outlay migration: moved {premium} USD of open option premium out of pnl.total.{env}"
+                );
+            }
+            let _ = state_store.kv_set(
+                "pnl.premium_outlay.migrated_v1",
+                &chrono::Utc::now().to_rfc3339(),
+            );
+        }
         // `sim_step_counter` feeds durable ids (`spatial-{n}` lots,
         // `funding-{n}` lots, `exec-*-{n}` log rows) — resuming at 8 after a
         // restart would collide with persisted ids and `INSERT OR REPLACE`
@@ -2359,8 +2541,56 @@ impl AppEngineState {
             last_risk_live_universe: RwLock::new(None),
             last_good_accounts: Mutex::new(std::collections::HashMap::new()),
             breaker_venue_equity: Mutex::new(std::collections::HashMap::new()),
+            breaker_fx_anchor: Mutex::new(initial_fx_anchor),
+            breaker_fx_adj: Mutex::new(std::collections::HashMap::new()),
+            equity_fx_prev: Mutex::new(
+                state_store
+                    .kv_get("equity.fx_prev")
+                    .ok()
+                    .flatten()
+                    .and_then(|raw| {
+                        serde_json::from_str::<std::collections::HashMap<String, Decimal>>(&raw)
+                            .ok()
+                    })
+                    .unwrap_or_default(),
+            ),
+            equity_upnl_prev: Mutex::new(
+                state_store
+                    .kv_get("equity.upnl_prev")
+                    .ok()
+                    .flatten()
+                    .and_then(|raw| {
+                        serde_json::from_str::<std::collections::HashMap<String, f64>>(&raw).ok()
+                    })
+                    .unwrap_or_default(),
+            ),
+            equity_optval_prev: Mutex::new(
+                state_store
+                    .kv_get("equity.optval_prev")
+                    .ok()
+                    .flatten()
+                    .and_then(|raw| {
+                        serde_json::from_str::<std::collections::HashMap<String, f64>>(&raw).ok()
+                    })
+                    .unwrap_or_default(),
+            ),
+            equity_bal_prev: Mutex::new(
+                state_store
+                    .kv_get("equity.bal_prev")
+                    .ok()
+                    .flatten()
+                    .and_then(|raw| {
+                        serde_json::from_str::<std::collections::HashMap<String, f64>>(&raw).ok()
+                    })
+                    .unwrap_or_default(),
+            ),
+            equity_check_lock: Mutex::new(()),
+            options_tick_status: Mutex::new(std::collections::HashMap::new()),
+            feed_lanes: Mutex::new(std::collections::BTreeMap::new()),
             total_realized_profit: RwLock::new(initial_pnl_testnet),
             total_realized_profit_live: RwLock::new(initial_pnl_live),
+            total_premium_outlay: RwLock::new(initial_premium_testnet),
+            total_premium_outlay_live: RwLock::new(initial_premium_live),
             execution_logs: RwLock::new(initial_logs),
             sim_step_counter: RwLock::new(initial_step),
             settings,
@@ -2386,6 +2616,7 @@ impl AppEngineState {
             sample_prune_at: Mutex::new(0),
             liq_trim_at: Mutex::new(std::collections::HashMap::new()),
             risk_locked_warn_at: Mutex::new(None),
+            risk_stale_warn_at: Mutex::new(std::collections::HashMap::new()),
             vault_unlock_backoff: Mutex::new((0, std::time::Instant::now())),
             mfa_pending: Mutex::new(None),
             margin_snapshot_at: Mutex::new(std::collections::HashMap::new()),
@@ -3620,7 +3851,6 @@ mod tests {
         assert_eq!(p.funding_max_entry_spread_bps, 50.0);
         assert_eq!(p.funding_auto_exit_spread_pct, None);
         assert_eq!(p.funding_liq_trim_pct, None);
-        assert!(!p.funding_auto_rebalance);
         assert_eq!(p.funding_rotation_threshold_bps, None);
         assert_eq!(p.futures_liq_trim_pct, None);
         assert_eq!(p.spot_liq_trim_pct, None);

@@ -82,7 +82,36 @@ export const STRATEGY_DISPLAY_NAMES: Record<string, string> = {
   stat_arb: "Statistical",
   triangle: "Triangle",
   options_parity: "Options Parity",
+  // Ledger (cycle-lot) namespaces — attribution maps the signal ids above
+  // into these; keep them named so ledger rows don't render raw ids.
+  spatial_spread: "Simple Spread",
+  funding_rate: "Funding Rate",
+  prediction_parity: "Prediction Market",
+  // Options substrategies keep their own ledger namespaces.
+  options_box_spread: "Box Spread",
+  options_jelly_roll: "Jelly Roll",
+  options_convexity: "Convexity",
+  unattributed: "Unattributed",
   external: "External (manual)",
+};
+
+/** Canonical ledger strategy id — mirrors backend
+ *  `attribution::ledger_strategy_id`: signal ids normalize into their
+ *  cycle-lot namespace so metrics, signals, and open positions join on
+ *  one key (`futures` → `spatial_spread`, `funding` → `funding_rate`). */
+export const ledgerStrategyId = (signalStrategy: string): string => {
+  switch (signalStrategy.trim().toLowerCase()) {
+    case "futures":
+      return "spatial_spread";
+    case "funding":
+      return "funding_rate";
+    case "prediction":
+      return "prediction_parity";
+    case "":
+      return "unattributed";
+    default:
+      return signalStrategy.trim().toLowerCase();
+  }
 };
 
 /** Display name for a persisted strategy id; falls back to the raw id. */

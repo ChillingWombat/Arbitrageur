@@ -39,6 +39,11 @@ export function formatDuration(seconds: number): string {
   if (s % 86_400 === 0) return `${s / 86_400}d`;
   if (s % 3_600 === 0) return `${s / 3_600}h`;
   if (s % 60 === 0) return `${s / 60}m`;
+  // Measured/auto windows are rarely round (e.g. 2×OU half-life = 3251s) —
+  // render them in the nearest sensible unit instead of a raw second count.
+  // Sub-5-minute remainders stay exact in seconds.
+  if (s >= 3_600) return `${(s / 3_600).toFixed(1)}h`;
+  if (s >= 300) return `${Math.round(s / 60)}m`;
   return `${s}s`;
 }
 

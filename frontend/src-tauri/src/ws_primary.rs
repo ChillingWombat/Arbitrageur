@@ -26,6 +26,11 @@ pub struct OrderbookSingleFlight {
     /// doesn't list the symbol (HTTP 404, "no quote", "unknown instrument")
     /// get a long one — the answer won't change until listings refresh.
     failures: Mutex<HashMap<(String, String), (std::time::Instant, std::time::Duration)>>,
+    /// Last INFO-logged instant per (venue, symbol). Waiters on a shared
+    /// flight each receive the leader's error and used to each log it —
+    /// N identical lines within milliseconds. The message is identical for
+    /// every caller, so one line per key per window loses nothing.
+    last_log: Mutex<HashMap<(String, String), std::time::Instant>>,
 }
 
 /// How long a transiently-failed (venue, symbol) book fetch replays its
@@ -33,6 +38,8 @@ pub struct OrderbookSingleFlight {
 const BOOK_FAIL_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(15);
 /// Cooldown for failures that prove the venue does not list the symbol.
 const BOOK_UNLISTED_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(300);
+/// Repeat identical failure logs collapse to one line per key per window.
+const BOOK_FAIL_LOG_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// Whether a book-fetch error proves the venue doesn't list the symbol —
 /// HTTP 404 plus the phrasing venues use for missing instruments. Anything
@@ -50,6 +57,12 @@ fn book_failure_is_unlisted(err: &str) -> bool {
         || e.contains("unsupported")
         || e.contains("ws-only")
         || e.contains("ws only")
+        || e.contains("websocket-only")
+        || e.contains("no rest orderbook")
+        // "Unknown <venue> perp symbol 'X'" and siblings: "unknown" alone is
+        // too broad (DNS failures say "unknown host"), but paired with an
+        // instrument word it means the venue rejected the listing.
+        || (e.contains("unknown") && (e.contains("symbol") || e.contains("instrument") || e.contains("market")))
 }
 
 impl OrderbookSingleFlight {
@@ -57,6 +70,23 @@ impl OrderbookSingleFlight {
         Self {
             slots: Mutex::new(HashMap::new()),
             failures: Mutex::new(HashMap::new()),
+            last_log: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Whether a failure for this key is worth an INFO line: yes on the
+    /// first sighting inside the window, no for duplicates. Returns false
+    /// for callers that should stay at debug (cooldown replays and
+    /// same-flight duplicates).
+    pub fn failure_is_newsworthy(&self, venue_id: &str, symbol: &str) -> bool {
+        let key = (venue_id.to_string(), symbol.to_string());
+        let mut map = self.last_log.lock();
+        match map.get(&key) {
+            Some(at) if at.elapsed() < BOOK_FAIL_LOG_WINDOW => false,
+            _ => {
+                map.insert(key, std::time::Instant::now());
+                true
+            }
         }
     }
 
@@ -169,8 +199,10 @@ pub async fn resolve_book_ws_first(
             // information, so it stays at debug.
             if e.contains("cooling down after failure") {
                 tracing::debug!("ws_first: {venue_id} REST book fetch for {symbol}: {e}");
-            } else {
+            } else if flights.failure_is_newsworthy(&venue_id.0, symbol) {
                 tracing::info!("ws_first: {venue_id} REST book fetch for {symbol} failed: {e}");
+            } else {
+                tracing::debug!("ws_first: {venue_id} REST book fetch for {symbol}: {e} (dup)");
             }
             None
         }
@@ -266,6 +298,24 @@ mod tests {
         async fn cancel_order(&self, _req: CancelRequest) -> anyhow::Result<()> {
             anyhow::bail!("no orders in fixture")
         }
+    }
+
+    #[test]
+    fn unlisted_classifier_catches_venue_specific_phrasing() {
+        // Real adapter error strings observed on testnet: Decibel has no
+        // REST depth at all, Lighter rejects symbols outside its perp list.
+        // Both must earn the long cooldown, not the transient one.
+        assert!(book_failure_is_unlisted(
+            "Decibel has no REST orderbook for BNB (depth is WebSocket-only upstream); refusing to synthesize a book"
+        ));
+        assert!(book_failure_is_unlisted(
+            "Unknown Lighter perp symbol 'BNB'"
+        ));
+        assert!(book_failure_is_unlisted("no quote found for BNB"));
+        // Transient errors stay transient: "unknown host" is a DNS failure,
+        // not a missing listing.
+        assert!(!book_failure_is_unlisted("dns error: unknown host"));
+        assert!(!book_failure_is_unlisted("connection reset by peer"));
     }
 
     #[tokio::test]

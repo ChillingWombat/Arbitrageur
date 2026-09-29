@@ -62,6 +62,33 @@ fn main() {
         )
         .init();
 
+    // Single-instance guard: a second process would double-dispatch every
+    // order the monitor and bots emit. The kernel-held flock lives for the
+    // process lifetime, so a dead instance's lock releases automatically.
+    let _instance_lock = {
+        use fs2::FileExt;
+        let lock_path = crate::state_store::StateStore::default_path()
+            .parent()
+            .map(|d| d.join("arbitrageur.lock"))
+            .unwrap_or_else(|| std::path::PathBuf::from("arbitrageur.lock"));
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&lock_path)
+            .expect("failed to open instance lock file");
+        match file.try_lock_exclusive() {
+            Ok(()) => file,
+            Err(_) => {
+                eprintln!(
+                    "another arbitrageur-desktop instance is already running (lock: {})",
+                    lock_path.display()
+                );
+                std::process::exit(1);
+            }
+        }
+    };
+
     let engine_state = Arc::new(
         AppEngineState::new_persistent().expect("failed to initialize durable application state"),
     );
@@ -163,7 +190,12 @@ fn main() {
                         execution::live_account_or_cached(&bg_state, vid, &adapter).await
                     {
                         bg_state.normalize_account_usd(vid, &mut acc);
-                        execution::feed_breaker_equity_usd(&bg_state, vid, acc.equity);
+                        execution::feed_breaker_equity_usd(
+                            &bg_state,
+                            vid,
+                            acc.equity,
+                            &acc.balances,
+                        );
                     }
                 }
             }
@@ -217,6 +249,7 @@ fn main() {
             commands::reset_circuit_breaker,
             commands::trigger_emergency_killswitch,
             commands::flatten_ticker_positions,
+            commands::flatten_trade_positions,
             commands::get_execution_logs,
             commands::reset_transaction_history,
             commands::get_venue_execution_capabilities,
@@ -294,6 +327,7 @@ fn main() {
             commands::get_strategy_fill_pnl,
             commands::get_calibration_report,
             commands::get_utilisation_history,
+            commands::get_pnl_history,
             commands::run_wfo_calibration,
             commands::get_monitor_snapshot,
             commands::get_monitor_config,

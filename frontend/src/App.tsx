@@ -1143,6 +1143,7 @@ export const App: React.FC = () => {
               isPaused={isPaused}
               isLive={systemStatus?.is_live_mode === true}
               optionsVenueAvailable={activeVenueCodes.has("DBT")}
+              premiumOutlayUsd={systemStatus?.total_premium_outlay_usd ?? null}
             />
           )}
 

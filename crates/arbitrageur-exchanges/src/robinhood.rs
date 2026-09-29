@@ -53,6 +53,10 @@ impl ExchangeAdapter for RobinhoodAdapter {
         "Robinhood"
     }
 
+    fn economic_account_key(&self) -> Option<String> {
+        self.inner.economic_account_key()
+    }
+
     async fn fetch_markets(&self) -> anyhow::Result<Vec<MarketMetadata>> {
         self.inner.fetch_markets().await
     }

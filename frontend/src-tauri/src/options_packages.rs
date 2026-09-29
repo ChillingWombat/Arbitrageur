@@ -59,6 +59,9 @@ pub struct OptionsPackageScanParams {
     pub min_hours_to_expiry: Option<f64>,
     pub max_days_to_expiry: Option<f64>,
     pub min_edge_bps: Option<f64>,
+    /// Result cap — a display concern. Execution re-scans pass usize::MAX so
+    /// a candidate cannot fall out of the top-N cut between scans.
+    pub limit: Option<usize>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -904,7 +907,7 @@ pub async fn scan_options_packages_impl(
     }
 
     out.sort_by(|a, b| b.net_edge_usd.total_cmp(&a.net_edge_usd));
-    out.truncate(MAX_RESULTS);
+    out.truncate(params.limit.unwrap_or(MAX_RESULTS));
     Ok(out)
 }
 
@@ -957,6 +960,9 @@ pub async fn execute_options_package_impl(
             min_hours_to_expiry: Some(0.0),
             max_days_to_expiry: Some(365.0),
             min_edge_bps: params.min_edge_bps,
+            // Re-verify must see the whole board: the display cap could drop
+            // a live edge when borderline candidates reshuffle between scans.
+            limit: Some(usize::MAX),
         },
         state,
     )
@@ -1022,16 +1028,35 @@ pub async fn execute_options_package_impl(
         .await
         .map_err(|e| format!("account read on deribit failed: {e}"))?;
     for leg in &opp.legs {
-        if adapter
+        if let Some(p) = adapter
             .account_position_for(&pre_acc, &leg.instrument)
-            .ok()
-            .flatten()
-            .is_some_and(|p| p.quantity > dec!(0))
+            .map_err(|e| {
+                format!(
+                    "position read on deribit failed for {}: {e}",
+                    leg.instrument
+                )
+            })?
+            .filter(|p| p.quantity > dec!(0))
         {
-            return Err(format!(
-                "An open position already exists for {}; flatten it before cycling",
-                leg.instrument
-            ));
+            // A residual below the venue's wire minimum cannot be flattened
+            // — refusing on it strands the substrategy forever. Only an
+            // actionable position blocks re-entry.
+            let actionable = adapter
+                .wire_base_qty(&leg.instrument, p.quantity)
+                .await
+                .ok()
+                .is_some_and(|q| q > dec!(0));
+            if actionable {
+                return Err(format!(
+                    "An open position already exists for {} (qty {}); flatten it before cycling",
+                    leg.instrument, p.quantity
+                ));
+            }
+            tracing::warn!(
+                "options package {strategy_id}: {} carries a sub-minimum residual position ({}); proceeding — it is not flattenable",
+                leg.instrument,
+                p.quantity
+            );
         }
     }
 
@@ -1174,6 +1199,20 @@ pub async fn execute_options_package_impl(
         let order =
             arbitrageur_core::order::OrderRequest::new_ioc(vid.clone(), sym, side, bound_px, qty);
         let client_oid = order.client_order_id.clone();
+        // Persist the client order id BEFORE dispatch so a crash between
+        // venue accept and ack write keeps the reconciler a locator.
+        if let Err(e) =
+            state
+                .state_store
+                .record_leg_client_order_id(&leg_signal_id, leg_side, &client_oid)
+        {
+            mark_failed(&leg_signal_id, &format!("client id persist failed: {e}"));
+            leg_error = Some(format!(
+                "leg {} ({sym}) client id persist failed: {e}",
+                idx + 1
+            ));
+            break;
+        }
         let mut resp = match adapter.place_order(order).await {
             Ok(r) => r,
             Err(e) => {
@@ -1264,10 +1303,17 @@ pub async fn execute_options_package_impl(
         let Some((_, sid, side)) = leg_signal_ids.iter().find(|(i, _, _)| i == idx) else {
             continue;
         };
+        // Ledger prices are USD: option fills print in base coin — convert
+        // at the scan's index price, same convention as parity.
+        let coin_priced = crate::state_store::symbol_is_fixed_contract(&opp.legs[*idx].instrument);
         let (qty_f64, px_f64) = match (resp.filled_qty, resp.avg_fill_price) {
             (q, Some(p)) if q > dec!(0) && p > dec!(0) => (
                 q.to_string().parse::<f64>().unwrap_or(0.0),
-                p.to_string().parse::<f64>().unwrap_or(0.0),
+                if coin_priced {
+                    p.to_string().parse::<f64>().unwrap_or(0.0) * to_f64(index)
+                } else {
+                    p.to_string().parse::<f64>().unwrap_or(0.0)
+                },
             ),
             _ => {
                 record_errors.push(format!("leg {} fill lacks qty/px", idx + 1));
@@ -1366,10 +1412,19 @@ pub async fn execute_options_package_impl(
             _ => premium_pnl += usd,
         }
     }
-    let attempt_pnl_f = to_f64(premium_pnl - fee_total * index);
-    let fee_total_f = to_f64(fee_total * index);
+    // `resp.fee` is already USD — the Deribit adapter converts the venue's
+    // coin-denominated commission at index before reporting it.
+    let attempt_pnl_f = to_f64(premium_pnl);
+    let fee_total_f = to_f64(fee_total);
+    // Premium cashflow is financing, not realized PnL — booked to the
+    // dedicated outlay counter (see options_parity); true PnL lands at
+    // close via per-leg deltas. Fees are a real cost paid at fill — they
+    // book to realized immediately, not into the outlay bucket.
     let total_f =
-        crate::execution::accumulate_realized_profit(state, state.is_live(), attempt_pnl_f);
+        crate::execution::accumulate_premium_outlay(state, state.is_live(), attempt_pnl_f);
+    if fee_total > Decimal::ZERO {
+        crate::execution::accumulate_realized_profit(state, state.is_live(), -fee_total_f);
+    }
     let latency_us = started.elapsed().as_micros() as u64;
     let direction = opp.label.clone();
     let attributed = crate::attribution::attribute_strategy_id(&strategy_id);

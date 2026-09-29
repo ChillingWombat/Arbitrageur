@@ -66,6 +66,7 @@ import type {
   StrategyCapabilityDto,
   SignalExecutionDto,
   TradedOpportunityDto,
+  PnlHistoryDto,
   TransactionHistoryResetDto,
   OpenPositionDto,
   TickerPositionState,
@@ -209,6 +210,7 @@ const NATIVE_COMMANDS: ReadonlySet<string> = new Set([
   "record_preset_applied",
   "get_strategy_tickers",
   "get_account_equity_events",
+  "get_pnl_history",
   "get_autotune_recommendation",
   "apply_autotune_selected",
   "run_seasonality_promotion",
@@ -347,7 +349,6 @@ export function normalizeStrategyParams(p: any): StrategyParamsDto {
       fundingMaxEntrySpreadBps: 50.0,
       fundingAutoExitSpreadPct: null,
       fundingLiqTrimPct: null,
-      fundingAutoRebalance: false,
       fundingRotationThresholdBps: null,
       fundingEnableBasis: true,
       fundingMinBasisBps: null,
@@ -389,7 +390,6 @@ export function normalizeStrategyParams(p: any): StrategyParamsDto {
     fundingMaxEntrySpreadBps: num(p.fundingMaxEntrySpreadBps ?? p.funding_max_entry_spread_bps, 50.0),
     fundingAutoExitSpreadPct: optThreshold(p.fundingAutoExitSpreadPct ?? p.funding_auto_exit_spread_pct),
     fundingLiqTrimPct: optThreshold(p.fundingLiqTrimPct ?? p.funding_liq_trim_pct),
-    fundingAutoRebalance: (p.fundingAutoRebalance ?? p.funding_auto_rebalance) === true,
     fundingRotationThresholdBps: optThreshold(p.fundingRotationThresholdBps ?? p.funding_rotation_threshold_bps),
     fundingEnableBasis: (p.fundingEnableBasis ?? p.funding_enable_basis) !== false,
     fundingMinBasisBps: optThreshold(p.fundingMinBasisBps ?? p.funding_min_basis_bps),
@@ -1195,6 +1195,10 @@ export const api = {
     return invokeDesktop<TradedOpportunityDto[]>("list_traded_opportunities");
   },
 
+  async getPnlHistory(): Promise<PnlHistoryDto> {
+    return invokeDesktop<PnlHistoryDto>("get_pnl_history");
+  },
+
   /** Wipe the ACTIVE environment's transaction ledger — signals, atomic
    * legs, cycle lots, execution journal, and the cumulative Net Profit
    * counter. Refuses while any position is open. Rows tagged 'unknown'
@@ -1220,6 +1224,21 @@ export const api = {
   ): Promise<FlattenResultDto> {
     return invokeDesktop<FlattenResultDto>("flatten_ticker_positions", {
       symbol,
+      strategyId,
+      executionType: executionType ?? null,
+    });
+  },
+
+  /** Flatten every leg of one executed trade (`{tradeId}-legN` siblings +
+   * the bare trade id) — the positions card's Clear for multi-instrument
+   * packages that share no single symbol. */
+  async flattenTradePositions(
+    tradeId: string,
+    strategyId: string,
+    executionType?: "emergency_market" | "non_emergency_limit"
+  ): Promise<FlattenResultDto> {
+    return invokeDesktop<FlattenResultDto>("flatten_trade_positions", {
+      tradeId,
       strategyId,
       executionType: executionType ?? null,
     });

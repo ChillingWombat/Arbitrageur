@@ -240,6 +240,12 @@ fn system_qty_for(
     exact_symbol: &str,
     side_sign: f64,
 ) -> f64 {
+    // Leg symbols persist bare-base spellings ("ADA") while venue rows
+    // normalize to quoted forms ("ADA-USDC") — exact matching alone would
+    // count system-owned exposure as external. Merge on canonical base the
+    // same way `account_position_for` does; different-base rows still can't
+    // collide (option/instrument spellings don't reduce to a bare base).
+    let wanted_base = canonical_base(exact_symbol);
     signals
         .iter()
         .filter(|s| !matches!(s.status, SignalStatus::Closed | SignalStatus::Failed))
@@ -248,7 +254,8 @@ fn system_qty_for(
             l.venue.trim().to_lowercase() == venue_lc
                 && l.filled_qty.is_finite()
                 && l.filled_qty > 0.0
-                && l.symbol.eq_ignore_ascii_case(exact_symbol)
+                && (l.symbol.eq_ignore_ascii_case(exact_symbol)
+                    || canonical_base(&l.symbol) == wanted_base)
         })
         .filter(|l| match l.side {
             LegSide::Long => side_sign > 0.0,
@@ -261,9 +268,10 @@ fn system_qty_for(
 // --- impls --------------------------------------------------------------------
 
 /// List live on-exchange positions with system legs subtracted out.
-/// Mirrors the `get_venue_balances` credential gates; per-venue failures are
-/// reported in `unreadable`, never raised (one dark venue must not hide the
-/// rest of the portfolio).
+/// Mirrors the `get_venue_balances` credential gates — venues without
+/// credentials are skipped; per-venue read failures are reported in
+/// `unreadable`, never raised (one dark venue must not hide the rest of
+/// the portfolio).
 pub async fn get_external_positions_impl(
     state: &AppEngineState,
 ) -> Result<ExternalPositionsResponse, String> {
@@ -280,8 +288,10 @@ pub async fn get_external_positions_impl(
     let mut unreadable = Vec::new();
     let mut venue_notes = Vec::new();
     for (vid, name, adapter) in state.get_venues() {
+        // No credentials = venue not configured, not a read failure — skip
+        // silently. `unreadable` is reserved for configured venues whose
+        // account read actually fails.
         if !adapter.has_live_credentials() {
-            unreadable.push(format!("{name}: no live credentials in the vault"));
             continue;
         }
         // Share the fresh-TTL + singleflight path so this poll coalesces
@@ -812,9 +822,17 @@ pub async fn close_external_position_impl(
             o
         };
         // Tag the client order so venue-side fills reconcile to this flow.
-        o.client_order_id = mint_id();
+        // Bounded form — Orderly caps client_order_id at 36 chars and
+        // `extclose-{venue}-{ms}-{rand}` overflows it (`extclose-vanta-…`
+        // is 37). The descriptive `sid` stays for the ledger; the wire id
+        // is short and venue-agnostic.
+        o.client_order_id = format!(
+            "xc-{}-{:08x}",
+            Utc::now().timestamp_millis(),
+            rand::random::<u32>()
+        );
         let cid = o.client_order_id.clone();
-        (Some(o), cid.clone(), cid)
+        (Some(o), cid, mint_id())
     };
     let expected_symbol = live.symbol.clone();
     let expected_qty = qty_dec;
@@ -859,6 +877,25 @@ pub async fn close_external_position_impl(
             state.env().as_str(),
         )
         .map_err(|e| format!("Failed to persist external close intent: {e}"))?;
+
+    // Persist the client order id BEFORE dispatch (limit/market modes —
+    // `auto` mints per-attempt ids inside the passive-unwind driver, which
+    // owns its own last-attempt persistence). A crash between venue accept
+    // and ack write then still leaves the reconciler a locator.
+    if mode != "auto" {
+        if let Err(e) =
+            state
+                .state_store
+                .record_leg_client_order_id(&sid, leg_side, &expected_client_order_id)
+        {
+            let _ = state.state_store.update_signal_status(
+                &sid,
+                SignalStatus::Failed,
+                Some("client order id persistence failed — dispatch refused"),
+            );
+            return Err(format!("Failed to persist client order id: {e}"));
+        }
+    }
 
     let mark_unresolved = |note: &str| {
         let _ = state
@@ -964,19 +1001,32 @@ pub async fn close_external_position_impl(
     let filled = resp.filled_qty.to_string().parse::<f64>().unwrap_or(0.0);
     let avg = resp
         .avg_fill_price
-        .map(|d| d.to_string().parse::<f64>().unwrap_or(0.0));
+        .map(|d| d.to_string().parse::<f64>().unwrap_or(0.0))
+        .and_then(|p| {
+            crate::execution::ledger_px_usd(state, &resp.venue.to_string(), &resp.symbol, p)
+        });
     if filled > 0.0 {
-        let fill_price = avg.unwrap_or(0.0).max(0.000_001);
-        if let Err(e) = state.state_store.apply_leg_fill(
-            &sid,
-            leg_side,
-            filled,
-            fill_price,
-            resp.fee
-                .map(|v| v.to_string().parse::<f64>().unwrap_or(0.0))
-                .unwrap_or(0.0),
-            Some(resp.order_id.as_str()),
-        ) {
+        let fee_f = resp
+            .fee
+            .map(|v| v.to_string().parse::<f64>().unwrap_or(0.0))
+            .unwrap_or(0.0);
+        // `avg` is None when a coin→USD conversion was required but no
+        // rate was available — persist the quantity anyway and leave the
+        // price cell empty rather than write a coin value under USD.
+        let persist = match avg {
+            Some(p) => state.state_store.apply_leg_fill(
+                &sid,
+                leg_side,
+                filled,
+                p.max(0.000_001),
+                fee_f,
+                Some(resp.order_id.as_str()),
+            ),
+            None => state
+                .state_store
+                .apply_leg_order_state(&sid, leg_side, filled, None, fee_f),
+        };
+        if let Err(e) = persist {
             let note = format!(
                 "External close order {} filled but its fill could not be persisted: {e}",
                 resp.order_id

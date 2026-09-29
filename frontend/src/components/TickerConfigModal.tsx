@@ -322,7 +322,6 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
   const [fundingMaxEntrySpreadBps, setFundingMaxEntrySpreadBps] = useState<number>(50.0);
   const [fundingAutoExitSpreadPct, setFundingAutoExitSpreadPct] = useState<string>("");
   const [fundingRotationThresholdBps, setFundingRotationThresholdBps] = useState<string>("");
-  const [fundingAutoRebalance, setFundingAutoRebalance] = useState<boolean>(false);
   const [fundingEnableBasis, setFundingEnableBasis] = useState<boolean>(true);
   const [fundingMinBasisBps, setFundingMinBasisBps] = useState<string>("");
 
@@ -450,7 +449,6 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
         setFundingMaxEntrySpreadBps(Number(p.fundingMaxEntrySpreadBps ?? 50.0));
         setFundingAutoExitSpreadPct(p.fundingAutoExitSpreadPct != null ? String(p.fundingAutoExitSpreadPct) : "");
         setFundingRotationThresholdBps(p.fundingRotationThresholdBps != null ? String(p.fundingRotationThresholdBps) : "");
-        setFundingAutoRebalance(p.fundingAutoRebalance === true);
         setFundingEnableBasis((p.fundingEnableBasis ?? true) !== false);
         setFundingMinBasisBps(p.fundingMinBasisBps != null ? String(p.fundingMinBasisBps) : "");
         setFundingLiqTrimPct(p.fundingLiqTrimPct != null ? String(p.fundingLiqTrimPct) : "");
@@ -651,7 +649,6 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
     setFundingMaxEntrySpreadBps(50.0);
     setFundingAutoExitSpreadPct("");
     setFundingRotationThresholdBps("");
-    setFundingAutoRebalance(false);
     setFundingLiqTrimPct("");
     setFuturesMaxSlippageBps(15.0);
     setFuturesLiqTrimPct("");
@@ -708,7 +705,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
       label="Liquidation-Distance Trim"
       description={
         enforced
-          ? "Enforced live — checked every 5s on fresh position reads. When either leg comes within this percent of liquidation, both legs trim by the same qty; if the remainder drops below one step, both close. Empty = off."
+          ? "Enforced live — supervised on fresh cached position reads. When either leg comes within this percent of liquidation, both legs trim by the same qty; if the remainder drops below one step, both close. Empty = off."
           : "Saved but NOT YET ENFORCED — this strategy has no live position supervisor to consume the threshold yet. Planned behavior: when either leg comes within this percent of liquidation, both legs trim equally; below one step, both close. Empty = off."
       }
       tooltip="When EITHER leg comes within this percent of liquidation, BOTH legs trim by the same qty to stay neutral; if the remainder would drop below one step, both close instead. Empty = off."
@@ -1346,8 +1343,8 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
 
       <SettingRow
         label="Auto-Exit Spread"
-        description="Saved but NOT YET ENFORCED — no live position supervisor consumes this threshold yet. Planned: exit early when inter-venue spread drops below this % · empty = off"
-        tooltip="Planned behavior: automatically unwind the position if the price spread closes faster than the holding horizon. Currently stored only — funding exits are operator-driven."
+        description="Exit a spot/perp basis position when the live perp-over-spot spread falls below this % · empty = off"
+        tooltip="Supervised every ~60s: flattens a basis pair (long spot leg marked -SPOT + short perp leg) once the mid-price spread converges below the threshold. Perp/perp carries are unaffected — they have no price basis to converge."
       >
         <NumberInput
           value={fundingAutoExitSpreadPct}
@@ -1366,29 +1363,16 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
   const renderFundingRiskSection = () => (
     <div className="space-y-3">
       <div className="pb-1 border-b border-surface-border/60">
-        <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Risk & Rebalance</h3>
-        <p className="text-[11px] font-sans text-muted mt-0.5">Drift rebalancing, rotation thresholds, and margin trim protection</p>
+        <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Risk &amp; Rotation</h3>
+        <p className="text-[11px] font-sans text-muted mt-0.5">Liquidation trim, rotation thresholds, and margin protection</p>
       </div>
 
-      {renderTrimBlock(fundingLiqTrimPct, setFundingLiqTrimPct, false)}
-
-      <SettingRow
-        label="Auto-Rebalance to Neutral"
-        description="Saved but NOT YET ENFORCED — no live position supervisor consumes this flag yet. Planned: trim the overweight leg back to neutral when the pair drifts"
-        tooltip="Planned behavior: reduce the overweight leg back to neutral when execution lot mismatches or partial fills cause delta exposure. Currently stored only — the residual-flatten supervisor already covers unmatched fills."
-      >
-        <SwitchToggle
-          size="sm"
-          checked={fundingAutoRebalance}
-          ariaLabel="Auto-rebalance to neutral enabled"
-          onChange={setFundingAutoRebalance}
-        />
-      </SettingRow>
+      {renderTrimBlock(fundingLiqTrimPct, setFundingLiqTrimPct, true)}
 
       <SettingRow
         label="Rotation Threshold"
-        description="Saved but NOT YET ENFORCED — no rotation supervisor exists yet. Planned: rotate only when net-of-friction APR improvement exceeds this · empty = off"
-        tooltip="Planned behavior: minimum APR improvement required over the current position before switching to a higher-yielding pair. Currently stored only — funding positions are not auto-rotated."
+        description="Exit when another symbol/venue pair's net carry exceeds this position's by more than this hurdle · empty = off"
+        tooltip="Supervised every ~60s against live funding-rate samples: flattens the position when a strictly better pairing clears the hurdle, so the scanner can re-deploy the capital. The threshold is the churn allowance for exit+re-entry friction."
       >
         <NumberInput
           value={fundingRotationThresholdBps}
@@ -1649,7 +1633,6 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
       fundingMaxEntrySpreadBps,
       fundingAutoExitSpreadPct: parseOptThreshold(fundingAutoExitSpreadPct),
       fundingLiqTrimPct: parseOptThreshold(fundingLiqTrimPct),
-      fundingAutoRebalance,
       fundingRotationThresholdBps: parseOptThreshold(fundingRotationThresholdBps),
       fundingEnableBasis,
       fundingMinBasisBps: fundingMinBasisBps.trim() === "" ? null : Number(fundingMinBasisBps),

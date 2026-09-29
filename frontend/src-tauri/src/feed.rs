@@ -48,11 +48,37 @@ enum FeedOutcome {
 /// simply stops feeding the hub and its pairs age out via the hub TTL.
 pub fn spawn_all(state: Arc<AppEngineState>) {
     for venue in ["hyperliquid", "lighter", "robinhood", "vanta"] {
+        // Pre-seed the health-surface row so a lane is observable before
+        // its first attempt completes.
+        state
+            .feed_lanes
+            .lock()
+            .entry(venue.to_string())
+            .or_default()
+            .phase = "starting".into();
         let task_state = state.clone();
         tauri::async_runtime::spawn(async move {
             supervise(venue, task_state).await;
         });
     }
+}
+
+fn lane_phase(state: &AppEngineState, venue: &str, phase: &str) {
+    state
+        .feed_lanes
+        .lock()
+        .entry(venue.to_string())
+        .or_default()
+        .phase = phase.into();
+}
+
+/// Mark a WS handshake success — the only writer of `last_connected_ms`,
+/// so the timestamp is always a real socket-open, never an attempt.
+fn mark_ws_connected(state: &AppEngineState, venue: &str) {
+    let mut lanes = state.feed_lanes.lock();
+    let t = lanes.entry(venue.to_string()).or_default();
+    t.last_connected_ms = Some(Utc::now().timestamp_millis());
+    t.phase = "connected".into();
 }
 
 /// Bounded WS connect: `connect_async` has no internal timeout, so a
@@ -107,15 +133,42 @@ async fn supervise(venue: &'static str, state: Arc<AppEngineState>) {
         // radar, balances, execution) onto REST and has already tripped
         // Lighter's WAF once. Engine pause still suspends feeds.
         if *state.is_paused.read() {
+            lane_phase(&state, venue, "paused");
             tokio::time::sleep(Duration::from_secs(2)).await;
             continue;
         }
         if !venue_ws_enabled(&state, venue) {
+            lane_phase(&state, venue, "not-admitted");
             tokio::time::sleep(Duration::from_secs(30)).await;
             continue;
         }
+        {
+            let mut lanes = state.feed_lanes.lock();
+            let t = lanes.entry(venue.to_string()).or_default();
+            t.attempts += 1;
+            t.phase = "connecting".into();
+            t.backoff_until_ms = None;
+        }
         let started = std::time::Instant::now();
-        match run_connection(venue, &state).await {
+        let outcome = run_connection(venue, &state).await;
+        {
+            let mut lanes = state.feed_lanes.lock();
+            let t = lanes.entry(venue.to_string()).or_default();
+            t.last_ended_ms = Some(Utc::now().timestamp_millis());
+            match &outcome {
+                Ok(FeedOutcome::Stop) => t.phase = "stopped".into(),
+                Ok(FeedOutcome::Disabled) => t.phase = "disabled".into(),
+                Ok(FeedOutcome::Reconnect) => {
+                    t.phase = "backoff".into();
+                    t.last_error = None;
+                }
+                Err(e) => {
+                    t.phase = "backoff".into();
+                    t.last_error = Some(e.to_string());
+                }
+            }
+        }
+        match outcome {
             Ok(FeedOutcome::Stop) => return,
             Ok(FeedOutcome::Disabled) => {
                 // Required config missing (e.g. unregistered venue account_id)
@@ -144,6 +197,14 @@ async fn supervise(venue: &'static str, state: Arc<AppEngineState>) {
         } else {
             arbitrageur_exchanges::ws::jittered_reconnect_backoff_secs(fail_streak) as f64
         };
+        {
+            let mut lanes = state.feed_lanes.lock();
+            let t = lanes.entry(venue.to_string()).or_default();
+            t.consecutive_failures = fail_streak;
+            t.instant_kills = instant_kills;
+            t.backoff_until_ms =
+                Some(Utc::now().timestamp_millis() + (backoff_secs.max(1.0) * 1000.0) as i64);
+        }
         tokio::time::sleep(Duration::from_secs_f64(backoff_secs.max(1.0))).await;
     }
 }
@@ -323,6 +384,7 @@ async fn run_hyperliquid(state: &AppEngineState) -> anyhow::Result<FeedOutcome> 
     let ws = ws_connect(&ws_url)
         .await
         .map_err(|e| anyhow::anyhow!("ws_connect: {e}"))?;
+    mark_ws_connected(state, "hyperliquid");
     // Environment this socket was bound under: after a live/testnet flip
     // the hub is cleared and re-admission is re-evaluated — frames from
     // the old env's venue must stop, not repopulate it.
@@ -478,6 +540,7 @@ async fn run_lighter_protocol(
         }
     };
     let ws = ws_connect(&ws_url).await?;
+    mark_ws_connected(state, venue);
     // Environment this socket was bound under — see run_hyperliquid.
     let connect_env = state.env();
     let (mut write, mut read) = ws.split();
@@ -632,6 +695,7 @@ async fn run_vanta(state: &AppEngineState) -> anyhow::Result<FeedOutcome> {
         anyhow::bail!("vanta lists no subscribable markets");
     }
     let ws = ws_connect(&ws_url).await?;
+    mark_ws_connected(state, "vanta");
     // Environment this socket was bound under — see run_hyperliquid.
     let connect_env = state.env();
     let (mut write, mut read) = ws.split();

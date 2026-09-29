@@ -133,6 +133,13 @@ pub struct StablecoinFx {
     stale_after_ms: i64,
     /// Set while the global refresh is failing — health surface flag.
     feed_down: Mutex<bool>,
+    /// CoinGecko failure streak and the epoch-ms until the next attempt.
+    /// A persistently-failing host used to be hit every tick forever —
+    /// 403/blocked answers don't heal in 60s, they just spam the wire.
+    /// Backoff doubles per consecutive failure (2→4→8→15min cap) while
+    /// the Uniswap backoff still runs every tick, so freshness degrades
+    /// only for quotes with no on-chain leg.
+    cg_backoff: Mutex<(u32, i64)>,
 }
 
 impl StablecoinFx {
@@ -147,6 +154,7 @@ impl StablecoinFx {
             convergence_half_life_ms: 86_400_000,
             stale_after_ms: 300_000,
             feed_down: Mutex::new(false),
+            cg_backoff: Mutex::new((0, 0)),
         })
     }
 
@@ -379,12 +387,20 @@ impl StablecoinFx {
     /// stale the Uniswap backoff refills the big two (USDT/USDC/DAI)
     /// from on-chain quotes.
     pub async fn refresh_global(&self) {
-        let cg = self.refresh_coingecko().await;
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        // `None` = still inside the failure-cooling window: no wire call,
+        // no warn — the skip is not new information.
+        let cg = if self.cg_backoff.lock().1 > now_ms {
+            None
+        } else {
+            Some(self.refresh_coingecko().await)
+        };
         let backoff_n = match &cg {
-            Ok(n) if *n > 0 => 0,
+            Some(Ok(n)) if *n > 0 => 0,
             _ => self.refresh_uniswap_backoff().await,
         };
-        self.finish_global_refresh(cg, backoff_n);
+        self.finish_global_refresh(cg.as_ref(), backoff_n);
+        self.note_cg_backoff(cg.as_ref(), now_ms);
     }
 
     /// Update `feed_down` after a refresh attempt. The flag clears when
@@ -392,20 +408,40 @@ impl StablecoinFx {
     /// nothing usable AND the on-chain backoff produced nothing either —
     /// "down" means no external truth is flowing, not "CG specifically
     /// failed" (a healthy backoff must not read as feed-stale).
-    fn finish_global_refresh(&self, cg: anyhow::Result<usize>, backoff_n: usize) {
+    fn finish_global_refresh(&self, cg: Option<&anyhow::Result<usize>>, backoff_n: usize) {
         match cg {
-            Ok(n) if n > 0 => {
+            Some(Ok(n)) if *n > 0 => {
                 *self.feed_down.lock() = false;
                 return;
             }
-            Ok(_) => {
+            Some(Ok(_)) => {
                 tracing::warn!("stablecoin fx: CoinGecko returned no usable prices");
             }
-            Err(e) => {
+            Some(Err(e)) => {
                 tracing::warn!("stablecoin fx: CoinGecko refresh failed: {e}");
+            }
+            None => {
+                tracing::debug!(
+                    "stablecoin fx: CoinGecko skipped — cooling after consecutive failures"
+                );
             }
         }
         *self.feed_down.lock() = backoff_n == 0;
+    }
+
+    /// Extend or reset the CoinGecko cooling window from this tick's
+    /// outcome. `None` means no attempt ran (already cooling) — leave the
+    /// window alone so it expires on schedule rather than snowballing.
+    fn note_cg_backoff(&self, cg: Option<&anyhow::Result<usize>>, now_ms: i64) {
+        let mut b = self.cg_backoff.lock();
+        match cg {
+            None => {}
+            Some(Ok(n)) if *n > 0 => *b = (0, 0),
+            Some(_) => {
+                b.0 = b.0.saturating_add(1).min(4);
+                b.1 = now_ms + (1i64 << b.0).min(15) * 60_000;
+            }
+        }
     }
 
     async fn refresh_coingecko(&self) -> anyhow::Result<usize> {
@@ -671,17 +707,41 @@ mod tests {
                 .feed_stale
         };
         // Primary lands: feed healthy.
-        f.finish_global_refresh(Ok(9), 0);
+        f.finish_global_refresh(Some(&Ok(9)), 0);
         assert!(!down(&f));
         // Primary fails, backoff also dead: genuinely down.
-        f.finish_global_refresh(Err(anyhow::anyhow!("cg 429")), 0);
+        f.finish_global_refresh(Some(&Err(anyhow::anyhow!("cg 429"))), 0);
         assert!(down(&f));
         // Primary still failing but on-chain backoff lands rates:
         // truth is flowing, so the surface must not read "feed down".
-        f.finish_global_refresh(Err(anyhow::anyhow!("cg 429")), 2);
+        f.finish_global_refresh(Some(&Err(anyhow::anyhow!("cg 429"))), 2);
         assert!(!down(&f));
         // Both dead again → down returns.
-        f.finish_global_refresh(Ok(0), 0);
+        f.finish_global_refresh(Some(&Ok(0)), 0);
         assert!(down(&f));
+    }
+
+    #[test]
+    fn cg_backoff_extends_on_failure_and_resets_on_success() {
+        let f = fx();
+        let t0 = 1_000_000i64;
+        // First failure: 2-minute window.
+        f.note_cg_backoff(Some(&Err(anyhow::anyhow!("cg 403"))), t0);
+        assert_eq!(*f.cg_backoff.lock(), (1, t0 + 120_000));
+        // A skipped (cooling) tick must not extend the window.
+        f.note_cg_backoff(None, t0 + 60_000);
+        assert_eq!(*f.cg_backoff.lock(), (1, t0 + 120_000));
+        // Failure #2 after the window: 4-minute window.
+        f.note_cg_backoff(Some(&Err(anyhow::anyhow!("cg 403"))), t0 + 120_000);
+        assert_eq!(*f.cg_backoff.lock(), (2, t0 + 120_000 + 240_000));
+        // Streak caps at 15 minutes.
+        f.note_cg_backoff(Some(&Err(anyhow::anyhow!("cg 403"))), t0);
+        f.note_cg_backoff(Some(&Err(anyhow::anyhow!("cg 403"))), t0);
+        f.note_cg_backoff(Some(&Err(anyhow::anyhow!("cg 403"))), t0);
+        assert_eq!(f.cg_backoff.lock().0, 4);
+        assert_eq!(f.cg_backoff.lock().1, t0 + 15 * 60_000);
+        // Success clears both streak and window.
+        f.note_cg_backoff(Some(&Ok(5)), t0);
+        assert_eq!(*f.cg_backoff.lock(), (0, 0));
     }
 }

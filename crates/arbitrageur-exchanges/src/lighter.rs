@@ -318,6 +318,37 @@ impl LighterAdapter {
         );
         Ok(params)
     }
+
+    /// Canonical engine symbol for a market id — the details `symbol`
+    /// field plus a `-SPOT` suffix for spot markets so the class marker
+    /// survives the same way named requests do. Single-flight `get_json`
+    /// makes the second details read nearly free inside the cache window.
+    async fn canonical_symbol_for(&self, market_id: u64) -> anyhow::Result<Option<String>> {
+        let details = self.get_json("/api/v1/orderBookDetails").await?;
+        let Some(entries) = details.get("order_book_details").and_then(|d| d.as_array()) else {
+            return Ok(None);
+        };
+        let Some(entry) = entries
+            .iter()
+            .find(|e| e.get("market_id").and_then(|m| m.as_u64()) == Some(market_id))
+        else {
+            return Ok(None);
+        };
+        let Some(sym) = entry
+            .get("symbol")
+            .and_then(|s| s.as_str())
+            .map(|s| s.trim().to_uppercase())
+            .filter(|s| !s.is_empty())
+        else {
+            return Ok(None);
+        };
+        let is_spot = entry
+            .get("market_type")
+            .and_then(|t| t.as_str())
+            .map(|t| t.eq_ignore_ascii_case("spot"))
+            .unwrap_or(false);
+        Ok(Some(if is_spot { format!("{sym}-SPOT") } else { sym }))
+    }
 }
 
 #[async_trait]
@@ -461,6 +492,15 @@ impl ExchangeAdapter for LighterAdapter {
             .await?;
 
         let mut book = OrderBook::new(self.venue_id.clone(), symbol.to_string());
+        // Venue-native callers pass the bare market id ("4096") instead of a
+        // symbol; the book then carries the id and fails canonical_base
+        // validation downstream. Re-key it on the market's canonical
+        // symbol (with `-SPOT` for spot markets) so identity round-trips.
+        if symbol.trim().parse::<u64>().is_ok() {
+            if let Ok(Some(name)) = self.canonical_symbol_for(market_id).await {
+                book.symbol = name;
+            }
+        }
         append_lighter_levels(&mut book, &res);
 
         book.timestamp = Utc::now();

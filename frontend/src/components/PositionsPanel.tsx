@@ -21,6 +21,7 @@ import {
 } from "../services/positionsQuant";
 import { api, describeCommandError } from "../services/api";
 import { EmptyState } from "./EmptyState";
+import { VenueLogo } from "./VenueLogo";
 import { PositionDetailModal } from "./PositionDetailModal";
 import { ConfirmActionModal, type ConfirmActionSpec } from "./ConfirmActionModal";
 
@@ -51,6 +52,10 @@ const STRATEGY_SHORT: Record<string, string> = {
   spot: "SPOT",
   prediction: "PREDICT",
   stat_arb: "STAT ARB",
+  options_parity: "PARITY",
+  options_jelly_roll: "JELLY ROLL",
+  options_box_spread: "BOX",
+  options_convexity: "CONVEXITY",
 };
 
 const SCOPE_BUTTON_LABEL: Record<string, string> = {
@@ -60,9 +65,9 @@ const SCOPE_BUTTON_LABEL: Record<string, string> = {
 const formatUsd = (v: number): string =>
   `${v < 0 ? "-" : "+"}$${Math.abs(v).toFixed(2)}`;
 
-const formatQty = (q: number): string => {
+export const formatQty = (q: number): string => {
   const abs = Math.abs(q);
-  const digits = abs >= 100 ? 2 : abs >= 1 ? 4 : 6;
+  const digits = abs >= 100 ? 2 : 4;
   const trimmed = abs.toFixed(digits).replace(/\.?0+$/, "");
   return `${q < 0 ? "-" : "+"}${trimmed === "" ? "0" : trimmed}`;
 };
@@ -161,8 +166,18 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
   const handleToggleReduceOnly = async (pos: OpenPositionDto) => {
     // Durable server-side flag — enforced by every backend entry gate, so a
     // manual execute can never bypass it the way the localStorage flag could.
+    // Enabling flags the trade's display label; disabling clears that label
+    // plus any leg-instrument flags so a stale per-leg flag can't keep the
+    // card badged after the operator turns it off.
     try {
       await api.setTickerReduceOnly(pos.symbol, pos.strategyId, !pos.reduceOnly);
+      if (pos.reduceOnly) {
+        for (const leg of pos.legSymbols) {
+          if (leg !== pos.symbol) {
+            await api.setTickerReduceOnly(leg, pos.strategyId, false);
+          }
+        }
+      }
       await onRefreshAll?.();
     } catch (err) {
       onCommandError?.(describeCommandError(err, "Reduce-only update failed"));
@@ -173,12 +188,13 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
 
   const requestClear = (pos: OpenPositionDto, mode: "emergency_market" | "non_emergency_limit") => {
     const emergency = mode === "emergency_market";
+    const legCount = pos.venues.length;
     setConfirm({
       title: emergency ? "Emergency Clear" : "Clear Position",
-      subtitle: `${pos.symbol} · ${pos.strategyId}`,
+      subtitle: `${pos.symbol} · ${pos.strategyId}${legCount > 1 ? ` · ${legCount} legs` : ""}`,
       body: emergency
-        ? `This dispatches market-close orders for every open leg of ${pos.symbol} at the prevailing venue price — immediate fill, whatever the slippage. Continue?`
-        : `This dispatches limit-close orders for every open leg of ${pos.symbol}. Unfilled residuals stay open and re-escalate — verify flatness afterward.`,
+        ? `This dispatches market-close orders for every open leg of this ${pos.symbol} trade at the prevailing venue price — immediate fill, whatever the slippage. Continue?`
+        : `This dispatches limit-close orders for every open leg of this ${pos.symbol} trade. Unfilled residuals stay open and re-escalate — verify flatness afterward.`,
       confirmLabel: emergency ? "Clear at Market" : "Clear via Limit",
     });
     pendingFlatten.current = { pos, mode };
@@ -195,7 +211,7 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
         : `Clearing ${pos.symbol} via limit…`
     );
     try {
-      await api.flattenTickerPositions(pos.symbol, pos.strategyId, mode);
+      await api.flattenTradePositions(pos.tradeId, pos.strategyId, mode);
       await onRefreshAll?.();
     } catch (err) {
       onCommandError?.(describeCommandError(err, `Clear ${pos.symbol} failed`));
@@ -318,7 +334,7 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
       {/* Column subheader */}
       <div className="px-3 py-1.5 border-b border-surface-border bg-surface-raised/60 flex items-center justify-between text-[11px] font-sans text-slate-500 font-semibold uppercase tracking-wider">
         <span>Position</span>
-        <span className="text-right">Σ Long · Σ Short · PnL</span>
+        <span className="text-right">Quantity</span>
       </div>
 
       {/* Position cards */}
@@ -337,14 +353,26 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
           scoped.map((pos) => {
             const isSelected = selectedPositionKey === pos.key;
             const isReduce = pos.reduceOnly;
-            const longSum = pos.venues.reduce(
-              (a, v) => (v.netQty > 0 ? a + v.netQty : a),
-              0,
-            );
-            const shortSum = pos.venues.reduce(
-              (a, v) => (v.netQty < 0 ? a + v.netQty : a),
-              0,
-            );
+            const multiLeg = pos.venues.length > 1;
+            // Every card collapses legs to per-(venue, side) totals — venue
+            // name on the left, signed net on the right (the sign IS the
+            // side). Instrument-level detail lives in the details modal.
+            const venueRows = (() => {
+              const acc = new Map<string, { venue: string; qty: number; side: "long" | "short" }>();
+              for (const v of pos.venues) {
+                if (v.netQty === 0) continue;
+                const side = v.netQty > 0 ? ("long" as const) : ("short" as const);
+                const key = `${v.venue}|${side}`;
+                const r = acc.get(key) ?? { venue: v.venue, qty: 0, side };
+                r.qty += v.netQty;
+                acc.set(key, r);
+              }
+              return [...acc.values()].sort(
+                (a, b) => a.venue.localeCompare(b.venue) || (a.side === "long" ? -1 : 1),
+              );
+            })();
+            const shownRows = venueRows.slice(0, 4);
+            const hiddenRows = venueRows.length - shownRows.length;
             return (
               <div
                 key={pos.key}
@@ -363,18 +391,26 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
                     setDetailPos(pos);
                   }
                 }}
-                className={`w-full px-2.5 py-2 rounded-lg border text-left transition cursor-pointer flex items-start justify-between ${
+                className={`w-full px-2.5 py-2 rounded-lg border text-left transition cursor-pointer ${
                   isSelected
                     ? "bg-accent-dim/70 border-accent/60 shadow-2xs text-slate-900 border-l-[3px] border-l-accent"
                     : "bg-surface hover:bg-surface-raised border-surface-border text-slate-700 hover:border-slate-300 shadow-2xs"
                 }`}
               >
-                {/* Left: symbol on top; strategy chip below the name */}
-                <div className="flex flex-col min-w-0 pr-2">
-                  <div className="flex items-center space-x-1.5 flex-wrap gap-y-0.5">
+                {/* Header: trade label + leg-count / reduce-only flags. */}
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center space-x-1.5 flex-wrap gap-y-0.5 min-w-0">
                     <span className="font-bold text-xs font-sans tracking-tight text-slate-900 truncate">
                       {pos.symbol}
                     </span>
+                    {multiLeg && (
+                      <span
+                        className="text-[9px] px-1.5 py-px rounded bg-slate-100 text-slate-500 font-mono font-bold border border-slate-200/60 whitespace-nowrap"
+                        title={`${pos.venues.length} leg instruments in this trade — open details for the full breakdown`}
+                      >
+                        {pos.venues.length} legs
+                      </span>
+                    )}
                     {isReduce && (
                       <span
                         className="text-[9px] px-1.5 py-px rounded bg-warn-dim text-warn-strong font-mono font-bold border border-warn-border whitespace-nowrap"
@@ -384,29 +420,47 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
                       </span>
                     )}
                   </div>
-                  <span className="text-[9px] px-1.5 py-px rounded bg-slate-100 text-slate-600 font-mono font-bold border border-slate-200/60 whitespace-nowrap mt-0.5 self-start">
-                    {STRATEGY_SHORT[pos.strategyId] ?? pos.strategyId.toUpperCase()}
-                  </span>
                 </div>
 
-                {/* Right: system-triggered exposure summed across venues —
-                    total long (positive) and total short (negative), with
-                    mark-to-market PnL under the position sizes. */}
-                <div className="flex flex-col items-end space-y-0.5 shrink-0 font-mono">
-                  <div className="flex items-baseline space-x-1.5 text-xs">
-                    <span className="text-muted font-sans text-[10px] font-semibold">Long</span>
-                    <span className="tabular-nums font-semibold text-slate-800">
-                      {formatQty(longSum)}
-                    </span>
-                  </div>
-                  <div className="flex items-baseline space-x-1.5 text-xs">
-                    <span className="text-muted font-sans text-[10px] font-semibold">Short</span>
-                    <span className="tabular-nums font-semibold text-slate-800">
-                      {formatQty(shortSum)}
-                    </span>
-                  </div>
+                {/* Per-(venue, side) totals for every strategy — venue name
+                    on the left, signed net on the right; instruments live in
+                    the details modal. */}
+                <div className="mt-1 space-y-px font-mono">
+                  {shownRows.map((r) => (
+                    <div
+                      key={`${r.venue}|${r.side}`}
+                      className="flex items-baseline justify-between gap-2 text-[10px]"
+                    >
+                      <span className="inline-flex items-center gap-1.5 text-slate-600 font-sans font-semibold min-w-0">
+                        <VenueLogo venueId={r.venue.toLowerCase()} name={r.venue} size={13} />
+                        <span className="truncate">{r.venue}</span>
+                      </span>
+                      <span
+                        className={`tabular-nums font-semibold shrink-0 ${
+                          r.qty >= 0 ? "text-emerald-700" : "text-rose-700"
+                        }`}
+                      >
+                        {formatQty(r.qty)}
+                      </span>
+                    </div>
+                  ))}
+                  {venueRows.length === 0 && (
+                    <div className="text-[9px] text-muted font-sans">no net exposure</div>
+                  )}
+                  {hiddenRows > 0 && (
+                    <div className="text-[9px] text-muted font-sans">
+                      +{hiddenRows} more venue row{hiddenRows === 1 ? "" : "s"} — open details
+                    </div>
+                  )}
+                </div>
+
+                {/* Footer: strategy chip left, net-of-fees PnL right. */}
+                <div className="mt-1.5 pt-1 border-t border-surface-border/60 flex items-center justify-between gap-2">
+                  <span className="text-[9px] px-1.5 py-px rounded bg-slate-100 text-slate-600 font-mono font-bold border border-slate-200/60 whitespace-nowrap">
+                    {STRATEGY_SHORT[pos.strategyId] ?? pos.strategyId.toUpperCase()}
+                  </span>
                   <span
-                    className="text-xs font-mono text-slate-500 tabular-nums"
+                    className="text-[10px] font-semibold text-slate-500 tabular-nums shrink-0"
                     title={
                       pos.unrealizedPnlUsd !== null
                         ? `Mark-to-market PnL net of $${pos.feesUsd.toFixed(2)} fees`
@@ -415,7 +469,7 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
                         : "No mark-to-market data"
                     }
                   >
-                    PnL {pos.unrealizedPnlUsd !== null ? formatUsd(pos.unrealizedPnlUsd) : "—"}
+                    {pos.unrealizedPnlUsd !== null ? formatUsd(pos.unrealizedPnlUsd) : "—"}
                   </span>
                 </div>
               </div>
@@ -435,6 +489,7 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
               className={`font-mono text-xs font-bold tabular-nums ${
                 pnl >= 0 ? "text-profit" : "text-loss"
               }`}
+              title="Realized trading PnL — closed-leg deltas net of fees."
             >
               {pnl >= 0 ? `+$${pnl.toFixed(2)}` : `-$${Math.abs(pnl).toFixed(2)}`}
             </span>

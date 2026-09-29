@@ -31,7 +31,7 @@ use arbitrageur_execution::virtual_ledger::CycleStatus;
 use arbitrageur_risk::margin_monitor::{MarginHealthStatus, MarginMonitor, MarginMonitorConfig};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tauri::State;
 
@@ -172,6 +172,7 @@ pub(crate) fn reconcile_signal_legs(
                 .avg_fill_price
                 .and_then(|p| p.to_string().parse::<f64>().ok())
                 .filter(|p| *p > 0.0)
+                .and_then(|p| ledger_px_usd(state, &leg.venue.to_string(), &leg.symbol, p))
                 .ok_or_else(|| format!("leg {side:?} filled but reports no positive price"))?;
             state
                 .state_store
@@ -211,6 +212,177 @@ pub(crate) fn reconcile_signal_legs(
     )
 }
 
+/// Bounded staleness for *valuation* book reads — position marks, USD
+/// conversion sources. REST-polled venues (Deribit) refresh held legs on
+/// the monitor's held-symbol cadence, nowhere near the hub's 400ms WS TTL;
+/// a mark under two minutes old is still the venue's freshest real quote.
+/// Execution paths keep the tight default — this never loosens order
+/// dispatch freshness gates.
+pub(crate) const MARK_READ_TTL: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// UTC-day FX anchor for the drawdown breaker, persisted in kv
+/// `cb.fx_anchor`. `fx` maps an uppercase currency (`BTC`) to its USD
+/// price captured at the first account feed of the UTC day.
+#[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
+pub(crate) struct BreakerFxAnchor {
+    pub day: Option<chrono::NaiveDate>,
+    #[serde(default)]
+    pub fx: std::collections::HashMap<String, Decimal>,
+}
+
+/// Freshness bound for FX reads used by the drawdown freeze. Wider than
+/// `MARK_READ_TTL`: when every live book is gone the latest persisted
+/// spread sample is still a better index estimate than none.
+const BREAKER_FX_SAMPLE_TTL_MS: i64 = 2 * 3_600_000;
+
+/// Best available USD price for a non-USD balance currency: the median of
+/// fresh hub mids across venues for the common USD-quote spellings
+/// (median rejects a single venue's bad print), falling back to the
+/// newest persisted spread sample. `None` means no trustworthy price —
+/// callers then leave that currency's repricing inside the raw drawdown
+/// (fail-closed: an unknown FX must never hide a real equity move).
+pub(crate) fn fx_usd_now(state: &AppEngineState, ccy: &str) -> Option<Decimal> {
+    let ccy = ccy.to_ascii_uppercase();
+    let candidates = [
+        format!("{ccy}-USDT"),
+        format!("{ccy}-USDC"),
+        format!("{ccy}-PERPETUAL"),
+        format!("{ccy}USD"),
+        ccy.clone(),
+    ];
+    let mut mids: Vec<f64> = Vec::new();
+    for cand in &candidates {
+        for (_, book) in state
+            .market_data_hub
+            .get_cross_venue_snapshot(cand, Some(MARK_READ_TTL))
+        {
+            if let Some(m) = book
+                .mid_price()
+                .and_then(|m| dec_to_f64(m, "breaker fx mid").ok())
+                .filter(|m| *m > 0.0 && m.is_finite())
+            {
+                mids.push(m);
+            }
+        }
+    }
+    if mids.is_empty() {
+        let now = chrono::Utc::now().timestamp_millis();
+        let env = state.env().as_str().to_string();
+        for cand in &candidates {
+            if let Ok(rows) = state.state_store.spread_samples_mode(
+                cand,
+                true,
+                now - BREAKER_FX_SAMPLE_TTL_MS,
+                now,
+                &env,
+            ) {
+                if let Some(latest) = rows.last() {
+                    if latest.mid > 0.0 && latest.mid.is_finite() {
+                        mids.push(latest.mid);
+                    }
+                }
+            }
+        }
+    }
+    if mids.is_empty() {
+        return None;
+    }
+    mids.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let m = mids[mids.len() / 2];
+    Decimal::from_f64_retain(m).filter(|d| *d > dec!(0))
+}
+
+/// Equity for the drawdown breaker with coin-collateral repricing removed:
+/// each non-USD balance is revalued at the UTC-day-start FX, so an index
+/// move on coin-margined collateral (e.g. 130 BTC on Deribit) does not
+/// read as a trading drawdown. Coin-denominated trading PnL lands inside
+/// `equity_usd` itself and still moves the measure. A currency with no
+/// trustworthy FX leaves its repricing in place — conservative, never
+/// fabricated. Returns the adjusted equity; the applied adjustment is
+/// recorded per account key in `breaker_fx_adj` for the risk overview.
+fn breaker_frozen_equity_usd(
+    state: &AppEngineState,
+    feed_key: &str,
+    equity_usd: Decimal,
+    balances: &[arbitrageur_core::position::Balance],
+) -> Decimal {
+    use arbitrageur_core::symbol::is_usd_family;
+    let today = chrono::Utc::now().date_naive();
+    let mut adj = dec!(0);
+    let mut dirty = false;
+    {
+        let mut anchor = state.breaker_fx_anchor.lock();
+        if anchor.day != Some(today) {
+            anchor.day = Some(today);
+            anchor.fx.clear();
+            dirty = true;
+        }
+        for bal in balances {
+            if bal.total <= dec!(0) {
+                continue;
+            }
+            let ccy = bal.currency.to_ascii_uppercase();
+            if is_usd_family(&ccy) {
+                continue;
+            }
+            let Some(fx_now) = fx_usd_now(state, &ccy) else {
+                continue;
+            };
+            let fx_day = match anchor.fx.get(&ccy) {
+                Some(v) => *v,
+                None => {
+                    anchor.fx.insert(ccy.clone(), fx_now);
+                    dirty = true;
+                    fx_now
+                }
+            };
+            adj += bal.total * (fx_day - fx_now);
+        }
+        if dirty {
+            if let Ok(json) = serde_json::to_string(&*anchor) {
+                let _ = state.state_store.kv_set("cb.fx_anchor", &json);
+            }
+        }
+    }
+    state
+        .breaker_fx_adj
+        .lock()
+        .insert(feed_key.to_string(), adj);
+    equity_usd + adj
+}
+
+/// Ledger fill prices are USD. Deribit option premiums are the exception
+/// on the wire — they print in the settlement coin (BTC/ETH) — so any leg
+/// whose symbol is a fully-specified option contract on Deribit converts
+/// at the underlying perp's current hub mid before persisting. Returns
+/// `None` when conversion is required but no perp book is available:
+/// callers must leave the price cell empty rather than write a coin value
+/// under a USD label.
+pub(crate) fn ledger_px_usd(
+    state: &AppEngineState,
+    venue: &str,
+    symbol: &str,
+    venue_px: f64,
+) -> Option<f64> {
+    if !venue.eq_ignore_ascii_case("deribit")
+        || !crate::state_store::symbol_is_fixed_contract(symbol)
+    {
+        return Some(venue_px);
+    }
+    let ccy = symbol.split('-').next()?;
+    let perp = format!("{ccy}-PERPETUAL");
+    state
+        .market_data_hub
+        .get_valid_orderbook(
+            &arbitrageur_core::types::VenueId::from("deribit"),
+            &perp,
+            Some(MARK_READ_TTL),
+        )
+        .and_then(|b| b.mid_price())
+        .and_then(|m| dec_to_f64(m, "deribit perp mid").ok())
+        .map(|usd| venue_px * usd)
+}
+
 /// Persist the atomic truth of a coordinator unwind: the filled entry leg's
 /// actual fill on the root signal, plus the compensation unwind order as a
 /// `flat-` close child with its own leg, order identity, fill, and terminal
@@ -244,6 +416,9 @@ pub(crate) fn persist_unwind_leg_records(
             .avg_fill_price
             .and_then(|p| p.to_string().parse::<f64>().ok())
             .filter(|p| *p > 0.0)
+            .and_then(|p| {
+                ledger_px_usd(state, &entry_fill.venue.to_string(), &entry_fill.symbol, p)
+            })
         {
             let fee = entry_fill
                 .fee
@@ -337,7 +512,15 @@ pub(crate) fn persist_unwind_leg_records(
     let unwind_px = unwind_resp
         .avg_fill_price
         .and_then(|p| p.to_string().parse::<f64>().ok())
-        .filter(|p| *p > 0.0);
+        .filter(|p| *p > 0.0)
+        .and_then(|p| {
+            ledger_px_usd(
+                state,
+                &unwind_resp.venue.to_string(),
+                &unwind_resp.symbol,
+                p,
+            )
+        });
     if let Some(px) = unwind_px.filter(|_| unwind_qty > 0.0) {
         let fee = unwind_resp
             .fee
@@ -830,13 +1013,26 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
         if max < 1 {
             return Err("max_units must be at least 1".into());
         }
+        // Truthful derivative limit: downstream, any existing derivative
+        // position is refused ("closing lifecycle is not implemented"), so
+        // accumulation beyond one balanced unit can never actually trade —
+        // a configured cap above 1 is therefore clamped to 1 for derivative
+        // strategies rather than advertised. Spot keeps the configured cap:
+        // base holdings are real inventory, not unhedged derivative
+        // exposure. When a signed STEP/FIFO inventory model exists this
+        // clamp lifts.
+        let effective_max = if strategy_id == "spot" {
+            max
+        } else {
+            max.min(1)
+        };
         if let Some(step) = position_step {
             if step < 1 {
                 return Err("position_step must be at least 1".into());
             }
-            if step > max {
+            if step > effective_max {
                 return Err(format!(
-                    "Grid cap reached for {symbol}: position_step {step} exceeds max_units {max} — entry rejected"
+                    "Grid cap reached for {symbol}: position_step {step} exceeds max_units {effective_max} — entry rejected"
                 ));
             }
         }
@@ -844,9 +1040,9 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
             .state_store
             .open_balanced_signal_count(symbol, Some(state.env().as_str()))
             .map_err(|e| e.to_string())?;
-        if open_units >= i64::from(max) {
+        if open_units >= i64::from(effective_max) {
             return Err(format!(
-                "Grid cap reached for {symbol}: {open_units}/{max} open pairs — entry rejected"
+                "Grid cap reached for {symbol}: {open_units}/{effective_max} open pairs — entry rejected"
             ));
         }
     }
@@ -1274,8 +1470,71 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
         })?;
 
     let margin_monitor = margin_monitor_from_settings(state);
+
+    // Fail-early gates BEFORE any venue write: a halted engine must not
+    // mutate account state (set_leverage) either.
+    if let Err(reason) = state.circuit_breaker.is_trading_allowed() {
+        return Err(format!(
+            "Execution halted by Risk Circuit Breaker: {}",
+            reason
+        ));
+    }
+    if *state.is_paused.read() {
+        return Err(
+            "Trading engine is PAUSED. Positions are preserved, but new executions are suspended."
+                .into(),
+        );
+    }
+
+    // Effective order-time leverage: the strategy chain (strategy params,
+    // then the per-symbol legacy fallback, then 5) lowered via min() by
+    // each leg account's cap and the venue cap. Feeds both the IM
+    // pre-checks below and the set_leverage calls after the books load.
+    // Spot trades at 1x — no leverage negotiation applies.
+    let is_spot = strategy_id == "spot";
+    let (target_leverage, _account_cap) = if is_spot {
+        (1u32, None)
+    } else {
+        resolve_effective_leverage(
+            state,
+            "futures",
+            strategy_id,
+            symbol,
+            buy_venue,
+            sell_venue,
+            route_id,
+        )?
+    };
+
+    // Leverage is applied BEFORE the account/margin snapshot so the IM
+    // pre-check prices the leverage the venue actually accepted. A failed
+    // or unimplemented `set_leverage` is not silently assumed: that leg's
+    // sizing leverage degrades to the conservative bound (1x — full
+    // notional collateral), so an order never submits on margin priced for
+    // leverage the venue may not have applied. Fail-closed in both envs;
+    // a conservative refusal beats a one-legged fill. Venue adapters whose
+    // protocol pins leverage (or that implement `updateLeverage`) pass the
+    // call and keep the resolved target.
+    let mut leg_leverage = [1u32, 1u32];
+    if !is_spot {
+        for (slot, vname, adapter, leg_sym) in [
+            (0usize, buy_venue, &buy_adapter, buy_order_sym),
+            (1usize, sell_venue, &sell_adapter, sell_order_sym),
+        ] {
+            match adapter.set_leverage(leg_sym, target_leverage).await {
+                Ok(()) => leg_leverage[slot] = target_leverage,
+                Err(e) => {
+                    tracing::warn!(
+                        "set_leverage {target_leverage}x on {vname} {leg_sym} failed: {e} — sizing margin at the conservative 1x bound"
+                    );
+                }
+            }
+        }
+    }
+
     // Both environments read real venue accounts — the adapter is the
-    // environment-scoped one (production or venue testnet).
+    // environment-scoped one (production or venue testnet). Fetched AFTER
+    // leverage application so `free_margin` reflects the applied value.
     let acc_buy = buy_adapter
         .fetch_account()
         .await
@@ -1298,25 +1557,6 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
             _ => {}
         }
     }
-    // Effective order-time leverage: the strategy chain (strategy params,
-    // then the per-symbol legacy fallback, then 5) lowered via min() by
-    // each leg account's cap and the venue cap. Feeds both the IM
-    // pre-checks below and the set_leverage calls after the books load.
-    // Spot trades at 1x — no leverage negotiation applies.
-    let is_spot = strategy_id == "spot";
-    let (target_leverage, _account_cap) = if is_spot {
-        (1u32, None)
-    } else {
-        resolve_effective_leverage(
-            state,
-            "futures",
-            strategy_id,
-            symbol,
-            buy_venue,
-            sell_venue,
-            route_id,
-        )?
-    };
     if is_spot {
         // Spot cannot margin or short: the buy leg draws quote cash, the
         // sell leg draws base inventory. `AccountSnapshot::get_balance` is
@@ -1345,15 +1585,19 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
             ));
         }
     } else {
-        let leverage = Decimal::from(target_leverage);
-        let im_buy = (buy_vwap * qty_dec) / leverage;
+        // Margin is priced at the leverage each leg PROVED (target on a
+        // successful set, 1x when the venue could not apply it) — never at
+        // the desired value alone.
+        let lev_buy = Decimal::from(leg_leverage[0]);
+        let im_buy = (buy_vwap * qty_dec) / lev_buy;
         if im_buy > acc_buy.free_margin {
             return Err(format!(
                 "Insufficient free margin on {}: required {} > available {}",
                 buy_venue, im_buy, acc_buy.free_margin
             ));
         }
-        let im_sell = (sell_vwap * qty_dec) / leverage;
+        let lev_sell = Decimal::from(leg_leverage[1]);
+        let im_sell = (sell_vwap * qty_dec) / lev_sell;
         if im_sell > acc_sell.free_margin {
             return Err(format!(
                 "Insufficient free margin on {}: required {} > available {}",
@@ -1384,37 +1628,6 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
                         "Cannot verify {vname} position for {leg_sym} ({e}); refusing entry"
                     ));
                 }
-            }
-        }
-    }
-
-    if let Err(reason) = state.circuit_breaker.is_trading_allowed() {
-        return Err(format!(
-            "Execution halted by Risk Circuit Breaker: {}",
-            reason
-        ));
-    }
-    if *state.is_paused.read() {
-        return Err(
-            "Trading engine is PAUSED. Positions are preserved, but new executions are suspended."
-                .into(),
-        );
-    }
-
-    // Leverage set is best-effort in both environments: venues may reject
-    // no-op changes or cap at account level. A rejected change is NOT fatal
-    // (the order submits at existing leverage) but must be visible — an
-    // operator reading "5x" while the venue kept 20x changes margin math.
-    // Spot has no leverage concept — skip the calls entirely.
-    if !is_spot {
-        for (vname, adapter, leg_sym) in [
-            (buy_venue, &buy_adapter, buy_order_sym),
-            (sell_venue, &sell_adapter, sell_order_sym),
-        ] {
-            if let Err(e) = adapter.set_leverage(leg_sym, target_leverage).await {
-                tracing::warn!(
-                    "set_leverage {target_leverage}x on {vname} {leg_sym} failed: {e} — order will submit at the venue's existing leverage"
-                );
             }
         }
     }
@@ -1509,6 +1722,28 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
             state.env().as_str(),
         )
         .map_err(|e| format!("Failed to persist in-flight signal record: {e}"))?;
+
+    // Persist each leg's client order id BEFORE dispatch: the id rides on
+    // the venue wire, so a crash between venue accept and ack persistence
+    // still leaves a locator the reconciler can resolve. Without a durable
+    // locator the dispatch would be unrecoverable — refuse it.
+    for (side, order) in [
+        (crate::state_store::LegSide::Long, &order_buy),
+        (crate::state_store::LegSide::Short, &order_sell),
+    ] {
+        if let Err(e) =
+            state
+                .state_store
+                .record_leg_client_order_id(&signal_id, side, &order.client_order_id)
+        {
+            let _ = state.state_store.update_signal_status(
+                &signal_id,
+                crate::state_store::SignalStatus::Failed,
+                Some("client order id persistence failed — dispatch refused"),
+            );
+            return Err(format!("Failed to persist client order id: {e}"));
+        }
+    }
 
     // Calibration log: persist the forecast BEFORE dispatch so the row
     // provably predates the outcome it will be scored against. A failed
@@ -1849,9 +2084,14 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
             ] {
                 if let Some(f) = fill {
                     let filled = f.filled_qty.to_string().parse::<f64>().unwrap_or(0.0);
+                    // Coin-denominated fills (Deribit options) convert to the
+                    // ledger's USD unit here; a missing rate falls to 0.0 and
+                    // the `px > 0.0` gate below skips the write rather than
+                    // persisting a coin value under a USD label.
                     let px = f
                         .avg_fill_price
                         .and_then(|p| p.to_string().parse::<f64>().ok())
+                        .and_then(|p| ledger_px_usd(state, &f.venue.to_string(), &f.symbol, p))
                         .unwrap_or(0.0);
                     let fee = f
                         .fee
@@ -2665,18 +2905,20 @@ pub async fn get_open_positions(
         signals.retain(|s| s.strategy_id.eq_ignore_ascii_case(&sid));
     }
     let hub = &state.market_data_hub;
+    let engine: &AppEngineState = &state;
     let mut positions = crate::state_store::aggregate_open_positions(&signals, &|venue, symbol| {
-        hub.get_valid_orderbook(&VenueId::from(venue), symbol, None)
-            .and_then(|b| b.mid_price())
+        hub.get_valid_orderbook(&VenueId::from(venue), symbol, Some(MARK_READ_TTL))
+            // Valuation fallback: a one-sided book has no mid but may carry
+            // the venue's own model mark (Deribit options) — the venue's
+            // accounting price, still never an executable quote.
+            .and_then(|b| b.mid_price().or(b.mark_price))
             .and_then(|m| dec_to_f64(m, "mark mid").ok())
+            .and_then(|p| ledger_px_usd(engine, venue, symbol, p))
     });
     // An unreadable flag fails closed: refuse the whole read rather than
     // badge a reduce-only ticker as freely tradable.
     for p in &mut positions {
-        p.reduce_only = state
-            .state_store
-            .ticker_reduce_only(&p.symbol, &p.strategy_id, state.env().as_str())
-            .map_err(|e| e.to_string())?;
+        p.reduce_only = trade_reduce_only(engine, p)?;
     }
     Ok(positions)
 }
@@ -2840,24 +3082,65 @@ pub(crate) async fn live_account_or_cached(
     }
 }
 
+/// The account bucket a venue's equity belongs in for breaker/risk
+/// aggregation: the adapter's shared economic-account identity (e.g. an
+/// EVM wallet backing several AMM venues) when it has one, else the venue
+/// id — one account per adapter is the finest granularity provable.
+pub(crate) fn breaker_account_key(state: &AppEngineState, vid: &str) -> String {
+    state
+        .get_adapter(vid)
+        .and_then(|a| a.economic_account_key())
+        .unwrap_or_else(|| vid.to_string())
+}
+
+/// Economic-account keys for every currently-admitted venue — the set the
+/// breaker map prunes to, so a disabled venue's stale equity (or a
+/// re-keyed adapter's abandoned bucket) cannot ghost the portfolio total.
+fn admitted_account_keys(state: &AppEngineState, env_prefix: &str) -> HashSet<String> {
+    state
+        .get_venues()
+        .iter()
+        .map(|(vid, _, adapter)| {
+            format!(
+                "{env_prefix}{}",
+                adapter
+                    .economic_account_key()
+                    .unwrap_or_else(|| vid.to_string())
+            )
+        })
+        .collect()
+}
+
 /// Feed the drawdown breaker from one venue's freshly-observed USD-basis
 /// equity. The breaker watches the portfolio total for the ACTIVE
-/// environment — `breaker_venue_equity` holds each venue's last-seen
-/// value keyed `{env}-{vid}`, so any lane that reads an account (risk
-/// overview, margin poller) keeps the total current even while nobody
-/// polls the UI. A testnet<->live switch is a different account universe,
-/// never a trading loss: the baseline re-anchors instead of tripping.
-/// On a genuine universe switch the map's stale-env entries are dropped
-/// so the old env's equity can't ghost the new env's total.
-pub(crate) fn feed_breaker_equity_usd(state: &AppEngineState, vid: &str, equity_usd: Decimal) {
+/// environment — `breaker_venue_equity` holds each ECONOMIC ACCOUNT's
+/// last-seen value keyed `{env}-{econ_key}`, so two adapters sharing one
+/// account update the same bucket instead of double-counting it, and any
+/// lane that reads an account (risk overview, margin poller) keeps the
+/// total current even while nobody polls the UI. A testnet<->live switch
+/// is a different account universe, never a trading loss: the baseline
+/// re-anchors instead of tripping. Stale-env and non-admitted entries are
+/// dropped so dead equity can't ghost the new total.
+pub(crate) fn feed_breaker_equity_usd(
+    state: &AppEngineState,
+    vid: &str,
+    equity_usd: Decimal,
+    balances: &[arbitrageur_core::position::Balance],
+) {
     let env_str = state.env().as_str();
     let prefix = format!("{env_str}-");
-    let key = format!("{prefix}{vid}");
+    let key = format!("{prefix}{}", breaker_account_key(state, vid));
+    let frozen = breaker_frozen_equity_usd(state, &key, equity_usd, balances);
     let is_live = state.is_live();
     let total: Decimal = {
         let mut map = state.breaker_venue_equity.lock();
-        map.insert(key, equity_usd);
-        map.retain(|k, _| k.starts_with(&prefix));
+        map.insert(key.clone(), frozen);
+        let admitted = admitted_account_keys(state, &prefix);
+        map.retain(|k, _| admitted.contains(k));
+        state
+            .breaker_fx_adj
+            .lock()
+            .retain(|k, _| admitted.contains(k));
         map.values().sum()
     };
     let mut universe = state.last_risk_live_universe.write();
@@ -2870,17 +3153,28 @@ pub(crate) fn feed_breaker_equity_usd(state: &AppEngineState, vid: &str, equity_
 }
 
 /// Batch variant for lanes that already hold the full account list —
-/// same per-venue bookkeeping, one total push at the end.
-pub(crate) fn feed_breaker_equity(state: &AppEngineState, accounts: &[AccountSnapshot]) {
+/// `(econ_key, equity, balances)` triples, same per-account bookkeeping,
+/// one total push at the end.
+pub(crate) fn feed_breaker_equity(
+    state: &AppEngineState,
+    entries: &[(String, Decimal, Vec<arbitrageur_core::position::Balance>)],
+) {
     let env_str = state.env().as_str();
     let prefix = format!("{env_str}-");
     let is_live = state.is_live();
     let total: Decimal = {
         let mut map = state.breaker_venue_equity.lock();
-        for acc in accounts {
-            map.insert(format!("{prefix}{}", acc.venue), acc.equity);
+        for (key, equity, balances) in entries {
+            let fkey = format!("{prefix}{key}");
+            let frozen = breaker_frozen_equity_usd(state, &fkey, *equity, balances);
+            map.insert(fkey, frozen);
         }
-        map.retain(|k, _| k.starts_with(&prefix));
+        let admitted = admitted_account_keys(state, &prefix);
+        map.retain(|k, _| admitted.contains(k));
+        state
+            .breaker_fx_adj
+            .lock()
+            .retain(|k, _| admitted.contains(k));
         map.values().sum()
     };
     let mut universe = state.last_risk_live_universe.write();
@@ -2942,6 +3236,13 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
             }
         }
     };
+    // Economic-account dedup: two adapters can trade the same account
+    // (e.g. AMM venues sharing one EVM wallet). Summing both snapshots
+    // would double-count equity, margin, and positions — first adapter on
+    // an account wins; the rest are the same money.
+    let mut seen_accounts: HashSet<String> = HashSet::new();
+    let mut breaker_feed: Vec<(String, Decimal, Vec<arbitrageur_core::position::Balance>)> =
+        Vec::new();
     for (vid, _name, adapter) in state.get_venues() {
         match live_account_or_cached(state, vid, &adapter).await {
             Ok((mut acc, stale_age)) => {
@@ -2954,16 +3255,45 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
                             );
                         }
                     } else {
-                        tracing::warn!(
-                            "risk overview: {vid} read failed, using last-known figures ({}s old)",
-                            age / 1000
-                        );
+                        // Per-venue throttle: a sustained outage is one
+                        // anomaly — warn at most once per 60s per venue
+                        // while stale figures keep serving.
+                        let warn_due = {
+                            let mut t = state.risk_stale_warn_at.lock();
+                            match t.get(vid) {
+                                Some(prev)
+                                    if prev.elapsed() < std::time::Duration::from_secs(60) =>
+                                {
+                                    false
+                                }
+                                _ => {
+                                    t.insert(vid.to_string(), std::time::Instant::now());
+                                    true
+                                }
+                            }
+                        };
+                        if warn_due {
+                            tracing::warn!(
+                                "risk overview: {vid} read failed, using last-known figures ({}s old)",
+                                age / 1000
+                            );
+                        }
                     }
                 }
                 // USD-quote policy: a venue settling in USDT reports equity
                 // in USDT — convert to the USD basis before portfolio sums
                 // so a depeg shows as real drawdown, not noise.
                 state.normalize_account_usd(vid, &mut acc);
+                let econ_key = adapter
+                    .economic_account_key()
+                    .unwrap_or_else(|| vid.to_string());
+                if !seen_accounts.insert(econ_key.clone()) {
+                    tracing::debug!(
+                        "risk overview: {vid} shares an economic account with an already-counted adapter — skipped from portfolio sums"
+                    );
+                    continue;
+                }
+                breaker_feed.push((econ_key, acc.equity, acc.balances.clone()));
                 accounts.push(acc);
             }
             Err(e) => {
@@ -2974,7 +3304,24 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
                         );
                     }
                 } else {
-                    tracing::warn!("risk overview: account read failed for {vid} (no cache): {e}");
+                    // Same 60s per-venue throttle as the stale-figure warn.
+                    let warn_due = {
+                        let mut t = state.risk_stale_warn_at.lock();
+                        match t.get(vid) {
+                            Some(prev) if prev.elapsed() < std::time::Duration::from_secs(60) => {
+                                false
+                            }
+                            _ => {
+                                t.insert(vid.to_string(), std::time::Instant::now());
+                                true
+                            }
+                        }
+                    };
+                    if warn_due {
+                        tracing::warn!(
+                            "risk overview: account read failed for {vid} (no cache): {e}"
+                        );
+                    }
                 }
             }
         }
@@ -2985,11 +3332,11 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
     let total_mm_dec: Decimal = accounts.iter().map(|a| a.maintenance_margin).sum();
     let all_positions: Vec<_> = accounts.iter().flat_map(|a| a.positions.clone()).collect();
 
-    // Feed observed equity into the breaker (env-scoped portfolio total),
-    // then re-read its state so a drawdown trip is reflected in this same
-    // snapshot.
+    // Feed observed equity into the breaker (env-scoped portfolio total,
+    // keyed by economic account), then re-read its state so a drawdown
+    // trip is reflected in this same snapshot.
     let is_halted = {
-        feed_breaker_equity(state, &accounts);
+        feed_breaker_equity(state, &breaker_feed);
         cb.is_tripped()
     };
     let cb_str = match cb.trip_reason() {
@@ -3069,9 +3416,31 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
             worst = s;
         }
     }
+    // Portfolio-margin venues (Deribit) never emit per-position liq prices —
+    // liquidation strikes when account equity reaches the maintenance
+    // requirement, so that account-level distance IS the honest measurement
+    // for positions on them. Collect it per venue up front; a position's
+    // Unknown severity is only excused when its own venue can measure.
+    let mut acct_liq_pct: std::collections::HashMap<arbitrageur_core::types::VenueId, f64> =
+        std::collections::HashMap::new();
+    for acc in &accounts {
+        if let Some(dist) = MarginMonitor::account_liquidation_distance(acc) {
+            acct_liq_pct.insert(
+                acc.venue.clone(),
+                (dist * dec!(100)).to_string().parse::<f64>().unwrap_or(0.0),
+            );
+        }
+    }
+
     let mut min_liq_dist_pct: Option<f64> = None;
     for pos in &all_positions {
-        let s = monitor.evaluate_position(pos);
+        let mut s = monitor.evaluate_position(pos);
+        if s == MarginHealthStatus::Unknown && acct_liq_pct.contains_key(&pos.venue) {
+            // The venue reports maintenance margin — the position's true
+            // liquidation boundary is the account's, already folded into
+            // min_liq_dist_pct below. Not unmeasurable: Healthy at this level.
+            s = MarginHealthStatus::Healthy;
+        }
         if severity(s) > severity(worst) {
             worst = s;
         }
@@ -3083,9 +3452,16 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
             });
         }
     }
+    for (_, pct) in acct_liq_pct {
+        min_liq_dist_pct = Some(match min_liq_dist_pct {
+            Some(cur) => cur.min(pct),
+            None => pct,
+        });
+    }
 
-    // Liquidation safety cannot be claimed without actual liquidation prices;
-    // open positions with no liquidation data report UNKNOWN_LIQUIDATION
+    // Liquidation safety needs a measured distance: per-position liq prices
+    // or, on portfolio-margin venues, the account's equity-to-maintenance
+    // buffer. Positions with neither stay unmeasurable → UNKNOWN_LIQUIDATION
     // unless a margin severity already demands a stronger state.
     let margin_status = if is_halted {
         "HALTED"
@@ -3107,12 +3483,28 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
         }
     };
 
+    let fx_adj_total: f64 = {
+        let env_str = state.env().as_str();
+        let prefix = format!("{env_str}-");
+        state
+            .breaker_fx_adj
+            .lock()
+            .iter()
+            .filter(|(k, _)| k.starts_with(&prefix))
+            .map(|(_, v)| *v)
+            .sum::<Decimal>()
+            .to_string()
+            .parse::<f64>()
+            .unwrap_or(0.0)
+    };
+
     Ok(RiskOverviewDto {
         circuit_breaker_state: cb_str,
         is_halted,
         current_drawdown_usd: current_drawdown,
         max_drawdown_limit_usd: max_drawdown_limit,
         drawdown_pct,
+        collateral_fx_adjustment_usd: fx_adj_total,
         consecutive_failures: cb.consecutive_errors(),
         max_failures_allowed: cb.max_consecutive_errors(),
         total_portfolio_value_usd: total_equity,
@@ -3278,6 +3670,11 @@ struct FlattenLegArgs<'a> {
     sig_id: &'a str,
     notes: &'a mut Vec<String>,
     execution_type: Option<&'a str>,
+    /// `(signal_id, leg_side)` of the durable close-child row this order
+    /// belongs to — when present, the minted client order id is persisted
+    /// onto that leg BEFORE dispatch so an accept-then-crash stays
+    /// recoverable. `None` when the caller owns identity persistence.
+    cid_target: Option<(&'a str, crate::state_store::LegSide)>,
 }
 
 /// Outcome of one flatten-leg dispatch. `fill` is present only when the
@@ -3304,6 +3701,7 @@ async fn flatten_leg(args: FlattenLegArgs<'_>) -> Result<FlattenLegOutcome, Stri
         notes,
         strategy_id,
         execution_type,
+        cid_target,
     } = args;
     let adapter = state
         .get_adapter(venue)
@@ -3386,6 +3784,15 @@ async fn flatten_leg(args: FlattenLegArgs<'_>) -> Result<FlattenLegOutcome, Stri
         arbitrageur_core::order::OrderRequest::new_market(adapter.venue_id(), symbol, side, qty);
     order.reduce_only = adapter.supports_reduce_only(symbol);
     let client_order_id = order.client_order_id.clone();
+
+    // Persist the client order id BEFORE dispatch — an accept-then-crash
+    // without a durable locator is unrecoverable.
+    if let Some((cid_sig, cid_side)) = cid_target {
+        state
+            .state_store
+            .record_leg_client_order_id(cid_sig, cid_side, &client_order_id)
+            .map_err(|e| format!("client order id persist failed — dispatch refused: {e}"))?;
+    }
 
     let resp = adapter
         .place_order(order)
@@ -3470,6 +3877,51 @@ pub(crate) fn accumulate_realized_profit(state: &AppEngineState, is_live: bool, 
     persisted.parse::<f64>().unwrap_or(0.0)
 }
 
+/// Accumulate option premium cashflow (premiums paid minus received at
+/// entry, minus fees) under `pnl.premium_outlay.{env}` — kept out of the
+/// realized-PnL counter because the premium is financing that converts to
+/// real PnL only at close/expiry. Persisted like the realized counter.
+pub(crate) fn accumulate_premium_outlay(state: &AppEngineState, is_live: bool, usd: f64) -> f64 {
+    if !usd.is_finite() {
+        return if is_live {
+            state
+                .total_premium_outlay_live
+                .read()
+                .to_string()
+                .parse::<f64>()
+                .unwrap_or(0.0)
+        } else {
+            state
+                .total_premium_outlay
+                .read()
+                .to_string()
+                .parse::<f64>()
+                .unwrap_or(0.0)
+        };
+    }
+    let delta = Decimal::from_str_exact(&usd.to_string()).unwrap_or(dec!(0));
+    let (key, persisted) = {
+        let mut total = if is_live {
+            state.total_premium_outlay_live.write()
+        } else {
+            state.total_premium_outlay.write()
+        };
+        *total += delta;
+        (
+            if is_live {
+                "pnl.premium_outlay.live"
+            } else {
+                "pnl.premium_outlay.testnet"
+            },
+            total.to_string(),
+        )
+    };
+    if let Err(e) = state.state_store.kv_set(key, &persisted) {
+        tracing::warn!("persist cumulative premium outlay failed: {e}");
+    }
+    persisted.parse::<f64>().unwrap_or(0.0)
+}
+
 /// Realize a liquidation trim's filled portion: accumulate its partial-close
 /// cash and shrink the open lot's quantities so the final flatten's fills
 /// still cover the remaining qty. Returns the realized USD (0 when no fills
@@ -3534,9 +3986,10 @@ pub(crate) fn realize_liq_trim(
     // fills enriched by order polling), so the durable mark tracks the
     // counted cumulative qty/pnl/fee — only the uncounted increment shrinks
     // the lot and reaches the counter.
+    let lot_sym = lot.symbol.clone();
     let realize_leg =
         |q: f64, px: f64, fee: f64, entry_px: f64, side: LegSide, venue: &str| -> (f64, f64) {
-            let mark = unlotted_fill_key(close_id, venue, side);
+            let mark = unlotted_fill_key(close_id, venue, &lot_sym, side);
             let (q_done, pnl_done, fee_done) = read_unlotted_mark(state, &mark);
             let delta_q = q - q_done;
             if delta_q <= 0.0 {
@@ -3605,9 +4058,21 @@ pub(crate) fn realize_liq_trim(
 /// venue + closing side — fills land atomically per leg via `apply_leg_fill`,
 /// so a leg present-unmarked gets picked up on the next pass even when its
 /// fill arrived late through order reconciliation.
-fn unlotted_fill_key(child_id: &str, venue: &str, side: crate::state_store::LegSide) -> String {
+fn unlotted_fill_key(
+    child_id: &str,
+    venue: &str,
+    symbol: &str,
+    side: crate::state_store::LegSide,
+) -> String {
     let canon = crate::state::canonical_venue_id(venue).unwrap_or(venue);
-    format!("unlotted.fill.{child_id}.{canon}.{}", side.as_str())
+    // Symbol is in the key: a package close can carry several same-side
+    // legs on one venue (e.g. four long option legs at different strikes)
+    // and venue+side alone collapses them into one mark.
+    format!(
+        "unlotted.fill.{child_id}.{canon}.{}.{}",
+        symbol.to_uppercase(),
+        side.as_str()
+    )
 }
 
 /// Sum the counted-fee share of durable marks on a family's close-aggregation
@@ -3628,8 +4093,10 @@ pub(crate) fn marked_family_fees(
         .filter(|child| !child.id.starts_with("trim-"))
         .flat_map(|child| child.legs.iter().map(move |l| (child.id.as_str(), l)))
         .map(|(cid, leg)| {
-            let (_, _, fee) =
-                read_unlotted_mark(state, &unlotted_fill_key(cid, &leg.venue, leg.side));
+            let (_, _, fee) = read_unlotted_mark(
+                state,
+                &unlotted_fill_key(cid, &leg.venue, &leg.symbol, leg.side),
+            );
             fee
         })
         .sum()
@@ -3717,7 +4184,7 @@ pub(crate) fn accumulate_unlotted_family_fills(
             if !(q > 0.0 && px > 0.0 && fee.is_finite()) {
                 continue;
             }
-            let mark = unlotted_fill_key(&child.id, &leg.venue, leg.side);
+            let mark = unlotted_fill_key(&child.id, &leg.venue, &leg.symbol, leg.side);
             // Delta semantics: a leg's fill can grow across passes, so the
             // mark tracks the counted cumulative qty/pnl/fee — only the
             // uncounted increment is realized now.
@@ -3726,10 +4193,18 @@ pub(crate) fn accumulate_unlotted_family_fills(
             if delta_q <= 0.0 {
                 continue;
             }
+            // Pair the closing fill with the entry leg for the *same*
+            // instrument: venue+symbol, not just opposite-side-on-venue —
+            // a multi-leg package has many opposite-side legs on one venue
+            // and a wrong-strike pairing books fabricated deltas.
             let entry_px = sig
                 .legs
                 .iter()
-                .find(|root| root.side != leg.side && root.venue.eq_ignore_ascii_case(&leg.venue))
+                .find(|root| {
+                    root.side != leg.side
+                        && root.venue.eq_ignore_ascii_case(&leg.venue)
+                        && root.symbol.eq_ignore_ascii_case(&leg.symbol)
+                })
                 .and_then(|root| root.fill_price)
                 .filter(|px| *px > 0.0);
             let Some(entry_px) = entry_px else {
@@ -3751,6 +4226,19 @@ pub(crate) fn accumulate_unlotted_family_fills(
                 continue;
             }
             realized += leg_pnl;
+            // Release the entry premium outlay for the closed slice: an
+            // option leg's entry cashflow sat in `total_premium_outlay`
+            // while open; once the leg closes, that premium has converted
+            // into the leg delta above and must leave the outlay bucket.
+            // (Closing side is opposite the entry — Short closes a paid
+            // Long premium, Long closes a received Short premium.)
+            if crate::state_store::symbol_is_fixed_contract(&leg.symbol) {
+                let release = match leg.side {
+                    LegSide::Short => entry_px * delta_q,
+                    LegSide::Long => -entry_px * delta_q,
+                };
+                accumulate_premium_outlay(state, state.is_live(), release);
+            }
         }
     }
     if realized != 0.0 {
@@ -4038,6 +4526,30 @@ pub async fn flatten_signal_positions_impl(
     .await
 }
 
+/// A trade card is exits-only when ANY of its leg instruments — or the
+/// group's display symbol — carries the durable (env, strategy, symbol)
+/// reduce-only flag. An unreadable flag fails closed: propagate.
+pub(crate) fn trade_reduce_only(
+    state: &AppEngineState,
+    pos: &crate::state_store::OpenPositionDto,
+) -> Result<bool, String> {
+    let env = state.env().as_str();
+    let mut symbols: Vec<&str> = pos.leg_symbols.iter().map(|s| s.as_str()).collect();
+    if !symbols.iter().any(|s| *s == pos.symbol) {
+        symbols.push(pos.symbol.as_str());
+    }
+    for sym in symbols {
+        if state
+            .state_store
+            .ticker_reduce_only(sym, &pos.strategy_id, env)
+            .map_err(|e| e.to_string())?
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 async fn flatten_ticker_positions_scoped_impl(
     symbol: Option<&str>,
     strategy_id: &str,
@@ -4045,6 +4557,51 @@ async fn flatten_ticker_positions_scoped_impl(
     close_status: CycleStatus,
     state: &AppEngineState,
     only_signal_id: Option<&str>,
+) -> Result<FlattenResultDto, String> {
+    flatten_positions_inner(
+        symbol,
+        strategy_id,
+        execution_type,
+        close_status,
+        state,
+        only_signal_id,
+        None,
+    )
+    .await
+}
+
+/// Flatten every root signal of one executed trade — all `{trade}-legN`
+/// siblings (an options package's legs) plus the bare `{trade}` id for
+/// single-signal executions. Symbol filtering is skipped: a package's
+/// legs span instruments, so the whole family must be loaded for child
+/// fills and pending-child suppression to see the complete picture.
+pub async fn flatten_trade_positions_impl(
+    trade_id: &str,
+    strategy_id: &str,
+    execution_type: Option<&str>,
+    close_status: CycleStatus,
+    state: &AppEngineState,
+) -> Result<FlattenResultDto, String> {
+    flatten_positions_inner(
+        None,
+        strategy_id,
+        execution_type,
+        close_status,
+        state,
+        None,
+        Some(trade_id),
+    )
+    .await
+}
+
+async fn flatten_positions_inner(
+    symbol: Option<&str>,
+    strategy_id: &str,
+    execution_type: Option<&str>,
+    close_status: CycleStatus,
+    state: &AppEngineState,
+    only_signal_id: Option<&str>,
+    only_trade_id: Option<&str>,
 ) -> Result<FlattenResultDto, String> {
     use crate::state_store::{LegSide, NewSignalExecution, NewSignalLeg, SignalStatus};
 
@@ -4066,10 +4623,25 @@ async fn flatten_ticker_positions_scoped_impl(
         .state_store
         .list_signals(symbol, None)
         .map_err(|e| e.to_string())?;
+    let trade_match = |id: &str| -> bool {
+        match only_trade_id {
+            None => true,
+            // `{trade}-leg*` covers package leg signals; `{trade}` itself
+            // covers single-signal trades. `flat-`/`trim-` children are
+            // excluded by the root filter below either way.
+            Some(t) => {
+                id == t
+                    || id
+                        .strip_prefix(t)
+                        .is_some_and(|rest| rest.starts_with("-leg"))
+            }
+        }
+    };
     let roots: Vec<crate::state_store::SignalExecution> = all_signals
         .iter()
         .filter(|s| {
             (only_signal_id.is_none() || only_signal_id == Some(s.id.as_str()))
+                && trade_match(&s.id)
                 && !s.id.starts_with("flat-")
                 && !s.id.starts_with("trim-")
                 && s.strategy_id.eq_ignore_ascii_case(&sid)
@@ -4080,7 +4652,9 @@ async fn flatten_ticker_positions_scoped_impl(
 
     let mut out = FlattenResultDto {
         strategy_id: sid.clone(),
-        symbol: symbol.map(|s| s.to_string()),
+        symbol: symbol
+            .map(|s| s.to_string())
+            .or_else(|| only_trade_id.map(|t| t.to_string())),
         signals_processed: roots.len(),
         signals_closed: 0,
         legs_closed: 0,
@@ -4303,21 +4877,58 @@ async fn flatten_ticker_positions_scoped_impl(
                     )?;
                     let dispatchable = (residual - pending).max(dec!(0));
                     let basis = dispatchable.min(p.quantity);
+                    // Venue-excess sweep: the venue may hold MORE than the
+                    // ledger residual (a child close partially filled but
+                    // was recorded failed, an entry over-filled beyond the
+                    // last poll, …). Ledger-sized closes then strand real
+                    // exposure — observed as an unflattenable 0.014 ETH
+                    // residual whose ledger residual was 0.0001. When no
+                    // other open signal claims this venue+symbol, the
+                    // excess is this family's by elimination: close the
+                    // venue's quantity, not ours. In-flight child closes
+                    // already claim `pending` of the venue position — only
+                    // the UNCLAIMED remainder is excess, or a re-click while
+                    // a close order works would double-dispatch.
+                    let mut qty = basis;
+                    let venue_unclaimed = (p.quantity - pending).max(dec!(0));
+                    if venue_unclaimed > qty {
+                        let leg_base = arbitrageur_core::symbol::canonical_base(&leg.symbol);
+                        let shared = all_signals.iter().any(|s| {
+                            s.id != sig.id
+                                && !crate::state_store::is_flatten_child_id(&s.id, &sig.id)
+                                && s.status.counts_as_open()
+                                && s.legs.iter().any(|l| {
+                                    (l.symbol.eq_ignore_ascii_case(&leg.symbol)
+                                        || arbitrageur_core::symbol::canonical_base(&l.symbol)
+                                            == leg_base)
+                                        && crate::state::canonical_venue_id(&l.venue)
+                                            == Some(canonical)
+                                })
+                        });
+                        if !shared {
+                            qty = venue_unclaimed;
+                            out.notes.push(format!(
+                                "{}: {} venue position {} exceeds ledger residual+pending {}; closing venue truth (exclusive symbol)",
+                                sig.id, leg.symbol, p.quantity, dispatchable + pending
+                            ));
+                        } else {
+                            out.notes.push(format!(
+                                "{}: {} venue position {} exceeds ledger residual+pending {} but the symbol is shared; closing ledger residual only",
+                                sig.id, leg.symbol, p.quantity, dispatchable + pending
+                            ));
+                        }
+                    }
                     // Leftover sweep: when the residual exceeds the closable
                     // quantity by less than one full ticker step, close the
                     // ENTIRE residual instead of stranding sub-step dust.
                     // Oversized reduce-only paper orders cap at the position.
-                    let mut qty = basis;
-                    let swept = sweep_flatten_qty(
-                        dispatchable,
-                        basis,
-                        flatten_step_qty(state, &sig.symbol),
-                    );
-                    if swept > basis {
+                    let swept =
+                        sweep_flatten_qty(dispatchable, qty, flatten_step_qty(state, &sig.symbol));
+                    if swept > qty {
                         qty = swept;
                         out.notes.push(format!(
                             "{}: {} leg sweep closes entire residual {}/{} (sub-step leftover)",
-                            sig.id, leg.venue, swept, basis
+                            sig.id, leg.venue, swept, qty
                         ));
                     }
                     if qty <= dec!(0) {
@@ -4453,6 +5064,7 @@ async fn flatten_ticker_positions_scoped_impl(
                 sig_id: &sig.id,
                 notes: &mut out.notes,
                 execution_type,
+                cid_target: Some((&close_id, t.leg_side)),
             })
             .await
             {
@@ -4475,13 +5087,25 @@ async fn flatten_ticker_positions_scoped_impl(
                     }
                     match outcome.fill {
                         Some((qty, px, fee)) => {
+                            let venue_px = dec_to_f64(px, "fill price")?;
+                            // Deribit option premiums fill in coin; the ledger
+                            // is USD — mixing them realizes a ~1000x unit error.
+                            let Some(ledger_px) =
+                                ledger_px_usd(state, &t.venue, &t.exact_symbol, venue_px)
+                            else {
+                                out.notes.push(format!(
+                                    "{}: {} close fill has no USD conversion ({px}) — reconciler settles it",
+                                    sig.id, t.venue
+                                ));
+                                continue;
+                            };
                             state
                                 .state_store
                                 .apply_leg_fill(
                                     &close_id,
                                     t.leg_side,
                                     dec_to_f64(qty, "fill quantity")?,
-                                    dec_to_f64(px, "fill price")?,
+                                    ledger_px,
                                     dec_to_f64(fee.unwrap_or_default(), "fill fee")?,
                                     outcome.order_id.as_deref(),
                                 )
@@ -4652,10 +5276,11 @@ async fn flatten_ticker_positions_scoped_impl(
         .map_err(|e| e.to_string())?
         .into_iter()
         .filter(|s| {
-            // A signal-scoped flatten measures residual against that
-            // family only — unrelated open carries must not keep the
-            // scoped row "actionable" forever.
+            // A scoped flatten measures residual against that scope only —
+            // unrelated open trades (a sibling package under the same
+            // strategy) must not keep the scoped row "actionable" forever.
             (only_signal_id.is_none() || only_signal_id == Some(s.id.as_str()))
+                && trade_match(&s.id)
                 && !s.id.starts_with("flat-")
                 && !s.id.starts_with("trim-")
                 && s.strategy_id.eq_ignore_ascii_case(&sid)
@@ -4857,6 +5482,29 @@ pub async fn flatten_ticker_positions(
     .await
 }
 
+/// Flatten one executed trade — every `{tradeId}-legN` leg signal at once.
+/// Multi-instrument packages have no single `symbol` to key on, so the
+/// positions card's Clear action targets the trade identity directly.
+#[tauri::command]
+pub async fn flatten_trade_positions(
+    trade_id: String,
+    strategy_id: String,
+    execution_type: Option<String>,
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<FlattenResultDto, String> {
+    flatten_trade_positions_impl(
+        &trade_id,
+        &strategy_id,
+        execution_type.as_deref(),
+        match execution_type.as_deref() {
+            Some("emergency_market") => CycleStatus::StoppedOut,
+            _ => CycleStatus::Closed,
+        },
+        &state,
+    )
+    .await
+}
+
 /// Re-price the live edge of an open "futures" pair from freshly validated
 /// books. `Ok(None)` means the edge is currently unpriceable (stale/missing
 /// books or unpriceable depth) — the caller holds (Unwatched) rather than
@@ -4887,10 +5535,19 @@ async fn live_spatial_edge(
         ) {
             Some(b) => b,
             None => {
+                let want_base = arbitrageur_core::symbol::canonical_base(symbol);
+                let fetch_sym = crate::commands::venue_fetch_symbol(
+                    state,
+                    vid.as_str(),
+                    adapter,
+                    &want_base,
+                    symbol,
+                )
+                .await;
                 let b = adapter
-                    .fetch_orderbook(symbol)
+                    .fetch_orderbook(&fetch_sym)
                     .await
-                    .map_err(|e| format!("No fresh {side} orderbook for {symbol}: {e}"))?;
+                    .map_err(|e| format!("No fresh {side} orderbook for {fetch_sym}: {e}"))?;
                 validate_adapter_book(&b, vid, symbol)
                     .map_err(|e| format!("{side} order book rejected: {e}"))?;
                 state.market_data_hub.update_orderbook(b.clone());
@@ -4973,7 +5630,7 @@ pub(crate) fn liq_trim_decision_for_positions(
     ))
 }
 
-async fn maybe_liq_trim_pair(
+pub(crate) async fn maybe_liq_trim_pair(
     state: &AppEngineState,
     sig: &crate::state_store::SignalExecution,
     buy: &crate::state_store::SignalLeg,
@@ -5112,6 +5769,7 @@ async fn maybe_liq_trim_pair(
                     sig_id: &sig.id,
                     notes: &mut notes,
                     execution_type: Some("emergency_market"),
+                    cid_target: Some((&close_id, close_side)),
                 })
                 .await
                 {
@@ -5134,18 +5792,31 @@ async fn maybe_liq_trim_pair(
                                     dec_to_f64(f.unwrap_or_default(), "trim fee"),
                                 ) {
                                     (Ok(qf), Ok(pf), Ok(ff)) => {
-                                        if let Err(e) = state.state_store.apply_leg_fill(
-                                            &close_id,
-                                            close_side,
-                                            qf,
-                                            pf,
-                                            ff,
-                                            outcome.order_id.as_deref(),
-                                        ) {
-                                            note.push_str(&format!(
-                                                "; {} fill record failed: {e}",
+                                        // Same Deribit coin→USD rule as the
+                                        // flatten persist above.
+                                        let pf = ledger_px_usd(state, &leg.venue, &leg.symbol, pf);
+                                        match pf {
+                                            Some(pf) => {
+                                                if let Err(e) =
+                                                    state.state_store.apply_leg_fill(
+                                                        &close_id,
+                                                        close_side,
+                                                        qf,
+                                                        pf,
+                                                        ff,
+                                                        outcome.order_id.as_deref(),
+                                                    )
+                                                {
+                                                    note.push_str(&format!(
+                                                        "; {} fill record failed: {e}",
+                                                        leg.venue
+                                                    ));
+                                                }
+                                            }
+                                            None => note.push_str(&format!(
+                                                "; {} fill has no USD conversion — reconciler settles",
                                                 leg.venue
-                                            ));
+                                            )),
                                         }
                                     }
                                     _ => note.push_str(&format!(
@@ -5427,6 +6098,204 @@ mod account_read_tests {
     use arbitrageur_core::position::AccountSnapshot;
     use arbitrageur_core::types::VenueId;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn ledger_px_usd_converts_only_deribit_option_premiums() {
+        let state = AppEngineState::new();
+        // Non-Deribit venues and USD-quoted Deribit instruments pass through.
+        assert_eq!(
+            ledger_px_usd(&state, "lighter", "BTC", 84_500.0),
+            Some(84_500.0)
+        );
+        assert_eq!(
+            ledger_px_usd(&state, "deribit", "BTC-PERPETUAL", 84_500.0),
+            Some(84_500.0)
+        );
+        // A coin-priced option leg with no perp book in the hub fails
+        // closed — the caller keeps the price cell empty rather than
+        // writing a BTC value under a USD label.
+        assert_eq!(
+            ledger_px_usd(&state, "deribit", "BTC-30OCT26-88000-P", 0.063),
+            None
+        );
+        // With a perp book present, premiums convert at its mid.
+        let mut book = OrderBook::new(VenueId::new("deribit"), "BTC-PERPETUAL".to_string());
+        book.bids.push(arbitrageur_core::quote::BookLevel::new(
+            dec!(84500),
+            dec!(1),
+        ));
+        book.asks.push(arbitrageur_core::quote::BookLevel::new(
+            dec!(84502),
+            dec!(1),
+        ));
+        state.market_data_hub.update_orderbook(book);
+        let usd = ledger_px_usd(&state, "deribit", "BTC-30OCT26-88000-P", 0.063)
+            .expect("perp mid converts coin premium");
+        assert!(
+            (usd - 0.063 * 84501.0).abs() < 1e-6,
+            "expected ~5323.56 USD, got {usd}"
+        );
+        // ETH option legs resolve their own perp (absent here → closed).
+        assert_eq!(
+            ledger_px_usd(&state, "deribit", "ETH-30OCT26-3000-P", 0.135),
+            None
+        );
+    }
+
+    #[test]
+    fn unlotted_close_realizes_usd_not_coin_premium() {
+        use crate::state_store::{LegSide, SignalExecution, SignalLeg, SignalStatus};
+        let state = AppEngineState::new();
+        // Deribit perp book the option premium converts against: mid 2651.
+        let mut book = OrderBook::new(VenueId::new("deribit"), "ETH-PERPETUAL".to_string());
+        book.bids
+            .push(arbitrageur_core::quote::BookLevel::new(dec!(2650), dec!(1)));
+        book.asks
+            .push(arbitrageur_core::quote::BookLevel::new(dec!(2652), dec!(1)));
+        state.market_data_hub.update_orderbook(book);
+
+        let ts = "2024-01-01T00:00:00Z";
+        let opt_leg = |id: &str, signal_id: &str, side: LegSide, px: f64| SignalLeg {
+            id: id.into(),
+            signal_id: signal_id.into(),
+            account_id: Some("acct-deribit".into()),
+            venue: "deribit".into(),
+            side,
+            symbol: "ETH-30OCT26-3000-P".into(),
+            intended_qty: 1.0,
+            filled_qty: 1.0,
+            fill_price: Some(px),
+            fee_usd: 0.0,
+            venue_order_id: Some(format!("oid-{id}")),
+            client_order_id: Some(format!("cid-{id}")),
+            intended_price: None,
+            unit_scale: 1.0,
+            created_at: ts.into(),
+            updated_at: ts.into(),
+        };
+        let mk_sig = |id: &str, status: SignalStatus, legs: Vec<SignalLeg>| SignalExecution {
+            id: id.into(),
+            strategy_id: "options_parity".into(),
+            symbol: "ETH".into(),
+            status,
+            environment: "testnet".into(),
+            route_id: None,
+            account_long_id: None,
+            account_short_id: None,
+            expected_net_usd: None,
+            fees_usd: 0.0,
+            note: None,
+            legs,
+            created_at: ts.into(),
+            updated_at: ts.into(),
+            closed_at: None,
+        };
+
+        // Entry persisted in USD (the entry path already converts).
+        let parent = mk_sig(
+            "sig-eth-par",
+            SignalStatus::Balanced,
+            vec![opt_leg("l-in", "sig-eth-par", LegSide::Long, 363.08115)],
+        );
+        // The flatten-path persist now routes the venue's coin premium
+        // through `ledger_px_usd` — 0.142 ETH × 2651 mid ≈ 376.4 USD.
+        let close_px = ledger_px_usd(&state, "deribit", "ETH-30OCT26-3000-P", 0.142)
+            .expect("perp mid converts coin premium");
+        let child = mk_sig(
+            "flat-sig-eth-par-0001",
+            SignalStatus::Closed,
+            vec![opt_leg(
+                "l-out",
+                "flat-sig-eth-par-0001",
+                LegSide::Short,
+                close_px,
+            )],
+        );
+        accumulate_unlotted_family_fills(&state, &parent, &[child], false);
+        let realized: f64 = state
+            .total_realized_profit
+            .read()
+            .to_string()
+            .parse()
+            .unwrap_or(0.0);
+        // True delta ≈ (376.44 − 363.08) ≈ +13.4. The regression wrote the
+        // coin price verbatim → (0.142 − 363.08) ≈ −363 booked as USD.
+        assert!(
+            realized > 10.0 && realized < 17.0,
+            "expected ~+13.4 USD realized, got {realized}"
+        );
+        // The entry premium releases from the outlay bucket at close.
+        let outlay: f64 = state
+            .total_premium_outlay
+            .read()
+            .to_string()
+            .parse()
+            .unwrap_or(0.0);
+        assert!(
+            (outlay - 363.08115).abs() < 1e-6,
+            "expected premium release 363.08115, got {outlay}"
+        );
+    }
+
+    #[test]
+    fn breaker_frozen_equity_isolates_coin_collateral_repricing() {
+        use arbitrageur_core::position::Balance;
+        use arbitrageur_core::quote::BookLevel;
+        let state = AppEngineState::new();
+        let btc_book = |px: i64| {
+            let mut b = OrderBook::new(VenueId::new("binance"), "BTC-USDT".to_string());
+            b.bids.push(BookLevel::new(Decimal::from(px), dec!(1)));
+            b.asks.push(BookLevel::new(Decimal::from(px + 2), dec!(1)));
+            b
+        };
+        let balances = || {
+            vec![
+                Balance {
+                    venue: VenueId::new("deribit"),
+                    currency: "BTC".into(),
+                    total: dec!(100),
+                    free: dec!(100),
+                    locked: dec!(0),
+                },
+                Balance {
+                    venue: VenueId::new("deribit"),
+                    currency: "USDC".into(),
+                    total: dec!(5000),
+                    free: dec!(5000),
+                    locked: dec!(0),
+                },
+            ]
+        };
+        // Day-start feed: BTC mid 84501 seeds the anchor — no adjustment.
+        state.market_data_hub.update_orderbook(btc_book(84500));
+        let e1 = breaker_frozen_equity_usd(&state, "testnet-deribit", dec!(8455100), &balances());
+        assert_eq!(e1, dec!(8455100));
+        // BTC falls ~0.95% (84501→83701): the account's USD equity falls
+        // $80,000 (100 BTC × $800), but frozen equity must not move — the
+        // whole move is collateral repricing, not trading PnL.
+        state.market_data_hub.update_orderbook(btc_book(83700));
+        let e2 = breaker_frozen_equity_usd(&state, "testnet-deribit", dec!(8375100), &balances());
+        assert_eq!(e2, dec!(8455100), "index beta must not read as drawdown");
+        // A real trading loss settles in coin: equity drops $500 below the
+        // beta-explained level and the frozen measure must keep it.
+        let e3 = breaker_frozen_equity_usd(&state, "testnet-deribit", dec!(8374600), &balances());
+        assert_eq!(e3, dec!(8454600), "coin-denominated loss still counts");
+        // USD-only balances pass through untouched.
+        let usd_only = vec![balances()[1].clone()];
+        let e4 = breaker_frozen_equity_usd(&state, "testnet-x", dec!(999), &usd_only);
+        assert_eq!(e4, dec!(999));
+        // No FX for a currency → its repricing stays inside the raw total
+        // (fail-closed: unknown FX never hides an equity move).
+        let doge = vec![Balance {
+            venue: VenueId::new("deribit"),
+            currency: "DOGE".into(),
+            total: dec!(1000),
+            free: dec!(1000),
+            locked: dec!(0),
+        }];
+        let e5 = breaker_frozen_equity_usd(&state, "testnet-y", dec!(777), &doge);
+        assert_eq!(e5, dec!(777));
+    }
 
     struct CountingAccountAdapter {
         calls: AtomicUsize,
