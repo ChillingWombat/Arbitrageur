@@ -74,6 +74,7 @@ export function getDefaultOrderQty(basePrice: number): number {
  *  with the Navigation tab labels; they are the single vocabulary used across
  *  panels, monitors, and the positions scope toggle. */
 export const STRATEGY_DISPLAY_NAMES: Record<string, string> = {
+  options: "Options",
   futures: "Simple Spread",
   radar: "Spread Radar",
   funding: "Funding Rate",

@@ -14,6 +14,7 @@ import {
   Eye,
   Boxes,
   Radar,
+  PieChart,
 } from "lucide-react";
 import { SpreadGapIcon } from "./icons";
 import { EmptyState } from "./EmptyState";
@@ -96,6 +97,270 @@ const formatShare = (sharePct: number, equityUsd: number) => {
 const pnlTone = (v: number) =>
   !Number.isFinite(v) || Math.abs(v) < 0.005 ? "text-slate-500" : v > 0 ? "text-profit" : "text-loss";
 
+export interface StrategyButtonItem {
+  id: string;
+  label: string;
+}
+
+/**
+ * Group any strategy ID starting with options_ into "options" (display label "Options").
+ */
+export const groupStrategyId = (strategyId: string): string =>
+  strategyId.startsWith("options_") ? "options" : strategyId;
+
+export const STRATEGY_BUTTONS: StrategyButtonItem[] = [
+  { id: "all", label: "All" },
+  { id: "spatial_spread", label: "Simple Spread" },
+  { id: "radar", label: "Spread Radar" },
+  { id: "funding_rate", label: "Funding Rate" },
+  { id: "spot", label: "Spatial" },
+  { id: "options", label: "Options" },
+  { id: "prediction_parity", label: "Prediction" },
+  { id: "stat_arb", label: "Statistical" },
+];
+
+export const matchStrategy = (rawId: string, filter: string): boolean => {
+  if (filter === "all") return true;
+  const canonicalFilter = ledgerStrategyId(filter);
+  const canonicalId = ledgerStrategyId(rawId);
+  if (filter === "options" || canonicalFilter === "options") {
+    return (
+      rawId === "options" ||
+      rawId.startsWith("options_") ||
+      canonicalId === "options" ||
+      canonicalId.startsWith("options_")
+    );
+  }
+  return (
+    canonicalId === canonicalFilter ||
+    rawId.toLowerCase() === filter.toLowerCase() ||
+    (canonicalFilter === "spot" && (canonicalId === "spot_trade" || canonicalId === "spot_arb"))
+  );
+};
+
+const PALETTE = [
+  "#2563eb", // blue-600
+  "#0d9488", // teal-600
+  "#8b5cf6", // violet-500
+  "#f59e0b", // amber-500
+  "#10b981", // emerald-500
+  "#ec4899", // pink-500
+  "#6366f1", // indigo-500
+  "#f97316", // orange-500
+  "#06b6d4", // cyan-500
+  "#84cc16", // lime-500
+  "#64748b", // slate-500
+];
+
+const VENUE_COLORS: Record<string, string> = {
+  deribit: "#0284c7",
+  alpaca: "#f59e0b",
+  lighter: "#6366f1",
+  hyperliquid: "#10b981",
+  decibel: "#eab308",
+  robinhood: "#22c55e",
+  vanta: "#8b5cf6",
+  binance: "#f59e0b",
+  okx: "#334155",
+  coinbase: "#2563eb",
+  kraken: "#7c3aed",
+  aster: "#ec4899",
+  popdex: "#14b8a6",
+  arcus: "#3b82f6",
+};
+
+const STRATEGY_COLORS: Record<string, string> = {
+  spatial_spread: "#2563eb",
+  futures: "#2563eb",
+  radar: "#0284c7",
+  funding_rate: "#059669",
+  funding: "#059669",
+  spot: "#d97706",
+  options: "#7c3aed",
+  prediction_parity: "#9333ea",
+  prediction: "#9333ea",
+  stat_arb: "#4f46e5",
+  unattributed: "#64748b",
+};
+
+interface DonutSlice {
+  id: string;
+  label: string;
+  value: number;
+  share: number;
+  color: string;
+  sublabel?: string;
+}
+
+function polarToCartesian(cx: number, cy: number, r: number, angleDeg: number) {
+  const rad = ((angleDeg - 90) * Math.PI) / 180.0;
+  return {
+    x: Number((cx + r * Math.cos(rad)).toFixed(2)),
+    y: Number((cy + r * Math.sin(rad)).toFixed(2)),
+  };
+}
+
+function describeArc(
+  cx: number,
+  cy: number,
+  r: number,
+  innerR: number,
+  startAngle: number,
+  endAngle: number,
+): string {
+  if (endAngle - startAngle >= 359.9) {
+    return [
+      `M ${cx} ${cy - r}`,
+      `A ${r} ${r} 0 1 1 ${cx} ${cy + r}`,
+      `A ${r} ${r} 0 1 1 ${cx} ${cy - r}`,
+      `M ${cx} ${cy - innerR}`,
+      `A ${innerR} ${innerR} 0 1 0 ${cx} ${cy + innerR}`,
+      `A ${innerR} ${innerR} 0 1 0 ${cx} ${cy - innerR}`,
+      "Z",
+    ].join(" ");
+  }
+
+  const p1 = polarToCartesian(cx, cy, r, startAngle);
+  const p2 = polarToCartesian(cx, cy, r, endAngle);
+  const p3 = polarToCartesian(cx, cy, innerR, endAngle);
+  const p4 = polarToCartesian(cx, cy, innerR, startAngle);
+  const largeArcFlag = endAngle - startAngle <= 180 ? "0" : "1";
+
+  return [
+    `M ${p1.x} ${p1.y}`,
+    `A ${r} ${r} 0 ${largeArcFlag} 1 ${p2.x} ${p2.y}`,
+    `L ${p3.x} ${p3.y}`,
+    `A ${innerR} ${innerR} 0 ${largeArcFlag} 0 ${p4.x} ${p4.y}`,
+    "Z",
+  ].join(" ");
+}
+
+const DonutChart: React.FC<{
+  slices: DonutSlice[];
+  totalValue: number;
+  totalLabel: string;
+  totalSublabel?: string;
+  hoveredId: string | null;
+  onHover: (id: string | null) => void;
+  size?: number;
+}> = ({
+  slices,
+  totalValue,
+  totalLabel,
+  totalSublabel,
+  hoveredId,
+  onHover,
+  size = 180,
+}) => {
+  const cx = size / 2;
+  const cy = size / 2;
+  const r = size / 2 - 10;
+  const innerR = r - 26;
+
+  const activeSlices = slices.filter((s) => s.value > 0);
+  const sumVal = activeSlices.reduce((acc, s) => acc + s.value, 0);
+
+  const arcs = useMemo(() => {
+    if (activeSlices.length === 0) return [];
+    if (activeSlices.length === 1) {
+      return [{ ...activeSlices[0], startAngle: 0, endAngle: 360 }];
+    }
+    const minDeg = 3.5;
+    const smallCount = activeSlices.filter((s) => (s.value / sumVal) * 360 < minDeg).length;
+    const largeVal = activeSlices
+      .filter((s) => (s.value / sumVal) * 360 >= minDeg)
+      .reduce((acc, s) => acc + s.value, 0);
+    const remainingDeg = Math.max(0, 360 - smallCount * minDeg);
+
+    let curAngle = 0;
+    return activeSlices.map((s) => {
+      let angleSpan = (s.value / sumVal) * 360;
+      if (angleSpan < minDeg && smallCount > 0 && largeVal > 0) {
+        angleSpan = minDeg;
+      } else if (largeVal > 0 && smallCount > 0) {
+        angleSpan = (s.value / largeVal) * remainingDeg;
+      }
+      const start = curAngle;
+      const end = curAngle + angleSpan;
+      curAngle = end;
+      return { ...s, startAngle: start, endAngle: end };
+    });
+  }, [activeSlices, sumVal]);
+
+  const hoveredSlice = hoveredId ? slices.find((s) => s.id === hoveredId) : null;
+
+  return (
+    <div className="relative flex items-center justify-center select-none" style={{ width: size, height: size }}>
+      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`} className="overflow-visible">
+        {arcs.length === 0 ? (
+          <circle
+            cx={cx}
+            cy={cy}
+            r={(r + innerR) / 2}
+            stroke="#e2e8f0"
+            strokeWidth={r - innerR}
+            fill="none"
+          />
+        ) : (
+          arcs.map((a) => {
+            const isHovered = hoveredId === a.id;
+            const currentR = isHovered ? r + 3 : r;
+            const currentInnerR = isHovered ? innerR - 2 : innerR;
+            const d = describeArc(cx, cy, currentR, currentInnerR, a.startAngle, a.endAngle);
+            return (
+              <path
+                key={a.id}
+                d={d}
+                fill={a.color}
+                stroke="#ffffff"
+                strokeWidth={arcs.length > 1 ? 1.5 : 0}
+                className="transition-all duration-200 cursor-pointer"
+                style={{
+                  opacity: hoveredId && !isHovered ? 0.45 : 1,
+                  filter: isHovered ? "drop-shadow(0 2px 4px rgba(0,0,0,0.18))" : "none",
+                }}
+                onMouseEnter={() => onHover(a.id)}
+                onMouseLeave={() => onHover(null)}
+              />
+            );
+          })
+        )}
+      </svg>
+
+      {/* Center Label */}
+      <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none text-center px-3">
+        {hoveredSlice ? (
+          <>
+            <span className="text-[11px] font-mono font-bold text-slate-700 truncate max-w-[95px]">
+              {hoveredSlice.label}
+            </span>
+            <span className="text-xs font-bold font-mono text-slate-900 tabular-nums">
+              {usdPlain(hoveredSlice.value)}
+            </span>
+            <span className="text-[10px] font-mono font-bold text-accent-strong">
+              {hoveredSlice.sublabel ?? `${hoveredSlice.share.toFixed(1)}%`}
+            </span>
+          </>
+        ) : (
+          <>
+            <span className="text-xs font-bold font-mono text-slate-900 tabular-nums tracking-tight">
+              {usdPlain(totalValue)}
+            </span>
+            <span className="text-[10px] font-mono text-muted uppercase tracking-wider mt-0.5">
+              {totalLabel}
+            </span>
+            {totalSublabel && (
+              <span className="text-[9px] font-mono text-slate-400 mt-0.5">
+                {totalSublabel}
+              </span>
+            )}
+          </>
+        )}
+      </div>
+    </div>
+  );
+};
+
 const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
   riskData,
   status,
@@ -108,6 +373,8 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
   const [metrics, setMetrics] = useState<StrategyMetrics[]>([]);
   const [tradedOpps, setTradedOpps] = useState<TradedOpportunityDto[]>([]);
   const [strategyFilter, setStrategyFilter] = useState<string>("all");
+  const [allocationTab, setAllocationTab] = useState<"venue" | "strategy">("venue");
+  const [hoveredSliceId, setHoveredSliceId] = useState<string | null>(null);
   // Per-venue inputs for the exchange gadget. Null until the first
   // successful read (never an empty fake).
   const [execLogs, setExecLogs] = useState<ExecutionLogEntry[] | null>(null);
@@ -198,33 +465,42 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
 
   // --- Derived portfolio truth -------------------------------------------------
   const equity = riskData?.total_portfolio_value_usd ?? 0;
+  // Open positions scoped to the selected strategy
+  const visibleOpenPositions = useMemo(
+    () =>
+      strategyFilter === "all"
+        ? openPositions
+        : openPositions.filter((p) => matchStrategy(p.strategyId ?? "", strategyFilter)),
+    [openPositions, strategyFilter],
+  );
   const markedPositions = useMemo(
-    () => openPositions.filter((p) => p.unrealizedPnlUsd != null),
-    [openPositions]
+    () => visibleOpenPositions.filter((p) => p.unrealizedPnlUsd != null),
+    [visibleOpenPositions],
   );
   const unrealizedUsd = useMemo(
     () => markedPositions.reduce((acc, p) => acc + (p.unrealizedPnlUsd ?? 0), 0),
-    [markedPositions]
+    [markedPositions],
   );
   const deployedUsd = useMemo(
     () =>
-      openPositions.reduce((acc, p) => acc + (p.notionalUsd != null && p.notionalUsd > 0 ? p.notionalUsd : 0), 0),
-    [openPositions]
+      visibleOpenPositions.reduce(
+        (acc, p) => acc + (p.notionalUsd != null && p.notionalUsd > 0 ? p.notionalUsd : 0),
+        0,
+      ),
+    [visibleOpenPositions],
   );
   const idleUsd = Math.max(0, equity - deployedUsd);
-
-  // Strategies with recorded metrics drive the monitor selector options
-  const strategyOptions = useMemo(
-    () => [...new Set(metrics.map((m) => m.strategy_id))].sort(),
-    [metrics],
-  );
 
   // Metrics scoped to the selected strategy ("all" = aggregate view)
   const visibleMetrics = useMemo(
     () =>
       strategyFilter === "all"
         ? metrics
-        : metrics.filter((m) => m.strategy_id === strategyFilter),
+        : metrics.filter((m) =>
+            strategyFilter === "options"
+              ? m.strategy_id === "options" || m.strategy_id.startsWith("options_")
+              : matchStrategy(m.strategy_id, strategyFilter),
+          ),
     [metrics, strategyFilter],
   );
 
@@ -233,7 +509,6 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
   const totalWinning = visibleMetrics.reduce((acc, m) => acc + m.winning_cycles, 0);
   const totalPnlUsd = visibleMetrics.reduce((acc, m) => acc + m.total_pnl_usd, 0);
   const overallWinRate = totalCompleted > 0 ? (totalWinning / totalCompleted) * 100 : 0;
-  const totalPnlAll = totalPnlUsd + unrealizedUsd;
 
   // One row per ledger strategy namespace: union of cycle-metric rows,
   // dispatched signals, and live open positions. Signal ids normalize into
@@ -300,7 +575,11 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
     () =>
       strategyFilter === "all"
         ? strategyRows
-        : strategyRows.filter((r) => r.ledgerId === ledgerStrategyId(strategyFilter)),
+        : strategyRows.filter((r) =>
+            strategyFilter === "options"
+              ? r.ledgerId === "options" || r.ledgerId.startsWith("options_")
+              : matchStrategy(r.ledgerId, strategyFilter),
+          ),
     [strategyRows, strategyFilter],
   );
 
@@ -380,8 +659,74 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
     [venueBalances],
   );
 
+  // Allocation slices: by venue (from balances) and by strategy (from open positions)
+  const venueSlices: DonutSlice[] = useMemo(() => {
+    return (sortedVenues ?? [])
+      .filter((b) => Number.isFinite(b.equity_usd) && b.equity_usd > 0)
+      .map((b, i) => {
+        const equityUsd = Math.max(0, b.equity_usd);
+        const share = venueTotal > 0 ? (equityUsd / venueTotal) * 100 : 0;
+        const vid = (b.venue ?? "").toLowerCase();
+        return {
+          id: `${vid}-${b.account_id ?? "default"}`,
+          label: formatVenueName(b.venue),
+          value: equityUsd,
+          share,
+          color: VENUE_COLORS[vid] ?? PALETTE[i % PALETTE.length],
+          sublabel: formatShare(share, equityUsd),
+        };
+      });
+  }, [sortedVenues, venueTotal]);
+
+  const strategyAllocations = useMemo(() => {
+    const map = new Map<
+      string,
+      { notionalUsd: number; count: number; unrealizedUsd: number }
+    >();
+    for (const p of openPositions) {
+      const rawId = p.strategyId ?? "unattributed";
+      const id = rawId.startsWith("options_") ? "options" : ledgerStrategyId(rawId);
+      const cur = map.get(id) ?? { notionalUsd: 0, count: 0, unrealizedUsd: 0 };
+      const notional = p.notionalUsd != null && p.notionalUsd > 0 ? p.notionalUsd : 0;
+      cur.notionalUsd += notional;
+      cur.count += 1;
+      if (p.unrealizedPnlUsd != null) {
+        cur.unrealizedUsd += p.unrealizedPnlUsd;
+      }
+      map.set(id, cur);
+    }
+    const total = [...map.values()].reduce((acc, s) => acc + s.notionalUsd, 0);
+    return [...map.entries()]
+      .map(([id, s], i) => ({
+        id,
+        label: id === "options" ? "Options" : formatStrategyName(id),
+        notionalUsd: s.notionalUsd,
+        count: s.count,
+        unrealizedUsd: s.unrealizedUsd,
+        share: total > 0 ? (s.notionalUsd / total) * 100 : openPositions.length > 0 ? (s.count / openPositions.length) * 100 : 0,
+        color: STRATEGY_COLORS[id] ?? PALETTE[i % PALETTE.length],
+      }))
+      .sort((a, b) => b.notionalUsd - a.notionalUsd);
+  }, [openPositions]);
+
+  const totalStrategyDeployed = useMemo(
+    () => strategyAllocations.reduce((acc, s) => acc + s.notionalUsd, 0),
+    [strategyAllocations],
+  );
+
+  const strategySlices: DonutSlice[] = useMemo(() => {
+    return strategyAllocations.map((s) => ({
+      id: s.id,
+      label: s.label,
+      value: s.notionalUsd > 0 ? s.notionalUsd : s.count,
+      share: s.share,
+      color: s.color,
+      sublabel: `${s.share.toFixed(1)}%`,
+    }));
+  }, [strategyAllocations]);
+
   const getStrategyIcon = (id: string) => {
-    if (id.startsWith("options_"))
+    if (id === "options" || id.startsWith("options_"))
       return <Boxes className="w-4 h-4 text-violet-600" />;
     switch (id) {
       case "spatial_spread":
@@ -414,58 +759,229 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
 
   return (
     <div className="w-full p-4 pr-5 space-y-4 overflow-y-auto h-full select-none pb-24">
-      {/* 1. Portfolio health header: verdict + equity + strategy scope.
-          Canonical circuit-breaker reset lives at the right (removed from
-          Header and sidebar to keep a single resume control). */}
-      <div className="bg-surface p-4 rounded-xl border border-surface-border flex flex-wrap items-center justify-between gap-3 shadow-card">
-        <div className="flex items-center gap-4 min-w-0 flex-wrap">
-          <span
-            className={`px-2.5 py-1 rounded-lg text-xs font-mono font-bold border tracking-wider ${verdict.cls}`}
-            title={isTripped ? "Halted — circuit breaker tripped. Trading stopped; positions preserved." : `Status: ${verdict.label}`}
-          >
-            {verdict.label}
-          </span>
-          <div className="min-w-0">
-            <div className="flex items-baseline gap-2 flex-wrap">
-              <span className="text-xl font-bold font-mono text-slate-900 tracking-tight tabular-nums">
-                {usdPlain(equity)}
-              </span>
-              <span className={`text-sm font-mono font-bold tabular-nums ${pnlTone(totalPnlAll)}`}>
-                {usd(totalPnlAll)} total
-              </span>
-              <label className="flex items-center space-x-2 text-xs font-mono text-slate-500">
-                <span>Strategy:</span>
-                <select
-                  value={strategyFilter}
-                  onChange={(e) => setStrategyFilter(e.target.value)}
-                  className="px-2.5 py-1.5 bg-surface border border-surface-border rounded-lg text-xs font-mono font-semibold text-slate-800 focus:outline-none focus:ring-1 focus:ring-accent cursor-pointer"
-                  title="Select which strategy to monitor"
+      {/* 1. Strategy Switcher & Key Metrics Gadget Zone */}
+      <div className="space-y-3">
+        {/* Strategy Switcher Button Row */}
+        <div className="bg-surface p-2.5 rounded-xl border border-surface-border flex items-center justify-between gap-2 flex-wrap shadow-card">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="text-xs font-mono font-bold text-slate-500 uppercase tracking-wider pl-1 pr-1.5">
+              Strategy:
+            </span>
+            {STRATEGY_BUTTONS.map((s) => {
+              const active = strategyFilter === s.id;
+              return (
+                <button
+                  key={s.id}
+                  onClick={() => setStrategyFilter(s.id)}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-mono font-semibold transition cursor-pointer flex items-center gap-1.5 ${
+                    active
+                      ? "bg-accent text-white shadow-xs"
+                      : "bg-surface-raised hover:bg-slate-200/70 text-slate-600 hover:text-slate-900 border border-surface-border"
+                  }`}
+                  title={`Filter portfolio metrics to ${s.label}`}
                 >
-                  <option value="all">All</option>
-                  {strategyOptions.map((id) => (
-                    <option key={id} value={id}>
-                      {formatStrategyName(id)}
-                    </option>
-                  ))}
-                </select>
-              </label>
+                  {s.id !== "all" && getStrategyIcon(s.id)}
+                  <span>{s.label}</span>
+                </button>
+              );
+            })}
+          </div>
+
+          {isTripped && (
+            <button
+              onClick={onResetCircuitBreaker}
+              className="px-3 py-1.5 bg-warn-dim hover:bg-amber-100 text-warn-strong border border-warn-border rounded-lg text-xs font-mono font-bold flex items-center gap-1.5 transition shadow-xs cursor-pointer shrink-0"
+              title="Reset Circuit Breaker — Resume Trading"
+            >
+              <span>Reset Circuit Breaker</span>
+            </button>
+          )}
+        </div>
+
+        {/* Key Metrics Little Gadgets */}
+        <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
+          {/* 1. Net Equity */}
+          <div className="bg-surface p-3.5 rounded-xl border border-surface-border shadow-card space-y-1">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium text-muted font-mono">Net Equity</span>
+              <Wallet className="w-4 h-4 text-accent" />
             </div>
-            <div className="text-[11px] font-mono text-slate-500 tabular-nums">
-              <span className={pnlTone(totalPnlUsd)}>{usd(totalPnlUsd)} realized</span>
-              {markedPositions.length > 0 ? ` · ${usd(unrealizedUsd)} unrealized (${markedPositions.length} marked)` : " · flat (no open marks)"}
-              {isPaused ? " · engine paused — positions preserved" : ""}
+            <div className="text-lg font-bold text-slate-900 font-mono tabular-nums tracking-tight">
+              {usdPlain(equity)}
+            </div>
+            <div className="text-xs text-slate-500 font-mono truncate">
+              {venueBalances ? `${venueBalances.length} venue${venueBalances.length === 1 ? "" : "s"} connected` : "Venue balances"}
+            </div>
+          </div>
+
+          {/* 2. Realized PnL */}
+          <div className="bg-surface p-3.5 rounded-xl border border-surface-border shadow-card space-y-1">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium text-muted font-mono">Realized P&L</span>
+              <TrendingUp className="w-4 h-4 text-emerald-600" />
+            </div>
+            <div className={`text-lg font-bold font-mono tabular-nums ${pnlTone(totalPnlUsd)}`}>
+              {usd(totalPnlUsd)}
+            </div>
+            <div className="text-xs text-slate-500 font-mono truncate">
+              {totalCompleted > 0 ? `${totalCompleted} cycle${totalCompleted === 1 ? "" : "s"} (${overallWinRate.toFixed(0)}% win)` : "no closed cycles"}
+            </div>
+          </div>
+
+          {/* 3. Unrealized PnL */}
+          <div className="bg-surface p-3.5 rounded-xl border border-surface-border shadow-card space-y-1">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium text-muted font-mono">Unrealized P&L</span>
+              <Activity className="w-4 h-4 text-sky-600" />
+            </div>
+            <div className={`text-lg font-bold font-mono tabular-nums ${pnlTone(unrealizedUsd)}`}>
+              {markedPositions.length > 0 ? usd(unrealizedUsd) : "$0.00"}
+            </div>
+            <div className="text-xs text-slate-500 font-mono truncate">
+              {markedPositions.length > 0 ? `${markedPositions.length} marked (${visibleOpenPositions.length} open)` : "flat (no marks)"}
+            </div>
+          </div>
+
+          {/* 4. Deployed / Margin Utilization */}
+          <div className="bg-surface p-3.5 rounded-xl border border-surface-border shadow-card space-y-1">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium text-muted font-mono">Margin / Deployed</span>
+              <Percent className="w-4 h-4 text-indigo-600" />
+            </div>
+            <div className="text-lg font-bold text-slate-900 font-mono tabular-nums">
+              {margin ? `${margin.margin_ratio_pct.toFixed(0)}%` : "0%"}
+            </div>
+            <div className="text-xs text-slate-500 font-mono truncate">
+              {usdPlain(deployedUsd)} deployed
+            </div>
+          </div>
+
+          {/* 5. Trading Status */}
+          <div className="bg-surface p-3.5 rounded-xl border border-surface-border shadow-card space-y-1">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium text-muted font-mono">Trading Status</span>
+              <ShieldCheck className="w-4 h-4 text-accent-strong" />
+            </div>
+            <div className="mt-0.5">
+              <span
+                className={`inline-block px-2.5 py-0.5 rounded-md text-xs font-mono font-bold border tracking-wider ${verdict.cls}`}
+              >
+                {verdict.label}
+              </span>
+            </div>
+            <div className="text-xs text-slate-500 font-mono truncate">
+              {isTripped
+                ? "Circuit breaker tripped"
+                : isPaused
+                ? "Engine paused"
+                : attention.length > 0
+                ? `${attention.length} need${attention.length === 1 ? "s" : ""} review`
+                : "Active & healthy"}
             </div>
           </div>
         </div>
+      </div>
 
-        {isTripped && (
-          <button
-            onClick={onResetCircuitBreaker}
-            className="px-2.5 py-1.5 bg-warn-dim hover:bg-amber-100 text-warn-strong border border-warn-border rounded-lg text-xs font-mono font-bold flex items-center transition shadow-xs cursor-pointer shrink-0"
-            title="Reset Circuit Breaker — Resume Trading"
-          >
-            <span>Reset Circuit Breaker</span>
-          </button>
+      {/* 2. Strategy Performance Attribution Breakdown (Moved upwards to be 2nd gadget from top) */}
+      <div className="bg-surface rounded-xl border border-surface-border p-4 shadow-card space-y-3">
+        <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
+          <div>
+            <h2 className="text-[13px] font-mono tracking-wider text-slate-900 font-bold flex items-center space-x-2">
+              <TrendingUp className="w-5 h-5 text-accent-strong" />
+              <span>Multi-Strategy PnL & Cycle Attribution</span>
+            </h2>
+          </div>
+          <span className="text-xs font-mono font-bold text-slate-600">
+            {visibleStrategyRows.length} {visibleStrategyRows.length === 1 ? "Strategy" : "Strategies"} Active
+          </span>
+        </div>
+
+        {visibleStrategyRows.length > 0 ? (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs font-mono tabular-nums">
+              <thead className="bg-surface-raised/60">
+                <tr className="border-b border-surface-border text-slate-500 text-xs font-semibold tracking-wider">
+                  <th className="py-2.5 px-3">Strategy</th>
+                  <th className="py-2.5 px-3 text-right" title="Dispatched signals in the traded-opportunity ledger">Signals</th>
+                  <th className="py-2.5 px-3 text-right" title="Live open legs attributed to this strategy">Open</th>
+                  <th className="py-2.5 px-3 text-right" title="Fee-inclusive net P&L across closed ledger rows">Realized P&L</th>
+                  <th className="py-2.5 px-3 text-right" title="Unrealized P&L on live open legs">Unrealized</th>
+                  <th className="py-2.5 px-3 text-right" title="Winning / completed cycles (cycle-ledger strategies only)">Win Rate</th>
+                  <th className="py-2.5 px-3 text-right">Sharpe</th>
+                  <th className="py-2.5 px-3 text-right">APR</th>
+                  <th className="py-2.5 px-3 text-right" title="Most recent signal dispatch or close">Last Activity</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-surface-border">
+                {visibleStrategyRows.map((r) => {
+                  const realized = r.signals > 0 || r.metricsPnlUsd == null ? r.realizedUsd : r.metricsPnlUsd;
+                  const winRate =
+                    r.cycles != null && r.cycles > 0 && r.wins != null
+                      ? (r.wins / r.cycles) * 100
+                      : null;
+                  return (
+                    <tr key={r.ledgerId} className="hover:bg-surface-raised/40 transition">
+                      <td className="py-2.5 px-3">
+                        <div className="flex items-center space-x-2.5">
+                          <span className="p-1.5 bg-surface rounded-md border border-surface-border shadow-xs">
+                            {getStrategyIcon(r.ledgerId)}
+                          </span>
+                          <div className="min-w-0">
+                            <div className="font-bold text-[13px] text-slate-900 truncate">{formatStrategyName(r.ledgerId)}</div>
+                            <div className="text-[11px] text-muted">{r.ledgerId}</div>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="py-2.5 px-3 text-right text-slate-700">{r.signals}</td>
+                      <td className="py-2.5 px-3 text-right">
+                        {r.openCount > 0 ? (
+                          <span className="px-1.5 py-0.5 rounded-md text-[11px] font-bold bg-accent-dim text-accent-strong border border-accent-line/60">
+                            {r.openCount} open
+                          </span>
+                        ) : (
+                          <span className="text-slate-400">0</span>
+                        )}
+                      </td>
+                      <td className="py-2.5 px-3 text-right">
+                        <span className={`font-bold ${pnlTone(realized)}`}>{usd(realized)}</span>
+                      </td>
+                      <td className="py-2.5 px-3 text-right">
+                        {r.openCount > 0 ? (
+                          <span className={`font-bold ${pnlTone(r.unrealizedUsd)}`}>{usd(r.unrealizedUsd)}</span>
+                        ) : (
+                          <span className="text-muted">—</span>
+                        )}
+                      </td>
+                      <td className="py-2.5 px-3 text-right text-slate-800">
+                        {winRate != null ? `${winRate.toFixed(1)}% (${r.wins}/${r.cycles})` : "—"}
+                      </td>
+                      <td className="py-2.5 px-3 text-right text-accent-strong font-bold">
+                        {r.sharpe != null ? r.sharpe.toFixed(2) : "—"}
+                      </td>
+                      <td className="py-2.5 px-3 text-right text-slate-700">
+                        {r.apr != null ? `${r.apr.toFixed(1)}%` : "—"}
+                      </td>
+                      <td className="py-2.5 px-3 text-right text-muted">
+                        {r.lastActivityMs != null
+                          ? new Date(r.lastActivityMs).toLocaleString(undefined, {
+                              month: "short",
+                              day: "numeric",
+                              hour: "2-digit",
+                              minute: "2-digit",
+                            })
+                          : "—"}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <EmptyState
+            title="No Strategy Activity"
+            hint="Signals, open positions, or closed cycles will attribute here per strategy."
+          />
         )}
       </div>
 
@@ -506,61 +1022,205 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
       {/* 3. Capital: where the money sits + deployed vs idle */}
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
         <div className="xl:col-span-2 bg-surface rounded-xl border border-surface-border p-4 shadow-card space-y-3">
-          <h2 className="text-[13px] font-mono tracking-wider text-slate-900 font-bold border-b border-surface-border pb-2.5 flex items-center space-x-2">
-            <Wallet className="w-5 h-5 text-accent-strong" />
-            <span>Capital Allocation by Venue</span>
-          </h2>
-          {sortedVenues.length > 0 ? (
-            <div className="space-y-2.5">
-              {sortedVenues.map((b) => {
-                const equityUsd = Number.isFinite(b.equity_usd) ? Math.max(0, b.equity_usd) : 0;
-                const freeUsd = Number.isFinite(b.available_margin_usd) ? Math.max(0, b.available_margin_usd) : 0;
-                const share = venueTotal > 0 && equityUsd > 0 ? (equityUsd / venueTotal) * 100 : 0;
-                const barCls =
-                  b.status === "DEPLETED" ? "bg-loss" : b.status === "LOW_MARGIN" ? "bg-amber-500" : "bg-accent";
-                // Keep dust venues visible: 0.3% still paints ~2px at card width.
-                const barWidth = equityUsd > 0 ? Math.max(1.5, Math.min(100, share)) : 0;
-                const showFree = freeUsd > 0 && Math.abs(freeUsd - equityUsd) > 0.005;
-                return (
-                  <div key={`${b.venue}-${b.account_id ?? "default"}`} className="space-y-1">
-                    <div className="flex items-center justify-between gap-3 text-xs font-mono">
-                      <span className="font-bold text-slate-900 truncate flex items-center gap-2 min-w-0">
-                        <VenueLogo venueId={(b.venue ?? "").toLowerCase()} name={formatVenueName(b.venue)} size={18} />
-                        <span className="truncate">{formatVenueName(b.venue)}</span>
-                      </span>
-                      <span className="tabular-nums text-slate-700 whitespace-nowrap">
-                        {usdPlain(equityUsd)}{" "}
-                        <span className="text-muted">({formatShare(share, equityUsd)})</span>
-                        {showFree && (
-                          <span className="text-muted"> · {usdPlain(freeUsd)} free</span>
+          <div className="flex items-center justify-between border-b border-surface-border pb-2.5 flex-wrap gap-2">
+            <h2 className="text-[13px] font-mono tracking-wider text-slate-900 font-bold flex items-center space-x-2">
+              <PieChart className="w-5 h-5 text-accent-strong" />
+              <span>Capital Allocation</span>
+            </h2>
+            <div className="flex items-center bg-surface-raised p-0.5 rounded-lg border border-surface-border text-xs font-mono">
+              <button
+                type="button"
+                onClick={() => {
+                  setAllocationTab("venue");
+                  setHoveredSliceId(null);
+                }}
+                className={`px-3 py-1 rounded-md font-semibold transition cursor-pointer ${
+                  allocationTab === "venue"
+                    ? "bg-surface text-slate-900 shadow-2xs font-bold"
+                    : "text-slate-500 hover:text-slate-800"
+                }`}
+              >
+                By Venue
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setAllocationTab("strategy");
+                  setHoveredSliceId(null);
+                }}
+                className={`px-3 py-1 rounded-md font-semibold transition cursor-pointer ${
+                  allocationTab === "strategy"
+                    ? "bg-surface text-slate-900 shadow-2xs font-bold"
+                    : "text-slate-500 hover:text-slate-800"
+                }`}
+              >
+                By Strategy
+              </button>
+            </div>
+          </div>
+
+          {allocationTab === "venue" ? (
+            sortedVenues.length > 0 ? (
+              <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-center">
+                {/* Donut Chart */}
+                <div className="md:col-span-5 flex justify-center py-1">
+                  <DonutChart
+                    slices={venueSlices}
+                    totalValue={venueTotal}
+                    totalLabel="Venue Total"
+                    totalSublabel={`${sortedVenues.length} venue${sortedVenues.length === 1 ? "" : "s"}`}
+                    hoveredId={hoveredSliceId}
+                    onHover={setHoveredSliceId}
+                    size={175}
+                  />
+                </div>
+
+                {/* Venue Breakdown List */}
+                <div className="md:col-span-7 space-y-2 max-h-[260px] overflow-y-auto pr-1">
+                  {sortedVenues.map((b) => {
+                    const equityUsd = Number.isFinite(b.equity_usd) ? Math.max(0, b.equity_usd) : 0;
+                    const freeUsd = Number.isFinite(b.available_margin_usd) ? Math.max(0, b.available_margin_usd) : 0;
+                    const share = venueTotal > 0 && equityUsd > 0 ? (equityUsd / venueTotal) * 100 : 0;
+                    const vid = (b.venue ?? "").toLowerCase();
+                    const sliceId = `${vid}-${b.account_id ?? "default"}`;
+                    const sliceColor = VENUE_COLORS[vid] ?? "#64748b";
+                    const isHovered = hoveredSliceId === sliceId;
+                    const showFree = freeUsd > 0 && Math.abs(freeUsd - equityUsd) > 0.005;
+                    const barWidth = equityUsd > 0 ? Math.max(1.5, Math.min(100, share)) : 0;
+
+                    return (
+                      <div
+                        key={sliceId}
+                        onMouseEnter={() => setHoveredSliceId(sliceId)}
+                        onMouseLeave={() => setHoveredSliceId(null)}
+                        className={`space-y-1 p-1.5 rounded-lg transition cursor-pointer ${
+                          isHovered ? "bg-surface-raised/70" : "hover:bg-surface-raised/40"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-3 text-xs font-mono">
+                          <span className="font-bold text-slate-900 truncate flex items-center gap-2 min-w-0">
+                            <span
+                              className="w-2.5 h-2.5 rounded-full shrink-0"
+                              style={{ backgroundColor: sliceColor }}
+                            />
+                            <VenueLogo venueId={vid} name={formatVenueName(b.venue)} size={16} />
+                            <span className="truncate">{formatVenueName(b.venue)}</span>
+                          </span>
+                          <span className="tabular-nums text-slate-700 whitespace-nowrap">
+                            {usdPlain(equityUsd)}{" "}
+                            <span className="text-muted">({formatShare(share, equityUsd)})</span>
+                            {showFree && (
+                              <span className="text-muted"> · {usdPlain(freeUsd)} free</span>
+                            )}
+                          </span>
+                        </div>
+                        <div className="h-1.5 w-full bg-slate-200 rounded-full overflow-hidden">
+                          <div
+                            className="h-full transition-all duration-300"
+                            style={{ width: `${barWidth}%`, backgroundColor: sliceColor }}
+                          />
+                        </div>
+                        {b.status !== "HEALTHY" && b.status !== "EMPTY" && b.status !== "STALE" && b.status !== "LOCKED" && b.recommended_action && (
+                          <div className="text-[11px] font-mono text-warn-strong">{b.recommended_action}</div>
                         )}
+                        {(b.status === "EMPTY" || b.status === "STALE" || b.status === "LOCKED") && b.recommended_action && (
+                          <div className="text-[11px] font-mono text-muted">{b.recommended_action}</div>
+                        )}
+                      </div>
+                    );
+                  })}
+                  <div className="flex items-center justify-between pt-1 text-[11px] font-mono text-slate-500 border-t border-surface-border">
+                    <span>
+                      Total {usdPlain(venueTotal)} across {sortedVenues.length} venue{sortedVenues.length === 1 ? "" : "s"}
+                    </span>
+                    {Math.abs(venueTotal - equity) > Math.max(1, equity * 0.005) && equity > 0 && (
+                      <span title="Header equity comes from risk overview; venue total from venue balances.">
+                        Header {usdPlain(equity)}
                       </span>
-                    </div>
-                    <div className="h-2 w-full bg-slate-200 rounded-full overflow-hidden">
-                      <div className={`h-full ${barCls} transition-all duration-300`} style={{ width: `${barWidth}%` }} />
-                    </div>
-                    {b.status !== "HEALTHY" && b.status !== "EMPTY" && b.status !== "STALE" && b.status !== "LOCKED" && b.recommended_action && (
-                      <div className="text-[11px] font-mono text-warn-strong">{b.recommended_action}</div>
-                    )}
-                    {(b.status === "EMPTY" || b.status === "STALE" || b.status === "LOCKED") && b.recommended_action && (
-                      <div className="text-[11px] font-mono text-muted">{b.recommended_action}</div>
                     )}
                   </div>
-                );
-              })}
-              <div className="flex items-center justify-between pt-1 text-[11px] font-mono text-slate-500 border-t border-surface-border">
-                <span>
-                  Total {usdPlain(venueTotal)} across {sortedVenues.length} venue{sortedVenues.length === 1 ? "" : "s"}
-                </span>
-                {Math.abs(venueTotal - equity) > Math.max(1, equity * 0.005) && equity > 0 && (
-                  <span title="Header equity comes from risk overview; venue total from venue balances. A drift means mixed snapshots or a stale read.">
-                    Header {usdPlain(equity)}
-                  </span>
-                )}
+                </div>
               </div>
-            </div>
+            ) : (
+              <EmptyState title="No Venue Balances" hint="Connect an exchange account to see capital allocation." />
+            )
           ) : (
-            <EmptyState title="No Venue Balances" hint="Connect an exchange account to see capital allocation." />
+            strategyAllocations.length > 0 ? (
+              <div className="grid grid-cols-1 md:grid-cols-12 gap-4 items-center">
+                {/* Donut Chart */}
+                <div className="md:col-span-5 flex justify-center py-1">
+                  <DonutChart
+                    slices={strategySlices}
+                    totalValue={totalStrategyDeployed}
+                    totalLabel="Deployed Margin"
+                    totalSublabel={`${openPositions.length} open position${openPositions.length === 1 ? "" : "s"}`}
+                    hoveredId={hoveredSliceId}
+                    onHover={setHoveredSliceId}
+                    size={175}
+                  />
+                </div>
+
+                {/* Strategy Breakdown List */}
+                <div className="md:col-span-7 space-y-2 max-h-[260px] overflow-y-auto pr-1">
+                  {strategyAllocations.map((s) => {
+                    const isHovered = hoveredSliceId === s.id;
+                    const barWidth = Math.max(1.5, Math.min(100, s.share));
+
+                    return (
+                      <div
+                        key={s.id}
+                        onMouseEnter={() => setHoveredSliceId(s.id)}
+                        onMouseLeave={() => setHoveredSliceId(null)}
+                        className={`space-y-1 p-1.5 rounded-lg transition cursor-pointer ${
+                          isHovered ? "bg-surface-raised/70" : "hover:bg-surface-raised/40"
+                        }`}
+                      >
+                        <div className="flex items-center justify-between gap-3 text-xs font-mono">
+                          <span className="font-bold text-slate-900 truncate flex items-center gap-2 min-w-0">
+                            <span
+                              className="w-2.5 h-2.5 rounded-full shrink-0"
+                              style={{ backgroundColor: s.color }}
+                            />
+                            {getStrategyIcon(s.id)}
+                            <span className="truncate">{s.label}</span>
+                          </span>
+                          <span className="tabular-nums text-slate-700 whitespace-nowrap">
+                            {usdPlain(s.notionalUsd)}{" "}
+                            <span className="text-muted">({s.share.toFixed(1)}%)</span>
+                            <span className="text-muted"> · {s.count} open</span>
+                          </span>
+                        </div>
+                        <div className="h-1.5 w-full bg-slate-200 rounded-full overflow-hidden">
+                          <div
+                            className="h-full transition-all duration-300"
+                            style={{ width: `${barWidth}%`, backgroundColor: s.color }}
+                          />
+                        </div>
+                        {Math.abs(s.unrealizedUsd) > 0.005 && (
+                          <div className="flex items-center justify-between text-[11px] font-mono">
+                            <span className="text-slate-500">Unrealized P&L:</span>
+                            <span className={`font-semibold ${pnlTone(s.unrealizedUsd)}`}>
+                              {usd(s.unrealizedUsd)}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                  <div className="flex items-center justify-between pt-1 text-[11px] font-mono text-slate-500 border-t border-surface-border">
+                    <span>
+                      Total {usdPlain(totalStrategyDeployed)} deployed across {strategyAllocations.length} strateg{strategyAllocations.length === 1 ? "y" : "ies"}
+                    </span>
+                    <span>{openPositions.length} open position{openPositions.length === 1 ? "" : "s"}</span>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <EmptyState
+                title="No Active Positions"
+                hint="No capital is currently deployed in open positions across any strategy."
+              />
+            )
           )}
         </div>
 
@@ -794,108 +1454,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
       {/* 5. Per-Exchange Stats (per venue, existing IPC only) */}
       <ExchangeVenueGadget rows={exchangeRows} />
 
-      {/* 6. Strategy Performance Attribution Breakdown */}
-      <div className="bg-surface rounded-xl border border-surface-border p-4 shadow-card space-y-3">
-        <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
-          <div>
-            <h2 className="text-[13px] font-mono tracking-wider text-slate-900 font-bold flex items-center space-x-2">
-              <TrendingUp className="w-5 h-5 text-accent-strong" />
-              <span>Multi-Strategy PnL & Cycle Attribution</span>
-            </h2>
-          </div>
-          <span className="text-xs font-mono font-bold text-slate-600">
-            {visibleStrategyRows.length} {visibleStrategyRows.length === 1 ? "Strategy" : "Strategies"} Active
-          </span>
-        </div>
 
-        {visibleStrategyRows.length > 0 ? (
-          <div className="overflow-x-auto">
-            <table className="w-full text-left text-xs font-mono tabular-nums">
-              <thead className="bg-surface-raised/60">
-                <tr className="border-b border-surface-border text-slate-500 text-xs font-semibold tracking-wider">
-                  <th className="py-2.5 px-3">Strategy</th>
-                  <th className="py-2.5 px-3 text-right" title="Dispatched signals in the traded-opportunity ledger">Signals</th>
-                  <th className="py-2.5 px-3 text-right" title="Live open legs attributed to this strategy">Open</th>
-                  <th className="py-2.5 px-3 text-right" title="Fee-inclusive net P&L across closed ledger rows">Realized P&L</th>
-                  <th className="py-2.5 px-3 text-right" title="Unrealized P&L on live open legs">Unrealized</th>
-                  <th className="py-2.5 px-3 text-right" title="Winning / completed cycles (cycle-ledger strategies only)">Win Rate</th>
-                  <th className="py-2.5 px-3 text-right">Sharpe</th>
-                  <th className="py-2.5 px-3 text-right">APR</th>
-                  <th className="py-2.5 px-3 text-right" title="Most recent signal dispatch or close">Last Activity</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-surface-border">
-                {visibleStrategyRows.map((r) => {
-                  const realized = r.signals > 0 || r.metricsPnlUsd == null ? r.realizedUsd : r.metricsPnlUsd;
-                  const winRate =
-                    r.cycles != null && r.cycles > 0 && r.wins != null
-                      ? (r.wins / r.cycles) * 100
-                      : null;
-                  return (
-                    <tr key={r.ledgerId} className="hover:bg-surface-raised/40 transition">
-                      <td className="py-2.5 px-3">
-                        <div className="flex items-center space-x-2.5">
-                          <span className="p-1.5 bg-surface rounded-md border border-surface-border shadow-xs">
-                            {getStrategyIcon(r.ledgerId)}
-                          </span>
-                          <div className="min-w-0">
-                            <div className="font-bold text-[13px] text-slate-900 truncate">{formatStrategyName(r.ledgerId)}</div>
-                            <div className="text-[11px] text-muted">{r.ledgerId}</div>
-                          </div>
-                        </div>
-                      </td>
-                      <td className="py-2.5 px-3 text-right text-slate-700">{r.signals}</td>
-                      <td className="py-2.5 px-3 text-right">
-                        {r.openCount > 0 ? (
-                          <span className="px-1.5 py-0.5 rounded-md text-[11px] font-bold bg-accent-dim text-accent-strong border border-accent-line/60">
-                            {r.openCount} open
-                          </span>
-                        ) : (
-                          <span className="text-slate-400">0</span>
-                        )}
-                      </td>
-                      <td className="py-2.5 px-3 text-right">
-                        <span className={`font-bold ${pnlTone(realized)}`}>{usd(realized)}</span>
-                      </td>
-                      <td className="py-2.5 px-3 text-right">
-                        {r.openCount > 0 ? (
-                          <span className={`font-bold ${pnlTone(r.unrealizedUsd)}`}>{usd(r.unrealizedUsd)}</span>
-                        ) : (
-                          <span className="text-muted">—</span>
-                        )}
-                      </td>
-                      <td className="py-2.5 px-3 text-right text-slate-800">
-                        {winRate != null ? `${winRate.toFixed(1)}% (${r.wins}/${r.cycles})` : "—"}
-                      </td>
-                      <td className="py-2.5 px-3 text-right text-accent-strong font-bold">
-                        {r.sharpe != null ? r.sharpe.toFixed(2) : "—"}
-                      </td>
-                      <td className="py-2.5 px-3 text-right text-slate-700">
-                        {r.apr != null ? `${r.apr.toFixed(1)}%` : "—"}
-                      </td>
-                      <td className="py-2.5 px-3 text-right text-muted">
-                        {r.lastActivityMs != null
-                          ? new Date(r.lastActivityMs).toLocaleString(undefined, {
-                              month: "short",
-                              day: "numeric",
-                              hour: "2-digit",
-                              minute: "2-digit",
-                            })
-                          : "—"}
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        ) : (
-          <EmptyState
-            title="No Strategy Activity"
-            hint="Signals, open positions, or closed cycles will attribute here per strategy."
-          />
-        )}
-      </div>
 
       {/* 7. Rebalance friction (last): venue-to-venue cost estimate.
           Pure frontend estimate over researched fee rails (no IPC); kept at

@@ -240,6 +240,12 @@ impl OptionsBotExecutor {
             ));
         }
         let (policy, mode) = dto.to_policy()?;
+        if (mode == BotMode::Auto || dto.enabled) && state.circuit_breaker.is_tripped() {
+            return Err(format!(
+                "Cannot enable or arm Options bot for '{}' while circuit breaker is tripped. Reset circuit breaker first.",
+                dto.substrategy_id
+            ));
+        }
         // Autonomous entries are testnet-only — the execute impl enforces it
         // at dispatch, but refuse the arming write here so the operator gets
         // the error at click time, not as silent failed ticks.
@@ -337,6 +343,27 @@ impl OptionsBotExecutor {
     async fn tick_substrategy(&self, state: &AppEngineState, substrategy: &str) -> u64 {
         let (cfg, mode) = Self::load_config(state, substrategy);
         let poll = cfg.poll_interval_secs.max(5);
+        if state.circuit_breaker.is_tripped() && mode != BotMode::Off {
+            let next = OptionsBotConfigDto::from_policy(substrategy, &cfg, BotMode::Off);
+            if let Err(e) = Self::save_config(state, &next) {
+                tracing::warn!(
+                    "options bot {substrategy}: circuit breaker trip retire to Off failed: {e}"
+                );
+            }
+            let status = OptionsBotTickStatus {
+                substrategy: substrategy.to_string(),
+                mode: "off".to_string(),
+                open_positions: 0,
+                max_open_positions: cfg.max_open_positions,
+                last_scan_ms: chrono::Utc::now().timestamp_millis(),
+                rows_scanned: 0,
+                candidates: 0,
+                best_edge_usd: None,
+                last_refusal: None,
+            };
+            Self::note_tick(state, status);
+            return poll;
+        }
         let mut status = OptionsBotTickStatus {
             substrategy: substrategy.to_string(),
             mode: format!("{mode:?}").to_lowercase(),

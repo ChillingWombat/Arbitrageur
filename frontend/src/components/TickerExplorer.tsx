@@ -353,7 +353,9 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
       // Detect if positions are not balanced or there are other issues
       const netDelta = riskData?.net_deltas?.find((d) => d.asset.toUpperCase() === t.base.toUpperCase());
       const hasUnbalancedPosition = Boolean(
-        netDelta && (!netDelta.is_neutral || Math.abs(netDelta.net_quantity) > 0.0001)
+        netDelta &&
+          (!netDelta.is_neutral ||
+            (Math.abs(netDelta.net_exposure_usd) >= 1.0 && Math.abs(netDelta.net_quantity) > 0.0001))
       );
       const config = _strategyConfigs?.get(t.symbol);
       const maxUnits = deriveStepSizing(t.symbol, t.venues, t.basePrice, totalEquityUsd, {

@@ -300,6 +300,74 @@ test("card: butterfly body prints the ×2 contract multiplier", () => {
   assert.match(html, /SELL ×2<\/span>\s*BTC-27JUN26-85000-C/);
 });
 
+test("metrics: 5th card renders Premium Outlay and ribbon omits outlay pill", () => {
+  const htmlWithOutlay = renderToStaticMarkup(
+    React.createElement(OptionsArbitrage, {
+      executionLogs: [],
+      onRefreshAll: noop,
+      optionsVenueAvailable: true,
+      premiumOutlayUsd: 1450.5,
+    })
+  );
+  assert.match(htmlWithOutlay, /Premium Outlay<\/div>/);
+  assert.match(htmlWithOutlay, /\$1,450\.50/);
+  assert.match(htmlWithOutlay, /net financing in packages/);
+  assert.doesNotMatch(htmlWithOutlay, /ribbon-pill[^>]*>[\s\S]{0,80}Premium Outlay/);
+
+  const htmlNullOutlay = renderToStaticMarkup(
+    React.createElement(OptionsArbitrage, {
+      executionLogs: [],
+      onRefreshAll: noop,
+      optionsVenueAvailable: true,
+      premiumOutlayUsd: null,
+    })
+  );
+  assert.match(htmlNullOutlay, /Premium Outlay<\/div>[\s\S]*?>—<\/div>/);
+});
+
+test("ribbon: header houses title, status, scan, and controls on a single line without wrapping", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(OptionsArbitrage, {
+      executionLogs: [],
+      onRefreshAll: noop,
+      optionsVenueAvailable: true,
+    })
+  );
+  const headerContainer = html.match(/<div class="[^"]*justify-between[^"]*rounded-xl[^"]*">/);
+  assert.ok(headerContainer);
+  assert.doesNotMatch(headerContainer[0], /flex-wrap/);
+  assert.doesNotMatch(html, /ribbon-pill[^>]*>[\s\S]{0,80}Poll/);
+  assert.doesNotMatch(html, /ribbon-pill[^>]*>[\s\S]{0,80}Max Open/);
+});
+
+test("status badge: OptionsArbitrage renders standardized status badge and never renders Engine", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(OptionsArbitrage, {
+      executionLogs: [],
+      onRefreshAll: noop,
+      optionsVenueAvailable: true,
+      isPaused: false,
+    })
+  );
+  assert.match(
+    html,
+    /Options Strategies<\/span>[\s\S]*?title="Strategy bot status: Stopped"[\s\S]*?>Stopped<\/span>/
+  );
+  assert.doesNotMatch(html, /Engine/i);
+
+  const htmlPaused = renderToStaticMarkup(
+    React.createElement(OptionsArbitrage, {
+      executionLogs: [],
+      onRefreshAll: noop,
+      optionsVenueAvailable: true,
+      isPaused: true,
+    })
+  );
+  assert.match(htmlPaused, /title="Strategy bot status: Stopped"/);
+  assert.doesNotMatch(htmlPaused, /Engine Paused/);
+  assert.doesNotMatch(htmlPaused, /badge-status-warn/);
+});
+
 test("substrategy bot controls live only on the selected live scanner (interactive DOM)", async (t) => {
   await t.test("all-view monitor-only → parity view controls", () => {
     const { execFileSync } = require("node:child_process");

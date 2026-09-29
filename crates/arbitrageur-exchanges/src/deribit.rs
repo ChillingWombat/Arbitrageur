@@ -281,6 +281,15 @@ impl DeribitAdapter {
         if !resp.status().is_success() {
             let is_429 = resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS;
             let status = resp.status().as_u16();
+            if status == 400 {
+                let text = resp.text().await.unwrap_or_default();
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if v.get("error").is_some() {
+                        return Ok(v);
+                    }
+                }
+                anyhow::bail!("Deribit HTTP 400 for {path}: {text}");
+            }
             self.rate_limiter.record_failure(is_429);
             anyhow::bail!("Deribit HTTP {status} for {path}");
         }
@@ -1279,9 +1288,27 @@ impl ExchangeAdapter for DeribitAdapter {
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .ok_or_else(|| anyhow::anyhow!("Deribit cancel requires a venue order_id"))?;
-        let v = self
+        let v = match self
             .private_get(&format!("/private/cancel?order_id={order_id}"))
-            .await?;
+            .await
+        {
+            Ok(v) => v,
+            Err(e) => {
+                let err_msg = e.to_string();
+                if err_msg.contains("not_found")
+                    || err_msg.contains("already_closed")
+                    || err_msg.contains("10004")
+                    || err_msg.contains("11044")
+                    || err_msg.contains("HTTP 400")
+                {
+                    tracing::info!(
+                        "Deribit order {order_id} already dead or not found on venue ({err_msg}) — treating as cancelled"
+                    );
+                    return Ok(());
+                }
+                return Err(e);
+            }
+        };
         // The cancel response is the order object — confirm terminal state
         // through venue truth rather than trusting the ack.
         let state = v

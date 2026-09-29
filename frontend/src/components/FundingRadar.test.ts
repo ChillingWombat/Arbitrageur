@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { fundingAutoEligible, splitFundingLegs } from "./FundingRadar.tsx";
+import React from "react";
+import { renderToStaticMarkup } from "react-dom/server";
+import { FundingRadar, fundingAutoEligible, splitFundingLegs } from "./FundingRadar.tsx";
 import type { FundingOpportunityDto } from "../types";
 
 const baseOpp = (over: Partial<FundingOpportunityDto>): FundingOpportunityDto =>
@@ -72,3 +74,44 @@ test("splitFundingLegs: empty venues yield no legs and zero qty", () => {
   assert.equal(longLegs.length + shortLegs.length, 0);
   assert.equal(legQty, 0);
 });
+
+test("FundingRadar: bottom dock container enforces fixed height across tabs", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(FundingRadar, {
+      opportunities: [],
+      tradeSize: 1000,
+      loading: false,
+    })
+  );
+  assert.match(html, /class="p-3\.5 h-96 overflow-y-auto"/);
+});
+
+test("FundingRadar renders standardized status badge immediately right of Strategy Status", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(FundingRadar, {
+      opportunities: [],
+      tradeSize: 1000,
+      loading: false,
+      isPaused: false,
+    })
+  );
+  assert.match(
+    html,
+    /Strategy Status<\/span>[\s\S]*?title="Strategy bot status: Stopped"[\s\S]*?>Stopped<\/span>/
+  );
+  assert.doesNotMatch(html, /Engine/i);
+});
+
+test("FundingRadar status badge handles isPaused and never renders Engine", () => {
+  const htmlPaused = renderToStaticMarkup(
+    React.createElement(FundingRadar, {
+      opportunities: [],
+      tradeSize: 1000,
+      loading: false,
+      isPaused: true,
+    })
+  );
+  assert.match(htmlPaused, /Strategy Status/);
+  assert.doesNotMatch(htmlPaused, /Engine/i);
+});
+

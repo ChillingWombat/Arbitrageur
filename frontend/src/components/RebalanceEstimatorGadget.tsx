@@ -20,6 +20,7 @@
 import React, { useMemo, useState } from "react";
 import { ArrowRightLeft, Info } from "lucide-react";
 import { EmptyState } from "./EmptyState";
+import { ToggleSwitch } from "./ToggleSwitch";
 import {
   VENUE_TRANSFER_PROFILES,
   estimateRebalance,
@@ -148,10 +149,14 @@ export const RebalanceEstimatorGadget: React.FC<Props> = ({ venueBalances = null
         </div>
       </div>
 
-      <label className="flex items-center gap-2 text-xs font-mono text-slate-600 cursor-pointer">
-        <input type="checkbox" checked={swapNeeded} onChange={(e) => setSwapNeeded(e.target.checked)} className="accent-[#2563eb]" />
-        Coin swap needed (e.g. SOL → USDC, ~15 bps taker + spread)
-      </label>
+      <div className="flex items-center">
+        <ToggleSwitch
+          size="sm"
+          checked={swapNeeded}
+          onChange={setSwapNeeded}
+          label="Coin swap needed (e.g. SOL → USDC, ~15 bps taker + spread)"
+        />
+      </div>
 
       {/* Coin rails: what each side accepts — prevents doomed moves. */}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-2 text-[11px] font-mono">

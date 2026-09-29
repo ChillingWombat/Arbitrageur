@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
-import { SlidersHorizontal, X, ChevronDown, Check } from "lucide-react";
+import { SlidersHorizontal, X, ChevronDown, Check, Wallet, History, Radar, Terminal } from "lucide-react";
 import type { FundingOpportunityDto, FundingTrendDto, ExecutionLogEntry, OpenPositionDto, FixedYieldMaturityDto, FixedYieldExitQuoteDto, TradedOpportunityDto } from "../types";
 import { api, describeCommandError } from "../services/api";
 import type { PerpTicker } from "../types/tickers";
@@ -1304,7 +1304,7 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
           <span className="text-[13px] font-mono font-bold tracking-wider text-slate-900 pr-1">
             Strategy Status
           </span>
-          <BotPhaseBadge phase={bot.phase} />
+          <BotPhaseBadge phase={bot.phase} isPaused={isPaused} />
           <div
             className="ribbon-pill"
             title="Notional per leg — edit via Configurator"
@@ -1626,80 +1626,43 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
       <div className="bg-surface rounded-xl border border-surface-border shadow-card overflow-hidden shrink-0">
         <div className="flex items-stretch border-b border-surface-border bg-slate-50/80 select-none">
           <div className="grid grid-cols-4 flex-1 divide-x divide-surface-border">
-            <button
-              type="button"
-              onClick={() => setDockTab("position")}
-              className={`relative h-9 flex items-center justify-center gap-2 px-4 text-[11px] font-sans transition select-none cursor-pointer ${
-                dockTab === "position"
-                  ? "text-accent-strong font-bold bg-surface"
-                  : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
-              }`}
-            >
-              <span>Current Position</span>
-              {fundingPositions.length > 0 && (
-              <span className="px-1.5 py-0.5 rounded-md text-[11px] font-sans font-bold min-w-[16px] text-center leading-tight bg-accent-dim text-accent-strong border border-accent-line/60">
-                {fundingPositions.length}
-              </span>
-              )}
-              {dockTab === "position" && (
-                <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
-              )}
-            </button>
-            <button
-              type="button"
-              onClick={() => setDockTab("history")}
-              className={`relative h-9 flex items-center justify-center gap-2 px-4 text-[11px] font-sans transition select-none cursor-pointer ${
-                dockTab === "history"
-                  ? "text-accent-strong font-bold bg-surface"
-                  : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
-              }`}
-            >
-              <span>Execution History</span>
-              {fundingLogs.length > 0 && (
-              <span className="px-1.5 py-0.5 rounded-md text-[11px] font-sans font-bold min-w-[16px] text-center leading-tight bg-accent-dim text-accent-strong border border-accent-line/60">
-                {fundingLogs.length}
-              </span>
-              )}
-              {dockTab === "history" && (
-                <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
-              )}
-            </button>
-            <button
-              type="button"
-              onClick={() => setDockTab("opps")}
-              className={`relative h-9 flex items-center justify-center gap-2 px-4 text-[11px] font-sans transition select-none cursor-pointer ${
-                dockTab === "opps"
-                  ? "text-accent-strong font-bold bg-surface"
-                  : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
-              }`}
-            >
-              <span>Opportunity History</span>
-              {fundingOpps.length > 0 && (
-              <span className="px-1.5 py-0.5 rounded-md text-[11px] font-sans font-bold min-w-[16px] text-center leading-tight bg-accent-dim text-accent-strong border border-accent-line/60">
-                {fundingOpps.length}
-              </span>
-              )}
-              {dockTab === "opps" && (
-                <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
-              )}
-            </button>
-            <button
-              type="button"
-              onClick={() => setDockTab("logs")}
-              className={`relative h-9 flex items-center justify-center gap-2 px-4 text-[11px] font-sans transition select-none cursor-pointer ${
-                dockTab === "logs"
-                  ? "text-accent-strong font-bold bg-surface"
-                  : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
-              }`}
-            >
-              <span>Log Monitor</span>
-              {dockTab === "logs" && (
-                <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
-              )}
-            </button>
+            {(
+              [
+                { id: "position", label: "Current Position", icon: Wallet, count: fundingPositions.length },
+                { id: "history", label: "Execution History", icon: History, count: fundingLogs.length },
+                { id: "opps", label: "Opportunity History", icon: Radar, count: fundingOpps.length },
+                { id: "logs", label: "Log Monitor", icon: Terminal, count: null },
+              ] as const
+            ).map(({ id, label, icon: Icon, count }) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setDockTab(id)}
+                className={`relative h-9 flex items-center justify-center space-x-2 px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
+                  dockTab === id
+                    ? "text-accent-strong font-bold bg-surface"
+                    : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
+                }`}
+              >
+                <Icon
+                  className={`w-3.5 h-3.5 transition shrink-0 ${
+                    dockTab === id ? "text-accent-strong" : "text-muted group-hover:text-slate-600"
+                  }`}
+                />
+                <span>{label}</span>
+                {count != null && count > 0 && (
+                  <span className="px-1.5 py-0.5 rounded-md text-[11px] font-sans font-bold min-w-[16px] text-center leading-tight bg-accent-dim text-accent-strong border border-accent-line/60">
+                    {count}
+                  </span>
+                )}
+                {dockTab === id && (
+                  <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
+                )}
+              </button>
+            ))}
           </div>
         </div>
-        <div className="p-3.5 max-h-96 overflow-y-auto">
+        <div className="p-3.5 h-96 overflow-y-auto">
           {dockTab === "position" ? (
             <>
             <FixedYieldPanel isLive={isLive} />

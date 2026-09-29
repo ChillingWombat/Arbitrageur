@@ -325,7 +325,12 @@ fn breaker_frozen_equity_usd(
             if is_usd_family(&ccy) {
                 continue;
             }
-            let Some(fx_now) = fx_usd_now(state, &ccy) else {
+            let Some(fx_now) = state
+                .get_adapter(bal.venue.as_str())
+                .and_then(|a| a.last_account_index_usd(&ccy))
+                .filter(|px| *px > dec!(0))
+                .or_else(|| fx_usd_now(state, &ccy))
+            else {
                 continue;
             };
             let fx_day = match anchor.fx.get(&ccy) {
@@ -1390,7 +1395,9 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
             .get("futures")
             .map(|p| p.target_profit_bps)
             .filter(|v| v.is_finite() && *v >= 0.0)
-            .unwrap_or(1.0),
+            .unwrap_or_else(|| {
+                crate::state::StrategyParamsDto::defaults_for("futures").target_profit_bps
+            }),
     };
     let econ = compute_route_economics(
         &book_buy,
@@ -3330,13 +3337,24 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
     let total_equity_dec: Decimal = accounts.iter().map(|a| a.equity).sum();
     let total_free_margin_dec: Decimal = accounts.iter().map(|a| a.free_margin).sum();
     let total_mm_dec: Decimal = accounts.iter().map(|a| a.maintenance_margin).sum();
-    let all_positions: Vec<_> = accounts.iter().flat_map(|a| a.positions.clone()).collect();
+    // Filter out sub-$1 dust residuals (e.g. worthless deep-OTM options with
+    // empty bid books) using the same $1 threshold as `external_positions.rs`
+    // so DeltaGuard and Margin Health agree with External Position & Stop All.
+    let all_positions: Vec<_> = accounts
+        .iter()
+        .flat_map(|a| a.positions.clone())
+        .filter(|p| (p.quantity.abs() * p.mark_price) >= dec!(1))
+        .collect();
 
     // Feed observed equity into the breaker (env-scoped portfolio total,
     // keyed by economic account), then re-read its state so a drawdown
-    // trip is reflected in this same snapshot.
+    // trip is reflected in this same snapshot. Skip feeding when no venue
+    // accounts have been read yet (e.g. vault locked at startup) so a $0
+    // locked snapshot does not clobber the universe anchor.
     let is_halted = {
-        feed_breaker_equity(state, &breaker_feed);
+        if !breaker_feed.is_empty() || !state.breaker_venue_equity.lock().is_empty() {
+            feed_breaker_equity(state, &breaker_feed);
+        }
         cb.is_tripped()
     };
     let cb_str = match cb.trip_reason() {
@@ -3527,16 +3545,453 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
     })
 }
 
-pub fn reset_circuit_breaker_impl(state: &AppEngineState) -> Result<String, String> {
-    state.circuit_breaker.reset();
-    Ok("Circuit Breaker reset successfully. Trading resumed.".into())
+/// Transition all automated bots (Radar Bot and Options Bot) to Off mode.
+pub fn stop_all_bots(state: &AppEngineState) {
+    // 1. Radar bot: persist mode = off and enabled = false
+    let (cfg, _) = crate::auto_exec::OpportunityExecutor::load_config(state);
+    let disabled_cfg = crate::auto_exec::RadarBotConfigDto::from_policy(
+        &cfg,
+        arbitrageur_strategy::convergence_auto::BotMode::Off,
+    );
+    if let Err(e) = crate::auto_exec::OpportunityExecutor::save_config(state, &disabled_cfg) {
+        tracing::warn!("Failed to persist radar bot off mode: {e}");
+    }
+
+    // 2. Options bots: persist mode = off and enabled = false for all live substrategies
+    for sub in crate::options_bot::LIVE_SUBSTRATEGIES {
+        let (cfg, _) = crate::options_bot::OptionsBotExecutor::load_config(state, sub);
+        let disabled_cfg = crate::options_bot::OptionsBotConfigDto::from_policy(
+            sub,
+            &cfg,
+            arbitrageur_strategy::convergence_auto::BotMode::Off,
+        );
+        if let Err(e) = crate::options_bot::OptionsBotExecutor::save_config(state, &disabled_cfg) {
+            tracing::warn!("Failed to persist options bot off mode for {sub}: {e}");
+        }
+        state.options_tick_status.lock().insert(
+            sub.to_string(),
+            crate::options_bot::OptionsBotTickStatus {
+                substrategy: sub.to_string(),
+                mode: "off".to_string(),
+                open_positions: 0,
+                max_open_positions: cfg.max_open_positions,
+                last_scan_ms: chrono::Utc::now().timestamp_millis(),
+                rows_scanned: 0,
+                candidates: 0,
+                best_edge_usd: None,
+                last_refusal: None,
+            },
+        );
+    }
+
+    // 3. Fixed yield bot: disable auto_fixed_yield_enabled and persist to KV
+    state.settings.write().auto_fixed_yield_enabled = false;
+    if let Err(e) = state
+        .state_store
+        .kv_set("engine.auto_fixed_yield_enabled", "0")
+    {
+        tracing::warn!("Failed to persist auto_fixed_yield_enabled = 0: {e}");
+    }
 }
 
-pub fn trigger_emergency_killswitch_impl(state: &AppEngineState) -> Result<String, String> {
+pub fn reset_circuit_breaker_impl(state: &AppEngineState) -> Result<String, String> {
+    state.circuit_breaker.reset();
+    stop_all_bots(state);
+    Ok("Circuit Breaker reset successfully. Automated bots remain stopped — start each strategy individually.".into())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UntradeableResidualDto {
+    pub venue: String,
+    pub symbol: String,
+    #[serde(alias = "rawQty")]
+    pub raw_qty: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UnresolvedPositionDto {
+    pub venue: String,
+    pub symbol: String,
+    #[serde(alias = "rawQty")]
+    pub raw_qty: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EmergencyShutdownReportDto {
+    #[serde(alias = "circuitBreakerTripped")]
+    pub circuit_breaker_tripped: bool,
+    #[serde(alias = "enginePaused")]
+    pub engine_paused: bool,
+    #[serde(alias = "cancelledOrdersCount")]
+    pub cancelled_orders_count: usize,
+    #[serde(alias = "cancelledOrdersFailed")]
+    pub cancelled_orders_failed: usize,
+    #[serde(alias = "closedEnginePositions")]
+    pub closed_engine_positions: usize,
+    #[serde(alias = "closedExternalPositions")]
+    pub closed_external_positions: usize,
+    #[serde(alias = "untradeableResiduals")]
+    pub untradeable_residuals: Vec<UntradeableResidualDto>,
+    #[serde(alias = "unresolvedPositions")]
+    pub unresolved_positions: Vec<UnresolvedPositionDto>,
+    #[serde(alias = "timestampMs")]
+    pub timestamp_ms: u64,
+    #[serde(default, alias = "safeStateVerified")]
+    pub safe_state_verified: bool,
+}
+
+impl EmergencyShutdownReportDto {
+    #[allow(dead_code)]
+    pub fn is_safe_state(&self) -> bool {
+        self.circuit_breaker_tripped
+            && self.engine_paused
+            && self.unresolved_positions.is_empty()
+            && self.cancelled_orders_failed == 0
+    }
+}
+
+pub async fn execute_emergency_stop_all_impl(
+    state: &AppEngineState,
+) -> Result<EmergencyShutdownReportDto, String> {
+    // 1. Immediate Fail-Closed Freeze
     state
         .circuit_breaker
         .trip("EMERGENCY KILLSWITCH ENGAGED BY OPERATOR");
-    Ok("EMERGENCY KILLSWITCH ENGAGED. All trading operations halted immediately.".into())
+    *state.is_paused.write() = true;
+    let _ = state.state_store.kv_set("engine.paused", "1");
+    let _ = state.state_store.kv_set("engine.is_paused", "true");
+    stop_all_bots(state);
+
+    // Sync vault credentials so risk-reducing exits authenticate on configured venues
+    state.sync_vault_credentials_to_adapters();
+
+    // Check live mode locked vault guard: fail-closed if vault is locked in live mode
+    if state.is_live() {
+        let is_locked = {
+            let mut v = state.vault.write();
+            !v.is_unlocked() && !v.is_auto_locked()
+        };
+        if is_locked {
+            return Err(
+                "vault locked: cannot dispatch order cancels or position unwinds in live mode"
+                    .into(),
+            );
+        }
+    }
+
+    // 2. Concurrent Resting Order Cancellation
+    let mut cancelled_orders_count = 0usize;
+    let mut cancelled_orders_failed = 0usize;
+    let mut untradeable_residuals = Vec::new();
+    let mut unresolved_positions = Vec::new();
+
+    let pending_legs = state
+        .state_store
+        .list_pending_order_legs(Some(state.env().as_str()))
+        .unwrap_or_default();
+
+    let mut resting_targets = Vec::new();
+    let mut seen_orders = HashSet::new();
+
+    for (_exec, leg) in pending_legs {
+        let venue = leg.venue.trim().to_string();
+        let symbol = leg.symbol.trim().to_string();
+        let oid = leg.venue_order_id.filter(|s| !s.trim().is_empty());
+        let cid = leg.client_order_id.filter(|s| !s.trim().is_empty());
+
+        if oid.is_none() && cid.is_none() {
+            continue;
+        }
+
+        let dedup_key = (
+            venue.to_lowercase(),
+            symbol.clone(),
+            oid.clone(),
+            cid.clone(),
+        );
+        if seen_orders.insert(dedup_key) {
+            resting_targets.push((venue, symbol, oid, cid));
+        }
+    }
+
+    if !resting_targets.is_empty() {
+        let mut cancel_futs = Vec::new();
+        for (venue, symbol, oid, cid) in resting_targets {
+            if let Some(adapter) = state.get_adapter(&venue) {
+                if adapter.live_order_submission_implemented() && adapter.has_live_credentials() {
+                    let req = arbitrageur_core::order::CancelRequest {
+                        venue: adapter.venue_id(),
+                        symbol: symbol.clone(),
+                        order_id: oid.clone(),
+                        client_order_id: cid.clone(),
+                    };
+                    cancel_futs.push(async move {
+                        let res = adapter.cancel_order(req).await;
+                        (venue, symbol, oid, cid, res)
+                    });
+                }
+            }
+        }
+
+        let results = futures::future::join_all(cancel_futs).await;
+        for (venue, symbol, oid, cid, res) in results {
+            match res {
+                Ok(_) => cancelled_orders_count += 1,
+                Err(e) => {
+                    let err_str = e.to_string();
+                    let is_already_dead = err_str.contains("not_found")
+                        || err_str.contains("already_closed")
+                        || err_str.contains("already cancelled")
+                        || err_str.contains("Order does not exist")
+                        || err_str.contains("Unknown order")
+                        || err_str.contains("10004")
+                        || err_str.contains("11044")
+                        || err_str.contains("HTTP 400");
+                    if is_already_dead {
+                        tracing::info!("Stop All: cancel order for {venue} {symbol} recognized order already dead: {err_str}");
+                        cancelled_orders_count += 1;
+                    } else {
+                        tracing::warn!("Stop All: cancel order error for {venue} {symbol}: {e}");
+                        cancelled_orders_failed += 1;
+                        let order_ref = oid.or(cid).unwrap_or_else(|| "unknown".to_string());
+                        unresolved_positions.push(UnresolvedPositionDto {
+                            venue: venue.clone(),
+                            symbol: symbol.clone(),
+                            raw_qty: "order".to_string(),
+                            reason: format!("Failed to cancel resting order {order_ref}: {e}"),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+    // 3. Partitioned Unwind Targets
+    let mut closed_engine_positions = 0usize;
+    let mut closed_external_positions = 0usize;
+
+    let all_signals = state
+        .state_store
+        .list_signals(None, None)
+        .map_err(|e| e.to_string())?;
+
+    let open_engine_signals: Vec<crate::state_store::SignalExecution> = all_signals
+        .iter()
+        .filter(|s| {
+            s.status.counts_as_open() && !s.id.starts_with("flat-") && !s.id.starts_with("trim-")
+        })
+        .cloned()
+        .collect();
+
+    let mut engine_covered_pairs: HashSet<(String, String)> = HashSet::new();
+    for s in &open_engine_signals {
+        for l in &s.legs {
+            let canon_venue = crate::state::canonical_venue_id(&l.venue)
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| l.venue.trim().to_lowercase());
+            engine_covered_pairs.insert((
+                canon_venue,
+                arbitrageur_core::symbol::canonical_base(&l.symbol),
+            ));
+        }
+    }
+
+    let mut engine_strategies: Vec<String> = open_engine_signals
+        .iter()
+        .map(|s| s.strategy_id.clone())
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
+    engine_strategies.sort();
+
+    for strat in engine_strategies {
+        match flatten_positions_inner(
+            None,
+            &strat,
+            Some("emergency_market"),
+            arbitrageur_execution::virtual_ledger::CycleStatus::Closed,
+            state,
+            None,
+            None,
+        )
+        .await
+        {
+            Ok(res) => {
+                closed_engine_positions += res.signals_closed;
+            }
+            Err(e) => {
+                tracing::error!("Stop All: emergency flatten for strategy '{strat}' error: {e}");
+            }
+        }
+    }
+
+    // Clean up any remaining open flatten/trim children whose parents are already closed
+    if let Ok(all_sigs_now) = state.state_store.list_signals(None, None) {
+        for s in &all_sigs_now {
+            if (s.id.starts_with("flat-") || s.id.starts_with("trim-")) && s.status.counts_as_open()
+            {
+                let parent_id =
+                    s.id.strip_prefix("flat-")
+                        .or_else(|| s.id.strip_prefix("trim-"))
+                        .and_then(|t| t.rsplit_once('-').map(|(p, _)| p));
+                let parent_is_closed = match parent_id {
+                    Some(pid) => all_sigs_now
+                        .iter()
+                        .find(|p| p.id == pid)
+                        .map(|p| !p.status.counts_as_open())
+                        .unwrap_or(true),
+                    None => true,
+                };
+                if parent_is_closed {
+                    let _ = state.state_store.update_signal_status(
+                        &s.id,
+                        crate::state_store::SignalStatus::Closed,
+                        Some("Stop All: parent is closed"),
+                    );
+                }
+            }
+        }
+    }
+
+    // 4. Close Unmanaged External Positions (with strict deduplication against engine positions)
+    if let Ok(ext_resp) = crate::external_positions::get_external_positions_impl(state).await {
+        for pos in ext_resp.positions {
+            let pos_base = arbitrageur_core::symbol::canonical_base(&pos.symbol);
+            let canon_pos_venue = crate::state::canonical_venue_id(&pos.venue)
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| pos.venue.trim().to_lowercase());
+            let venue_key = (canon_pos_venue, pos_base);
+            if engine_covered_pairs.contains(&venue_key) {
+                tracing::info!(
+                    "Stop All: skipping external position {} {} — claimed by engine unwind",
+                    pos.venue,
+                    pos.symbol
+                );
+                continue;
+            }
+            if !pos.close_supported || pos.external_qty <= 0.0 {
+                continue;
+            }
+            let close_input = crate::external_positions::CloseExternalPositionInput {
+                venue: pos.venue.clone(),
+                symbol: pos.symbol.clone(),
+                mode: "market".to_string(),
+                limit_price: None,
+                close_pct: Some(100.0),
+            };
+            match crate::external_positions::close_external_position_impl(close_input, state).await
+            {
+                Ok(_) => {
+                    closed_external_positions += 1;
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Stop All: close external position {} {} error: {e}",
+                        pos.venue,
+                        pos.symbol
+                    );
+                }
+            }
+        }
+    }
+
+    // 5. Venue-Truth Re-Read and Untradeable Residual Accounting
+    for (vid, name, adapter) in state.get_venues() {
+        if !adapter.has_live_credentials() {
+            continue;
+        }
+        match adapter.fetch_account().await {
+            Ok(account) => {
+                for raw_pos in &account.positions {
+                    let p = match adapter.normalize_account_position(raw_pos) {
+                        Ok(Some(p)) => p,
+                        _ => continue,
+                    };
+                    if p.quantity == Decimal::ZERO {
+                        continue;
+                    }
+                    let qty = p.quantity;
+                    let wire_qty = adapter.wire_base_qty(&p.symbol, qty).await.unwrap_or(qty);
+                    let mark_px = p.mark_price;
+                    let notional_usd =
+                        dec_to_f64(qty * mark_px, "residual notional").unwrap_or(0.0);
+
+                    if wire_qty == Decimal::ZERO {
+                        untradeable_residuals.push(UntradeableResidualDto {
+                            venue: vid.to_string(),
+                            symbol: p.symbol.clone(),
+                            raw_qty: qty.to_string(),
+                            reason: "sub-lot increment (wire_base_qty == 0)".to_string(),
+                        });
+                    } else if notional_usd < 10.0 {
+                        untradeable_residuals.push(UntradeableResidualDto {
+                            venue: vid.to_string(),
+                            symbol: p.symbol.clone(),
+                            raw_qty: qty.to_string(),
+                            reason: "dust notional under $10 (dust notional under $1)".to_string(),
+                        });
+                    } else {
+                        unresolved_positions.push(UnresolvedPositionDto {
+                            venue: vid.to_string(),
+                            symbol: p.symbol.clone(),
+                            raw_qty: qty.to_string(),
+                            reason: format!("exposure remains: {qty} ({notional_usd:.2} USD)"),
+                        });
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!("Stop All: failed to fetch final account for {name}: {e}");
+                unresolved_positions.push(UnresolvedPositionDto {
+                    venue: vid.to_string(),
+                    symbol: "*".into(),
+                    raw_qty: "unknown".into(),
+                    reason: format!("Venue account balance unverified: {e}"),
+                });
+            }
+        }
+    }
+
+    let timestamp_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0);
+
+    let safe_state_verified = state.circuit_breaker.is_tripped()
+        && *state.is_paused.read()
+        && unresolved_positions.is_empty()
+        && cancelled_orders_failed == 0;
+
+    let report = EmergencyShutdownReportDto {
+        circuit_breaker_tripped: state.circuit_breaker.is_tripped(),
+        engine_paused: *state.is_paused.read(),
+        cancelled_orders_count,
+        cancelled_orders_failed,
+        closed_engine_positions,
+        closed_external_positions,
+        untradeable_residuals,
+        unresolved_positions,
+        timestamp_ms,
+        safe_state_verified,
+    };
+
+    Ok(report)
+}
+
+pub async fn trigger_emergency_killswitch_impl(state: &AppEngineState) -> Result<String, String> {
+    let report = execute_emergency_stop_all_impl(state).await?;
+    Ok(format!(
+        "EMERGENCY KILLSWITCH ENGAGED. Orders cancelled: {}, Engine positions closed: {}, External positions closed: {}, Untradeable residuals: {}, Unresolved: {}.",
+        report.cancelled_orders_count,
+        report.closed_engine_positions,
+        report.closed_external_positions,
+        report.untradeable_residuals.len(),
+        report.unresolved_positions.len()
+    ))
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -3794,10 +4249,53 @@ async fn flatten_leg(args: FlattenLegArgs<'_>) -> Result<FlattenLegOutcome, Stri
             .map_err(|e| format!("client order id persist failed — dispatch refused: {e}"))?;
     }
 
-    let resp = adapter
+    let mut resp = adapter
         .place_order(order)
         .await
         .map_err(|e| e.to_string())?;
+
+    // On async-ack venues (Lighter, Decibel, Aster, Arcus, PopDEX), an accepted
+    // market order returns New or PartiallyFilled while fills land shortly after.
+    // Poll fetch_order up to 15 times (~3s) to capture the authoritative fill.
+    if !resp.status.is_final()
+        || (resp.status == arbitrageur_core::types::OrderStatus::Filled
+            && resp.filled_qty == Decimal::ZERO)
+    {
+        let order_id = resp.order_id.clone();
+        if !order_id.trim().is_empty() {
+            #[cfg(not(test))]
+            let attempts = 15;
+            #[cfg(test)]
+            let attempts = 3;
+            #[cfg(not(test))]
+            let interval = std::time::Duration::from_millis(200);
+            #[cfg(test)]
+            let interval = std::time::Duration::from_millis(5);
+
+            for _ in 0..attempts {
+                tokio::time::sleep(interval).await;
+                if let Ok(polled) = adapter
+                    .fetch_order(symbol, &order_id, Some(&client_order_id))
+                    .await
+                {
+                    let matches = (!polled.order_id.is_empty() && polled.order_id == order_id)
+                        || polled.client_order_id == client_order_id;
+                    if matches {
+                        resp = polled;
+                        if resp.status.is_final()
+                            && resp
+                                .avg_fill_price
+                                .map(|p| p > Decimal::ZERO)
+                                .unwrap_or(false)
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let resp =
         arbitrageur_execution::enrich_fill_stats(&adapter, symbol, &client_order_id, resp).await;
     let order_id = (!resp.order_id.trim().is_empty()).then(|| resp.order_id.clone());
@@ -4726,6 +5224,9 @@ async fn flatten_positions_inner(
                             side: LegSide,
                             symbol: &str|
      -> Result<Decimal, String> {
+        if execution_type == Some("emergency_market") {
+            return Ok(dec!(0));
+        }
         let mut total = dec!(0);
         for child in children {
             if !child.status.counts_as_open() {
@@ -4974,6 +5475,15 @@ async fn flatten_positions_inner(
                     .update_signal_status(&child.id, SignalStatus::Closed, Some(note))
                     .map_err(|e| e.to_string())?;
             }
+            for child in &family {
+                if child.status.counts_as_open() {
+                    let _ = state.state_store.update_signal_status(
+                        &child.id,
+                        SignalStatus::Closed,
+                        Some(note),
+                    );
+                }
+            }
             Ok(())
         };
 
@@ -4983,7 +5493,11 @@ async fn flatten_positions_inner(
             // (resolve_flattened_parent skips a Closed parent) and could mark
             // a still-live position fully closed. Leave the parent open; the
             // reconciler closes it once the children reach a terminal state.
-            if family.iter().any(|c| c.status.counts_as_open()) {
+            // In an emergency market flatten (Stop All), resting orders were
+            // already cancelled, so zero residual venue position means we are flat.
+            if family.iter().any(|c| c.status.counts_as_open())
+                && execution_type != Some("emergency_market")
+            {
                 out.notes.push(format!(
                     "{}: residual already covered by working close orders — awaiting settlement",
                     sig.id
@@ -5005,6 +5519,28 @@ async fn flatten_positions_inner(
                 // signal, or a dead lot that can never match now). Sweep all
                 // unmarked child fills — this is their last chance to count.
                 accumulate_unlotted_family_fills(state, &sig, &family, true);
+            }
+            let (venue_a, venue_b) = (
+                sig.legs
+                    .first()
+                    .map(|l| l.venue.clone())
+                    .unwrap_or_default(),
+                sig.legs.get(1).map(|l| l.venue.clone()).unwrap_or_default(),
+            );
+            if let Some(bot) = state.radar_bot.lock().clone() {
+                bot.forget_position(&sig.symbol, &venue_a, &venue_b);
+                let _ = state.state_store.delete_bot_position(
+                    &sig.symbol,
+                    &venue_a,
+                    &venue_b,
+                    sig.environment.as_str(),
+                );
+                let _ = state.state_store.delete_bot_position(
+                    &sig.symbol,
+                    &venue_b,
+                    &venue_a,
+                    sig.environment.as_str(),
+                );
             }
             continue;
         }
@@ -5165,7 +5701,29 @@ async fn flatten_positions_inner(
                             sig.id, exp.canonical, p.side, exp.entry_side
                         ));
                     }
-                    Ok(Some(_)) => fully_flat = false,
+                    Ok(Some(p)) => {
+                        // In emergency flatten or terminal close, check if the remaining venue position
+                        // is untradeable dust (< $1 notional) or sub-lot increment.
+                        let wire_qty = adapter
+                            .wire_base_qty(&p.symbol, p.quantity)
+                            .await
+                            .unwrap_or(p.quantity);
+                        let notional_usd =
+                            dec_to_f64(p.quantity * p.mark_price, "residual notional")
+                                .unwrap_or(0.0);
+                        let is_dust = wire_qty == Decimal::ZERO || notional_usd < 10.0;
+                        if is_dust
+                            && (execution_type == Some("emergency_market")
+                                || close_status == CycleStatus::Closed)
+                        {
+                            out.notes.push(format!(
+                                "{}: {} remaining venue position {} is untradeable dust (${:.2}) — closed under emergency flatten",
+                                sig.id, exp.exact_symbol, p.quantity, notional_usd
+                            ));
+                        } else {
+                            fully_flat = false;
+                        }
+                    }
                     Err(e) => {
                         fully_flat = false;
                         out.notes.push(format!(
@@ -5457,7 +6015,15 @@ pub async fn reset_circuit_breaker(
 pub async fn trigger_emergency_killswitch(
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<String, String> {
-    trigger_emergency_killswitch_impl(&state)
+    trigger_emergency_killswitch_impl(&state).await
+}
+
+#[allow(dead_code)]
+#[tauri::command]
+pub async fn execute_emergency_stop_all(
+    state: State<'_, Arc<AppEngineState>>,
+) -> Result<EmergencyShutdownReportDto, String> {
+    execute_emergency_stop_all_impl(&state).await
 }
 
 #[tauri::command]

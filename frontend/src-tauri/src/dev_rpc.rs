@@ -83,6 +83,12 @@ async fn dispatch(line: &str, state: &Arc<AppEngineState>) -> Value {
     let out: Result<Value, String> = match cmd {
         // ── vault / env / engine ────────────────────────────────────────────
         "vault_status" => Ok(json!(crate::accounts::get_vault_status_impl(st))),
+        "vault_presence" => {
+            let mut v = st.vault.write();
+            v.credential_presence()
+                .map(|v| json!(v))
+                .map_err(|e| e.to_string())
+        }
         "unlock_vault" => {
             let pw = arg(&args, "password").unwrap_or_default().to_string();
             let totp = arg(&args, "totp").map(str::to_string);
@@ -252,7 +258,9 @@ async fn dispatch(line: &str, state: &Arc<AppEngineState>) -> Value {
             .await
             .map(|v| json!(v))
         }
-        "killswitch" => crate::execution::trigger_emergency_killswitch_impl(st).map(|v| json!(v)),
+        "killswitch" | "stop_all" => crate::execution::execute_emergency_stop_all_impl(st)
+            .await
+            .map(|v| json!(v)),
         "reset_circuit_breaker" => {
             crate::execution::reset_circuit_breaker_impl(st).map(|v| json!(v))
         }
@@ -539,4 +547,91 @@ fn adopt_position(args: &Value, state: &AppEngineState) -> Result<Value, String>
         arg_f64(args, "expected_converge_secs"),
     )
     .map(|_| json!(true))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_dev_rpc_stop_all_and_killswitch() {
+        let state = Arc::new(AppEngineState::new());
+
+        // Test dispatch "stop_all"
+        let line_stop = r#"{"id": 1, "cmd": "stop_all", "args": {}}"#;
+        let res_stop = dispatch(line_stop, &state).await;
+        assert_eq!(res_stop["id"], 1);
+        assert!(res_stop["ok"].is_object());
+        assert_eq!(res_stop["ok"]["circuit_breaker_tripped"], true);
+        assert_eq!(res_stop["ok"]["engine_paused"], true);
+
+        // Reset breaker
+        state.circuit_breaker.reset();
+        *state.is_paused.write() = false;
+
+        // Test dispatch "killswitch"
+        let line_kill = r#"{"id": 2, "cmd": "killswitch", "args": {}}"#;
+        let res_kill = dispatch(line_kill, &state).await;
+        assert_eq!(res_kill["id"], 2);
+        assert!(res_kill["ok"].is_object());
+        assert_eq!(res_kill["ok"]["circuit_breaker_tripped"], true);
+        assert_eq!(res_kill["ok"]["engine_paused"], true);
+    }
+
+    #[tokio::test]
+    async fn test_dev_rpc_concurrent_stop_all_and_killswitch() {
+        let state = Arc::new(AppEngineState::new());
+
+        let line_stop = r#"{"id": 1, "cmd": "stop_all", "args": {}}"#;
+        let line_kill = r#"{"id": 2, "cmd": "killswitch", "args": {}}"#;
+
+        let (res_stop, res_kill) =
+            tokio::join!(dispatch(line_stop, &state), dispatch(line_kill, &state));
+
+        assert_eq!(res_stop["id"], 1);
+        assert!(res_stop["ok"].is_object());
+        assert_eq!(res_stop["ok"]["circuit_breaker_tripped"], true);
+        assert_eq!(res_stop["ok"]["engine_paused"], true);
+
+        assert_eq!(res_kill["id"], 2);
+        assert!(res_kill["ok"].is_object());
+        assert_eq!(res_kill["ok"]["circuit_breaker_tripped"], true);
+        assert_eq!(res_kill["ok"]["engine_paused"], true);
+
+        // Verify circuit breaker and engine pause stay locked
+        assert!(state.circuit_breaker.is_tripped());
+        assert!(*state.is_paused.read());
+    }
+
+    #[tokio::test]
+    async fn test_dev_rpc_burst_concurrent_stop_all() {
+        let state = Arc::new(AppEngineState::new());
+
+        let mut tasks = Vec::new();
+        for i in 1..=10 {
+            let s = Arc::clone(&state);
+            tasks.push(tokio::spawn(async move {
+                let line = format!(r#"{{"id": {i}, "cmd": "stop_all", "args": {{}}}}"#);
+                dispatch(&line, &s).await
+            }));
+        }
+
+        let results = futures::future::join_all(tasks).await;
+        for (i, res) in results.into_iter().enumerate() {
+            let val = res.expect("task join failed");
+            assert_eq!(val["id"], i + 1);
+            assert!(
+                val["ok"].is_object(),
+                "Call {} did not return ok object: {:?}",
+                i + 1,
+                val
+            );
+            assert_eq!(val["ok"]["circuit_breaker_tripped"], true);
+            assert_eq!(val["ok"]["engine_paused"], true);
+        }
+
+        // Verify state remains locked
+        assert!(state.circuit_breaker.is_tripped());
+        assert!(*state.is_paused.read());
+    }
 }

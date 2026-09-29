@@ -3012,11 +3012,23 @@ pub async fn reset_transaction_history_impl(
     if let Err(e) = state.state_store.kv_set(key, "0") {
         tracing::warn!("persist reset cumulative realized PnL failed: {e}");
     }
+    let outlay_key = if is_live {
+        "pnl.premium_outlay.live"
+    } else {
+        "pnl.premium_outlay.testnet"
+    };
+    if let Err(e) = state.state_store.kv_set(outlay_key, "0") {
+        tracing::warn!("persist reset cumulative premium outlay failed: {e}");
+    }
     if is_live {
         *state.total_realized_profit_live.write() = dec!(0);
+        *state.total_premium_outlay_live.write() = dec!(0);
     } else {
         *state.total_realized_profit.write() = dec!(0);
+        *state.total_premium_outlay.write() = dec!(0);
     }
+    state.circuit_breaker.reset();
+    *state.last_risk_live_universe.write() = None;
     state
         .execution_logs
         .write()
@@ -3176,6 +3188,12 @@ pub fn set_live_mode_impl(enabled: bool, state: &AppEngineState) -> Result<bool,
 }
 
 pub fn set_engine_paused_impl(paused: bool, state: &AppEngineState) -> Result<bool, String> {
+    if !paused && state.circuit_breaker.is_tripped() {
+        return Err(
+            "Cannot resume engine while circuit breaker is tripped. Reset circuit breaker first."
+                .into(),
+        );
+    }
     // Durable: a restart must not silently resume a halted engine. A kv
     // write failure refuses the toggle — an in-memory-only pause would
     // lull the operator into thinking the halt survives restarts.
@@ -3184,6 +3202,9 @@ pub fn set_engine_paused_impl(paused: bool, state: &AppEngineState) -> Result<bo
         .kv_set("engine.paused", if paused { "1" } else { "0" })
         .map_err(|e| format!("Failed to persist pause state: {e}"))?;
     *state.is_paused.write() = paused;
+    if paused {
+        crate::execution::stop_all_bots(state);
+    }
     Ok(paused)
 }
 
@@ -6263,6 +6284,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_engine_pause_circuit_breaker_and_stop_all_bots() {
+        let state = setup_test_state_with_venues();
+
+        // 1. Enable fixed yield bot
+        state.settings.write().auto_fixed_yield_enabled = true;
+        let _ = state
+            .state_store
+            .kv_set("engine.auto_fixed_yield_enabled", "1");
+
+        // 2. Arm radar bot
+        let (cfg, _) = crate::auto_exec::OpportunityExecutor::load_config(&state);
+        let armed_cfg = crate::auto_exec::RadarBotConfigDto {
+            enabled: true,
+            mode: "auto".to_string(),
+            ..crate::auto_exec::RadarBotConfigDto::from_policy(
+                &cfg,
+                arbitrageur_strategy::convergence_auto::BotMode::Auto,
+            )
+        };
+        crate::auto_exec::OpportunityExecutor::save_config(&state, &armed_cfg).expect("arm radar");
+
+        // 3. Pausing the engine stops all bots and disables fixed yield
+        let p = set_engine_paused_impl(true, &state).expect("pause");
+        assert!(p);
+        assert!(*state.is_paused.read());
+        assert!(!state.settings.read().auto_fixed_yield_enabled);
+        assert_eq!(
+            state
+                .state_store
+                .kv_get("engine.auto_fixed_yield_enabled")
+                .unwrap(),
+            Some("0".to_string())
+        );
+        let (_, radar_mode) = crate::auto_exec::OpportunityExecutor::load_config(&state);
+        assert_eq!(
+            radar_mode,
+            arbitrageur_strategy::convergence_auto::BotMode::Off
+        );
+
+        // 4. Trip circuit breaker
+        state.circuit_breaker.trip("TEST TRIP");
+        assert!(state.circuit_breaker.is_tripped());
+
+        // 5. Unpausing while circuit breaker is tripped fails fail-closed
+        let resume_err = set_engine_paused_impl(false, &state).unwrap_err();
+        assert_eq!(
+            resume_err,
+            "Cannot resume engine while circuit breaker is tripped. Reset circuit breaker first."
+        );
+        assert!(*state.is_paused.read());
+
+        // 6. Arming radar bot or options bot while circuit breaker is tripped fails
+        let radar_err =
+            crate::auto_exec::OpportunityExecutor::save_config(&state, &armed_cfg).unwrap_err();
+        assert!(
+            radar_err.contains("Cannot enable or arm Radar bot while circuit breaker is tripped")
+        );
+
+        let (opt_cfg, _) = crate::options_bot::OptionsBotExecutor::load_config(&state, "parity");
+        let armed_opt_cfg = crate::options_bot::OptionsBotConfigDto {
+            enabled: true,
+            mode: "auto".to_string(),
+            ..crate::options_bot::OptionsBotConfigDto::from_policy(
+                "parity",
+                &opt_cfg,
+                arbitrageur_strategy::convergence_auto::BotMode::Auto,
+            )
+        };
+        let opt_err = crate::options_bot::OptionsBotExecutor::save_config(&state, &armed_opt_cfg)
+            .unwrap_err();
+        assert!(opt_err.contains("Cannot enable or arm Options bot"));
+
+        // 7. Reset circuit breaker allows unpausing
+        state.circuit_breaker.reset();
+        assert!(!state.circuit_breaker.is_tripped());
+        let unpaused = set_engine_paused_impl(false, &state).expect("unpause");
+        assert!(!unpaused);
+        assert!(!*state.is_paused.read());
+    }
+
+    #[tokio::test]
     async fn test_unconfigured_state_returns_zero_synthetic_data() {
         let state = AppEngineState::new();
 
@@ -6867,7 +6969,9 @@ mod tests {
         assert_eq!(risk.margin_health.maintenance_margin_req_usd, 0.0);
 
         // Trigger killswitch
-        let halt_msg = trigger_emergency_killswitch_impl(&state).expect("killswitch");
+        let halt_msg = trigger_emergency_killswitch_impl(&state)
+            .await
+            .expect("killswitch");
         assert!(halt_msg.contains("EMERGENCY KILLSWITCH"));
 
         let risk_after = get_risk_overview_impl(&state)
@@ -6884,6 +6988,848 @@ mod tests {
             .await
             .expect("risk overview resumed");
         assert!(!risk_resumed.is_halted);
+    }
+
+    #[tokio::test]
+    async fn test_emergency_stop_all_full_overhaul() {
+        let state = setup_test_state_with_venues();
+
+        // 1. Verify initially unpaused and circuit breaker active
+        assert!(!state.circuit_breaker.is_tripped());
+        assert!(!*state.is_paused.read());
+
+        // 2. Insert a simulated pending leg with an active resting order
+        let sig_id = "test-sig-stop-all";
+        let new_sig = crate::state_store::NewSignalExecution {
+            id: sig_id.to_string(),
+            strategy_id: "futures".to_string(),
+            symbol: "BTC".to_string(),
+            route_id: None,
+            expected_net_usd: None,
+            note: Some("test entry".to_string()),
+            legs: vec![crate::state_store::NewSignalLeg {
+                account_id: None,
+                venue: "hyperliquid".to_string(),
+                side: crate::state_store::LegSide::Long,
+                symbol: Some("BTC-USDC".to_string()),
+                intended_qty: 0.1,
+                intended_price: Some(60000.0),
+                unit_scale: None,
+            }],
+        };
+        state
+            .state_store
+            .record_signal_execution(&new_sig, state.env().as_str())
+            .expect("record signal");
+        state
+            .state_store
+            .record_leg_order_id(
+                sig_id,
+                crate::state_store::LegSide::Long,
+                "hl_order_999",
+                Some("client_ord_999"),
+            )
+            .expect("record order id");
+
+        // Verify pending legs are returned
+        let pending = state
+            .state_store
+            .list_pending_order_legs(Some(state.env().as_str()))
+            .expect("list pending legs");
+        assert!(!pending.is_empty());
+
+        // 3. Execute emergency stop all
+        let report = execute_emergency_stop_all_impl(&state)
+            .await
+            .expect("execute emergency stop all");
+
+        // 4. Verify Phase 1: Trip & Freeze
+        assert!(report.circuit_breaker_tripped);
+        assert!(report.engine_paused);
+        assert!(state.circuit_breaker.is_tripped());
+        assert!(*state.is_paused.read());
+        assert_eq!(
+            state.state_store.kv_get("engine.paused").unwrap(),
+            Some("1".to_string())
+        );
+        assert_eq!(
+            state.state_store.kv_get("engine.is_paused").unwrap(),
+            Some("true".to_string())
+        );
+
+        // 5. Verify Phase 2: Resting order cancellation was attempted
+        assert!(report.cancelled_orders_count + report.cancelled_orders_failed >= 1);
+
+        // 6. Verify Phase 6: Safe state
+        assert!(report.safe_state_verified);
+        assert!(report.is_safe_state());
+
+        // 7. Verify trigger_emergency_killswitch_impl returns summary message
+        let kill_msg = trigger_emergency_killswitch_impl(&state)
+            .await
+            .expect("trigger killswitch");
+        assert!(kill_msg.contains("EMERGENCY KILLSWITCH ENGAGED"));
+    }
+
+    #[tokio::test]
+    async fn test_emergency_stop_all_concurrent_execution() {
+        let state = setup_test_state_with_venues();
+
+        // 1. Insert a simulated pending leg with an active resting order
+        let sig_id = "test-sig-concurrent-stop";
+        let new_sig = crate::state_store::NewSignalExecution {
+            id: sig_id.to_string(),
+            strategy_id: "futures".to_string(),
+            symbol: "ETH".to_string(),
+            route_id: None,
+            expected_net_usd: None,
+            note: Some("test entry concurrent".to_string()),
+            legs: vec![crate::state_store::NewSignalLeg {
+                account_id: None,
+                venue: "hyperliquid".to_string(),
+                side: crate::state_store::LegSide::Long,
+                symbol: Some("ETH-USDC".to_string()),
+                intended_qty: 1.0,
+                intended_price: Some(3000.0),
+                unit_scale: None,
+            }],
+        };
+        state
+            .state_store
+            .record_signal_execution(&new_sig, state.env().as_str())
+            .expect("record signal");
+        state
+            .state_store
+            .record_leg_order_id(
+                sig_id,
+                crate::state_store::LegSide::Long,
+                "hl_order_eth_888",
+                Some("client_ord_eth_888"),
+            )
+            .expect("record order id");
+
+        // 2. Concurrently call execute_emergency_stop_all_impl twice
+        let (res1, res2) = tokio::join!(
+            execute_emergency_stop_all_impl(&state),
+            execute_emergency_stop_all_impl(&state)
+        );
+
+        let report1 = res1.expect("concurrent call 1 failed");
+        let report2 = res2.expect("concurrent call 2 failed");
+
+        // 3. Verify both reports show tripped circuit breaker and paused engine
+        assert!(report1.circuit_breaker_tripped);
+        assert!(report1.engine_paused);
+        assert!(report2.circuit_breaker_tripped);
+        assert!(report2.engine_paused);
+
+        // 4. Verify system state is locked
+        assert!(state.circuit_breaker.is_tripped());
+        assert!(*state.is_paused.read());
+        assert_eq!(
+            state.state_store.kv_get("engine.paused").unwrap(),
+            Some("1".to_string())
+        );
+        assert_eq!(
+            state.state_store.kv_get("engine.is_paused").unwrap(),
+            Some("true".to_string())
+        );
+
+        // 5. Verify total cancellation attempts succeeded
+        assert!(
+            report1.cancelled_orders_count
+                + report1.cancelled_orders_failed
+                + report2.cancelled_orders_count
+                + report2.cancelled_orders_failed
+                >= 1
+        );
+
+        // 6. Test second sequential call on already-halted system (idempotency)
+        let report3 = execute_emergency_stop_all_impl(&state)
+            .await
+            .expect("subsequent call failed");
+        assert!(report3.circuit_breaker_tripped);
+        assert!(report3.engine_paused);
+        assert!(report3.safe_state_verified);
+        assert!(report3.is_safe_state());
+
+        // Breaker and pause remain locked
+        assert!(state.circuit_breaker.is_tripped());
+        assert!(*state.is_paused.read());
+    }
+
+    #[tokio::test]
+    async fn test_emergency_stop_all_deduplication_and_dust_adversarial() {
+        let (state, _vault_dir) = test_state_with_vault("adversarial_stop");
+        {
+            let mut s = state.settings.write();
+            s.hyperliquid_enabled = true;
+            s.lighter_enabled = true;
+            s.vanta_enabled = true;
+            s.robinhood_enabled = true;
+            s.arcus_enabled = true;
+            s.passive_unwind.timeout_secs = 0;
+        }
+        for v in ["hyperliquid", "lighter", "vanta", "robinhood", "arcus"] {
+            state.install_test_sim(v);
+        }
+        initialize_vault_impl("000000", &state).expect("init vault");
+        unlock_vault_impl("000000", None, &state).expect("unlock vault");
+
+        // 1. Seed orderbooks
+        seed_test_book(
+            &state,
+            "hyperliquid",
+            "BTC-USDC",
+            dec!(60000.0),
+            dec!(60005.0),
+        );
+        seed_test_book(&state, "hyperliquid", "SOL-USDC", dec!(150.0), dec!(150.2));
+        seed_test_book(&state, "lighter", "ETH-USDC", dec!(3000.0), dec!(3001.0));
+        seed_test_book(&state, "lighter", "DOGE-USDC", dec!(0.10), dec!(0.101));
+
+        // 2. Open on-exchange positions via simulated exchange orders:
+        // - Hyperliquid BTC-USDC: 0.8 BTC total (0.5 engine-owned + 0.3 external excess)
+        let open_btc = arbitrageur_core::order::OrderRequest::new_market(
+            state.test_sim("hyperliquid").expect("hl sim").venue_id(),
+            "BTC-USDC",
+            Side::Buy,
+            dec!(0.8),
+        );
+        state
+            .test_sim("hyperliquid")
+            .expect("hl sim")
+            .place_order(open_btc)
+            .await
+            .expect("open btc position");
+
+        // - Hyperliquid SOL-USDC: 2.0 SOL ($300 notional) purely external position (same venue, different canonical base)
+        let open_sol = arbitrageur_core::order::OrderRequest::new_market(
+            state.test_sim("hyperliquid").expect("hl sim").venue_id(),
+            "SOL-USDC",
+            Side::Buy,
+            dec!(2.0),
+        );
+        state
+            .test_sim("hyperliquid")
+            .expect("hl sim")
+            .place_order(open_sol)
+            .await
+            .expect("open sol position");
+
+        // - Lighter ETH-USDC: 1.0 ETH ($3000 notional) purely external position (different venue, different base)
+        let open_eth = arbitrageur_core::order::OrderRequest::new_market(
+            state.test_sim("lighter").expect("lighter sim").venue_id(),
+            "ETH-USDC",
+            Side::Buy,
+            dec!(1.0),
+        );
+        state
+            .test_sim("lighter")
+            .expect("lighter sim")
+            .place_order(open_eth)
+            .await
+            .expect("open eth position");
+
+        // - Lighter DOGE-USDC: 5.0 DOGE ($0.50 notional < $1 dust threshold)
+        let open_doge = arbitrageur_core::order::OrderRequest::new_market(
+            state.test_sim("lighter").expect("lighter sim").venue_id(),
+            "DOGE-USDC",
+            Side::Buy,
+            dec!(5.0),
+        );
+        state
+            .test_sim("lighter")
+            .expect("lighter sim")
+            .place_order(open_doge)
+            .await
+            .expect("open doge dust position");
+
+        // 3. Record engine signal claiming 0.5 BTC on Hyperliquid
+        let sig_id = "sig-btc-engine-test";
+        let new_sig = crate::state_store::NewSignalExecution {
+            id: sig_id.to_string(),
+            strategy_id: "futures".to_string(),
+            symbol: "BTC-USDC".to_string(),
+            route_id: None,
+            expected_net_usd: None,
+            note: Some("engine btc long position".to_string()),
+            legs: vec![crate::state_store::NewSignalLeg {
+                account_id: None,
+                venue: "hyperliquid".to_string(),
+                side: crate::state_store::LegSide::Long,
+                symbol: Some("BTC-USDC".to_string()),
+                intended_qty: 0.5,
+                intended_price: Some(60000.0),
+                unit_scale: None,
+            }],
+        };
+        state
+            .state_store
+            .record_signal_execution(&new_sig, state.env().as_str())
+            .expect("record signal");
+        state
+            .state_store
+            .apply_leg_fill(
+                sig_id,
+                crate::state_store::LegSide::Long,
+                0.5,
+                60000.0,
+                0.0,
+                None,
+            )
+            .expect("apply leg fill");
+
+        // Verify initial state:
+        // External positions before stop_all:
+        let ext_before = crate::external_positions::get_external_positions_impl(&state)
+            .await
+            .expect("get external positions");
+        // BTC excess: 0.8 - 0.5 = 0.3 BTC external
+        // SOL: 2.0 SOL external
+        // ETH: 1.0 ETH external
+        // DOGE: < $1 dust filtered out by get_external_positions_impl
+        let has_ext_btc = ext_before
+            .positions
+            .iter()
+            .any(|p| p.venue.eq_ignore_ascii_case("hyperliquid") && p.symbol == "BTC-USDC");
+        let has_ext_sol = ext_before
+            .positions
+            .iter()
+            .any(|p| p.venue.eq_ignore_ascii_case("hyperliquid") && p.symbol == "SOL-USDC");
+        let has_ext_eth = ext_before
+            .positions
+            .iter()
+            .any(|p| p.venue.eq_ignore_ascii_case("lighter") && p.symbol == "ETH-USDC");
+        let has_ext_doge = ext_before
+            .positions
+            .iter()
+            .any(|p| p.symbol.contains("DOGE"));
+        assert!(
+            has_ext_btc,
+            "BTC external excess should be reported before stop all"
+        );
+        assert!(
+            has_ext_sol,
+            "SOL external should be reported before stop all"
+        );
+        assert!(
+            has_ext_eth,
+            "ETH external should be reported before stop all"
+        );
+        assert!(
+            !has_ext_doge,
+            "DOGE dust (< $1) should be filtered from external positions table"
+        );
+
+        // 4. Execute Emergency Stop All
+        let report = execute_emergency_stop_all_impl(&state)
+            .await
+            .expect("execute emergency stop all");
+
+        // 5. Verify Deduplication Invariant:
+        // BTC was claimed by engine unwind. The external position close MUST have skipped BTC on Hyperliquid.
+        // If BTC was double-sold (sold by engine sweep AND sold by external position close),
+        // the Hyperliquid position would become negative / short!
+        let hl_acc = state
+            .test_sim("hyperliquid")
+            .expect("hl sim")
+            .fetch_account()
+            .await
+            .expect("fetch hl account");
+        let btc_pos = hl_acc.get_position("BTC-USDC");
+        if let Some(pos) = btc_pos {
+            assert!(
+                pos.quantity >= dec!(0),
+                "BTC position must NEVER be negative (flipping short due to double-selling); got qty: {}, side: {:?}",
+                pos.quantity,
+                pos.side
+            );
+            assert_ne!(
+                pos.side,
+                Side::Sell,
+                "BTC position was double-sold into short position!"
+            );
+        }
+
+        // SOL and ETH were external positions not claimed by engine -> closed by external unwind
+        let hl_sol_pos = hl_acc.get_position("SOL-USDC");
+        assert!(
+            hl_sol_pos.is_none() || hl_sol_pos.unwrap().quantity == dec!(0),
+            "SOL external position should be closed"
+        );
+
+        let lighter_acc = state
+            .test_sim("lighter")
+            .expect("lighter sim")
+            .fetch_account()
+            .await
+            .expect("fetch lighter account");
+        let lighter_eth_pos = lighter_acc.get_position("ETH-USDC");
+        assert!(
+            lighter_eth_pos.is_none() || lighter_eth_pos.unwrap().quantity == dec!(0),
+            "ETH external position should be closed"
+        );
+
+        // 6. Verify Dust Threshold Handling:
+        // DOGE was $0.50 (< $1.00 notional). It should be categorized into untradeable_residuals.
+        let doge_residual = report
+            .untradeable_residuals
+            .iter()
+            .find(|r| r.symbol == "DOGE-USDC" || r.venue.eq_ignore_ascii_case("lighter"));
+        assert!(
+            doge_residual.is_some(),
+            "DOGE dust position (< $1) must be classified into untradeable_residuals"
+        );
+        let res = doge_residual.unwrap();
+        assert!(
+            res.reason.contains("dust notional under $1") || res.reason.contains("sub-lot"),
+            "Residual reason must specify dust or sub-lot: {}",
+            res.reason
+        );
+
+        // Untradeable residuals must NOT pollute unresolved_positions
+        assert!(
+            report.unresolved_positions.is_empty(),
+            "Unresolved positions must be empty when only dust residuals remain; got: {:?}",
+            report.unresolved_positions
+        );
+
+        // Safe state verified must be true despite dust residuals
+        assert!(
+            report.safe_state_verified,
+            "Safe state must be verified when only dust residuals exist"
+        );
+        assert!(report.is_safe_state());
+    }
+
+    #[tokio::test]
+    async fn test_emergency_stop_all_unresolved_exposure_marks_unsafe() {
+        let (state, _vault_dir) = test_state_with_vault("adversarial_unsafe");
+        {
+            let mut s = state.settings.write();
+            s.hyperliquid_enabled = true;
+            s.lighter_enabled = true;
+            s.vanta_enabled = true;
+            s.robinhood_enabled = true;
+            s.arcus_enabled = true;
+            s.passive_unwind.timeout_secs = 0;
+        }
+        for v in ["hyperliquid", "lighter", "vanta", "robinhood", "arcus"] {
+            state.install_test_sim(v);
+        }
+        initialize_vault_impl("000000", &state).expect("init vault");
+        unlock_vault_impl("000000", None, &state).expect("unlock vault");
+
+        // 1. Seed book and open position of 100 ADA ($150) on Vanta
+        seed_test_book(&state, "vanta", "ADA-USDC", dec!(1.50), dec!(1.51));
+        let open_ada = arbitrageur_core::order::OrderRequest::new_market(
+            state.test_sim("vanta").expect("vanta sim").venue_id(),
+            "ADA-USDC",
+            Side::Buy,
+            dec!(100.0),
+        );
+        state
+            .test_sim("vanta")
+            .expect("vanta sim")
+            .place_order(open_ada)
+            .await
+            .expect("open ada position");
+
+        // Now replace Vanta orderbook with very thin liquidity (only 0.001 ADA on bids) so close order leaves remaining exposure
+        let mut thin_book = arbitrageur_core::quote::OrderBook::new(
+            arbitrageur_core::types::VenueId::new("vanta"),
+            "ADA-USDC".to_string(),
+        );
+        thin_book.bids.push(arbitrageur_core::quote::BookLevel::new(
+            dec!(1.50),
+            dec!(0.001),
+        ));
+        thin_book.asks.push(arbitrageur_core::quote::BookLevel::new(
+            dec!(1.51),
+            dec!(0.001),
+        ));
+        state
+            .test_sim("vanta")
+            .expect("vanta sim")
+            .replace_orderbook(thin_book)
+            .expect("thin book");
+
+        // 2. Execute Emergency Stop All
+        let report = execute_emergency_stop_all_impl(&state)
+            .await
+            .expect("execute emergency stop all");
+
+        // 3. Verify that failed close leaves position in unresolved_positions
+        assert!(
+            !report.unresolved_positions.is_empty(),
+            "Unresolved positions must contain uncloseable position"
+        );
+        let unresolved_ada = report
+            .unresolved_positions
+            .iter()
+            .find(|u| u.venue.eq_ignore_ascii_case("vanta") || u.symbol.contains("ADA"));
+        assert!(
+            unresolved_ada.is_some(),
+            "ADA position on Vanta must be marked unresolved"
+        );
+
+        // 4. Safe state verified MUST BE FALSE
+        assert!(
+            !report.safe_state_verified,
+            "Safe state verified MUST BE FALSE when unresolved exposure > $1 remains"
+        );
+        assert!(
+            !report.is_safe_state(),
+            "is_safe_state() MUST return false when unresolved positions remain"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_emergency_stop_all_unverified_account_marks_unsafe() {
+        let state = setup_test_state_with_venues();
+        struct FailingFetchAdapter;
+        #[async_trait::async_trait]
+        impl ExchangeAdapter for FailingFetchAdapter {
+            fn venue_id(&self) -> VenueId {
+                VenueId::new("hyperliquid")
+            }
+            fn name(&self) -> &str {
+                "hyperliquid"
+            }
+            async fn fetch_markets(
+                &self,
+            ) -> anyhow::Result<Vec<arbitrageur_core::market::MarketMetadata>> {
+                unimplemented!()
+            }
+            async fn fetch_orderbook(&self, _s: &str) -> anyhow::Result<OrderBook> {
+                unimplemented!()
+            }
+            async fn fetch_ticker(
+                &self,
+                _s: &str,
+            ) -> anyhow::Result<arbitrageur_core::quote::Ticker> {
+                unimplemented!()
+            }
+            async fn fetch_funding_rate(
+                &self,
+                _s: &str,
+            ) -> anyhow::Result<arbitrageur_core::quote::FundingRate> {
+                unimplemented!()
+            }
+            async fn fetch_account(
+                &self,
+            ) -> anyhow::Result<arbitrageur_core::position::AccountSnapshot> {
+                anyhow::bail!("connection reset by peer during account fetch")
+            }
+            fn has_live_credentials(&self) -> bool {
+                true
+            }
+            async fn place_order(
+                &self,
+                _o: arbitrageur_core::order::OrderRequest,
+            ) -> anyhow::Result<arbitrageur_core::order::OrderResponse> {
+                unimplemented!()
+            }
+            async fn cancel_order(
+                &self,
+                _r: arbitrageur_core::order::CancelRequest,
+            ) -> anyhow::Result<()> {
+                Ok(())
+            }
+        }
+
+        state
+            .test_adapters
+            .write()
+            .unwrap()
+            .insert("hyperliquid".to_string(), Arc::new(FailingFetchAdapter));
+
+        let report = execute_emergency_stop_all_impl(&state)
+            .await
+            .expect("execute emergency stop all");
+
+        assert!(
+            !report.safe_state_verified,
+            "safe_state_verified must be false when account fetch fails"
+        );
+        assert!(
+            !report.is_safe_state(),
+            "is_safe_state() must be false when account fetch fails"
+        );
+        assert!(
+            !report.unresolved_positions.is_empty(),
+            "unresolved_positions must capture account fetch failure"
+        );
+        let unverified = report
+            .unresolved_positions
+            .iter()
+            .find(|u| u.venue == "hyperliquid" && u.symbol == "*");
+        assert!(
+            unverified.is_some(),
+            "unresolved positions must include venue with symbol *"
+        );
+        assert!(unverified
+            .unwrap()
+            .reason
+            .contains("Venue account balance unverified"));
+    }
+
+    #[tokio::test]
+    async fn test_emergency_stop_all_failed_cancel_marks_unsafe() {
+        let state = setup_test_state_with_venues();
+        struct FailingCancelAdapter;
+        #[async_trait::async_trait]
+        impl ExchangeAdapter for FailingCancelAdapter {
+            fn venue_id(&self) -> VenueId {
+                VenueId::new("hyperliquid")
+            }
+            fn name(&self) -> &str {
+                "hyperliquid"
+            }
+            async fn fetch_markets(
+                &self,
+            ) -> anyhow::Result<Vec<arbitrageur_core::market::MarketMetadata>> {
+                unimplemented!()
+            }
+            async fn fetch_orderbook(&self, _s: &str) -> anyhow::Result<OrderBook> {
+                unimplemented!()
+            }
+            async fn fetch_ticker(
+                &self,
+                _s: &str,
+            ) -> anyhow::Result<arbitrageur_core::quote::Ticker> {
+                unimplemented!()
+            }
+            async fn fetch_funding_rate(
+                &self,
+                _s: &str,
+            ) -> anyhow::Result<arbitrageur_core::quote::FundingRate> {
+                unimplemented!()
+            }
+            async fn fetch_account(
+                &self,
+            ) -> anyhow::Result<arbitrageur_core::position::AccountSnapshot> {
+                Ok(arbitrageur_core::position::AccountSnapshot {
+                    venue: VenueId::new("hyperliquid"),
+                    equity: dec!(1000),
+                    free_margin: dec!(1000),
+                    maintenance_margin: dec!(0),
+                    margin_usage_pct: dec!(0),
+                    balances: vec![],
+                    positions: vec![],
+                    timestamp: Utc::now(),
+                })
+            }
+            fn has_live_credentials(&self) -> bool {
+                true
+            }
+            fn live_order_submission_implemented(&self) -> bool {
+                true
+            }
+            async fn place_order(
+                &self,
+                _o: arbitrageur_core::order::OrderRequest,
+            ) -> anyhow::Result<arbitrageur_core::order::OrderResponse> {
+                unimplemented!()
+            }
+            async fn cancel_order(
+                &self,
+                _r: arbitrageur_core::order::CancelRequest,
+            ) -> anyhow::Result<()> {
+                anyhow::bail!("rate limited / network timeout cancelling order")
+            }
+        }
+
+        state
+            .test_adapters
+            .write()
+            .unwrap()
+            .insert("hyperliquid".to_string(), Arc::new(FailingCancelAdapter));
+
+        let sig_id = "test-sig-fail-cancel";
+        let new_sig = crate::state_store::NewSignalExecution {
+            id: sig_id.to_string(),
+            strategy_id: "futures".to_string(),
+            symbol: "BTC".to_string(),
+            route_id: None,
+            expected_net_usd: None,
+            note: Some("test entry".to_string()),
+            legs: vec![crate::state_store::NewSignalLeg {
+                account_id: None,
+                venue: "hyperliquid".to_string(),
+                side: crate::state_store::LegSide::Long,
+                symbol: Some("BTC-USDC".to_string()),
+                intended_qty: 0.1,
+                intended_price: Some(60000.0),
+                unit_scale: None,
+            }],
+        };
+        state
+            .state_store
+            .record_signal_execution(&new_sig, state.env().as_str())
+            .expect("record signal");
+        state
+            .state_store
+            .record_leg_order_id(
+                sig_id,
+                crate::state_store::LegSide::Long,
+                "hl_order_fail",
+                Some("client_ord_fail"),
+            )
+            .expect("record order id");
+
+        let report = execute_emergency_stop_all_impl(&state)
+            .await
+            .expect("execute emergency stop all");
+
+        assert_eq!(report.cancelled_orders_failed, 1);
+        assert!(
+            !report.safe_state_verified,
+            "safe_state_verified must be false when order cancel fails"
+        );
+        assert!(
+            !report.is_safe_state(),
+            "is_safe_state() must be false when order cancel fails"
+        );
+        let failed_item = report
+            .unresolved_positions
+            .iter()
+            .find(|u| u.venue == "hyperliquid" && u.symbol == "BTC-USDC");
+        assert!(
+            failed_item.is_some(),
+            "unresolved positions must record failed cancel"
+        );
+        assert!(failed_item
+            .unwrap()
+            .reason
+            .contains("Failed to cancel resting order"));
+    }
+
+    #[tokio::test]
+    async fn test_emergency_stop_all_live_locked_vault_fails_closed() {
+        let (state, _vault_dir) = test_state_with_vault("live_locked_vault");
+        state.set_environment(crate::state::TradingEnvironment::Live);
+        assert!(state.is_live());
+        assert!(!state.vault.write().is_unlocked());
+
+        let res = execute_emergency_stop_all_impl(&state).await;
+        assert!(
+            res.is_err(),
+            "Stop all must fail closed when vault is locked in live mode"
+        );
+        let err = res.err().unwrap();
+        assert!(
+            err.contains("vault locked"),
+            "Error message must indicate locked vault: {err}"
+        );
+
+        // Circuit breaker and pause must still trip immediately even if vault is locked
+        assert!(state.circuit_breaker.is_tripped());
+        assert!(*state.is_paused.read());
+    }
+
+    #[tokio::test]
+    async fn test_emergency_stop_all_closes_family_when_venue_flat_despite_unresolved_child() {
+        let state = setup_test_state_with_venues();
+
+        let sig_id = "test-pkg-trade-leg0";
+        let child_id = "flat-test-pkg-trade-leg0-1a2b";
+
+        // 1. Insert an open parent signal
+        state
+            .state_store
+            .record_signal_execution(
+                &crate::state_store::NewSignalExecution {
+                    id: sig_id.to_string(),
+                    strategy_id: "options_box_spread".to_string(),
+                    symbol: "ETH-30OCT26-1200-P".to_string(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: Some("test parent".to_string()),
+                    legs: vec![crate::state_store::NewSignalLeg {
+                        account_id: None,
+                        venue: "hyperliquid".to_string(),
+                        side: crate::state_store::LegSide::Long,
+                        symbol: Some("ETH".to_string()),
+                        intended_qty: 1.0,
+                        intended_price: Some(2500.0),
+                        unit_scale: None,
+                    }],
+                },
+                state.env().as_str(),
+            )
+            .expect("record parent signal");
+        state
+            .state_store
+            .update_signal_status(sig_id, crate::state_store::SignalStatus::Balanced, None)
+            .expect("update status balanced");
+        state
+            .state_store
+            .apply_leg_fill(
+                sig_id,
+                crate::state_store::LegSide::Long,
+                1.0,
+                2500.0,
+                0.0,
+                Some("ord-parent"),
+            )
+            .expect("fill parent");
+
+        // 2. Insert a child signal in Unresolved status (simulating a failed attempt with 0 fills)
+        state
+            .state_store
+            .record_signal_execution(
+                &crate::state_store::NewSignalExecution {
+                    id: child_id.to_string(),
+                    strategy_id: "options_box_spread".to_string(),
+                    symbol: "ETH-30OCT26-1200-P".to_string(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: Some("test child".to_string()),
+                    legs: vec![crate::state_store::NewSignalLeg {
+                        account_id: None,
+                        venue: "hyperliquid".to_string(),
+                        side: crate::state_store::LegSide::Short,
+                        symbol: Some("ETH".to_string()),
+                        intended_qty: 1.0,
+                        intended_price: None,
+                        unit_scale: None,
+                    }],
+                },
+                state.env().as_str(),
+            )
+            .expect("record child signal");
+        state
+            .state_store
+            .update_signal_status(child_id, crate::state_store::SignalStatus::Unresolved, None)
+            .expect("update status unresolved");
+
+        // The simulated venue holds no position for ETH -> venue truth is flat.
+        // 3. Run emergency stop all
+        let report = execute_emergency_stop_all_impl(&state)
+            .await
+            .expect("execute emergency stop all");
+
+        assert_eq!(report.closed_engine_positions, 1);
+        assert_eq!(
+            state
+                .state_store
+                .get_signal(sig_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            crate::state_store::SignalStatus::Closed
+        );
+        assert_eq!(
+            state
+                .state_store
+                .get_signal(child_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            crate::state_store::SignalStatus::Closed
+        );
     }
 
     #[tokio::test]

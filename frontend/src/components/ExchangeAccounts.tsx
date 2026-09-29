@@ -765,10 +765,7 @@ export const VenueBalancePanel: React.FC<{
           </div>
           <div className="text-xl font-bold text-slate-900 flex items-baseline space-x-1.5 tracking-tight font-mono tabular-nums">
             {bal?.margin_rate_pct != null ? (
-              <>
-                <span>{bal.margin_rate_pct.toFixed(1)}%</span>
-                <span className="text-xs font-normal text-muted font-sans">utilized</span>
-              </>
+              <span>{bal.margin_rate_pct.toFixed(1)}%</span>
             ) : (
               <span>N/A</span>
             )}
@@ -795,12 +792,6 @@ export const VenueBalancePanel: React.FC<{
         </div>
       )}
 
-      {bal?.status === "LOCKED" && (
-        <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono text-slate-600 flex items-start space-x-2">
-          <span>{bal.recommended_action || "Vault is locked — unlock to read live balances."}</span>
-        </div>
-      )}
-
       {bal?.status === "STALE" && bal?.recommended_action && (
         <div className="p-2.5 bg-slate-50 border border-slate-200 rounded-lg text-xs font-mono text-slate-500 flex items-start space-x-2">
           <span>{bal.recommended_action}</span>
@@ -814,7 +805,7 @@ export const VenueBalancePanel: React.FC<{
         </div>
       )}
 
-      {bal?.recommended_action && bal?.status !== "ERROR" && bal?.status !== "NO_CREDENTIALS" && bal?.status !== "EMPTY" && (
+      {bal?.recommended_action && bal?.status !== "ERROR" && bal?.status !== "NO_CREDENTIALS" && bal?.status !== "EMPTY" && bal?.status !== "LOCKED" && !bal.recommended_action.toLowerCase().includes("vault is locked") && (
         <div className="p-2.5 bg-warn-dim border border-warn-border rounded-lg text-xs font-mono text-warn-strong flex items-start space-x-2">
           <AlertTriangle className="w-3.5 h-3.5 text-warn-strong shrink-0 mt-0.5" />
           <span>{bal.recommended_action}</span>

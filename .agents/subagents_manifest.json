@@ -1,0 +1,81 @@
+{
+  "version": "1.4.0",
+  "last_updated": "2026-09-29T17:33:00Z",
+  "parent_conversation_id": "4f9f9f4e-4c20-4c88-98e9-ef5559c5d390",
+  "active_mission": "Comprehensive UI/UX, Bot Lifecycle, and Strategy Controls Overhaul for Arbitrageur Desktop (COMPLETED)",
+  "subagents": [
+    {
+      "conversation_id": "0de761ad-86b1-4ac2-b616-16b8f63c3375",
+      "role": "Teamwork Multi-Agent Coordinator",
+      "type_name": "teamwork_preview",
+      "state_dir": ".agents/teamwork/orchestrator_2",
+      "status": "completed",
+      "in_progress_milestones": [],
+      "completed_milestones": ["Survey", "M1", "M2", "M3", "M4", "M5", "VictoryAudit"],
+      "pending_milestones": [],
+      "m5_gate_status": {
+        "reviewer_1": "DONE (APPROVE)",
+        "reviewer_2": "DONE (APPROVE)",
+        "challenger_1": "DONE (APPROVE)",
+        "challenger_2": "DONE (APPROVE)",
+        "auditor_1": "DONE (CLEAN)",
+        "remediation_worker": "DONE (600/600 Rust, 23/23 Frontend)",
+        "victory_auditor_1": "DONE (VICTORY CONFIRMED)"
+      },
+      "revival_instruction": "Mission completed and Victory Confirmed. No revival needed."
+    }
+  ],
+  "milestones": [
+    {
+      "id": "Survey",
+      "title": "Deep survey of R1-R5 files, bot lifecycle, status tags, gadgets, and tests",
+      "status": "completed",
+      "owner": "survey_explorers"
+    },
+    {
+      "id": "M1",
+      "title": "R1: Bot Status on Halt/Reset & Header Controls",
+      "status": "completed",
+      "owner": "m1_worker"
+    },
+    {
+      "id": "M2",
+      "title": "R2: Strategy Filter Relocation & Options Unification",
+      "status": "completed",
+      "owner": "m2_worker"
+    },
+    {
+      "id": "M3",
+      "title": "R3/R4: Standardized Status Badge & Dock Heights",
+      "status": "completed",
+      "owner": "m3_worker"
+    },
+    {
+      "id": "M4",
+      "title": "R1/R3/R4/R5: Strategy Panels Integration & Options Ribbon Reorganization",
+      "status": "completed",
+      "owner": "m4_worker"
+    },
+    {
+      "id": "M5",
+      "title": "Full Regression & Dual-Track Verification (cargo test, npm test)",
+      "status": "completed",
+      "owner": "orchestrator_2"
+    },
+    {
+      "id": "VictoryAudit",
+      "title": "Independent 3-Phase Victory Audit by victory_auditor_1",
+      "status": "completed",
+      "owner": "victory_auditor_1 (b8e20326-ab91-4298-88ba-024f5684fe9c)"
+    }
+  ],
+  "recovery_protocol": {
+    "on_restart_event": [
+      "1. Check manage_subagents list to identify idle conversation IDs.",
+      "2. Read .agents/subagents_manifest.json to look up the subagent's assigned milestones and revival_instruction.",
+      "3. Send revival message via send_message using revival_instruction + current milestone context.",
+      "4. If a subagent process was destroyed completely, re-spawn via invoke_subagent with the saved state.",
+      "5. Check and re-register any required background tasks/crons."
+    ]
+  }
+}

@@ -62,7 +62,7 @@ export const TickerTelemetryGadget: React.FC<TickerTelemetryGadgetProps> = ({
   }, [tickerLogs]);
 
   return (
-    <div className="bg-surface border border-surface-border rounded-xl p-3.5 shadow-card transition">
+    <div className="bg-surface rounded-xl border border-surface-border p-4 shadow-card space-y-3 transition">
       {/* Ticker KPI Summary Bar */}
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3 text-xs font-mono">
         <div className="bg-surface-raised border border-surface-border rounded-lg p-2.5 shadow-xs">

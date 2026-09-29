@@ -207,7 +207,7 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
           <span className="text-[13px] font-mono font-bold tracking-wider text-slate-900 pr-1">
             Strategy Status
           </span>
-          <BotPhaseBadge phase={bot.phase} />
+          <BotPhaseBadge phase={bot.phase} isPaused={isPaused} />
           <div
             className="ribbon-pill"
             title="Minimum net profit required for auto-execution"

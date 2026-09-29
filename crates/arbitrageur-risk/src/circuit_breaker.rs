@@ -300,14 +300,14 @@ impl CircuitBreaker {
 
             if dollar_loss >= self.config.read().max_daily_drawdown_usd {
                 self.trip(format!(
-                    "Daily dollar drawdown limit breached: -${} (max ${})",
-                    dollar_loss,
+                    "Daily dollar drawdown limit breached: -${:.2} (max ${})",
+                    dollar_loss.round_dp(2),
                     self.config.read().max_daily_drawdown_usd
                 ));
             } else if loss_pct >= self.config.read().max_daily_drawdown_pct {
                 self.trip(format!(
-                    "Daily percentage drawdown limit breached: -{}% (max {}%)",
-                    loss_pct,
+                    "Daily percentage drawdown limit breached: -{:.2}% (max {}%)",
+                    loss_pct.round_dp(2),
                     self.config.read().max_daily_drawdown_pct
                 ));
             }

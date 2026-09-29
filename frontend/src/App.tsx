@@ -17,6 +17,7 @@ import { TickerConfigModal } from "./components/TickerConfigModal";
 import { VaultUnlockModal } from "./components/VaultUnlockModal";
 import { api, describeCommandError, withTimeoutFallback } from "./services/api";
 import { scheduleVaultLock } from "./services/vaultLock";
+import { stopAllFrontendBots } from "./hooks/useBotLifecycle";
 import { Lock, Unlock, ShieldCheck, AlertTriangle } from "lucide-react";
 import type {
   SystemStatusDto,
@@ -655,6 +656,7 @@ export const App: React.FC = () => {
   const handleResetCircuitBreaker = useCallback(async () => {
     try {
       await api.resetCircuitBreaker();
+      stopAllFrontendBots();
       await refreshAllData();
     } catch (err) {
       notifyCommandError(describeCommandError(err, "Circuit breaker reset failed"));
@@ -664,11 +666,19 @@ export const App: React.FC = () => {
   const handleEmergencyKillswitch = useCallback(async () => {
     try {
       await api.triggerKillswitch();
+      stopAllFrontendBots();
       await refreshAllData();
     } catch (err) {
       notifyCommandError(describeCommandError(err, "Killswitch trigger failed"));
     }
   }, [refreshAllData, notifyCommandError]);
+
+  // When circuit breaker status changes (trips or resets), all automated bots must immediately transition to stopped (idle)
+  useEffect(() => {
+    if (systemStatus?.circuit_breaker_tripped !== undefined) {
+      stopAllFrontendBots();
+    }
+  }, [systemStatus?.circuit_breaker_tripped]);
 
   const handleTogglePause = useCallback(
     async (paused: boolean) => {
@@ -677,6 +687,9 @@ export const App: React.FC = () => {
         // Apply the backend-confirmed state — never the optimistic intent:
         // a failed IPC must not show the engine paused when it isn't.
         setIsPaused(applied);
+        if (applied) {
+          stopAllFrontendBots();
+        }
         await refreshAllData();
       } catch (err) {
         notifyCommandError(describeCommandError(err, "Failed to toggle pause status"));
@@ -1121,6 +1134,7 @@ export const App: React.FC = () => {
               hasApiConnectivity={activeVenueCodes.size >= 2}
               params={spotParams}
               capability={strategyCaps.get("spot")}
+              openPositions={openPositions}
             />
           )}
 

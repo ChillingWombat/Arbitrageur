@@ -2,7 +2,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { BotLifecycleControls, BotPhaseBadge } from "./BotLifecycleControls.tsx";
+import {
+  BotLifecycleControls,
+  BotPhaseBadge,
+  StrategyStatusBadge,
+  resolveBotStatus,
+} from "./BotLifecycleControls.tsx";
 
 const noop = () => {};
 
@@ -72,18 +77,50 @@ test("BotLifecycleControls renders no phase label — the badge lives in the Str
   assert.doesNotMatch(html, />Stopping</);
 });
 
-test("BotPhaseBadge labels drain phases and renders nothing otherwise", () => {
-  const reduceOnly = renderToStaticMarkup(
-    React.createElement(BotPhaseBadge, { phase: "reduce_only" })
-  );
-  const stopping = renderToStaticMarkup(
-    React.createElement(BotPhaseBadge, { phase: "stopping" })
-  );
-  const running = renderToStaticMarkup(
-    React.createElement(BotPhaseBadge, { phase: "running" })
-  );
-
-  assert.match(reduceOnly, /Reduce-Only/);
-  assert.match(stopping, /Stopping/);
-  assert.equal(running, "");
+test("resolveBotStatus resolves all phase and isPaused combinations", () => {
+  assert.equal(resolveBotStatus("running", false), "Active");
+  assert.equal(resolveBotStatus("running", true), "Paused");
+  assert.equal(resolveBotStatus("paused", false), "Paused");
+  assert.equal(resolveBotStatus("paused", true), "Paused");
+  assert.equal(resolveBotStatus("reduce_only", false), "Reducing");
+  assert.equal(resolveBotStatus("reduce_only", true), "Reducing");
+  assert.equal(resolveBotStatus("stopping", false), "Reducing");
+  assert.equal(resolveBotStatus("stopping", true), "Reducing");
+  assert.equal(resolveBotStatus("idle", false), "Stopped");
+  assert.equal(resolveBotStatus("idle", true), "Stopped");
+  assert.equal(resolveBotStatus(undefined, false), "Stopped");
+  assert.equal(resolveBotStatus(undefined, true), "Stopped");
 });
+
+test("BotPhaseBadge renders all 4 standardized statuses and never renders Engine", () => {
+  const cases = [
+    { props: { phase: "running" as const, isPaused: false }, expected: "Active", dotClass: "bg-profit", badgeClass: "bg-profit-dim" },
+    { props: { phase: "running" as const, isPaused: true }, expected: "Paused", dotClass: "bg-warn", badgeClass: "bg-warn-dim" },
+    { props: { phase: "paused" as const }, expected: "Paused", dotClass: "bg-warn", badgeClass: "bg-warn-dim" },
+    { props: { phase: "reduce_only" as const }, expected: "Reducing", dotClass: "animate-pulse", badgeClass: "bg-warn-dim" },
+    { props: { phase: "stopping" as const }, expected: "Reducing", dotClass: "animate-pulse", badgeClass: "bg-warn-dim" },
+    { props: { phase: "idle" as const }, expected: "Stopped", dotClass: "bg-slate-400", badgeClass: "bg-surface-raised" },
+    { props: {}, expected: "Stopped", dotClass: "bg-slate-400", badgeClass: "bg-surface-raised" },
+    { props: { status: "Active" as const }, expected: "Active", dotClass: "bg-profit", badgeClass: "bg-profit-dim" },
+    { props: { status: "Paused" as const }, expected: "Paused", dotClass: "bg-warn", badgeClass: "bg-warn-dim" },
+    { props: { status: "Reducing" as const }, expected: "Reducing", dotClass: "animate-pulse", badgeClass: "bg-warn-dim" },
+    { props: { status: "Stopped" as const }, expected: "Stopped", dotClass: "bg-slate-400", badgeClass: "bg-surface-raised" },
+  ];
+
+  for (const c of cases) {
+    const html = renderToStaticMarkup(React.createElement(BotPhaseBadge, c.props));
+    assert.match(html, new RegExp(`>${c.expected}<`));
+    assert.match(html, new RegExp(c.dotClass));
+    assert.match(html, new RegExp(c.badgeClass));
+    assert.match(html, new RegExp(`title="Strategy bot status: ${c.expected}"`));
+    assert.doesNotMatch(html, /Engine/i);
+  }
+});
+
+test("StrategyStatusBadge is an alias of BotPhaseBadge", () => {
+  assert.equal(StrategyStatusBadge, BotPhaseBadge);
+  const html = renderToStaticMarkup(React.createElement(StrategyStatusBadge, { status: "Active" }));
+  assert.match(html, />Active</);
+  assert.doesNotMatch(html, /Engine/i);
+});
+

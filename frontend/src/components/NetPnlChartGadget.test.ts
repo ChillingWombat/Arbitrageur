@@ -4,6 +4,7 @@ import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
   EXTERNAL_CATEGORY,
+  KNOWN_PNL_CATEGORIES,
   NetPnlChartGadget,
   SeriesChart,
   cumulativeSeries,
@@ -111,7 +112,15 @@ nodeTest("SeriesChart degrades honestly on one or zero points", () => {
   assert.doesNotMatch(empty, /<svg/);
 });
 
-nodeTest("gadget renders the two tabs and the strategy filter", () => {
+nodeTest("KNOWN_PNL_CATEGORIES unifies options under 'Options' without substrategies", () => {
+  assert.ok(KNOWN_PNL_CATEGORIES.includes("Options"));
+  assert.ok(!KNOWN_PNL_CATEGORIES.includes("Options Parity"));
+  assert.ok(!KNOWN_PNL_CATEGORIES.includes("Box Spread"));
+  assert.ok(!KNOWN_PNL_CATEGORIES.includes("Jelly Roll"));
+  assert.ok(!KNOWN_PNL_CATEGORIES.includes("Convexity"));
+});
+
+nodeTest("gadget renders the strategy filter in the top bar header next to title and unifies options", () => {
   const html = renderToStaticMarkup(React.createElement(NetPnlChartGadget));
   assert.match(html, /Net P&amp;L/);
   assert.match(html, /Net Equity/);
@@ -120,4 +129,35 @@ nodeTest("gadget renders the two tabs and the strategy filter", () => {
   assert.match(html, /Simple Spread/); // known families appear even with no realized rows yet
   assert.match(html, /Spread Radar/);
   assert.match(html, /Loading P&amp;L history/);
+
+  // Strategy filter dropdown is in the top bar header directly next to <h2> title
+  assert.match(
+    html,
+    /<div class="flex items-center gap-3 min-w-0 flex-wrap"><h2[^>]*>[\s\S]*?<\/h2><select[^>]*aria-label="Filter P&amp;L by strategy category"/,
+  );
+  // Redundant second row below divider is eliminated
+  assert.doesNotMatch(html, /<div class="flex items-center gap-2 flex-wrap"><select/);
+
+  // "Options" is present in the rendered options dropdown
+  assert.match(html, /<option value="Options">Options<\/option>/);
+
+  // Individual options substrategies are NOT present in the dropdown
+  assert.doesNotMatch(html, /Options Parity/);
+  assert.doesNotMatch(html, /Box Spread/);
+  assert.doesNotMatch(html, /Jelly Roll/);
+  assert.doesNotMatch(html, /Convexity/);
 });
+
+nodeTest("realizedSeries matches all options substrategies under 'Options'", () => {
+  const rows = [
+    opp("o1", "options_parity", "closed", 10, "2026-09-27T09:00:00Z"),
+    opp("o2", "options_box_spread", "closed", 5, "2026-09-27T10:00:00Z"),
+    opp("o3", "options_jelly_roll", "closed", 3, "2026-09-27T11:00:00Z"),
+    opp("o4", "options_convexity", "closed", 2, "2026-09-27T12:00:00Z"),
+    opp("f1", "funding", "closed", 7, "2026-09-27T13:00:00Z"),
+  ];
+  const pts = realizedSeries(rows, "Options");
+  assert.equal(pts.length, 4);
+  assert.deepEqual(pts.map((p) => p.valueUsd), [10, 15, 18, 20]);
+});
+
