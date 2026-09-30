@@ -5912,14 +5912,16 @@ async fn flatten_positions_inner(
                 );
             }
         } else {
-            state
-                .state_store
-                .update_signal_status(&sig.id, SignalStatus::Unresolved, Some(&note))
-                .map_err(|e| e.to_string())?;
-            state
-                .state_store
-                .update_signal_status(&close_id, SignalStatus::Unresolved, Some(&note))
-                .map_err(|e| e.to_string())?;
+            let _ = state.state_store.update_signal_status(
+                &sig.id,
+                SignalStatus::Unresolved,
+                Some(&note),
+            );
+            let _ = state.state_store.update_signal_status(
+                &close_id,
+                SignalStatus::Unresolved,
+                Some(&note),
+            );
         }
         // Lotless signals (1-leg residuals, imbalanced pairs, positions
         // whose lot never persisted) realize only through child fills —

@@ -323,7 +323,14 @@ impl BotDispatch for VenueDispatch {
                             "unwound {closed_count} signal(s) for {}",
                             key.label()
                         ));
-                    } else if !notes.is_empty() {
+                    }
+                    if notes.iter().any(|n| n.contains("awaiting settlement")) {
+                        return Ok(format!(
+                            "exit orders working for {} — awaiting settlement",
+                            key.label()
+                        ));
+                    }
+                    if !notes.is_empty() {
                         return Err(format!("flatten for {}: {}", key.label(), notes.join("; ")));
                     }
                 }
@@ -341,6 +348,12 @@ impl BotDispatch for VenueDispatch {
                 return Ok(format!(
                     "unwound {} signal(s) on {}",
                     res.signals_closed, key.symbol
+                ));
+            }
+            if res.notes.iter().any(|n| n.contains("awaiting settlement")) {
+                return Ok(format!(
+                    "exit orders working for {} — awaiting settlement",
+                    key.label()
                 ));
             }
             if res.residual_signals > 0 {
