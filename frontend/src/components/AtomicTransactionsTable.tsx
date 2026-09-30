@@ -81,8 +81,8 @@ export const fillChip = (state: AtomicTransactionDto["fillState"]) => {
   }
 };
 
-/** Classify instrument into Option (Call/Put), Perpetual, or other. */
-export function parseInstrumentType(symbol: string): { isOption: boolean; type: "CALL" | "PUT" | "PERP" | null } {
+/** Classify instrument into Option (Call/Put), Perpetual, Spot, or other. */
+export function parseInstrumentType(symbol: string): { isOption: boolean; type: "CALL" | "PUT" | "PERP" | "SPOT" | null } {
   const sym = (symbol || "").trim().toUpperCase();
   if (sym.endsWith("-C") || sym.includes("-C-") || sym.includes("-CALL")) {
     return { isOption: true, type: "CALL" };
@@ -90,7 +90,19 @@ export function parseInstrumentType(symbol: string): { isOption: boolean; type: 
   if (sym.endsWith("-P") || sym.includes("-P-") || sym.includes("-PUT")) {
     return { isOption: true, type: "PUT" };
   }
-  if (sym.includes("PERPETUAL") || sym.includes("PERP")) {
+  if (sym.endsWith("-SPOT") || sym.endsWith("_SPOT") || sym.includes("-SPOT-")) {
+    return { isOption: false, type: "SPOT" };
+  }
+  if (
+    sym.includes("PERPETUAL") ||
+    sym.includes("PERP") ||
+    sym.endsWith("-USDC") ||
+    sym.endsWith("-USDT") ||
+    sym.endsWith("-USD") ||
+    sym.endsWith("/USD") ||
+    sym.endsWith("/USDC") ||
+    sym.endsWith("/USDT")
+  ) {
     return { isOption: false, type: "PERP" };
   }
   return { isOption: false, type: null };
@@ -164,6 +176,10 @@ export const AtomicTransactionsTable: React.FC<{ transactions: AtomicTransaction
                   ) : inst.type === "PERP" ? (
                     <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-sky-500/10 text-sky-600 dark:text-sky-400 border border-sky-500/20">
                       PERP
+                    </span>
+                  ) : inst.type === "SPOT" ? (
+                    <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20">
+                      SPOT
                     </span>
                   ) : (
                     <span className="text-slate-400 text-[10px] font-mono">—</span>

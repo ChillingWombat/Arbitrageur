@@ -322,6 +322,10 @@ export const PositionDetailModal: React.FC<PositionDetailModalProps> = React.mem
                             <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-sky-500/10 text-sky-600 dark:text-sky-400 border border-sky-500/20">
                               PERP
                             </span>
+                          ) : inst.type === "SPOT" ? (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20">
+                              SPOT
+                            </span>
                           ) : (
                             <span className="text-slate-400 text-[10px] font-mono">—</span>
                           )}
