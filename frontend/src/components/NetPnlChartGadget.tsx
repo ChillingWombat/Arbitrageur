@@ -107,7 +107,7 @@ export const SeriesChart: React.FC<{
   // stay small if the coordinate space is near the rendered width.
   const W = 760;
   const H = height;
-  const PAD = { l: 46, r: 12, t: 12, b: 22 };
+  const PAD = { l: 54, r: 12, t: 12, b: 22 };
   const iw = W - PAD.l - PAD.r;
   const ih = H - PAD.t - PAD.b;
 
