@@ -339,7 +339,7 @@ export const PositionDetailModal: React.FC<PositionDetailModalProps> = React.mem
 
           <div>
             <div className="text-[11px] font-sans text-muted font-medium mb-1.5">
-              Net PnL since entry — solid: realized · dashed: illustrative 24h projection
+              Net PnL since entry — solid: realized · dashed: {pos.strategyId.toLowerCase().includes("options") ? "illustrative target at expiry" : "illustrative 24h projection"}
             </div>
             <svg viewBox={`0 0 ${W} ${H}`} className="w-full rounded-lg border border-surface-border bg-surface-raised" role="img">
               {hasProjection && (
@@ -382,17 +382,26 @@ export const PositionDetailModal: React.FC<PositionDetailModalProps> = React.mem
               {hasProjection && <circle cx={xPos(t2)} cy={yPos(yEnd)} r="3.5" fill="#64748b" opacity="0.6" />}
 
               {/* Current PnL label at t1 */}
-              <text
-                x={xPos(t1)}
-                y={yPos(nowPnl) + (nowPnl >= entryPnl ? -9 : 16)}
-                fontSize="11"
-                fontWeight="700"
-                fill={nowPnl >= 0 ? "#15803d" : "#b91c1c"}
-                fontFamily="Inter, sans-serif"
-                textAnchor="middle"
-              >
-                {usd(nowPnl)}
-              </text>
+              {(() => {
+                const px1 = xPos(t1);
+                const nearLeft = px1 - PAD_LEFT < 36;
+                const nearRight = W - PAD_RIGHT - px1 < 36;
+                const anchor = nearLeft ? "start" : nearRight ? "end" : "middle";
+                const labelX = nearLeft ? PAD_LEFT + 4 : nearRight ? W - PAD_RIGHT - 4 : px1;
+                return (
+                  <text
+                    x={labelX}
+                    y={yPos(nowPnl) + (nowPnl >= entryPnl ? -9 : 16)}
+                    fontSize="11"
+                    fontWeight="700"
+                    fill={nowPnl >= 0 ? "#15803d" : "#b91c1c"}
+                    fontFamily="Inter, sans-serif"
+                    textAnchor={anchor}
+                  >
+                    {usd(nowPnl)}
+                  </text>
+                );
+              })()}
 
               {/* Projected target label at t2 */}
               {hasProjection && (
@@ -414,12 +423,12 @@ export const PositionDetailModal: React.FC<PositionDetailModalProps> = React.mem
                 {`${fmtT(t0safe)} (Entry)`}
               </text>
               {hasProjection && (
-                <text x={xPos(t1)} y={H - 8} fontSize="10" fill="#94a3b8" fontFamily="Inter, sans-serif" textAnchor="middle">
+                <text x={Math.max(PAD_LEFT + 55, Math.min(W - PAD_RIGHT - 55, xPos(t1)))} y={H - 8} fontSize="10" fill="#94a3b8" fontFamily="Inter, sans-serif" textAnchor="middle">
                   Now
                 </text>
               )}
               <text x={W - PAD_RIGHT} y={H - 8} fontSize="10" fill="#94a3b8" fontFamily="Inter, sans-serif" textAnchor="end">
-                {hasProjection ? "Target (+24h)" : "Now"}
+                {hasProjection ? (pos.strategyId.toLowerCase().includes("options") ? "Target (At Expiry)" : "Target (+24h)") : "Now"}
               </text>
 
               {/* Entry fees indicator */}
