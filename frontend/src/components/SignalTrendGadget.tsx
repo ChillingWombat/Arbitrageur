@@ -190,7 +190,7 @@ function SignalTrendGadgetInner({
 
   // Chart geometry — W tracks the measured container width so lines and
   // gridlines stretch across the full available space without empty margins.
-  const PAD_L = 46;
+  const PAD_L = 52;
   const PAD_R = 10;
   const PAD_T = 10;
   const PAD_B = 20;

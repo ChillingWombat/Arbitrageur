@@ -1152,9 +1152,9 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
                   <thead className="sticky top-0 z-20 bg-surface-raised text-slate-500 text-[10px] font-semibold tracking-wider">
                     <tr className="h-11 bg-surface-raised border-b border-surface-border">
                       <th className="w-[122px] p-1.5 text-left font-semibold text-slate-500 text-[10px] tracking-wider border-r border-b border-surface-border whitespace-nowrap overflow-hidden sticky top-0 left-0 bg-surface-raised z-30">
-                        <div className="flex items-center justify-between whitespace-nowrap overflow-hidden">
-                          <span className="truncate">LONG ↓</span>
-                          <span className="truncate">SHORT →</span>
+                        <div className="flex items-center justify-between whitespace-nowrap overflow-hidden text-[10px] font-semibold text-slate-500">
+                          <span className="truncate">BUY ↓</span>
+                          <span className="truncate">SELL →</span>
                         </div>
                       </th>
                       {venueMatrix.venueLabels.map((colVenue, j) => {
@@ -1168,8 +1168,8 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
                               <VenueLogo venueId={(venueMatrix.venues[j] ?? colVenue).toLowerCase()} name={colVenue} size={14} />
                               <span className="truncate">{colVenue}</span>
                             </div>
-                            <div className="text-[10px] font-normal text-profit mt-0.5 truncate">
-                              Sell @ {formatCurrencyPrice(sellPrice)}
+                            <div className="text-[10px] font-medium text-profit mt-0.5 truncate">
+                              Bid {formatCurrencyPrice(sellPrice)}
                             </div>
                           </th>
                         );
@@ -1183,14 +1183,14 @@ const LiveMatrixInner: React.FC<LiveMatrixProps> = ({
 
                       return (
                         <tr key={venueMatrix.venues[i]} className="h-10 hover:bg-surface-raised/40 transition">
-                          {/* Row Header (Long Leg) */}
+                          {/* Row Header (Buy Leg) */}
                           <td className="h-10 p-1.5 font-semibold text-slate-900 border-r border-surface-border bg-surface-raised/95 sticky left-0 z-10 whitespace-nowrap overflow-hidden">
                             <div className="text-[10px] font-bold text-slate-900 truncate flex items-center gap-1">
                               <VenueLogo venueId={(venueMatrix.venues[i] ?? rowLabel).toLowerCase()} name={rowLabel} size={14} />
                               <span className="truncate">{rowLabel}</span>
                             </div>
-                            <div className="text-[10px] font-normal text-loss mt-0.5 truncate">
-                              Buy @ {formatCurrencyPrice(buyPrice)}
+                            <div className="text-[10px] font-medium text-loss mt-0.5 truncate">
+                              Ask {formatCurrencyPrice(buyPrice)}
                             </div>
                           </td>
 

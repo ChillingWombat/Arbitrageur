@@ -129,8 +129,8 @@ export const PositionDetailModal: React.FC<PositionDetailModalProps> = React.mem
   const expectedNet = familyExpected ?? pos.expectedNetUsd;
   const hasProjection = expectedNet != null && Number.isFinite(expectedNet);
   // Chart geometry: x in [t0, t1, t2], y auto-scaled with safe padding.
-  const W = 800, H = 140;
-  const PAD_LEFT = 75, PAD_RIGHT = 45, PAD_TOP = 22, PAD_BOTTOM = 26;
+  const W = 800, H = 200;
+  const PAD_LEFT = 75, PAD_RIGHT = 45, PAD_TOP = 26, PAD_BOTTOM = 30;
   const plotW = W - PAD_LEFT - PAD_RIGHT;
   const plotH = H - PAD_TOP - PAD_BOTTOM;
   const t0 = Date.parse(pos.openedAt);
