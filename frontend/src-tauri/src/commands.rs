@@ -36,7 +36,7 @@ use tauri::State;
 /// reconciliation machinery (poll supervisor, residual auto-flatten,
 /// bounded cancel retry) covers every entry that lands imbalanced.
 pub(crate) fn live_entry_gate(state: &AppEngineState, venues: &[&str]) -> Result<(), String> {
-    if !state.vault.write().is_unlocked() {
+    if !state.vault.write().allows_adapter_execution() {
         return Err("Live strategy entries require an unlocked credential vault".into());
     }
     for venue in venues {
@@ -590,6 +590,26 @@ pub(crate) fn compute_route_economics(
     sell_fee_bps: f64,
     target_profit_bps: f64,
 ) -> Option<RouteEconomics> {
+    compute_route_economics_for_mode(
+        book_buy,
+        book_sell,
+        qty,
+        buy_fee_bps,
+        sell_fee_bps,
+        target_profit_bps,
+        true,
+    )
+}
+
+pub(crate) fn compute_route_economics_for_mode(
+    book_buy: &OrderBook,
+    book_sell: &OrderBook,
+    qty: Decimal,
+    buy_fee_bps: f64,
+    sell_fee_bps: f64,
+    target_profit_bps: f64,
+    two_way: bool,
+) -> Option<RouteEconomics> {
     let buy_best_ask = dec_opt_f64(book_buy.best_ask_price()?).filter(|p| *p > 0.0)?;
     let sell_best_bid = dec_opt_f64(book_sell.best_bid_price()?).filter(|p| *p > 0.0)?;
     let buy_best_bid = dec_opt_f64(book_buy.best_bid_price()?).filter(|p| *p > 0.0)?;
@@ -603,31 +623,40 @@ pub(crate) fn compute_route_economics(
     if rem > dec!(0) {
         return None;
     }
-    let (buy_exit, rem, _) = book_buy.sell_execution_vwap(qty)?;
-    if rem > dec!(0) {
-        return None;
-    }
-    let (sell_exit, rem, _) = book_sell.buy_execution_vwap(qty)?;
-    if rem > dec!(0) {
-        return None;
-    }
     let buy_entry_vwap = dec_opt_f64(buy_entry)?;
     let sell_entry_vwap = dec_opt_f64(sell_entry)?;
-    let buy_exit_vwap = dec_opt_f64(buy_exit)?;
-    let sell_exit_vwap = dec_opt_f64(sell_exit)?;
     let qty_f = dec_opt_f64(qty)?;
 
     let top_gross_bps = (sell_best_bid - buy_best_ask) / buy_best_ask * 10_000.0;
     let entry_slippage_bps = ((buy_entry_vwap - buy_best_ask) / buy_best_ask * 10_000.0).max(0.0)
         + ((sell_best_bid - sell_entry_vwap) / sell_best_bid * 10_000.0).max(0.0);
-    let exit_slippage_bps = ((buy_best_bid - buy_exit_vwap) / buy_best_bid * 10_000.0).max(0.0)
-        + ((sell_exit_vwap - sell_best_ask) / sell_best_ask * 10_000.0).max(0.0);
-    let buy_spread_bps =
-        (buy_best_ask - buy_best_bid) / ((buy_best_ask + buy_best_bid) / 2.0) * 10_000.0;
-    let sell_spread_bps =
-        (sell_best_ask - sell_best_bid) / ((sell_best_ask + sell_best_bid) / 2.0) * 10_000.0;
-    let closing_spread_bps = buy_spread_bps + sell_spread_bps;
-    let round_trip_commission_bps = 2.0 * (buy_fee_bps + sell_fee_bps);
+
+    let (exit_slippage_bps, closing_spread_bps, round_trip_commission_bps) = if two_way {
+        let (buy_exit, rem, _) = book_buy.sell_execution_vwap(qty)?;
+        if rem > dec!(0) {
+            return None;
+        }
+        let (sell_exit, rem, _) = book_sell.buy_execution_vwap(qty)?;
+        if rem > dec!(0) {
+            return None;
+        }
+        let buy_exit_vwap = dec_opt_f64(buy_exit)?;
+        let sell_exit_vwap = dec_opt_f64(sell_exit)?;
+        let exit_slip = ((buy_best_bid - buy_exit_vwap) / buy_best_bid * 10_000.0).max(0.0)
+            + ((sell_exit_vwap - sell_best_ask) / sell_best_ask * 10_000.0).max(0.0);
+        let buy_spread_bps =
+            (buy_best_ask - buy_best_bid) / ((buy_best_ask + buy_best_bid) / 2.0) * 10_000.0;
+        let sell_spread_bps =
+            (sell_best_ask - sell_best_bid) / ((sell_best_ask + sell_best_bid) / 2.0) * 10_000.0;
+        (
+            exit_slip,
+            buy_spread_bps + sell_spread_bps,
+            2.0 * (buy_fee_bps + sell_fee_bps),
+        )
+    } else {
+        (0.0, 0.0, buy_fee_bps + sell_fee_bps)
+    };
+
     let expected_friction_bps =
         round_trip_commission_bps + entry_slippage_bps + exit_slippage_bps + closing_spread_bps;
     let expected_net_bps = top_gross_bps - expected_friction_bps;
@@ -1397,6 +1426,9 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
         if let Some(adapter) = state.get_adapter(&v.id) {
             v.can_submit = adapter.live_order_submission_implemented();
             v.can_enter_strategy = adapter.live_strategy_entry_implemented();
+            if v.status == "READ_ONLY" && v.can_submit && adapter.has_live_credentials() {
+                v.status = "ONLINE".into();
+            }
         }
     }
 
@@ -2799,7 +2831,7 @@ pub struct VenueCapabilityDto {
 
 pub fn get_venue_execution_capabilities_impl(state: &AppEngineState) -> Vec<VenueCapabilityDto> {
     state.sync_vault_credentials_to_adapters();
-    let is_unlocked = state.vault.write().is_unlocked();
+    let is_unlocked = state.vault.write().allows_adapter_execution();
     let venues = state.get_venues();
     venues
         .into_iter()
@@ -4811,7 +4843,7 @@ pub async fn cancel_venue_order(
     client_order_id: Option<String>,
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<String, String> {
-    if state.is_live() && !state.vault.write().is_unlocked() {
+    if state.is_live() && !state.vault.write().allows_adapter_execution() {
         return Err(
             "Cannot cancel a venue order in Live Trading mode while the secure credential vault is locked. Unlock the vault first."
                 .into(),
@@ -5415,6 +5447,7 @@ pub(crate) async fn maybe_record_margin_snapshots(state: &AppEngineState, now_ms
     if now_ms < 0 {
         return;
     }
+    let mut breaker_feed = Vec::new();
     for (vid, _, adapter) in state.get_venues() {
         let fresh = state
             .margin_snapshot_at
@@ -5437,9 +5470,8 @@ pub(crate) async fn maybe_record_margin_snapshots(state: &AppEngineState, now_ms
             }
             Err(_) => continue,
         };
-        // Feed the drawdown breaker from the background lane too — the
-        // halt must not depend on someone watching the Risk Overview.
-        crate::execution::feed_breaker_equity_usd(state, vid, account.equity, &account.balances);
+        let econ_key = crate::execution::breaker_account_key(state, vid);
+        breaker_feed.push((econ_key, account.equity, account.balances.clone()));
         let equity = match account.equity.to_string().parse::<f64>() {
             Ok(v) if v.is_finite() && v >= 0.0 => v,
             _ => continue,
@@ -5463,6 +5495,9 @@ pub(crate) async fn maybe_record_margin_snapshots(state: &AppEngineState, now_ms
                 .lock()
                 .insert(vid.to_string(), now_ms);
         }
+    }
+    if !breaker_feed.is_empty() {
+        crate::execution::feed_breaker_equity(state, &breaker_feed);
     }
 }
 

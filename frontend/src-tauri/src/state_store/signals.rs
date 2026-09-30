@@ -133,17 +133,31 @@ impl StateStore {
         let now = Utc::now().to_rfc3339();
         let terminal = matches!(status, SignalStatus::Closed | SignalStatus::Failed);
         let conn = self.conn.lock();
+        let is_flatten_child = signal_id.starts_with("flat-") || signal_id.starts_with("trim-");
         // `status NOT IN ('closed','failed') OR status = ?2` — a terminal row
-        // only matches when the new status equals the stored one.
+        // only matches when the new status equals the stored one, except for
+        // flatten/trim children where venue-authoritative fills can promote a
+        // premature Failed attempt to Closed.
         let changed = if terminal {
-            conn.execute(
-                "UPDATE signal_executions
-                 SET status = ?2, note = COALESCE(?3, note), updated_at = ?4,
-                     closed_at = COALESCE(closed_at, ?4)
-                 WHERE id = ?1
-                   AND (status NOT IN ('closed','failed') OR status = ?2)",
-                params![signal_id, status.as_str(), note, now],
-            )?
+            if status == SignalStatus::Closed && is_flatten_child {
+                conn.execute(
+                    "UPDATE signal_executions
+                     SET status = ?2, note = COALESCE(?3, note), updated_at = ?4,
+                         closed_at = COALESCE(closed_at, ?4)
+                     WHERE id = ?1
+                       AND (status != 'closed')",
+                    params![signal_id, status.as_str(), note, now],
+                )?
+            } else {
+                conn.execute(
+                    "UPDATE signal_executions
+                     SET status = ?2, note = COALESCE(?3, note), updated_at = ?4,
+                         closed_at = COALESCE(closed_at, ?4)
+                     WHERE id = ?1
+                       AND (status NOT IN ('closed','failed') OR status = ?2)",
+                    params![signal_id, status.as_str(), note, now],
+                )?
+            }
         } else {
             conn.execute(
                 "UPDATE signal_executions
@@ -533,6 +547,25 @@ impl StateStore {
         Ok(())
     }
 
+    /// Clear a pre-persisted client order id when the coordinator proves the
+    /// leg has no remaining live order or exposure (rejected outright,
+    /// cancelled empty, or filled and already unwound). Without clearing the
+    /// crash-recovery locator, `reconcile_pending_orders` would attempt
+    /// `adopt_venue_order_id` on the dead/unwound leg instead of classifying
+    /// it as `CancelledEmpty`.
+    pub fn clear_leg_client_order_id(&self, signal_id: &str, side: LegSide) -> anyhow::Result<()> {
+        let signal_id = normalize_id(signal_id)?;
+        let now = Utc::now().to_rfc3339();
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE signal_legs
+             SET client_order_id = NULL, updated_at = ?3
+             WHERE signal_id = ?1 AND side = ?2 AND (venue_order_id IS NULL OR venue_order_id = '')",
+            params![signal_id, side.as_str(), now],
+        )?;
+        Ok(())
+    }
+
     /// One persisted leg that carries a venue order id — or a client order
     /// id persisted pre-dispatch — on a signal that has not reached
     /// `closed`/`failed`: the reconciliation poll set. A client-id-only leg
@@ -559,6 +592,7 @@ impl StateStore {
                   AND l.venue_order_id NOT LIKE 'sim-%')
                  OR (l.client_order_id IS NOT NULL AND l.client_order_id != '')
                  OR e.status IN ('imbalanced', 'unresolved')
+                 OR (e.status = 'in_flight' AND datetime(e.created_at) < datetime('now', '-30 seconds'))
                )
                AND (
                  e.status IN ('in_flight', 'imbalanced', 'unresolved')
@@ -570,7 +604,8 @@ impl StateStore {
                    -- window so the recorded fill lands (or the venue proves
                    -- it dead); once `filled_qty > 0` the row self-excludes.
                    e.status IN ('closed', 'failed')
-                   AND l.filled_qty <= 0
+                   AND (e.id LIKE 'flat-%' OR e.id LIKE 'trim-%')
+                   AND l.filled_qty < l.intended_qty
                    AND (
                      (l.venue_order_id IS NOT NULL AND l.venue_order_id != ''
                       AND l.venue_order_id NOT LIKE 'sim-%')

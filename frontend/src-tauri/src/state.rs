@@ -2482,6 +2482,56 @@ impl AppEngineState {
                 &chrono::Utc::now().to_rfc3339(),
             );
         }
+
+        // Reconcile pnl.total.{env} to true realized trading profit by excluding
+        // open options capital outlays (which are financing tracked under pnl.premium_outlay)
+        // and counting only transaction fees and non-options trading profits.
+        if state_store
+            .kv_get("pnl.premium_outlay.migrated_v2")
+            .ok()
+            .flatten()
+            .is_none()
+        {
+            if let Ok(all_logs) = state_store.load_execution_logs(100_000) {
+                let mut true_realized_testnet = Decimal::ZERO;
+                let mut true_realized_live = Decimal::ZERO;
+                let mut has_testnet = false;
+                let mut has_live = false;
+                for l in &all_logs {
+                    let net = Decimal::from_str_exact(&l.net_profit.to_string()).unwrap_or(dec!(0));
+                    let fee = Decimal::from_str_exact(&l.fees.to_string()).unwrap_or(dec!(0));
+                    let entry_realized = if l.strategy_id.starts_with("options") {
+                        -fee
+                    } else {
+                        net
+                    };
+                    if l.is_live {
+                        has_live = true;
+                        true_realized_live += entry_realized;
+                    } else {
+                        has_testnet = true;
+                        true_realized_testnet += entry_realized;
+                    }
+                }
+                if has_testnet {
+                    initial_pnl_testnet = true_realized_testnet;
+                    let _ =
+                        state_store.kv_set("pnl.total.testnet", &true_realized_testnet.to_string());
+                    tracing::info!("pnl.total.testnet recalibrated to true realized PnL: {true_realized_testnet}");
+                }
+                if has_live {
+                    initial_pnl_live = true_realized_live;
+                    let _ = state_store.kv_set("pnl.total.live", &true_realized_live.to_string());
+                    tracing::info!(
+                        "pnl.total.live recalibrated to true realized PnL: {true_realized_live}"
+                    );
+                }
+            }
+            let _ = state_store.kv_set(
+                "pnl.premium_outlay.migrated_v2",
+                &chrono::Utc::now().to_rfc3339(),
+            );
+        }
         // `sim_step_counter` feeds durable ids (`spatial-{n}` lots,
         // `funding-{n}` lots, `exec-*-{n}` log rows) — resuming at 8 after a
         // restart would collide with persisted ids and `INSERT OR REPLACE`

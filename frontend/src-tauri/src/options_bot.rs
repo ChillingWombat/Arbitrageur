@@ -405,20 +405,45 @@ impl OptionsBotExecutor {
             return poll;
         }
 
+        let env_str = state.env().as_str();
+        let mut open_instruments: std::collections::HashSet<String> = state
+            .state_store
+            .list_signals(None, None)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| {
+                (s.environment.eq_ignore_ascii_case(env_str) || s.environment == "unknown")
+                    && s.status.counts_as_open()
+            })
+            .flat_map(|s| {
+                let mut v: Vec<String> = s
+                    .legs
+                    .into_iter()
+                    .map(|l| l.symbol.to_ascii_uppercase())
+                    .collect();
+                v.push(s.symbol.to_ascii_uppercase());
+                v
+            })
+            .collect();
+
         // Fresh scan per underlying; each execute re-scans server-side, so a
         // stale edge is refused by the impl, never here.
         for ccy in SCAN_CURRENCIES {
-            // (id, currency, net_edge_usd) — the two scanners' DTOs project
-            // onto one shape for sorting + dispatch.
-            let opps: Vec<(String, String, f64)> = if substrategy == "parity" {
+            let scan_qty = if ccy.eq_ignore_ascii_case("ETH") {
+                cfg.qty_base.max(1.0)
+            } else {
+                cfg.qty_base
+            };
+            // (id, currency, net_edge_usd, leg_instruments) — the two scanners'
+            // DTOs project onto one shape for sorting + dispatch.
+            let opps: Vec<(String, String, f64, Vec<String>)> = if substrategy == "parity" {
                 match scan_options_parity_impl(
                     &OptionsParityScanParams {
                         currency: ccy.to_string(),
-                        qty_base: Some(cfg.qty_base),
+                        qty_base: Some(scan_qty),
                         min_hours_to_expiry: Some(cfg.min_hours_to_expiry),
                         max_days_to_expiry: Some(cfg.max_days_to_expiry),
                         min_edge_bps: Some(cfg.min_edge_bps),
-
                         limit: None,
                     },
                     state,
@@ -429,7 +454,13 @@ impl OptionsBotExecutor {
                         status.rows_scanned += v.len();
                         v.into_iter()
                             .filter(|o| o.is_executable)
-                            .map(|o| (o.id, o.currency, o.net_edge_usd))
+                            .map(|o| {
+                                let legs = vec![
+                                    o.call_leg.instrument.to_ascii_uppercase(),
+                                    o.put_leg.instrument.to_ascii_uppercase(),
+                                ];
+                                (o.id, o.currency, o.net_edge_usd, legs)
+                            })
                             .collect()
                     }
                     Err(e) => {
@@ -442,11 +473,10 @@ impl OptionsBotExecutor {
                     &OptionsPackageScanParams {
                         substrategy_id: substrategy.to_string(),
                         currency: ccy.to_string(),
-                        qty_base: Some(cfg.qty_base),
+                        qty_base: Some(scan_qty),
                         min_hours_to_expiry: Some(cfg.min_hours_to_expiry),
                         max_days_to_expiry: Some(cfg.max_days_to_expiry),
                         min_edge_bps: Some(cfg.min_edge_bps),
-
                         limit: None,
                     },
                     state,
@@ -457,7 +487,14 @@ impl OptionsBotExecutor {
                         status.rows_scanned += v.len();
                         v.into_iter()
                             .filter(|o| o.is_executable)
-                            .map(|o| (o.id, o.currency, o.net_edge_usd))
+                            .map(|o| {
+                                let legs = o
+                                    .legs
+                                    .iter()
+                                    .map(|l| l.instrument.to_ascii_uppercase())
+                                    .collect();
+                                (o.id, o.currency, o.net_edge_usd, legs)
+                            })
                             .collect()
                     }
                     Err(e) => {
@@ -479,25 +516,30 @@ impl OptionsBotExecutor {
                             .map_or(best, |b| if best > b { best } else { b }),
                     );
             }
-            // Drop candidates still cooling from a prior refusal, then prune
-            // expired cooldown entries so the map stays bounded.
+            // Drop candidates still cooling from a prior refusal or sharing an
+            // instrument with an already-open signal, then prune expired
+            // cooldown entries so the map stays bounded.
             {
                 let mut cd = self.refusal_cooldown.lock();
                 cd.retain(|_, t| t.elapsed() < REFUSAL_COOLDOWN);
-                opps.retain(|(id, _, _)| !cd.contains_key(&Self::cooldown_key(substrategy, id)));
+                opps.retain(|(id, _, _, legs)| {
+                    !cd.contains_key(&Self::cooldown_key(substrategy, id))
+                        && !legs.iter().any(|inst| open_instruments.contains(inst))
+                });
             }
-            for (id, _ccy, _edge) in opps {
+            for (id, _ccy, _edge, legs) in opps {
                 if open >= cfg.max_open_positions {
                     break;
                 }
-                // One refusal ends the currency's batch — a mid-batch error
-                // may mean partial fills; next poll re-evaluates honestly.
+                if legs.iter().any(|inst| open_instruments.contains(inst)) {
+                    continue;
+                }
                 let res = if substrategy == "parity" {
                     execute_options_parity_impl(
                         OptionsParityExecutionParams {
                             id: id.clone(),
                             currency: ccy.to_string(),
-                            qty_base: cfg.qty_base,
+                            qty_base: scan_qty,
                             min_edge_bps: Some(cfg.min_edge_bps),
                             auto: true,
                         },
@@ -511,7 +553,7 @@ impl OptionsBotExecutor {
                             id: id.clone(),
                             substrategy_id: substrategy.to_string(),
                             currency: ccy.to_string(),
-                            qty_base: cfg.qty_base,
+                            qty_base: scan_qty,
                             min_edge_bps: Some(cfg.min_edge_bps),
                             auto: true,
                         },
@@ -524,11 +566,18 @@ impl OptionsBotExecutor {
                     Ok(()) => {
                         open += 1;
                         status.open_positions = open;
+                        open_instruments.extend(legs);
                     }
                     Err(e) => {
                         tracing::warn!("options bot {substrategy}: entry {id} refused: {e}");
                         status.last_refusal = Some(format!("{id}: {e}"));
                         self.note_refusal(substrategy, &id);
+                        if e.contains("An open position already exists for")
+                            || e.contains("is blocked by signal")
+                            || e.contains("is no longer available")
+                        {
+                            continue;
+                        }
                         break;
                     }
                 }

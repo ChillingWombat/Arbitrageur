@@ -276,7 +276,12 @@ pub async fn scan_options_parity_impl(
     if !matches!(ccy.as_str(), "BTC" | "ETH") {
         return Err("options parity supports BTC or ETH".into());
     }
-    let qty_base = params.qty_base.unwrap_or(0.1);
+    let mut qty_base = params
+        .qty_base
+        .unwrap_or(if ccy == "ETH" { 1.0 } else { 0.1 });
+    if ccy == "ETH" && qty_base < 1.0 {
+        qty_base = 1.0;
+    }
     if !qty_base.is_finite() || qty_base <= 0.0 {
         return Err("qty_base must be a finite positive number".into());
     }
@@ -595,6 +600,12 @@ pub async fn execute_options_parity_impl(
         .await
         .map_err(|e| format!("account read on deribit failed: {e}"))?;
     for sym in &leg_symbols {
+        // Only fixed option contracts (Call and Put) cannot already exist in the account.
+        // The perpetual hedge (BTC-PERPETUAL / ETH-PERPETUAL) is linear delta and can accumulate
+        // across multiple parity conversions up to max_open_positions.
+        if !crate::state_store::symbol_is_fixed_contract(sym) {
+            continue;
+        }
         if let Some(p) = adapter
             .account_position_for(&pre_acc, sym)
             .map_err(|e| format!("position read on deribit failed for {sym}: {e}"))?
@@ -659,7 +670,7 @@ pub async fn execute_options_parity_impl(
     // book quantities are contracts (base units for contract_size=1); the
     // perp book is USD-sized — venue-unit quantities differ per leg.
     let mut books = Vec::with_capacity(3);
-    for sym in &leg_symbols {
+    for (sym, side) in leg_symbols.iter().zip(leg_sides.iter()) {
         let book = adapter
             .fetch_orderbook(sym)
             .await
@@ -672,8 +683,9 @@ pub async fn execute_options_parity_impl(
                 book.symbol
             ));
         }
-        book.validate_for_execution()
+        book.validate_for_side(*side)
             .map_err(|e| format!("dispatch book for {sym}: {e}"))?;
+        state.market_data_hub.update_orderbook(book.clone());
         books.push(book);
     }
 
@@ -939,7 +951,12 @@ pub async fn execute_options_parity_impl(
             .ok()
             .flatten()
             .map(|s| s.status);
-        if current != Some(SignalStatus::InFlight) {
+        // The background reconciler may have polled an earlier leg while
+        // subsequent legs were still dispatching, advancing it from InFlight
+        // to Balanced or Unresolved. Override any non-terminal state so a
+        // partial cycle always marks filled legs Imbalanced and a completed
+        // cycle stamps the uniform cycle note.
+        if matches!(current, Some(SignalStatus::Closed | SignalStatus::Failed)) {
             continue;
         }
         if cycle_complete {
@@ -962,7 +979,7 @@ pub async fn execute_options_parity_impl(
                 SignalStatus::Imbalanced,
                 Some("options parity partial — residual leg; flatten the instrument to unwind"),
             );
-        } else {
+        } else if current == Some(SignalStatus::InFlight) {
             let _ = state.state_store.update_signal_status(
                 sid,
                 SignalStatus::Failed,

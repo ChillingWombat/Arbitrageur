@@ -81,6 +81,21 @@ export const fillChip = (state: AtomicTransactionDto["fillState"]) => {
   }
 };
 
+/** Classify instrument into Option (Call/Put), Perpetual, or other. */
+export function parseInstrumentType(symbol: string): { isOption: boolean; type: "CALL" | "PUT" | "PERP" | null } {
+  const sym = (symbol || "").trim().toUpperCase();
+  if (sym.endsWith("-C") || sym.includes("-C-") || sym.includes("-CALL")) {
+    return { isOption: true, type: "CALL" };
+  }
+  if (sym.endsWith("-P") || sym.includes("-P-") || sym.includes("-PUT")) {
+    return { isOption: true, type: "PUT" };
+  }
+  if (sym.includes("PERPETUAL") || sym.includes("PERP")) {
+    return { isOption: false, type: "PERP" };
+  }
+  return { isOption: false, type: null };
+}
+
 /** Every dispatched venue order, chronological — entry legs plus all
  *  flatten/trim children the caller merged in. Rows are leg-level orders;
  *  venue/client order ids render as footnotes under the table. */
@@ -95,7 +110,8 @@ export const AtomicTransactionsTable: React.FC<{ transactions: AtomicTransaction
             <th className="py-2 px-3">Time</th>
             <th className="py-2 px-3">Role</th>
             <th className="py-2 px-3">Venue</th>
-            <th className="py-2 px-3">Order</th>
+            <th className="py-2 px-3">Action</th>
+            <th className="py-2 px-3">Type</th>
             <th className="py-2 px-3">Instrument</th>
             <th className="py-2 px-3 text-right">Qty Filled / Intended</th>
             <th className="py-2 px-3 text-right">Fill / Intended Px</th>
@@ -108,6 +124,15 @@ export const AtomicTransactionsTable: React.FC<{ transactions: AtomicTransaction
             const role = roleChip(tx.role);
             const fill = fillChip(tx.fillState);
             const scaled = Math.abs(tx.unitScale - 1) > 1e-9;
+            const inst = parseInstrumentType(tx.symbol);
+            const isBuy = tx.orderSide === "buy";
+            const actionText = inst.isOption
+              ? (isBuy ? "BOUGHT" : "WROTE")
+              : (isBuy ? "BUY" : "SELL");
+            const actionColor = inst.isOption
+              ? (isBuy ? "text-profit font-bold" : "text-purple-600 dark:text-purple-400 font-bold")
+              : (isBuy ? "text-profit font-bold" : "text-loss font-bold");
+
             return (
               <tr key={tx.legId} className="hover:bg-surface-raised/40 transition">
                 <td className="py-2 px-3 text-slate-600 whitespace-nowrap">{fmtTime(tx.createdAt)}</td>
@@ -122,11 +147,27 @@ export const AtomicTransactionsTable: React.FC<{ transactions: AtomicTransaction
                     {tx.venue}
                   </span>
                 </td>
-                <td className="py-2 px-3">
-                  <span className={tx.orderSide === "buy" ? "text-profit font-bold" : "text-loss font-bold"}>
-                    {tx.orderSide.toUpperCase()}
+                <td className="py-2 px-3 whitespace-nowrap">
+                  <span className={actionColor}>
+                    {actionText}
                   </span>
-                  <span className="text-slate-400"> /{tx.side}</span>
+                </td>
+                <td className="py-2 px-3 whitespace-nowrap">
+                  {inst.type === "CALL" ? (
+                    <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
+                      CALL
+                    </span>
+                  ) : inst.type === "PUT" ? (
+                    <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20">
+                      PUT
+                    </span>
+                  ) : inst.type === "PERP" ? (
+                    <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-sky-500/10 text-sky-600 dark:text-sky-400 border border-sky-500/20">
+                      PERP
+                    </span>
+                  ) : (
+                    <span className="text-slate-400 text-[10px] font-mono">—</span>
+                  )}
                 </td>
                 <td className="py-2 px-3 text-slate-700 whitespace-nowrap">
                   {tx.symbol}
@@ -155,7 +196,7 @@ export const AtomicTransactionsTable: React.FC<{ transactions: AtomicTransaction
           })}
           {transactions.length === 0 && (
             <tr>
-              <td colSpan={9}>
+              <td colSpan={10}>
                 <EmptyState plain title="No orders persisted for this signal." />
               </td>
             </tr>

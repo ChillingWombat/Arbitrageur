@@ -119,6 +119,7 @@ pub trait ExchangeAdapter: Send + Sync {
         // Multiple rows sharing that base (e.g. USDC + USDT twins answering
         // a bare `BTC`) stay ambiguous and fail closed in the second pass.
         let requested_base = crate::symbol::canonical_base(requested);
+        let requested_quote = crate::symbol::symbol_quote(requested);
         let mut matched: Option<Position> = None;
         for base_pass in [false, true] {
             for raw in &account.positions {
@@ -131,8 +132,16 @@ pub trait ExchangeAdapter: Send + Sync {
                 if position.quantity == Decimal::ZERO {
                     continue;
                 }
+                let quote_conflict = match (
+                    requested_quote.as_deref(),
+                    crate::symbol::symbol_quote(&position.symbol).as_deref(),
+                ) {
+                    (Some(rq), Some(pq)) if rq != "USD" && pq != "USD" => rq != pq,
+                    _ => false,
+                };
                 let hit = if base_pass {
                     !position.symbol.eq_ignore_ascii_case(requested)
+                        && !quote_conflict
                         && crate::symbol::canonical_base(&position.symbol) == requested_base
                 } else {
                     position.symbol.eq_ignore_ascii_case(requested)

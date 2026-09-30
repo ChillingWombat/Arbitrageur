@@ -108,18 +108,35 @@ fn materially_short(filled: Decimal, intended: Decimal) -> bool {
         && filled + (intended / dec!(1_000_000)).max(dec!(0.000000001)) < intended
 }
 
+fn is_quote_notional_future(resp: &OrderResponse) -> bool {
+    let sym = resp.symbol.to_ascii_uppercase();
+    resp.venue.as_str().eq_ignore_ascii_case("deribit")
+        && !sym.ends_with("-C")
+        && !sym.ends_with("-P")
+}
+
 /// Map an authoritative venue snapshot onto a poll outcome for ledger math.
 /// `intended_qty` is the leg's planned quantity — a terminal response whose
 /// fill does not cover it is partial exposure, never a full fill, whatever
 /// the venue's status field claims.
 fn classify_response(resp: &OrderResponse, intended_qty: Decimal) -> LegPoll {
+    let quote_future_full = is_quote_notional_future(resp)
+        && resp.remaining_qty <= Decimal::ZERO
+        && resp.filled_qty > Decimal::ZERO
+        && resp.original_qty > Decimal::ZERO
+        && !materially_short(resp.filled_qty, resp.original_qty)
+        && (intended_qty <= Decimal::ZERO
+            || resp.filled_qty + (intended_qty * dec!(0.05)) >= intended_qty);
     match resp.status {
         OrderStatus::Filled => {
             // Venue-authoritative full execution — but a `Filled` status
             // reporting materially less than the intended size is a venue
             // accounting inconsistency: treat it as partial so the residual
             // stays on the escalation path instead of silently trusting it.
-            if materially_short(resp.filled_qty, intended_qty) {
+            // On quote-notional futures (Deribit USD contracts), `intended_qty`
+            // is computed at pre-submit mark while `filled_qty` is `usd / fill_px`,
+            // so a 100%-filled venue order within conversion drift is full.
+            if materially_short(resp.filled_qty, intended_qty) && !quote_future_full {
                 LegPoll::PartialTerminal
             } else {
                 LegPoll::Filled
@@ -129,7 +146,7 @@ fn classify_response(resp: &OrderResponse, intended_qty: Decimal) -> LegPoll {
             if resp.filled_qty <= Decimal::ZERO {
                 LegPoll::CancelledEmpty
             } else if resp.remaining_qty <= Decimal::ZERO
-                && !materially_short(resp.filled_qty, intended_qty)
+                && (!materially_short(resp.filled_qty, intended_qty) || quote_future_full)
             {
                 LegPoll::Filled
             } else {
@@ -210,17 +227,26 @@ fn derive_signal_status(
         // a failed ATTEMPT: Failed releases it from the open-child dedup so
         // the residual dispatcher can retry — the parent keeps its open
         // status and still tracks the underlying exposure.
+        let all_empty = polls.iter().all(|p| *p == LegPoll::CancelledEmpty);
         return (
             Some(if is_flatten_child {
-                SignalStatus::Failed
+                if all_empty {
+                    SignalStatus::Failed
+                } else {
+                    SignalStatus::Closed
+                }
             } else if is_close_signal {
                 SignalStatus::Unresolved
-            } else if polls.iter().all(|p| *p == LegPoll::CancelledEmpty) {
+            } else if all_empty {
                 SignalStatus::Failed
             } else {
                 SignalStatus::Imbalanced
             }),
-            Some("Order(s) ended with zero fill per venue".into()),
+            Some(if all_empty {
+                "Order(s) ended with zero fill per venue".into()
+            } else {
+                "Some leg(s) filled while other(s) ended empty per venue".into()
+            }),
         );
     }
     (
@@ -369,7 +395,11 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
                     // unproven, not terminal-empty — hold for the deadline
                     // escalation rather than guessing the order never lived.
                     None => {
-                        legs_out.push(LegPoll::Unknown);
+                        if age > NON_FINAL_DEADLINE_SECS {
+                            legs_out.push(LegPoll::CancelledEmpty);
+                        } else {
+                            legs_out.push(LegPoll::Unknown);
+                        }
                         continue;
                     }
                 },
@@ -594,7 +624,10 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
             .as_ref()
             .map(|s| matches!(s.status, SignalStatus::Closed | SignalStatus::Failed))
             .unwrap_or(false);
-        if already_terminal {
+        let all_filled = polls.len() == *leg_count && polls.iter().all(|p| *p == LegPoll::Filled);
+        if already_terminal
+            && !(current.as_ref().map(|s| s.status) == Some(SignalStatus::Failed) && all_filled)
+        {
             // A terminal flat/trim child can still have landed its fill this
             // pass (leg state persists before status derivation) — re-check
             // parent coverage so a failed close whose order filled late
@@ -609,14 +642,28 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
             }
             continue;
         }
-        let (new_status, note): (Option<SignalStatus>, Option<String>) = derive_signal_status(
-            polls,
-            *leg_count,
-            *age,
-            is_close_signal,
-            is_flatten_child,
-            cancel_notes.get(signal_id),
-        );
+        let (mut new_status, mut note): (Option<SignalStatus>, Option<String>) =
+            derive_signal_status(
+                polls,
+                *leg_count,
+                *age,
+                is_close_signal,
+                is_flatten_child,
+                cancel_notes.get(signal_id),
+            );
+        // A 1-leg entry signal (options parity/package or triangle leg) that
+        // is already marked `Imbalanced` was flagged by its multi-leg cycle
+        // executor because a sibling leg failed. Keep it `Imbalanced` so it
+        // never masquerades as a balanced trade and residual auto-flatten can
+        // unwind it.
+        if *leg_count == 1
+            && !is_close_signal
+            && current.as_ref().map(|s| s.status) == Some(SignalStatus::Imbalanced)
+            && new_status == Some(SignalStatus::Balanced)
+        {
+            new_status = Some(SignalStatus::Imbalanced);
+            note = current.as_ref().and_then(|s| s.note.clone());
+        }
         if let Some(status) = new_status {
             // Idempotent escalation: rewriting identical status+note every
             // pass bumps `updated_at` and re-counts the escalation forever —
@@ -676,6 +723,20 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
                 {
                     resolve_flattened_parent(state, &parent_id);
                 }
+            }
+        }
+    }
+
+    // Sweep open parent signals that have flatten/trim children so late fills
+    // or sequencer-settled children close covered parents without requiring
+    // an active child order in the poll set.
+    if let Ok(open_sigs) = state
+        .state_store
+        .list_open_signals(Some(state.env().as_str()))
+    {
+        for sig in open_sigs {
+            if !sig.id.starts_with("flat-") && !sig.id.starts_with("trim-") {
+                resolve_flattened_parent(state, &sig.id);
             }
         }
     }
@@ -783,6 +844,7 @@ fn resolve_flattened_parent(state: &AppEngineState, parent_id: &str) {
         .into_iter()
         .filter(|s| crate::state_store::is_flatten_child_id(&s.id, parent_id))
         .collect();
+
     // The parent closes when the residual is provably covered: no child
     // still open and no uncovered residual quantity. A child that failed
     // before submitting covers nothing — and blocks nothing.
@@ -1895,6 +1957,18 @@ mod tests {
             None,
         );
         assert_eq!(st, Some(SignalStatus::Closed));
+
+        // Mixed filled and cancelled empty on flatten child also resolves Closed for residual math
+        let (st, note) = derive_signal_status(
+            &[LegPoll::Filled, LegPoll::CancelledEmpty],
+            2,
+            10,
+            true,
+            true,
+            None,
+        );
+        assert_eq!(st, Some(SignalStatus::Closed));
+        assert!(note.unwrap().contains("Some leg(s) filled"));
     }
 
     #[test]

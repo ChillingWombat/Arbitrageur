@@ -8,9 +8,9 @@
 //! used by flatten paths come from `crate::triangle`.
 
 use crate::commands::{
-    compute_route_economics, effective_venue_fee_bps, fetch_multi_market_quotes_impl,
-    live_entry_gate, maybe_record_margin_snapshots, record_execution_failure, record_execution_log,
-    refresh_equity_expectations_after_fills, reject_if_strategy_filtered,
+    compute_route_economics, compute_route_economics_for_mode, effective_venue_fee_bps,
+    fetch_multi_market_quotes_impl, live_entry_gate, maybe_record_margin_snapshots,
+    record_execution_failure, record_execution_log, refresh_equity_expectations_after_fills,
     resolve_effective_leverage, snapshot_venue_equity, strategy_slippage_bps,
     validate_adapter_book, validate_market_symbol, ConvergenceCheckDto, MarginHealthDto,
     NetDeltaDto, RiskOverviewDto, SimStepResultDto, TickerMarketQuoteDto,
@@ -385,6 +385,12 @@ pub(crate) fn ledger_px_usd(
         )
         .and_then(|b| b.mid_price())
         .and_then(|m| dec_to_f64(m, "deribit perp mid").ok())
+        .or_else(|| {
+            state
+                .get_adapter("deribit")
+                .and_then(|a| a.last_account_index_usd(ccy))
+                .and_then(|idx| dec_to_f64(idx, "deribit account index").ok())
+        })
         .map(|usd| venue_px * usd)
 }
 
@@ -934,6 +940,31 @@ pub(crate) async fn common_wire_qty(
     Ok(common)
 }
 
+pub(crate) async fn venue_min_order_notional_usd(
+    state: &AppEngineState,
+    vid: &str,
+    symbol: &str,
+    adapter: &Arc<dyn ExchangeAdapter>,
+) -> Decimal {
+    if let Ok(markets) = state.cached_markets(vid, adapter).await {
+        let sym_base = arbitrageur_core::symbol::canonical_base(symbol);
+        if let Some(m) = markets.iter().find(|m| {
+            m.venue_symbol.eq_ignore_ascii_case(symbol)
+                || m.symbol.raw.eq_ignore_ascii_case(symbol)
+                || m.symbol.base.eq_ignore_ascii_case(&sym_base)
+        }) {
+            if m.min_notional > Decimal::ZERO {
+                return m.min_notional;
+            }
+        }
+    }
+    match vid {
+        "vanta" | "hyperliquid" | "lighter" | "popdex" => dec!(10.0),
+        "binance" | "okx" | "decibel" | "arcus" | "kraken" | "aster" => dec!(5.0),
+        _ => dec!(1.0),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_spatial_arbitrage_inner(
     symbol: &str,
@@ -974,8 +1005,6 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
     };
     let buy_hubkey = legs.map(|l| l.buy_key.as_str()).unwrap_or(symbol);
     let sell_hubkey = legs.map(|l| l.sell_key.as_str()).unwrap_or(symbol);
-    let buy_order_sym = legs.map(|l| l.buy_symbol.as_str()).unwrap_or(symbol);
-    let sell_order_sym = legs.map(|l| l.sell_symbol.as_str()).unwrap_or(symbol);
     let scale_buy = legs
         .and_then(|l| Decimal::from_f64_retain(l.buy_scale))
         .map(|d| d.round_dp(9))
@@ -1136,6 +1165,37 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
     if crate::state::canonical_venue_id(buy_venue) == crate::state::canonical_venue_id(sell_venue) {
         return Err("Buy and sell venues must resolve to distinct canonical venues".into());
     }
+
+    let buy_want_base = arbitrageur_core::symbol::canonical_base(symbol);
+    let sell_want_base = arbitrageur_core::symbol::canonical_base(symbol);
+    let resolved_buy_order_sym = match pair_legs {
+        Some(l) => l.buy_symbol.clone(),
+        None => {
+            crate::commands::venue_fetch_symbol(
+                state,
+                buy_venue,
+                &buy_adapter,
+                &buy_want_base,
+                symbol,
+            )
+            .await
+        }
+    };
+    let resolved_sell_order_sym = match pair_legs {
+        Some(l) => l.sell_symbol.clone(),
+        None => {
+            crate::commands::venue_fetch_symbol(
+                state,
+                sell_venue,
+                &sell_adapter,
+                &sell_want_base,
+                symbol,
+            )
+            .await
+        }
+    };
+    let buy_order_sym = resolved_buy_order_sym.as_str();
+    let sell_order_sym = resolved_sell_order_sym.as_str();
 
     // Cash-session preflight: equity-rail legs (Alpaca shares, Ondo
     // tokenized perps) refuse IOC outside US market hours — dispatching
@@ -1302,6 +1362,23 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
     let buy_limit = router.calculate_bounded_price(Side::Buy, buy_ref);
     let sell_limit = router.calculate_bounded_price(Side::Sell, sell_ref);
 
+    let notional_buy = qty_buy_leg * buy_ref_leg;
+    let notional_sell = qty_sell_leg * sell_ref_leg;
+    let min_notional_buy =
+        venue_min_order_notional_usd(state, buy_vid.as_str(), buy_order_sym, &buy_adapter).await;
+    let min_notional_sell =
+        venue_min_order_notional_usd(state, sell_vid.as_str(), sell_order_sym, &sell_adapter).await;
+    if notional_buy < min_notional_buy {
+        return Err(format!(
+            "Order notional ${notional_buy:.2} on {buy_vid} is below venue minimum notional ${min_notional_buy:.2}"
+        ));
+    }
+    if notional_sell < min_notional_sell {
+        return Err(format!(
+            "Order notional ${notional_sell:.2} on {sell_vid} is below venue minimum notional ${min_notional_sell:.2}"
+        ));
+    }
+
     let mut book_buy_exec = book_buy.clone();
     book_buy_exec.asks.retain(|l| l.price <= buy_limit);
     let mut book_sell_exec = book_sell.clone();
@@ -1331,30 +1408,53 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
             sell_venue, v.effective_vwap, v.top_price, v.slippage_bps, v.max_allowed_bps
         )
     })?;
-    arbitrageur_risk::safety_guards::verify_pre_execution_slippage(
-        &book_buy,
-        Side::Sell,
-        qty_dec,
-        max_slip_dec,
-    )
-    .map_err(|v| {
-        format!(
-            "Exit slippage check failed on {}: VWAP {} vs top {} ({} bps, limit {} bps)",
-            buy_venue, v.effective_vwap, v.top_price, v.slippage_bps, v.max_allowed_bps
+    let is_two_way = if strategy_id == "radar" {
+        let ticker_mode = state
+            .strategy_params
+            .read()
+            .get("radar")
+            .map(|p| p.execution_mode.clone());
+        let mode = ticker_mode
+            .filter(|m| !m.trim().is_empty())
+            .or_else(|| {
+                state
+                    .monitor
+                    .lock()
+                    .as_ref()
+                    .map(|m| m.config().execution_mode)
+            })
+            .unwrap_or_else(|| "two_way".to_string());
+        crate::commands::execution_mode_is_two_way(&mode)
+    } else {
+        true
+    };
+
+    if is_two_way {
+        arbitrageur_risk::safety_guards::verify_pre_execution_slippage(
+            &book_buy,
+            Side::Sell,
+            qty_dec,
+            max_slip_dec,
         )
-    })?;
-    arbitrageur_risk::safety_guards::verify_pre_execution_slippage(
-        &book_sell,
-        Side::Buy,
-        qty_dec,
-        max_slip_dec,
-    )
-    .map_err(|v| {
-        format!(
-            "Exit slippage check failed on {}: VWAP {} vs top {} ({} bps, limit {} bps)",
-            sell_venue, v.effective_vwap, v.top_price, v.slippage_bps, v.max_allowed_bps
+        .map_err(|v| {
+            format!(
+                "Exit slippage check failed on {}: VWAP {} vs top {} ({} bps, limit {} bps)",
+                buy_venue, v.effective_vwap, v.top_price, v.slippage_bps, v.max_allowed_bps
+            )
+        })?;
+        arbitrageur_risk::safety_guards::verify_pre_execution_slippage(
+            &book_sell,
+            Side::Buy,
+            qty_dec,
+            max_slip_dec,
         )
-    })?;
+        .map_err(|v| {
+            format!(
+                "Exit slippage check failed on {}: VWAP {} vs top {} ({} bps, limit {} bps)",
+                sell_venue, v.effective_vwap, v.top_price, v.slippage_bps, v.max_allowed_bps
+            )
+        })?;
+    }
 
     let buy_depth: Decimal = book_buy_exec.asks.iter().map(|l| l.size).sum();
     let sell_depth: Decimal = book_sell_exec.bids.iter().map(|l| l.size).sum();
@@ -1378,7 +1478,7 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
 
     // Entry profit floor: each strategy reads its own configured hurdle —
     // spot entries must clear `spot_min_net_spread_bps` (the page's Min Net
-    // param); the futures grid keeps its `target_profit_bps`.
+    // param); radar reads `min_expected_profit_bps`; the futures grid keeps `target_profit_bps`.
     let target_profit_bps = match strategy_id {
         "spot" => state
             .strategy_params
@@ -1389,6 +1489,12 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
             .unwrap_or_else(|| {
                 crate::state::StrategyParamsDto::defaults_for("spot").spot_min_net_spread_bps
             }),
+        "radar" => state
+            .monitor
+            .lock()
+            .as_ref()
+            .map(|m| m.config().min_expected_profit_bps.max(0.0))
+            .unwrap_or(0.0),
         _ => state
             .strategy_params
             .read()
@@ -1399,18 +1505,25 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
                 crate::state::StrategyParamsDto::defaults_for("futures").target_profit_bps
             }),
     };
-    let econ = compute_route_economics(
+    let econ = compute_route_economics_for_mode(
         &book_buy,
         &book_sell,
         qty_dec,
         effective_venue_fee_bps(state, buy_vid.as_str()),
         effective_venue_fee_bps(state, sell_vid.as_str()),
         target_profit_bps,
+        is_two_way,
     )
     .ok_or_else(|| {
         format!(
-            "Route economics unavailable on {}/{}: the full quantity cannot be priced on all four legs",
-            buy_venue, sell_venue
+            "Route economics unavailable on {}/{}: the full quantity cannot be priced{}",
+            buy_venue,
+            sell_venue,
+            if is_two_way {
+                " on all four legs"
+            } else {
+                " on entry legs"
+            }
         )
     })?;
     // The profit floor is the configured target — no caller-provided
@@ -1564,31 +1677,31 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
             _ => {}
         }
     }
-    if is_spot {
-        // Spot cannot margin or short: the buy leg draws quote cash, the
-        // sell leg draws base inventory. `AccountSnapshot::get_balance` is
-        // venue-truthful free balance for both; a missing row reads as zero
-        // — refusing here is strictly better than a mid-cycle venue reject.
-        let (base_ccy, quote_ccy) = symbol
-            .split_once('-')
-            .ok_or_else(|| format!("Spot symbol {symbol} is not canonical BASE-QUOTE"))?;
-        let buy_notional = buy_vwap * qty_dec;
-        let buy_free = acc_buy
-            .get_balance(quote_ccy)
-            .map(|b| b.free)
-            .unwrap_or(dec!(0));
-        if buy_free < buy_notional {
-            return Err(format!(
-                "Insufficient free {quote_ccy} on {buy_venue} for the spot buy leg: required {buy_notional}, available {buy_free}"
-            ));
+    let sell_requires_inventory = !sell_adapter.supports_reduce_only(sell_order_sym);
+    if is_spot || sell_requires_inventory {
+        let (base_ccy, quote_ccy) = match symbol.split_once('-') {
+            Some((b, q)) => (arbitrageur_core::symbol::canonical_base(b), q),
+            None => (arbitrageur_core::symbol::canonical_base(symbol), "USD"),
+        };
+        if is_spot {
+            let buy_notional = buy_vwap * qty_dec;
+            let buy_free = acc_buy
+                .get_balance(quote_ccy)
+                .map(|b| b.free)
+                .unwrap_or(dec!(0));
+            if buy_free < buy_notional {
+                return Err(format!(
+                    "Insufficient free {quote_ccy} on {buy_venue} for the spot buy leg: required {buy_notional}, available {buy_free}"
+                ));
+            }
         }
         let sell_free = acc_sell
-            .get_balance(base_ccy)
+            .get_balance(&base_ccy)
             .map(|b| b.free)
             .unwrap_or(dec!(0));
         if sell_free < qty_dec {
             return Err(format!(
-                "Insufficient free {base_ccy} inventory on {sell_venue} for the spot sell leg: required {qty_dec}, available {sell_free}"
+                "Insufficient free {base_ccy} inventory on {sell_venue} for the sell leg (venue does not support uncovered shorting): required {qty_dec}, available {sell_free}"
             ));
         }
     } else {
@@ -2137,6 +2250,10 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
                             );
                         }
                     }
+                } else {
+                    let _ = state
+                        .state_store
+                        .clear_leg_client_order_id(&signal_id, side);
                 }
             }
             let _ = state.state_store.update_signal_status(
@@ -2401,7 +2518,8 @@ pub async fn execute_spatial_candidates_impl(
             let mut scope = vec![c.buy_venue.clone(), c.sell_venue.clone()];
             scope.sort();
             scope.dedup();
-            if let Err(reason) = reject_if_strategy_filtered(state, "futures", &base, &scope).await
+            if let Err(reason) =
+                crate::commands::reject_if_strategy_filtered(state, "futures", &base, &scope).await
             {
                 auto_block = Some(reason);
                 break;
@@ -2921,6 +3039,19 @@ pub async fn get_open_positions(
             .and_then(|b| b.mid_price().or(b.mark_price))
             .and_then(|m| dec_to_f64(m, "mark mid").ok())
             .and_then(|p| ledger_px_usd(engine, venue, symbol, p))
+            .or_else(|| {
+                let acct_key = format!("{}-{}", engine.env().as_str(), venue.to_lowercase());
+                let guard = engine.last_good_accounts.lock();
+                let (snap, ts_ms) = guard.get(&acct_key)?;
+                let age_ms = chrono::Utc::now().timestamp_millis().saturating_sub(*ts_ms);
+                if age_ms > MARK_READ_TTL.as_millis() as i64 {
+                    return None;
+                }
+                snap.positions
+                    .iter()
+                    .find(|p| p.symbol.eq_ignore_ascii_case(symbol) && p.mark_price > dec!(0))
+                    .and_then(|p| dec_to_f64(p.mark_price, "account position mark").ok())
+            })
     });
     // An unreadable flag fails closed: refuse the whole read rather than
     // badge a reduce-only ticker as freely tradable.
@@ -3128,6 +3259,8 @@ fn admitted_account_keys(state: &AppEngineState, env_prefix: &str) -> HashSet<St
 /// is a different account universe, never a trading loss: the baseline
 /// re-anchors instead of tripping. Stale-env and non-admitted entries are
 /// dropped so dead equity can't ghost the new total.
+#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn feed_breaker_equity_usd(
     state: &AppEngineState,
     vid: &str,
@@ -5108,7 +5241,7 @@ async fn flatten_positions_inner(
     // Live flatten dispatches real reduce-only orders — the vault must be
     // unlocked so venue calls authenticate. Testnet relies on adapter-level
     // auth failure (a locked vault has already stripped credentials).
-    if is_live && !state.vault.write().is_unlocked() {
+    if is_live && !state.vault.write().allows_adapter_execution() {
         return Err(
             "Cannot flatten while the secure credential vault is locked. Unlock the vault first."
                 .into(),
@@ -5460,28 +5593,20 @@ async fn flatten_positions_inner(
                 .state_store
                 .update_signal_status(&sig.id, SignalStatus::Closed, Some(note))
                 .map_err(|e| e.to_string())?;
-            for child in state
-                .state_store
-                .list_open_signals(Some(state.env().as_str()))
-                .map_err(|e| e.to_string())?
-                .into_iter()
-                .filter(|s| {
-                    crate::state_store::is_flatten_child_id(&s.id, &sig.id)
-                        && s.status.counts_as_open()
-                })
-            {
-                state
-                    .state_store
-                    .update_signal_status(&child.id, SignalStatus::Closed, Some(note))
-                    .map_err(|e| e.to_string())?;
-            }
-            for child in &family {
-                if child.status.counts_as_open() {
-                    let _ = state.state_store.update_signal_status(
-                        &child.id,
-                        SignalStatus::Closed,
-                        Some(note),
-                    );
+            if let Ok(all) = state.state_store.list_signals(None, None) {
+                for s in all {
+                    if crate::state_store::is_flatten_child_id(&s.id, &sig.id) {
+                        let has_fills = s.legs.iter().any(|l| l.filled_qty > 0.0);
+                        if s.status.counts_as_open()
+                            || (s.status == SignalStatus::Failed && has_fills)
+                        {
+                            let _ = state.state_store.update_signal_status(
+                                &s.id,
+                                SignalStatus::Closed,
+                                Some(note),
+                            );
+                        }
+                    }
                 }
             }
             Ok(())
@@ -5495,9 +5620,20 @@ async fn flatten_positions_inner(
             // reconciler closes it once the children reach a terminal state.
             // In an emergency market flatten (Stop All), resting orders were
             // already cancelled, so zero residual venue position means we are flat.
-            if family.iter().any(|c| c.status.counts_as_open())
-                && execution_type != Some("emergency_market")
-            {
+            let has_live_child_orders = family.iter().any(|c| {
+                c.status.counts_as_open()
+                    && c.legs.iter().any(|l| {
+                        l.venue_order_id
+                            .as_deref()
+                            .filter(|s| !s.is_empty())
+                            .is_some()
+                            || l.client_order_id
+                                .as_deref()
+                                .filter(|s| !s.is_empty())
+                                .is_some()
+                    })
+            });
+            if has_live_child_orders && execution_type != Some("emergency_market") {
                 out.notes.push(format!(
                     "{}: residual already covered by working close orders — awaiting settlement",
                     sig.id

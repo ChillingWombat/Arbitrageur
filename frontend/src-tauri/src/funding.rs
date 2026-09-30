@@ -861,6 +861,7 @@ async fn scan_funding_opportunities_for_symbol(
                     let cost = rep.entry_spread_bps.map(|e| (-e).max(0.0))?;
                     Some((optimal, cost))
                 })();
+
                 // Marginal cost gradient at the requested size (informational).
                 // Computed before the push: opp's venue strings move into the DTO.
                 let slope: Option<f64> = (|| {
@@ -1089,11 +1090,16 @@ async fn scan_funding_opportunities_for_symbol(
                         .to_string()
                         .parse::<f64>()
                         .unwrap_or(0.0),
-                    break_even_hours: opp
-                        .break_even_hours
-                        .to_string()
-                        .parse::<f64>()
-                        .unwrap_or(0.0),
+                    break_even_hours: hold_estimate
+                        .as_ref()
+                        .map(|h| h.breakeven_hours)
+                        .filter(|b| b.is_finite() && *b >= 0.0)
+                        .unwrap_or_else(|| {
+                            opp.break_even_hours
+                                .to_string()
+                                .parse::<f64>()
+                                .unwrap_or(0.0)
+                        }),
                     estimated_daily_income_usd: opp
                         .daily_income_usd
                         .to_string()
@@ -1291,6 +1297,7 @@ async fn scan_funding_opportunities_for_symbol(
                     let depth = rep
                         .optimal_size_usd
                         .zip(rep.entry_spread_bps.map(|e| (-e).max(0.0)));
+
                     let venue_label = funding_rate.venue.to_string();
                     let spot_mid_f = spot_mid.to_string().parse::<f64>().unwrap_or(0.0);
                     let perp_mid_f = perp_mid.to_string().parse::<f64>().unwrap_or(0.0);
@@ -2272,8 +2279,10 @@ pub async fn execute_funding_carry_impl(
         .map(|p| p.funding_max_entry_spread_bps)
         .filter(|v| v.is_finite() && *v > 0.0)
         .unwrap_or(50.0);
+    // Favorable entry cross (short_vwap >= long_vwap) is positive edge (adverse cross cost = 0.0 bps).
+    // Adverse entry cross (long_vwap > short_vwap) is entry cross friction.
     let entry_spread_bps =
-        (long_vwap_f - short_vwap_f).abs() / ((long_vwap_f + short_vwap_f) / 2.0) * 10_000.0;
+        ((long_vwap_f - short_vwap_f) / ((long_vwap_f + short_vwap_f) / 2.0) * 10_000.0).max(0.0);
     if !entry_spread_bps.is_finite() || entry_spread_bps > max_entry_spread_bps {
         return Err(format!(
             "funding entry spread {entry_spread_bps:.1} bps on {long_sym}/{short_sym} exceeds the {max_entry_spread_bps:.1} bps limit"
@@ -3210,6 +3219,10 @@ pub async fn execute_funding_carry_impl(
                             );
                         }
                     }
+                } else {
+                    let _ = state
+                        .state_store
+                        .clear_leg_client_order_id(&signal_id, side);
                 }
             }
             let _ = state.state_store.update_signal_status(
@@ -3627,7 +3640,7 @@ pub async fn execute_fixed_yield_exit_impl(
     if !state.is_live() {
         return Err("fixed-yield exits are live-only — Boros has no testnet".into());
     }
-    if !state.vault.write().is_unlocked() {
+    if !state.vault.write().allows_adapter_execution() {
         return Err("vault is locked — cannot sign Boros exit orders".into());
     }
     let _execution_guard = state.execution_lock.lock().await;

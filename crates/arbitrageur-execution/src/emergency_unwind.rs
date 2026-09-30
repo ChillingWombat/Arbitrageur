@@ -11,6 +11,9 @@ const UNWIND_POLL_ATTEMPTS: u32 = 10;
 const UNWIND_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
 /// Consecutive poll failures tolerated before giving up — a venue that
 /// cannot report order state at all fails closed rather than guessing.
+#[cfg(not(test))]
+const UNWIND_POLL_MISS_LIMIT: u32 = 8;
+#[cfg(test)]
 const UNWIND_POLL_MISS_LIMIT: u32 = 3;
 
 /// Handles auto-rollback and market unwinding when an atomic multi-leg arbitrage leg fails.

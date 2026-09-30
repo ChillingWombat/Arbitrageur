@@ -1,4 +1,4 @@
-use crate::types::{dec, Decimal, VenueId};
+use crate::types::{dec, Decimal, Side, VenueId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -134,6 +134,80 @@ impl OrderBook {
                     "order book {} asks are not monotonically ascending",
                     self.symbol
                 ));
+            }
+        }
+        if let (Some(bid), Some(ask)) = (self.best_bid_price(), self.best_ask_price()) {
+            if bid >= ask {
+                return Err(format!(
+                    "order book {} is crossed or locked: best bid {} >= best ask {}",
+                    self.symbol, bid, ask
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Rejects books that cannot safely drive execution on the specified `side`:
+    /// empty symbol, missing bids (for Sell) or asks (for Buy), nonpositive
+    /// prices or sizes, unsorted levels, or a crossed/locked book if both sides exist.
+    pub fn validate_for_side(&self, side: Side) -> Result<(), String> {
+        if self.symbol.trim().is_empty() {
+            return Err("order book symbol is empty".to_string());
+        }
+        match side {
+            Side::Buy => {
+                if self.asks.is_empty() {
+                    return Err(format!("order book {} has no asks", self.symbol));
+                }
+                for level in &self.asks {
+                    if level.price <= dec!(0) {
+                        return Err(format!(
+                            "order book {} has nonpositive ask price {}",
+                            self.symbol, level.price
+                        ));
+                    }
+                    if level.size <= dec!(0) {
+                        return Err(format!(
+                            "order book {} has nonpositive ask size {}",
+                            self.symbol, level.size
+                        ));
+                    }
+                }
+                for pair in self.asks.windows(2) {
+                    if pair[0].price > pair[1].price {
+                        return Err(format!(
+                            "order book {} asks are not monotonically ascending",
+                            self.symbol
+                        ));
+                    }
+                }
+            }
+            Side::Sell => {
+                if self.bids.is_empty() {
+                    return Err(format!("order book {} has no bids", self.symbol));
+                }
+                for level in &self.bids {
+                    if level.price <= dec!(0) {
+                        return Err(format!(
+                            "order book {} has nonpositive bid price {}",
+                            self.symbol, level.price
+                        ));
+                    }
+                    if level.size <= dec!(0) {
+                        return Err(format!(
+                            "order book {} has nonpositive bid size {}",
+                            self.symbol, level.size
+                        ));
+                    }
+                }
+                for pair in self.bids.windows(2) {
+                    if pair[0].price < pair[1].price {
+                        return Err(format!(
+                            "order book {} bids are not monotonically descending",
+                            self.symbol
+                        ));
+                    }
+                }
             }
         }
         if let (Some(bid), Some(ask)) = (self.best_bid_price(), self.best_ask_price()) {
@@ -368,5 +442,18 @@ mod tests {
             .validate_for_execution()
             .unwrap_err()
             .contains("crossed"));
+    }
+
+    #[test]
+    fn validate_for_side_accepts_one_sided_book() {
+        let mut buy_only = OrderBook::new(VenueId::new("deribit"), "BTC-OPT".to_string());
+        buy_only.asks.push(BookLevel::new(dec!(10.0), dec!(1.0)));
+        assert!(buy_only.validate_for_side(Side::Buy).is_ok());
+        assert!(buy_only.validate_for_side(Side::Sell).is_err());
+
+        let mut sell_only = OrderBook::new(VenueId::new("deribit"), "BTC-OPT".to_string());
+        sell_only.bids.push(BookLevel::new(dec!(10.0), dec!(1.0)));
+        assert!(sell_only.validate_for_side(Side::Sell).is_ok());
+        assert!(sell_only.validate_for_side(Side::Buy).is_err());
     }
 }

@@ -229,6 +229,19 @@ async fn dispatch(line: &str, state: &Arc<AppEngineState>) -> Value {
             .await
             .map(|v| json!(v))
         }
+        "execute_spot" => {
+            let params = crate::commands::SpotExecutionParams {
+                symbol: arg(&args, "symbol").unwrap_or_default().to_string(),
+                buy_venue: arg(&args, "buy_venue").unwrap_or_default().to_string(),
+                sell_venue: arg(&args, "sell_venue").unwrap_or_default().to_string(),
+                trade_size_usd: arg_f64(&args, "trade_size_usd").unwrap_or(100.0),
+                max_slippage_bps: arg_f64(&args, "max_slippage_bps").unwrap_or(20.0),
+                net_spread_bps: arg_f64(&args, "net_spread_bps"),
+            };
+            crate::commands::execute_spot_arbitrage_impl(params, st)
+                .await
+                .map(|v| json!(v))
+        }
         "pnl_history" => crate::performance::get_pnl_history_impl(st).map(|v| json!(v)),
         "cancel_venue_order" => cancel_order(&args, st).await,
         "flatten_ticker" => {
@@ -247,16 +260,116 @@ async fn dispatch(line: &str, state: &Arc<AppEngineState>) -> Value {
             let Some(tid) = arg(&args, "trade_id") else {
                 return json!({"id": id, "err": "missing trade_id"});
             };
-            let strat = arg(&args, "strategy_id").unwrap_or("options_parity");
+            let resolved_strat = arg(&args, "strategy_id")
+                .map(str::to_string)
+                .or_else(|| {
+                    st.state_store
+                        .get_signal(tid)
+                        .ok()
+                        .flatten()
+                        .or_else(|| {
+                            st.state_store
+                                .get_signal(&format!("{tid}-leg0"))
+                                .ok()
+                                .flatten()
+                        })
+                        .map(|s| s.strategy_id)
+                })
+                .unwrap_or_else(|| "options_parity".to_string());
             crate::execution::flatten_trade_positions_impl(
                 tid,
-                strat,
+                &resolved_strat,
                 None,
                 arbitrageur_execution::virtual_ledger::CycleStatus::Closed,
                 st,
             )
             .await
             .map(|v| json!(v))
+        }
+        "execute_monitor_opportunity" => {
+            let sym = arg(&args, "symbol").unwrap_or_default();
+            let buy = arg(&args, "buy_venue").unwrap_or_default();
+            let sell = arg(&args, "sell_venue").unwrap_or_default();
+            let size = arg_f64(&args, "size_usd").unwrap_or(0.0);
+            crate::commands::execute_monitor_opportunity_impl(sym, buy, sell, size, st)
+                .await
+                .map(|v| json!(v))
+        }
+        "scan_options_parity" => {
+            let params = crate::options_parity::OptionsParityScanParams {
+                currency: arg(&args, "currency").unwrap_or("BTC").to_string(),
+                qty_base: arg_f64(&args, "qty_base"),
+                min_hours_to_expiry: arg_f64(&args, "min_hours_to_expiry"),
+                max_days_to_expiry: arg_f64(&args, "max_days_to_expiry"),
+                min_edge_bps: arg_f64(&args, "min_edge_bps"),
+                limit: arg_u32(&args, "limit").map(|n| n as usize),
+            };
+            crate::options_parity::scan_options_parity_impl(&params, st)
+                .await
+                .map(|v| json!(v))
+        }
+        "execute_options_parity" => {
+            let params = crate::options_parity::OptionsParityExecutionParams {
+                id: arg(&args, "id").unwrap_or_default().to_string(),
+                currency: arg(&args, "currency").unwrap_or("BTC").to_string(),
+                qty_base: arg_f64(&args, "qty_base").unwrap_or(0.1),
+                min_edge_bps: arg_f64(&args, "min_edge_bps"),
+                auto: args.get("auto").and_then(Value::as_bool).unwrap_or(false),
+            };
+            crate::options_parity::execute_options_parity_impl(params, st)
+                .await
+                .map(|v| json!(v))
+        }
+        "scan_options_packages" => {
+            let params = crate::options_packages::OptionsPackageScanParams {
+                substrategy_id: arg(&args, "substrategy_id")
+                    .unwrap_or("box_spread")
+                    .to_string(),
+                currency: arg(&args, "currency").unwrap_or("BTC").to_string(),
+                qty_base: arg_f64(&args, "qty_base"),
+                min_hours_to_expiry: arg_f64(&args, "min_hours_to_expiry"),
+                max_days_to_expiry: arg_f64(&args, "max_days_to_expiry"),
+                min_edge_bps: arg_f64(&args, "min_edge_bps"),
+                limit: arg_u32(&args, "limit").map(|n| n as usize),
+            };
+            crate::options_packages::scan_options_packages_impl(&params, st)
+                .await
+                .map(|v| json!(v))
+        }
+        "execute_options_package" => {
+            let params = crate::options_packages::OptionsPackageExecutionParams {
+                id: arg(&args, "id").unwrap_or_default().to_string(),
+                substrategy_id: arg(&args, "substrategy_id")
+                    .unwrap_or("box_spread")
+                    .to_string(),
+                currency: arg(&args, "currency").unwrap_or("BTC").to_string(),
+                qty_base: arg_f64(&args, "qty_base").unwrap_or(0.1),
+                min_edge_bps: arg_f64(&args, "min_edge_bps"),
+                auto: args.get("auto").and_then(Value::as_bool).unwrap_or(false),
+            };
+            crate::options_packages::execute_options_package_impl(&params, st)
+                .await
+                .map(|v| json!(v))
+        }
+        "scan_triangle" => {
+            let filter = arg(&args, "filter_asset").unwrap_or("");
+            crate::triangle::scan_triangular_opportunities_impl(filter, st)
+                .await
+                .map(|v| json!(v))
+        }
+        "execute_triangle" => {
+            let params = crate::triangle::TriangleExecutionParams {
+                id: arg(&args, "id").unwrap_or_default().to_string(),
+                venue: arg(&args, "venue").unwrap_or_default().to_string(),
+                path: arg(&args, "path").unwrap_or_default().to_string(),
+                trade_size_usd: arg_f64(&args, "trade_size_usd").unwrap_or(100.0),
+                min_profit_bps: arg_f64(&args, "min_profit_bps").unwrap_or(0.0),
+                net_spread_bps: arg_f64(&args, "net_spread_bps"),
+                auto: args.get("auto").and_then(Value::as_bool).unwrap_or(false),
+            };
+            crate::triangle::execute_triangle_arbitrage_impl(params, st)
+                .await
+                .map(|v| json!(v))
         }
         "killswitch" | "stop_all" => crate::execution::execute_emergency_stop_all_impl(st)
             .await
@@ -351,7 +464,7 @@ async fn dispatch(line: &str, state: &Arc<AppEngineState>) -> Value {
 
 async fn cancel_order(args: &Value, state: &AppEngineState) -> Result<Value, String> {
     // Same body as commands::cancel_venue_order (thin Tauri wrapper).
-    if state.is_live() && !state.vault.write().is_unlocked() {
+    if state.is_live() && !state.vault.write().allows_adapter_execution() {
         return Err(
             "Cannot cancel a venue order in Live Trading mode while the secure credential vault is locked. Unlock the vault first."
                 .into(),
@@ -411,8 +524,40 @@ fn open_positions(args: &Value, state: &AppEngineState) -> Result<Value, String>
             symbol,
             Some(crate::execution::MARK_READ_TTL),
         );
+        let from_hub = book
+            .as_ref()
+            .and_then(|b| b.mid_price().or(b.mark_price))
+            .and_then(|m| crate::execution::dec_to_f64(m, "mark mid").ok())
+            .and_then(|p| crate::execution::ledger_px_usd(state, venue, symbol, p));
+        if from_hub.is_some() {
+            return from_hub;
+        }
+        let acct_key = format!("{}-{}", state.env().as_str(), venue.to_lowercase());
+        if let Some(mark_usd) =
+            state
+                .last_good_accounts
+                .lock()
+                .get(&acct_key)
+                .and_then(|(snap, ts_ms)| {
+                    let age_ms = chrono::Utc::now().timestamp_millis().saturating_sub(*ts_ms);
+                    if age_ms > crate::execution::MARK_READ_TTL.as_millis() as i64 {
+                        return None;
+                    }
+                    snap.positions
+                        .iter()
+                        .find(|p| {
+                            p.symbol.eq_ignore_ascii_case(symbol)
+                                && p.mark_price > arbitrageur_core::types::dec!(0)
+                        })
+                        .and_then(|p| {
+                            crate::execution::dec_to_f64(p.mark_price, "account mark").ok()
+                        })
+                })
+        {
+            return Some(mark_usd);
+        }
         match &book {
-            None => tracing::warn!("open_positions mark miss: {venue}/{symbol} — no fresh hub book"),
+            None => tracing::warn!("open_positions mark miss: {venue}/{symbol} — no fresh hub book or account mark"),
             Some(b) if b.mid_price().or(b.mark_price).is_none() => tracing::warn!(
                 "open_positions mark miss: {venue}/{symbol} — book present but no mid/mark (bids={} asks={} mark={:?})",
                 b.bids.len(),
@@ -421,9 +566,7 @@ fn open_positions(args: &Value, state: &AppEngineState) -> Result<Value, String>
             ),
             _ => {}
         }
-        book.and_then(|b| b.mid_price().or(b.mark_price))
-            .and_then(|m| crate::execution::dec_to_f64(m, "mark mid").ok())
-            .and_then(|p| crate::execution::ledger_px_usd(state, venue, symbol, p))
+        None
     });
     for p in &mut positions {
         p.reduce_only = crate::execution::trade_reduce_only(state, p)?;
