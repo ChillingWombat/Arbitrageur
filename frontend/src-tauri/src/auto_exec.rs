@@ -220,15 +220,15 @@ pub trait BotDispatch: Send + Sync {
 
     fn exit<'a>(
         &'a self,
-        symbol: &'a str,
+        key: &'a PairKey,
         trigger: ExitTrigger,
         state: &'a AppEngineState,
     ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>>;
 }
 
 /// Production dispatch: entries reuse `execute_monitor_opportunity_impl`
-/// (identical gates to the manual button); exits reuse the symbol-scoped
-/// flatten path for the `radar` strategy.
+/// (identical gates to the manual button); exits reuse the route-scoped
+/// or symbol-scoped flatten path for the `radar` strategy.
 pub struct VenueDispatch;
 
 impl BotDispatch for VenueDispatch {
@@ -254,7 +254,7 @@ impl BotDispatch for VenueDispatch {
 
     fn exit<'a>(
         &'a self,
-        symbol: &'a str,
+        key: &'a PairKey,
         trigger: ExitTrigger,
         state: &'a AppEngineState,
     ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
@@ -269,23 +269,87 @@ impl BotDispatch for VenueDispatch {
                 // Stopped + StaleUnwind: adverse unwind, not a target exit.
                 _ => arbitrageur_execution::virtual_ledger::CycleStatus::StoppedOut,
             };
+
+            // First, check if there are specific open root signals for this exact pair route
+            // (symbol + buy_venue + sell_venue). Closing by signal ID guarantees that
+            // another route on the same symbol (e.g. ONDO hyperliquid→vanta vs ONDO alpaca→vanta)
+            // does not collide or cause residual signal errors.
+            if let Ok(all_signals) = state.state_store.list_signals(Some(&key.symbol), None) {
+                let mut matched_signal_ids = Vec::new();
+                for s in &all_signals {
+                    if !s.id.starts_with("flat-")
+                        && !s.id.starts_with("trim-")
+                        && s.strategy_id.eq_ignore_ascii_case(BOT_STRATEGY_ID)
+                        && s.status.counts_as_open()
+                    {
+                        let has_buy = s
+                            .legs
+                            .iter()
+                            .any(|l| l.venue.eq_ignore_ascii_case(&key.buy_venue));
+                        let has_sell = s
+                            .legs
+                            .iter()
+                            .any(|l| l.venue.eq_ignore_ascii_case(&key.sell_venue));
+                        if has_buy && has_sell {
+                            matched_signal_ids.push(s.id.clone());
+                        }
+                    }
+                }
+
+                if !matched_signal_ids.is_empty() {
+                    let mut closed_count = 0;
+                    let mut notes = Vec::new();
+                    for sig_id in matched_signal_ids {
+                        let res = crate::execution::flatten_signal_positions_impl(
+                            &sig_id,
+                            BOT_STRATEGY_ID,
+                            None,
+                            close_status,
+                            state,
+                        )
+                        .await?;
+                        if res.signals_closed > 0 {
+                            closed_count += res.signals_closed;
+                        }
+                        if res.residual_signals > 0 {
+                            notes.push(format!(
+                                "signal {sig_id} left {} residual",
+                                res.residual_signals
+                            ));
+                        }
+                    }
+                    if closed_count > 0 {
+                        return Ok(format!(
+                            "unwound {closed_count} signal(s) for {}",
+                            key.label()
+                        ));
+                    } else if !notes.is_empty() {
+                        return Err(format!("flatten for {}: {}", key.label(), notes.join("; ")));
+                    }
+                }
+            }
+
+            // Fallback: ticker-scoped flatten
             let res = crate::commands::flatten_ticker_positions_impl(
-                Some(symbol),
+                Some(&key.symbol),
                 BOT_STRATEGY_ID,
                 close_status,
                 state,
             )
             .await?;
-            if res.residual_signals > 0 {
-                return Err(format!(
-                    "flatten left {} residual signal(s) on {symbol}",
-                    res.residual_signals
+            if res.signals_closed > 0 {
+                return Ok(format!(
+                    "unwound {} signal(s) on {}",
+                    res.signals_closed, key.symbol
                 ));
             }
-            Ok(format!(
-                "unwound {} signal(s) on {symbol}",
-                res.signals_closed
-            ))
+            if res.residual_signals > 0 {
+                return Err(format!(
+                    "flatten left {} residual signal(s) on {}",
+                    res.residual_signals, key.symbol
+                ));
+            }
+            Ok(format!("unwound 0 signals on {}", key.symbol))
         })
     }
 }
@@ -1041,7 +1105,7 @@ impl OpportunityExecutor {
         // Cooldown starts at the exit decision, including failed attempts, so
         // a flapping pair cannot spin the unwind path.
         self.cooldowns.lock().insert(key.clone(), now_ms);
-        match dispatch.exit(&key.symbol, trigger, state).await {
+        match dispatch.exit(key, trigger, state).await {
             Ok(note) => {
                 *self.last_error.lock() = None;
                 self.open.lock().remove(key);
@@ -1301,14 +1365,14 @@ mod tests {
 
         fn exit<'a>(
             &'a self,
-            symbol: &'a str,
+            key: &'a PairKey,
             _trigger: ExitTrigger,
             _state: &'a AppEngineState,
         ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
             Box::pin(async move {
                 self.exits
                     .lock()
-                    .map(|mut v| v.push(symbol.to_string()))
+                    .map(|mut v| v.push(key.symbol.clone()))
                     .ok();
                 self.exit_results
                     .lock()
