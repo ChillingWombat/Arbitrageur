@@ -3044,7 +3044,9 @@ pub async fn get_open_positions(
                 let guard = engine.last_good_accounts.lock();
                 let (snap, ts_ms) = guard.get(&acct_key)?;
                 let age_ms = chrono::Utc::now().timestamp_millis().saturating_sub(*ts_ms);
-                if age_ms > MARK_READ_TTL.as_millis() as i64 {
+                // Account snapshots are polled at longer intervals than order books; allow
+                // up to 15 minutes of staleness for position mark fallback rather than dropping to null.
+                if age_ms > 900_000 {
                     return None;
                 }
                 snap.positions

@@ -63,6 +63,8 @@ const fmtBps = (v: number | null | undefined, digits = 1) =>
 
 // Table cells carry the unit; headers stay unitless.
 const bpsUnit = <span className="text-muted font-normal"> bps</span>;
+const fmtBpsStr = (v: number | null | undefined, digits = 1) =>
+  v == null || !Number.isFinite(v) ? "—" : `${v.toFixed(digits)} bps`;
 const fmtBpsU = (v: number | null | undefined, digits = 1) => (
   <>
     {fmtBps(v, digits)}
@@ -877,9 +879,9 @@ const SignalDetailModal: React.FC<SignalDetailModalProps> = React.memo(
                 value={r.netExpectedBps != null ? fmtBpsU(r.netExpectedBps) : "—"}
                 tip={
                   r.netDecilesBps && r.netDecilesBps.length === 11
-                    ? `Net-bps deciles of simulated entries at this deviation: P10 ${fmtBpsU(
+                    ? `Net-bps deciles of simulated entries at this deviation: P10 ${fmtBpsStr(
                         r.netDecilesBps[1]
-                      )} · P50 ${fmtBpsU(r.netDecilesBps[5])} · P90 ${fmtBpsU(r.netDecilesBps[9])}`
+                      )} · P50 ${fmtBpsStr(r.netDecilesBps[5])} · P90 ${fmtBpsStr(r.netDecilesBps[9])}`
                     : "Recency-weighted mean net bps per simulated entry"
                 }
               />
@@ -1067,7 +1069,7 @@ const RadarRow: React.FC<RadarRowProps> = React.memo(
               r.netWinLower != null ? ` Wilson lower ${fmtPct(r.netWinLower)} (censored count as losses)` : ""
             }${r.outcomeTrials != null ? ` · ${r.outcomeTrials} trials` : ""}${
               r.outcomeCensored != null && r.outcomeCensored > 0 ? ` · ${r.outcomeCensored} still open` : ""
-            }${r.netExpectedBps != null ? ` · E[net] ${fmtBpsU(r.netExpectedBps)}` : ""}`}
+            }${r.netExpectedBps != null ? ` · E[net] ${fmtBpsStr(r.netExpectedBps)}` : ""}`}
           >
             {fmtPct(r.netWinProbability)}
           </td>
