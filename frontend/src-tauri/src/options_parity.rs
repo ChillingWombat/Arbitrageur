@@ -304,22 +304,28 @@ pub async fn scan_options_parity_impl(
     if index <= dec!(0) {
         return Err(format!("Deribit {ccy} index price unavailable"));
     }
-    let perp_bid = Some(perp_ticker.bid).filter(|p| *p > dec!(0));
-    let perp_ask = Some(perp_ticker.ask).filter(|p| *p > dec!(0));
-    let (Some(perp_bid), Some(perp_ask)) = (perp_bid, perp_ask) else {
-        return Err(format!("Deribit {ccy}-PERPETUAL is not quoting both sides"));
-    };
-    let perp_mark = if perp_ticker.last > dec!(0) {
-        perp_ticker.last
-    } else {
-        (perp_bid + perp_ask) / dec!(2)
-    };
     let summary_map: std::collections::HashMap<String, &DeribitBookSummary> =
         summaries.iter().map(|s| (s.name.clone(), s)).collect();
-    let perp_summary = summary_map
+    let perp_mark = summary_map
         .get(&format!("{ccy}-PERPETUAL"))
         .and_then(|s| s.mark)
-        .unwrap_or(perp_mark);
+        .filter(|m| *m > dec!(0))
+        .or_else(|| (perp_ticker.last > dec!(0)).then_some(perp_ticker.last))
+        .unwrap_or(index);
+
+    let (perp_bid, perp_ask, perp_quotes_live) = match (
+        Some(perp_ticker.bid).filter(|p| *p > dec!(0)),
+        Some(perp_ticker.ask).filter(|p| *p > dec!(0)),
+    ) {
+        (Some(b), Some(a)) => (b, a, true),
+        _ => {
+            if perp_mark <= dec!(0) {
+                return Err(format!("Deribit {ccy}-PERPETUAL price unavailable"));
+            }
+            (perp_mark * dec!(0.9995), perp_mark * dec!(1.0005), false)
+        }
+    };
+    let perp_summary = perp_mark;
 
     let fee_bps = effective_venue_fee_bps(state, "deribit");
     let perp_fee_rate = Decimal::from_f64_retain(fee_bps / 10_000.0).unwrap_or(dec!(0.0005));
@@ -399,7 +405,7 @@ pub async fn scan_options_parity_impl(
             }
             ParityDirection::Reversal => (call_ask, put_bid, Some(perp_bid), "buy", "sell", "sell"),
         };
-        let executable = eval.net_edge_usd > dec!(0);
+        let executable = eval.net_edge_usd > dec!(0) && perp_quotes_live;
         let to_f = |d: Option<Decimal>| {
             d.and_then(|v| v.to_string().parse::<f64>().ok())
                 .unwrap_or(0.0)
@@ -452,7 +458,13 @@ pub async fn scan_options_parity_impl(
             index_price_usd: index.to_string().parse().unwrap_or(0.0),
             qty_base_suggested: qty_base,
             is_executable: executable,
-            reason: (!executable).then(|| "edge is fee-eaten at this size".to_string()),
+            reason: if !perp_quotes_live {
+                Some("Deribit perp orderbook has no resting quotes".to_string())
+            } else if eval.net_edge_usd <= dec!(0) {
+                Some("edge is fee-eaten at this size".to_string())
+            } else {
+                None
+            },
         });
     }
     out.sort_by(|a, b| b.net_edge_usd.total_cmp(&a.net_edge_usd));
