@@ -766,7 +766,7 @@ impl DeribitAdapter {
                     .filter_map(|tr| dec_from_json(tr.get("fee")))
                     .filter(|f| *f > dec!(0))
                     .sum();
-                Some(sum)
+                (sum > dec!(0)).then_some(sum)
             })
             .or_else(|| dec_from_json(o.get("commission")));
         let fee = raw_comm.and_then(|c| {
@@ -1402,7 +1402,26 @@ impl ExchangeAdapter for DeribitAdapter {
         } else {
             index
         };
-        self.order_response(&v, &req, &meta, ref_px, index, &v)
+        let mut raw_v = v.clone();
+        if dec_from_json(v.get("commission")).unwrap_or(dec!(0)) <= dec!(0) {
+            if let Ok(t_res) = self
+                .private_get(&format!(
+                    "/private/get_user_trades_by_order?order_id={}",
+                    urlencoding(order_id)
+                ))
+                .await
+            {
+                if let Some(trades) = t_res
+                    .get("trades")
+                    .or_else(|| t_res.as_array().is_some().then_some(&t_res))
+                {
+                    if let Some(obj) = raw_v.as_object_mut() {
+                        obj.insert("trades".into(), trades.clone());
+                    }
+                }
+            }
+        }
+        self.order_response(&v, &req, &meta, ref_px, index, &raw_v)
     }
 
     /// Snap an engine quantity (base units) to the instrument's wire grid:

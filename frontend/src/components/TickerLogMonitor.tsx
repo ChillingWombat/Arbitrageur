@@ -163,8 +163,8 @@ function TickerLogMonitorInner({
         const level = log.success ? "EXEC" : "ERROR";
         const status = log.success ? "SUCCESS" : "REJECTED";
         const route = `${log.venue_a || "Venue A"} ➔ ${log.venue_b || "Venue B"}`;
-        const pnlStr = log.net_profit !== undefined ? ` Net PnL: ${formatCurrencyPnl(log.net_profit)}` : "";
-        const spreadStr = log.trigger_spread_bps !== undefined ? ` [Spread: +${log.trigger_spread_bps.toFixed(1)} BPS]` : "";
+        const pnlStr = typeof log.net_profit === "number" ? ` Net PnL: ${formatCurrencyPnl(log.net_profit)}` : "";
+        const spreadStr = typeof log.trigger_spread_bps === "number" ? ` [Spread: +${log.trigger_spread_bps.toFixed(1)} BPS]` : "";
 
         return {
           id: `exec-${log.id}`,
