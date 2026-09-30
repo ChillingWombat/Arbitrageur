@@ -14,7 +14,7 @@ use tracing::{error, info, warn};
 /// resolve on fresh venue truth, not force an unnecessary unwind of the
 /// other leg. Kept short: every poll defers compensation for a real fill.
 #[cfg(not(test))]
-const LEG_SETTLE_POLLS: u32 = 5;
+const LEG_SETTLE_POLLS: u32 = 10;
 #[cfg(test)]
 const LEG_SETTLE_POLLS: u32 = 3;
 #[cfg(not(test))]
@@ -208,8 +208,11 @@ fn response_identity_matches(
     symbol: &str,
     client_order_id: &str,
 ) -> bool {
+    let sym_match = resp.symbol.as_str().eq_ignore_ascii_case(symbol)
+        || arbitrageur_core::symbol::canonical_base(resp.symbol.as_str())
+            .eq_ignore_ascii_case(&arbitrageur_core::symbol::canonical_base(symbol));
     resp.venue == exchange.venue_id()
-        && resp.symbol.as_str() == symbol
+        && sym_match
         && !client_order_id.trim().is_empty()
         && resp.client_order_id == client_order_id
         && !resp.order_id.trim().is_empty()

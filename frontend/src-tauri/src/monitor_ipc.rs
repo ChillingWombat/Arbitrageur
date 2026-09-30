@@ -151,6 +151,27 @@ pub(crate) async fn execute_monitor_opportunity_impl(
     size_usd: f64,
     state: &AppEngineState,
 ) -> Result<SimStepResultDto, String> {
+    execute_monitor_opportunity_inner(symbol, buy_venue, sell_venue, size_usd, true, state).await
+}
+
+pub(crate) async fn execute_monitor_opportunity_for_bot_impl(
+    symbol: &str,
+    buy_venue: &str,
+    sell_venue: &str,
+    size_usd: f64,
+    state: &AppEngineState,
+) -> Result<SimStepResultDto, String> {
+    execute_monitor_opportunity_inner(symbol, buy_venue, sell_venue, size_usd, false, state).await
+}
+
+async fn execute_monitor_opportunity_inner(
+    symbol: &str,
+    buy_venue: &str,
+    sell_venue: &str,
+    size_usd: f64,
+    adopt_manual: bool,
+    state: &AppEngineState,
+) -> Result<SimStepResultDto, String> {
     let engine = monitor_engine(state)?;
     // Watchlist key under the active quote policy: merged modes canonicalize
     // to the base ("BTC"), `separate` keeps the pair key ("BTC-USDT") so the
@@ -302,25 +323,29 @@ pub(crate) async fn execute_monitor_opportunity_impl(
     )
     .await?;
 
-    // Adopt into auto-exit watcher pool targeting dynamic baseline
-    if let Some(bot) = state.radar_bot.lock().as_ref() {
-        let friction_band = row
-            .deviation_bps
-            .zip(row.net_capture_bps)
-            .and_then(|(d, n)| {
-                arbitrageur_strategy::convergence_auto::friction_band_bps(Some(d), Some(n))
-            });
-        let _ = bot.adopt_manual_position(
-            state,
-            &sym,
-            buy_venue,
-            sell_venue,
-            size_usd,
-            row.deviation_bps,
-            row.baseline_bps,
-            friction_band,
-            row.expected_converge_secs,
-        );
+    // Adopt into auto-exit watcher pool targeting dynamic baseline when
+    // triggered manually; autonomous bot entries record their own position
+    // row in `OpportunityExecutor::evaluate_and_execute`.
+    if adopt_manual && res.execution_success {
+        if let Some(bot) = state.radar_bot.lock().as_ref() {
+            let friction_band = row
+                .deviation_bps
+                .zip(row.net_capture_bps)
+                .and_then(|(d, n)| {
+                    arbitrageur_strategy::convergence_auto::friction_band_bps(Some(d), Some(n))
+                });
+            let _ = bot.adopt_manual_position(
+                state,
+                &sym,
+                buy_venue,
+                sell_venue,
+                size_usd,
+                row.deviation_bps,
+                row.baseline_bps,
+                friction_band,
+                row.expected_converge_secs,
+            );
+        }
     }
 
     Ok(res)

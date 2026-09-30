@@ -1239,6 +1239,47 @@ impl ExchangeAdapter for VantaAdapter {
         true
     }
 
+    async fn set_leverage(&self, symbol: &str, leverage: u32) -> anyhow::Result<()> {
+        if !self.has_live_credentials() {
+            anyhow::bail!("Cannot set leverage on Vanta: credentials not configured");
+        }
+        if leverage == 0 || leverage > 100 {
+            anyhow::bail!("Vanta leverage {leverage} out of range 1..=100");
+        }
+        let venue_symbol = Self::to_vanta_symbol(symbol).unwrap_or_else(|_| symbol.to_string());
+        let body = serde_json::json!({
+            "symbol": venue_symbol,
+            "leverage": leverage
+        })
+        .to_string();
+        let res = self
+            .signed_orderly("POST", "/v1/client/leverage", &body)
+            .await;
+        match res {
+            Ok(v) => {
+                if v.get("success").and_then(|s| s.as_bool()).unwrap_or(false) {
+                    Ok(())
+                } else {
+                    let acc_body = serde_json::json!({ "leverage": leverage }).to_string();
+                    if let Ok(v2) = self
+                        .signed_orderly("POST", "/v1/client/leverage", &acc_body)
+                        .await
+                    {
+                        if v2.get("success").and_then(|s| s.as_bool()).unwrap_or(false) {
+                            return Ok(());
+                        }
+                    }
+                    let msg = v
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .unwrap_or("unknown error");
+                    anyhow::bail!("Vanta set_leverage failed: {msg}")
+                }
+            }
+            Err(e) => anyhow::bail!("Vanta set_leverage transport failure: {e}"),
+        }
+    }
+
     fn supports_live_execution(&self) -> bool {
         true
     }

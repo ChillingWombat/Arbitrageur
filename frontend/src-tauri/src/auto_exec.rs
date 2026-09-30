@@ -241,11 +241,14 @@ impl BotDispatch for VenueDispatch {
         state: &'a AppEngineState,
     ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + 'a>> {
         Box::pin(async move {
-            crate::commands::execute_monitor_opportunity_impl(
+            let res = crate::commands::execute_monitor_opportunity_for_bot_impl(
                 symbol, buy_venue, sell_venue, size_usd, state,
             )
-            .await
-            .map(|r| r.message)
+            .await?;
+            if !res.execution_success {
+                return Err(res.message);
+            }
+            Ok(res.message)
         })
     }
 
@@ -941,6 +944,34 @@ impl OpportunityExecutor {
                         continue;
                     }
                 };
+                let min_venue_notional =
+                    match (signal.buy_venue.as_str(), signal.sell_venue.as_str()) {
+                        (b, s)
+                            if b == "vanta"
+                                || s == "vanta"
+                                || b == "hyperliquid"
+                                || s == "hyperliquid"
+                                || b == "lighter"
+                                || s == "lighter" =>
+                        {
+                            10.0
+                        }
+                        _ => 5.0,
+                    };
+                if plan.size_usd < min_venue_notional {
+                    self.audit_skip(
+                        state,
+                        &key,
+                        now_ms,
+                        &signal,
+                        &format!(
+                            "size ${:.2} below venue minimum notional ${:.2}",
+                            plan.size_usd, min_venue_notional
+                        ),
+                        Some(plan.size_usd),
+                    );
+                    continue;
+                }
                 match dispatch
                     .enter(
                         &signal.symbol,
@@ -1012,6 +1043,7 @@ impl OpportunityExecutor {
         self.cooldowns.lock().insert(key.clone(), now_ms);
         match dispatch.exit(&key.symbol, trigger, state).await {
             Ok(note) => {
+                *self.last_error.lock() = None;
                 self.open.lock().remove(key);
                 let _ = state.state_store.delete_bot_position(
                     &key.symbol,

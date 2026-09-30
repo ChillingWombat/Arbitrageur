@@ -2939,7 +2939,7 @@ impl SpreadMonitorEngine {
         // theoretical span on an untradeable venue must never flatten a
         // real position (observed: a live carry churned out chasing a
         // funding gap whose short venue had an empty book).
-        let best_alt_apr = if rotation_bps.is_some() {
+        let valid_alt_spans: Vec<(&String, f64, &String, &String)> = if rotation_bps.is_some() {
             let mut span: HashMap<&String, (f64, &String, f64, &String)> = HashMap::new();
             for ((venue, base), (rate, ts)) in ema.iter() {
                 if now.duration_since(*ts) >= Duration::from_secs(300) {
@@ -2964,12 +2964,9 @@ impl SpreadMonitorEngine {
                     .partial_cmp(&(a.1 - a.3))
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
-            let mut best: Option<f64> = None;
+            let mut valid = Vec::new();
             for (base, hi, hi_v, lo, lo_v) in spans {
                 let span_apr = (hi - lo) * 8760.0 * 100.0;
-                if best.is_some_and(|b| span_apr <= b) {
-                    break;
-                }
                 let mut executable = true;
                 for v in [hi_v, lo_v] {
                     let executable_venue = match state.get_adapter(v) {
@@ -3000,13 +2997,12 @@ impl SpreadMonitorEngine {
                     }
                 }
                 if executable {
-                    best = Some(span_apr);
-                    break;
+                    valid.push((base, span_apr, hi_v, lo_v));
                 }
             }
-            best
+            valid
         } else {
-            None
+            Vec::new()
         };
         for sig in signals.iter().filter(|s| {
             s.strategy_id.eq_ignore_ascii_case("funding")
@@ -3060,21 +3056,45 @@ impl SpreadMonitorEngine {
                 continue;
             };
             let net_apr_pct = (sr - lr) * 8760.0 * 100.0;
-            // Yield rotation: a different symbol/venue pairing exceeds this
-            // carry by more than the configured bps — exit so the scanner
+            // Yield rotation: a DIFFERENT symbol/venue pairing exceeds this
+            // carry by more than the configured bps (plus minimum hurdle) — exit so the scanner
             // re-deploys the capital. The threshold is the churn allowance.
-            if let (Some(th_bps), Some(best)) = (rotation_bps, best_alt_apr) {
-                if best > net_apr_pct + th_bps / 100.0 {
-                    flatten_funding_signal(
-                        state,
-                        sig,
-                        "rotation",
-                        &format!(
-                            "net APR {net_apr_pct:.1}% trails best alternative {best:.1}% by more than {th_bps}bps"
-                        ),
-                    )
-                    .await;
-                    continue;
+            // Skip rotation if signal is too fresh (< 1800s / 30m) to prevent immediate churn.
+            let min_hold_s = if cfg!(test) { 0 } else { 1800 };
+            let sig_age_secs = chrono::DateTime::parse_from_rfc3339(&sig.created_at)
+                .map(|t| {
+                    (chrono::Utc::now() - t.with_timezone(&chrono::Utc))
+                        .num_seconds()
+                        .max(0)
+                })
+                .unwrap_or(0);
+            if let Some(th_bps) = rotation_bps {
+                if sig_age_secs >= min_hold_s {
+                    let sig_base = arbitrageur_core::symbol::canonical_base(&sig.symbol);
+                    let best_alt = valid_alt_spans.iter().find(|(alt_base, _, hi_v, lo_v)| {
+                        let alt_b = arbitrageur_core::symbol::canonical_base(alt_base);
+                        let same_pair = (hi_v.eq_ignore_ascii_case(&short_leg.venue)
+                            && lo_v.eq_ignore_ascii_case(&long_leg.venue))
+                            || (hi_v.eq_ignore_ascii_case(&long_leg.venue)
+                                && lo_v.eq_ignore_ascii_case(&short_leg.venue));
+                        let is_same_position = alt_b.eq_ignore_ascii_case(&sig_base) && same_pair;
+                        !is_same_position
+                    });
+                    if let Some((alt_base, best_apr, alt_hi, alt_lo)) = best_alt {
+                        let hurdle_apr = (th_bps / 100.0).max(1.0);
+                        if *best_apr > net_apr_pct + hurdle_apr {
+                            flatten_funding_signal(
+                                state,
+                                sig,
+                                "rotation",
+                                &format!(
+                                    "net APR {net_apr_pct:.1}% trails alternative {alt_base} ({alt_hi}/{alt_lo} at {best_apr:.1}%) by more than {hurdle_apr:.1}% (held {sig_age_secs}s)"
+                                ),
+                            )
+                            .await;
+                            continue;
+                        }
+                    }
                 }
             }
             if net_apr_pct < min_apr {
@@ -3803,12 +3823,25 @@ impl SpreadMonitorEngine {
         }
         if p_win.is_none() {
             gate_reasons.push("win estimate uncomputable".into());
+        } else if let Some(p) = p_win {
+            if p < cfg.min_win_probability {
+                gate_reasons.push(format!(
+                    "win probability {:.0}% below {:.0}% floor",
+                    p * 100.0,
+                    cfg.min_win_probability * 100.0
+                ));
+            }
         }
         if funding_unknown {
             gate_reasons.push("funding rates unknown".into());
         }
         if depth_curve.is_empty() {
             gate_reasons.push("no executable depth".into());
+        } else if optimal.map(|s| s <= 0.0).unwrap_or(true) {
+            gate_reasons.push("no profitable capacity at current book depth".into());
+        }
+        if let Some(ref reason) = session_block {
+            gate_reasons.push(reason.clone());
         }
         if !session_conf_ok {
             gate_reasons.push("session win rate below floor".into());
@@ -4201,12 +4234,24 @@ fn execution_gate(
     if status != PairStatus::Ready || !signal_active {
         return (false, Some("signal not ready".into()));
     }
+    if funding_unknown {
+        return (false, Some("funding adjustment unknown".into()));
+    }
+    if exit_uncostable {
+        return (
+            false,
+            Some("exit depth insufficient for two-way close".into()),
+        );
+    }
+    if optimal.map(|s| s <= 0.0).unwrap_or(true) {
+        return (false, Some("no profitable capacity".into()));
+    }
     match p_win {
         Some(p) if p >= p_min => {}
         Some(_) => {
             return (
                 false,
-                Some(format!("win probability below {p_min:.0}% floor")),
+                Some(format!("win probability below {:.0}% floor", p_min * 100.0)),
             )
         }
         None => return (false, Some("win probability unknown".into())),
@@ -4228,18 +4273,6 @@ fn execution_gate(
             None => return (false, Some("win-rate confidence bound unknown".into())),
         }
     }
-    if funding_unknown {
-        return (false, Some("funding adjustment unknown".into()));
-    }
-    if exit_uncostable {
-        return (
-            false,
-            Some("exit depth insufficient for two-way close".into()),
-        );
-    }
-    if optimal.map(|s| s <= 0.0).unwrap_or(true) {
-        return (false, Some("no profitable capacity".into()));
-    }
     if let Ok(true) = state
         .state_store
         .ticker_blocked(symbol, Some(state.env().as_str()))
@@ -4250,8 +4283,12 @@ fn execution_gate(
     // the entry rather than silently permitting it.
     if state
         .state_store
-        .ticker_reduce_only(symbol, "futures", state.env().as_str())
+        .ticker_reduce_only(symbol, "radar", state.env().as_str())
         .unwrap_or(true)
+        || state
+            .state_store
+            .ticker_reduce_only(symbol, "futures", state.env().as_str())
+            .unwrap_or(true)
     {
         return (false, Some("ticker is reduce-only — exits only".into()));
     }

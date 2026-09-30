@@ -270,6 +270,15 @@ impl SecureVault {
         !self.is_unlocked && self.auto_locked
     }
 
+    /// Whether adapter-authenticated venue calls (entries, exits, cancels,
+    /// capability probes) remain permitted: true while unlocked OR after the
+    /// inactivity timer auto-locks (which wipes only vault secrets in RAM and
+    /// leaves adapter credentials provisioned by design), and false when
+    /// never unlocked or after an explicit operator `lock()`.
+    pub fn allows_adapter_execution(&mut self) -> bool {
+        self.is_unlocked() || self.is_auto_locked()
+    }
+
     /// Force the inactivity timer into the past so the next `is_unlocked`
     /// check exercises the auto-lock path.
     #[cfg(test)]

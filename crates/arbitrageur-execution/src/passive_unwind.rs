@@ -654,7 +654,7 @@ pub async fn execute_passive_reduce_live(
                 }
                 Err(_) => {
                     poll_misses += 1;
-                    if poll_misses >= 3 {
+                    if poll_misses >= 8 {
                         break;
                     }
                 }
@@ -717,8 +717,32 @@ pub async fn execute_passive_reduce_live(
             }
         }
 
+        let full_wire_fill = cur.status == OrderStatus::Filled
+            && cur.remaining_qty <= Decimal::ZERO
+            && cur.filled_qty >= cur.original_qty
+            && cur.original_qty > Decimal::ZERO;
         filled_total += cur.filled_qty;
         attempts.push(cur);
+        if full_wire_fill {
+            return Ok(PassiveReduceReport {
+                outcome: PassiveOutcome::LimitFilled,
+                limit_tries: tries,
+                limit_prices,
+                response: combine_live_attempts(adapter.venue_id(), symbol, qty, &attempts),
+            });
+        }
+        let rem = (qty - filled_total).max(Decimal::ZERO);
+        if rem > Decimal::ZERO
+            && filled_total > Decimal::ZERO
+            && matches!(adapter.wire_base_qty(symbol, rem).await, Ok(w) if w <= Decimal::ZERO)
+        {
+            return Ok(PassiveReduceReport {
+                outcome: PassiveOutcome::LimitFilled,
+                limit_tries: tries,
+                limit_prices,
+                response: combine_live_attempts(adapter.venue_id(), symbol, qty, &attempts),
+            });
+        }
     }
 
     if filled_total >= qty {
@@ -760,7 +784,10 @@ async fn finish_live(
 ) -> anyhow::Result<PassiveReduceReport> {
     let remaining = requested - filled_so_far;
     let had_limit_fill = attempts.iter().any(|r| r.filled_qty > Decimal::ZERO);
-    if remaining <= Decimal::ZERO {
+    let sub_lot_remainder = remaining > Decimal::ZERO
+        && had_limit_fill
+        && matches!(adapter.wire_base_qty(symbol, remaining).await, Ok(w) if w <= Decimal::ZERO);
+    if remaining <= Decimal::ZERO || sub_lot_remainder {
         return Ok(PassiveReduceReport {
             outcome: if had_limit_fill {
                 PassiveOutcome::LimitFilled
@@ -782,7 +809,23 @@ async fn finish_live(
         ))
         .await
     {
-        Ok(mkt) => {
+        #[allow(unused_mut)]
+        Ok(mut mkt) => {
+            #[cfg(not(test))]
+            if !mkt.status.is_final() {
+                let oid = mkt.order_id.clone();
+                let cid = (!mkt.client_order_id.is_empty()).then(|| mkt.client_order_id.clone());
+                for _ in 0..5 {
+                    tokio::time::sleep(std::time::Duration::from_millis(450)).await;
+                    if let Ok(polled) = adapter.fetch_order(symbol, &oid, cid.as_deref()).await {
+                        let done = polled.status.is_final();
+                        mkt = polled;
+                        if done {
+                            break;
+                        }
+                    }
+                }
+            }
             attempts.push(mkt);
             Ok(PassiveReduceReport {
                 outcome: if had_limit_fill {

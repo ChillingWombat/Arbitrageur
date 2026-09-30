@@ -415,7 +415,7 @@ impl ExchangeAdapter for LighterAdapter {
         let mut markets = Vec::new();
         for item in details {
             let symbol_str = item.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
-            let market_id = item.get("market_id").and_then(|m| m.as_u64()).unwrap_or(0);
+            let _market_id = item.get("market_id").and_then(|m| m.as_u64()).unwrap_or(0);
             let price_dec = item
                 .get("price_decimals")
                 .and_then(|p| p.as_u64())
@@ -438,7 +438,11 @@ impl ExchangeAdapter for LighterAdapter {
             markets.push(MarketMetadata {
                 symbol,
                 venue: self.venue_id.clone(),
-                venue_symbol: market_id.to_string(),
+                venue_symbol: if is_spot {
+                    format!("{}-SPOT", symbol_str)
+                } else {
+                    symbol_str.to_string()
+                },
                 price_decimals: price_dec,
                 size_decimals: size_dec,
                 min_order_size: dec!(0.01),
@@ -895,6 +899,23 @@ impl ExchangeAdapter for LighterAdapter {
             &params,
         )?;
         let tx_hash = self.submit_signed_tx(&signed).await?;
+        drop(_guard);
+
+        #[cfg(not(test))]
+        if tif == 0 {
+            for _ in 0..8 {
+                tokio::time::sleep(std::time::Duration::from_millis(450)).await;
+                if let Ok(polled) = self
+                    .fetch_order(&order.symbol, &tx_hash, Some(&order.client_order_id))
+                    .await
+                {
+                    if polled.status.is_final() {
+                        return Ok(polled);
+                    }
+                }
+            }
+        }
+
         Ok(OrderResponse {
             order_id: tx_hash,
             client_order_id: order.client_order_id.clone(),
@@ -924,6 +945,24 @@ impl ExchangeAdapter for LighterAdapter {
     }
 
     async fn cancel_order(&self, req: CancelRequest) -> anyhow::Result<()> {
+        if let Some(cid) = req
+            .client_order_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+        {
+            if let Ok(o) = self.fetch_order(&req.symbol, "", Some(cid)).await {
+                if matches!(
+                    o.status,
+                    OrderStatus::Cancelled
+                        | OrderStatus::Filled
+                        | OrderStatus::Expired
+                        | OrderStatus::Rejected
+                ) {
+                    return Ok(());
+                }
+            }
+        }
         let _guard = self.order_lock.lock().await;
         let (account, api_key_index, api_key) = self.signing_identity()?;
         let (market_id, _, _) = self.market_params_for(&req.symbol).await?;
@@ -953,6 +992,7 @@ impl ExchangeAdapter for LighterAdapter {
             account as i64,
         )?;
         self.submit_signed_tx(&signed).await?;
+        drop(_guard);
 
         // `sendTx` acceptance is not a cancel confirmation — the tx lands
         // asynchronously. Poll venue truth (accountOrders) until the order
@@ -969,7 +1009,7 @@ impl ExchangeAdapter for LighterAdapter {
                  verified without the persisted client_order_id — unconfirmed"
             );
         };
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(25);
         loop {
             match self.fetch_order(&req.symbol, "", Some(cid.as_str())).await {
                 Ok(o)
@@ -993,7 +1033,7 @@ impl ExchangeAdapter for LighterAdapter {
             }
             if std::time::Instant::now() >= deadline {
                 anyhow::bail!(
-                    "Lighter cancel for cidx {order_index} unconfirmed after 10s — order may still rest"
+                    "Lighter cancel for cidx {order_index} unconfirmed after 25s — order may still rest"
                 );
             }
             tokio::time::sleep(std::time::Duration::from_millis(300)).await;
@@ -1150,7 +1190,11 @@ fn lighter_order_row_response(
         .get(&(market_id as u64))
         .cloned()
         .ok_or_else(|| anyhow::anyhow!("Lighter order row market_index {market_id} unknown"))?;
-    if !expected.eq_ignore_ascii_case(identity.symbol) {
+    let expected_base = arbitrageur_core::symbol::canonical_base(&expected);
+    let identity_base = arbitrageur_core::symbol::canonical_base(identity.symbol);
+    if !expected.eq_ignore_ascii_case(identity.symbol)
+        && !expected_base.eq_ignore_ascii_case(&identity_base)
+    {
         anyhow::bail!(
             "Lighter order market mismatch: row is {expected}, expected {}",
             identity.symbol
@@ -1207,10 +1251,25 @@ fn lighter_order_row_response(
             }
         }
     };
+    let resolved_order_id = if !identity.order_id.trim().is_empty() {
+        identity.order_id.to_string()
+    } else {
+        row.get("order_id")
+            .or_else(|| row.get("order_index"))
+            .and_then(|v| {
+                v.as_str()
+                    .map(str::to_string)
+                    .or_else(|| v.as_i64().map(|n| n.to_string()))
+                    .or_else(|| v.as_u64().map(|n| n.to_string()))
+            })
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| cidx.to_string())
+    };
     Ok(OrderResponse {
         // Identity anchor is the client order index; echo the persisted
-        // venue id (sendTx hash) so the caller's order_id check passes.
-        order_id: identity.order_id.to_string(),
+        // venue id (sendTx hash) when present so the caller's order_id check
+        // passes, or fall back to the venue order index during client-id recovery.
+        order_id: resolved_order_id,
         client_order_id: identity.client_order_id.to_string(),
         venue: identity.venue.clone(),
         symbol: identity.symbol.to_string(),

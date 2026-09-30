@@ -12,6 +12,7 @@ import {
   fmtTime,
   statusChip,
   roleChip,
+  parseInstrumentType,
 } from "./AtomicTransactionsTable";
 
 export interface PositionDetailModalProps {
@@ -127,19 +128,45 @@ export const PositionDetailModal: React.FC<PositionDetailModalProps> = React.mem
   const entryPnl = -fees;
   const expectedNet = familyExpected ?? pos.expectedNetUsd;
   const hasProjection = expectedNet != null && Number.isFinite(expectedNet);
-  // Chart geometry: x in [t0, t1, t2], y auto-scaled with padding.
-  const W = 600, H = 180, PAD = 28;
+  // Chart geometry: x in [t0, t1, t2], y auto-scaled with proper padding.
+  const W = 800, H = 150;
+  const PAD_LEFT = 70, PAD_RIGHT = 45, PAD_TOP = 24, PAD_BOTTOM = 28;
+  const plotW = W - PAD_LEFT - PAD_RIGHT;
+  const plotH = H - PAD_TOP - PAD_BOTTOM;
   const t0 = Date.parse(pos.openedAt);
   const t1 = Date.now();
   const t2 = t1 + 24 * 3600 * 1000;
   const t0safe = Number.isFinite(t0) ? t0 : t1 - 3600 * 1000;
   const yEnd = hasProjection ? nowPnl + (expectedNet as number) : nowPnl;
-  const lo = Math.min(entryPnl, nowPnl, yEnd);
-  const hi = Math.max(entryPnl, nowPnl, yEnd);
+
+  const rawLo = Math.min(entryPnl, nowPnl, yEnd);
+  const rawHi = Math.max(entryPnl, nowPnl, yEnd);
+  const padY = Math.max(1.5, (rawHi - rawLo) * 0.15);
+  const lo = rawLo - padY;
+  const hi = rawHi + padY;
   const span = hi - lo > 1e-9 ? hi - lo : 1;
-  const xPos = (t: number) => PAD + ((t - t0safe) / Math.max(1, t2 - t0safe)) * (W - 2 * PAD);
-  const yPos = (v: number) => H - PAD - ((v - lo) / span) * (H - 2 * PAD);
-  const zeroY = yPos(0);
+
+  // Balanced 2-zone width partitioning:
+  // If there's a forward projection, allocate 45% of plot width to realized history (t0 -> t1),
+  // and 55% to the projected horizon (t1 -> t2).
+  // If no projection, 100% of plot width is allocated to realized history.
+  const realizedRatio = hasProjection ? 0.45 : 1.0;
+  const realizedW = plotW * realizedRatio;
+  const projW = plotW - realizedW;
+  const elapsed = Math.max(1000, t1 - t0safe);
+  const projDuration = 24 * 3600 * 1000;
+
+  const xPos = (t: number) => {
+    if (t <= t1) {
+      const frac = Math.max(0, Math.min(1, (t - t0safe) / elapsed));
+      return PAD_LEFT + frac * realizedW;
+    } else {
+      const frac = Math.max(0, Math.min(1, (t - t1) / projDuration));
+      return PAD_LEFT + realizedW + frac * projW;
+    }
+  };
+  const yPos = (v: number) => H - PAD_BOTTOM - ((v - lo) / span) * plotH;
+  const zeroY = Math.max(PAD_TOP, Math.min(H - PAD_BOTTOM, yPos(0)));
   const fmtT = (t: number) =>
     new Date(t).toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
   const ageSecs = Number.isFinite(t0) ? Math.max(0, (t1 - t0) / 1000) : null;
@@ -253,30 +280,58 @@ export const PositionDetailModal: React.FC<PositionDetailModalProps> = React.mem
                   <tr className="border-b border-surface-border text-slate-500 text-xs font-semibold tracking-wider">
                     <th className="py-2 px-3">Venue</th>
                     <th className="py-2 px-3">Instrument</th>
-                    <th className="py-2 px-3">Side</th>
+                    <th className="py-2 px-3">Action</th>
+                    <th className="py-2 px-3">Type</th>
                     <th className="py-2 px-3 text-right">Net Qty</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-surface-border">
-                  {pos.venues.map((v, i) => (
-                    <tr key={`${v.venue}-${v.symbol}-${i}`} className="hover:bg-surface-raised/40 transition">
-                      <td className="py-2 px-3 whitespace-nowrap">
-                        <span className="inline-flex items-center gap-1.5">
-                          <VenueLogo venueId={v.venue.toLowerCase()} name={v.venue} size={14} />
-                          {v.venue}
-                        </span>
-                      </td>
-                      <td className="py-2 px-3 text-slate-700">{v.symbol ?? "?"}</td>
-                      <td className="py-2 px-3">
-                        <span className={`font-bold ${v.netQty >= 0 ? "text-profit" : "text-loss"}`}>
-                          {v.netQty >= 0 ? "LONG" : "SHORT"}
-                        </span>
-                      </td>
-                      <td className={`py-2 px-3 text-right font-semibold ${v.netQty >= 0 ? "text-profit" : "text-loss"}`}>
-                        {fmtQty4(v.netQty)}
-                      </td>
-                    </tr>
-                  ))}
+                  {pos.venues.map((v, i) => {
+                    const inst = parseInstrumentType(v.symbol ?? "");
+                    const isLong = v.netQty >= 0;
+                    const actionText = inst.isOption
+                      ? (isLong ? "BOUGHT" : "WROTE")
+                      : (isLong ? "LONG" : "SHORT");
+                    const actionColor = inst.isOption
+                      ? (isLong ? "text-profit font-bold" : "text-purple-600 dark:text-purple-400 font-bold")
+                      : (isLong ? "text-profit font-bold" : "text-loss font-bold");
+                    return (
+                      <tr key={`${v.venue}-${v.symbol}-${i}`} className="hover:bg-surface-raised/40 transition">
+                        <td className="py-2 px-3 whitespace-nowrap">
+                          <span className="inline-flex items-center gap-1.5">
+                            <VenueLogo venueId={v.venue.toLowerCase()} name={v.venue} size={14} />
+                            {v.venue}
+                          </span>
+                        </td>
+                        <td className="py-2 px-3 text-slate-700">{v.symbol ?? "?"}</td>
+                        <td className="py-2 px-3 whitespace-nowrap">
+                          <span className={actionColor}>
+                            {actionText}
+                          </span>
+                        </td>
+                        <td className="py-2 px-3 whitespace-nowrap">
+                          {inst.type === "CALL" ? (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
+                              CALL
+                            </span>
+                          ) : inst.type === "PUT" ? (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-500/10 text-amber-600 dark:text-amber-400 border border-amber-500/20">
+                              PUT
+                            </span>
+                          ) : inst.type === "PERP" ? (
+                            <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-sky-500/10 text-sky-600 dark:text-sky-400 border border-sky-500/20">
+                              PERP
+                            </span>
+                          ) : (
+                            <span className="text-slate-400 text-[10px] font-mono">—</span>
+                          )}
+                        </td>
+                        <td className={`py-2 px-3 text-right font-semibold ${v.netQty >= 0 ? "text-profit" : "text-loss"}`}>
+                          {fmtQty4(v.netQty)}
+                        </td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -288,17 +343,21 @@ export const PositionDetailModal: React.FC<PositionDetailModalProps> = React.mem
             </div>
             <svg viewBox={`0 0 ${W} ${H}`} className="w-full rounded-lg border border-surface-border bg-surface-raised" role="img">
               {hasProjection && (
-                <rect x={xPos(t1)} y={PAD * 0.5} width={W - PAD - xPos(t1)} height={H - PAD * 1.5} fill="#f8fafc" />
+                <rect x={xPos(t1)} y={PAD_TOP * 0.5} width={W - PAD_RIGHT - xPos(t1)} height={H - PAD_BOTTOM - PAD_TOP * 0.5} fill="#f8fafc" />
               )}
-              <line x1={PAD} y1={zeroY} x2={W - PAD} y2={zeroY} stroke="#94a3b8" strokeWidth="1" strokeDasharray="2 3" />
+              {/* Zero line */}
+              <line x1={PAD_LEFT} y1={zeroY} x2={W - PAD_RIGHT} y2={zeroY} stroke="#94a3b8" strokeWidth="1" strokeDasharray="2 3" />
+              {/* Projection divider line at t1 */}
               {hasProjection && (
-                <line x1={xPos(t1)} y1={PAD * 0.5} x2={xPos(t1)} y2={H - PAD * 0.5} stroke="#94a3b8" strokeWidth="1" strokeDasharray="3 3" opacity="0.7" />
+                <line x1={xPos(t1)} y1={PAD_TOP * 0.5} x2={xPos(t1)} y2={H - PAD_BOTTOM} stroke="#94a3b8" strokeWidth="1" strokeDasharray="3 3" opacity="0.7" />
               )}
+              {/* Realized shaded area */}
               <polygon
                 points={`${xPos(t0safe)},${zeroY} ${xPos(t0safe)},${yPos(entryPnl)} ${xPos(t1)},${yPos(nowPnl)} ${xPos(t1)},${zeroY}`}
                 fill={nowPnl >= 0 ? "#16a34a" : "#dc2626"}
                 opacity="0.08"
               />
+              {/* Realized line */}
               <polyline
                 points={`${xPos(t0safe)},${yPos(entryPnl)} ${xPos(t1)},${yPos(nowPnl)}`}
                 fill="none"
@@ -306,6 +365,7 @@ export const PositionDetailModal: React.FC<PositionDetailModalProps> = React.mem
                 strokeWidth="2.5"
                 strokeLinecap="round"
               />
+              {/* Projected line */}
               {hasProjection && (
                 <polyline
                   points={`${xPos(t1)},${yPos(nowPnl)} ${xPos(t2)},${yPos(yEnd)}`}
@@ -316,24 +376,55 @@ export const PositionDetailModal: React.FC<PositionDetailModalProps> = React.mem
                   strokeLinecap="round"
                 />
               )}
+              {/* Dots */}
               <circle cx={xPos(t0safe)} cy={yPos(entryPnl)} r="3.5" fill="#64748b" />
-              <circle cx={xPos(t1)} cy={yPos(nowPnl)} r="3.5" fill={nowPnl >= 0 ? "#15803d" : "#b91c1c"} />
-              {hasProjection && <circle cx={xPos(t2)} cy={yPos(yEnd)} r="3" fill="#64748b" opacity="0.6" />}
+              <circle cx={xPos(t1)} cy={yPos(nowPnl)} r="4" fill={nowPnl >= 0 ? "#15803d" : "#b91c1c"} />
+              {hasProjection && <circle cx={xPos(t2)} cy={yPos(yEnd)} r="3.5" fill="#64748b" opacity="0.6" />}
+
+              {/* Current PnL label at t1 */}
               <text
-                x={xPos(t1) - 8}
-                y={yPos(nowPnl) + (nowPnl >= entryPnl ? -8 : 16)}
-                fontSize="10"
-                fontWeight="600"
+                x={xPos(t1)}
+                y={yPos(nowPnl) + (nowPnl >= entryPnl ? -9 : 16)}
+                fontSize="11"
+                fontWeight="700"
                 fill={nowPnl >= 0 ? "#15803d" : "#b91c1c"}
                 fontFamily="Inter, sans-serif"
-                textAnchor="end"
+                textAnchor="middle"
               >
                 {usd(nowPnl)}
               </text>
-              <text x={PAD} y={H - 8} fontSize="10" fill="#94a3b8" fontFamily="Inter, sans-serif">{fmtT(t0safe)}</text>
-              <text x={W - PAD} y={H - 8} fontSize="10" fill="#94a3b8" fontFamily="Inter, sans-serif" textAnchor="end">now{hasProjection ? " → +24h" : ""}</text>
-              <text x={PAD} y={14} fontSize="10" fill="#94a3b8" fontFamily="Inter, sans-serif">
-                {`entry -$${Math.abs(entryPnl).toFixed(0)} fees`}
+
+              {/* Projected target label at t2 */}
+              {hasProjection && (
+                <text
+                  x={xPos(t2)}
+                  y={yPos(yEnd) + (yEnd >= nowPnl ? -9 : 16)}
+                  fontSize="10"
+                  fontWeight="600"
+                  fill="#64748b"
+                  fontFamily="Inter, sans-serif"
+                  textAnchor="end"
+                >
+                  {`target: ${usd(yEnd)}`}
+                </text>
+              )}
+
+              {/* Time axis labels */}
+              <text x={PAD_LEFT} y={H - 8} fontSize="10" fill="#94a3b8" fontFamily="Inter, sans-serif">
+                {`${fmtT(t0safe)} (Entry)`}
+              </text>
+              {hasProjection && (
+                <text x={xPos(t1)} y={H - 8} fontSize="10" fill="#94a3b8" fontFamily="Inter, sans-serif" textAnchor="middle">
+                  Now
+                </text>
+              )}
+              <text x={W - PAD_RIGHT} y={H - 8} fontSize="10" fill="#94a3b8" fontFamily="Inter, sans-serif" textAnchor="end">
+                {hasProjection ? "Target (+24h)" : "Now"}
+              </text>
+
+              {/* Entry fees indicator */}
+              <text x={PAD_LEFT} y={16} fontSize="10" fill="#94a3b8" fontFamily="Inter, sans-serif">
+                {`entry -$${Math.abs(entryPnl).toFixed(2)} fees`}
               </text>
             </svg>
             {!hasProjection && (

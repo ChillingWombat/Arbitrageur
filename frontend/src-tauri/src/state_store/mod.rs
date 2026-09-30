@@ -694,10 +694,7 @@ pub fn aggregate_open_positions(
         let mut fees = 0.0f64;
         let mut expected_sum = 0.0f64;
         let mut expected_any = false;
-        let mut pnl = Some(0.0f64);
-        let mut notional = Some(0.0f64);
         let mut opened_at = String::new();
-
         for s in &members {
             fees += s.fees_usd;
             if let Some(e) = s.expected_net_usd {
@@ -718,23 +715,67 @@ pub fn aggregate_open_positions(
                 *nets
                     .entry((leg.venue.clone(), leg.symbol.clone()))
                     .or_insert(0.0) += signed;
+            }
+        }
 
-                match (leg.fill_price, mark(&leg.venue, &leg.symbol)) {
-                    (Some(entry), Some(mid)) => {
-                        if let Some(p) = pnl.as_mut() {
-                            *p += (mid - entry) * signed;
+        let mut pnl = Some(0.0f64);
+        let mut notional = Some(0.0f64);
+        for ((v, sym), q) in &nets {
+            if q.abs() <= EPS {
+                continue;
+            }
+            // Find the entry fill price for this instrument across member opening legs.
+            let (entry_px, entry_qty) = members
+                .iter()
+                .filter(|s| !s.id.starts_with("flat-") && !s.id.starts_with("trim-"))
+                .flat_map(|s| s.legs.iter())
+                .filter(|l| {
+                    l.venue.eq_ignore_ascii_case(v)
+                        && l.symbol.eq_ignore_ascii_case(sym)
+                        && l.fill_price.is_some()
+                        && l.filled_qty.abs() > EPS
+                        && match l.side {
+                            LegSide::Long => *q > 0.0,
+                            LegSide::Short => *q < 0.0,
                         }
+                })
+                .fold((0.0f64, 0.0f64), |(px_acc, qty_acc), l| {
+                    let px = l.fill_price.unwrap_or(0.0);
+                    let qty = l.filled_qty.abs();
+                    (px_acc + px * qty, qty_acc + qty)
+                });
+            let avg_entry_px = if entry_qty > EPS {
+                Some(entry_px / entry_qty)
+            } else {
+                members
+                    .iter()
+                    .flat_map(|s| s.legs.iter())
+                    .find(|l| {
+                        l.venue.eq_ignore_ascii_case(v)
+                            && l.symbol.eq_ignore_ascii_case(sym)
+                            && l.fill_price.is_some()
+                    })
+                    .and_then(|l| l.fill_price)
+            };
+
+            let cur_mark = mark(v, sym);
+            let leg_px = cur_mark.or(avg_entry_px);
+            match leg_px {
+                Some(px) => {
+                    if let Some(n) = notional.as_mut() {
+                        *n += q.abs() * px;
                     }
-                    _ => pnl = None,
                 }
-                match leg.fill_price {
-                    Some(entry) => {
-                        if let Some(n) = notional.as_mut() {
-                            *n += leg.filled_qty * entry;
-                        }
+                None => notional = None,
+            }
+
+            match (avg_entry_px, cur_mark) {
+                (Some(entry), Some(mid)) => {
+                    if let Some(p) = pnl.as_mut() {
+                        *p += (mid - entry) * (*q);
                     }
-                    None => notional = None,
                 }
+                _ => pnl = None,
             }
         }
 

@@ -50,7 +50,16 @@ pub fn index_alias_siblings(canonical: &str) -> &'static [&'static str] {
 /// books stay distinct from perp books. Shared by [`canonical_base`] and
 /// [`symbol_quote`]. The `_` variants cover Orderly/Gate-style spellings
 /// (`PERP_BTC_USDC`, `BTC_USDT_PERP`).
-const CLASS_SUFFIXES: &[&str] = &["-PERP", "-SWAP", "-SPOT", "_PERP", "_SWAP", "_SPOT"];
+const CLASS_SUFFIXES: &[&str] = &[
+    "-PERPETUAL",
+    "-PERP",
+    "-SWAP",
+    "-SPOT",
+    "_PERPETUAL",
+    "_PERP",
+    "_SWAP",
+    "_SPOT",
+];
 
 /// Separated USD-family quote suffixes ("-USDT", "/USDC", "_USDT", …),
 /// covering every member of [`USD_QUOTE_FAMILY`]. Shared by

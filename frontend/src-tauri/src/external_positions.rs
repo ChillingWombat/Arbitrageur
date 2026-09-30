@@ -1140,7 +1140,7 @@ pub async fn schedule_external_exit_impl(
     input: ScheduleExitInput,
     state: &AppEngineState,
 ) -> Result<crate::state_store::ScheduledExit, String> {
-    if !state.vault.write().is_unlocked() {
+    if !state.vault.write().allows_adapter_execution() {
         return Err("Vault is locked. Unlock before scheduling an exit.".into());
     }
     let venue_lc = input.venue.trim().to_lowercase();

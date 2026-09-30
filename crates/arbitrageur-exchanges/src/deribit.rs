@@ -756,7 +756,20 @@ impl DeribitAdapter {
         // Commission is venue-reported in the settlement currency (BTC for
         // BTC instruments) — convert to USD at the index so the ledger's
         // USD-only fee accounting stays exact instead of unaccounted.
-        let fee = dec_from_json(o.get("commission")).and_then(|c| {
+        // Fall back to summing `trades[*].fee` when `order.commission` is zero/absent.
+        let raw_comm = dec_from_json(o.get("commission"))
+            .filter(|c| *c > dec!(0))
+            .or_else(|| {
+                let trades = raw.get("trades").and_then(|t| t.as_array())?;
+                let sum: Decimal = trades
+                    .iter()
+                    .filter_map(|tr| dec_from_json(tr.get("fee")))
+                    .filter(|f| *f > dec!(0))
+                    .sum();
+                Some(sum)
+            })
+            .or_else(|| dec_from_json(o.get("commission")));
+        let fee = raw_comm.and_then(|c| {
             if c < dec!(0) {
                 return None;
             }
@@ -866,7 +879,7 @@ impl ExchangeAdapter for DeribitAdapter {
                             let symbol = match kind {
                                 "option" => Symbol::crypto_option(name, currency),
                                 _ if name.ends_with("-PERPETUAL") => Symbol::perp(currency, "USD"),
-                                _ => Symbol::new(currency, "USD", MarketType::DatedFutures),
+                                _ => Symbol::new(name, "USD", MarketType::DatedFutures),
                             };
                             out.push(MarketMetadata {
                                 symbol,
@@ -1051,9 +1064,10 @@ impl ExchangeAdapter for DeribitAdapter {
         let mut free_usd = dec!(0);
         let mut balances = Vec::new();
         let mut positions = Vec::new();
+        let mut staged_indices = Vec::new();
         for ccy in SUPPORTED_CURRENCIES {
             let idx = self.index_price_usd(ccy).await?;
-            self.account_index_used.write().insert(ccy.to_string(), idx);
+            staged_indices.push((ccy.to_string(), idx));
             let summary = self
                 .private_get(&format!(
                     "/private/get_account_summary?currency={ccy}&extended=true"
@@ -1064,16 +1078,19 @@ impl ExchangeAdapter for DeribitAdapter {
                 .or_else(|| dec_from_json(summary.get("available_withdrawal_funds")))
                 .unwrap_or(dec!(0));
             let maint = dec_from_json(summary.get("maintenance_margin")).unwrap_or(dec!(0));
-            let bal = dec_from_json(summary.get("balance")).unwrap_or(eq);
+            let _bal = dec_from_json(summary.get("balance")).unwrap_or(eq);
             equity_usd += eq * idx;
             maint_usd += maint * idx;
             free_usd += avail * idx;
             balances.push(Balance {
                 venue: self.venue_id.clone(),
                 currency: ccy.to_string(),
-                total: bal,
+                // Use coin-denominated `eq` (which includes option market value
+                // and futures session UPL) so `breaker_frozen_equity_usd`
+                // freezes the exact coin notional backing `equity_usd`.
+                total: eq,
                 free: avail,
-                locked: (bal - avail).max(dec!(0)),
+                locked: (eq - avail).max(dec!(0)),
             });
             for kind in ["future", "option"] {
                 let rows = self
@@ -1134,6 +1151,12 @@ impl ExchangeAdapter for DeribitAdapter {
                 }
             }
         }
+        {
+            let mut idx_map = self.account_index_used.write();
+            for (ccy, idx) in staged_indices {
+                idx_map.insert(ccy, idx);
+            }
+        }
         Ok(AccountSnapshot {
             venue: self.venue_id.clone(),
             equity: equity_usd,
@@ -1191,16 +1214,24 @@ impl ExchangeAdapter for DeribitAdapter {
         let mut amount = self
             .to_venue_amount(&meta, order.quantity, ref_price_usd)
             .await?;
+        let lot = meta.min_amount.max(dec!(0.00000001));
+        if order.reduce_only {
+            amount = (amount / lot).round() * lot;
+        } else {
+            let ratio = amount / lot;
+            let nearest = ratio.round();
+            if (ratio - nearest).abs() <= dec!(0.005) {
+                amount = nearest * lot;
+            } else {
+                amount = ratio.floor() * lot;
+            }
+        }
         if amount < meta.min_amount {
             anyhow::bail!(
                 "Deribit order amount {amount} below min {} for {instrument}",
                 meta.min_amount
             );
         }
-        // Snap to the instrument's amount granularity (0.1-contract options,
-        // $10 futures) — floor for buys, ceil for sells never oversizes.
-        let lot = meta.min_amount.max(dec!(0.00000001));
-        amount = (amount / lot).floor() * lot;
 
         // Wire policy: every semantic maps explicitly or refuses.
         let mut params: Vec<(String, String)> = vec![
@@ -1387,7 +1418,13 @@ impl ExchangeAdapter for DeribitAdapter {
         };
         let amount = self.to_venue_amount(&meta, qty, ref_px).await?;
         let lot = meta.min_amount.max(dec!(0.00000001));
-        let snapped = (amount / lot).floor() * lot;
+        let ratio = amount / lot;
+        let nearest = ratio.round();
+        let snapped = if (ratio - nearest).abs() <= dec!(0.0001) {
+            nearest * lot
+        } else {
+            ratio.floor() * lot
+        };
         if snapped <= dec!(0) {
             return Ok(dec!(0));
         }

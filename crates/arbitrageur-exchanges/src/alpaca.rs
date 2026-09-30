@@ -124,8 +124,19 @@ impl AlpacaAdapter {
         }
     }
 
+    const CRYPTO_BASES: &'static [&'static str] = &[
+        "BTC", "ETH", "SOL", "ADA", "DOGE", "AVAX", "LINK", "LTC", "BCH", "UNI", "AAVE", "SHIB",
+        "DOT", "MATIC", "POL", "ATOM", "ALGO", "NEAR", "XRP", "TRX", "XLM", "ICP", "FIL", "APT",
+        "SUI", "ARB", "OP", "PEPE", "WIF", "BONK", "FLOKI", "RENDER", "FET", "INJ", "TIA", "SEI",
+        "TAO", "RUNE", "MKR", "CRV", "SNX", "LDO", "GRT",
+    ];
+
     fn is_crypto_symbol(symbol: &str) -> bool {
-        symbol.contains('/')
+        if symbol.contains('/') || symbol.contains('-') {
+            return true;
+        }
+        let sym_upper = symbol.trim().to_ascii_uppercase();
+        Self::CRYPTO_BASES.iter().any(|&c| sym_upper == c)
     }
 
     /// US equities are NMS instruments: limit prices must be quoted in
@@ -150,7 +161,8 @@ impl AlpacaAdapter {
 
     /// Canonical `BTC-USD` / `AAPL` → Alpaca `BTC/USD` / `AAPL`.
     /// Crypto venue symbols always carry the `/` quote separator; an
-    /// equity ticker passes through uppercase-validated.
+    /// equity ticker passes through uppercase-validated. Bare crypto bases
+    /// (e.g. `ADA`, `BTC`, `WIF`) default to the USD quote pair.
     pub fn to_venue_symbol(symbol: &str) -> anyhow::Result<String> {
         let s = symbol.trim();
         if s.contains('/') {
@@ -167,8 +179,12 @@ impl AlpacaAdapter {
                 return Ok(format!("{}/{}", b.to_uppercase(), q.to_uppercase()));
             }
         }
+        let sym_upper = s.to_ascii_uppercase();
+        if Self::CRYPTO_BASES.iter().any(|&c| sym_upper == c) {
+            return Ok(format!("{sym_upper}/USD"));
+        }
         if s.chars().all(|c| c.is_ascii_alphanumeric() || c == '.') && !s.is_empty() {
-            return Ok(s.to_uppercase());
+            return Ok(sym_upper);
         }
         anyhow::bail!("unsupported Alpaca symbol '{symbol}'")
     }
@@ -294,6 +310,7 @@ impl AlpacaAdapter {
                 .chars()
                 .take(512)
                 .collect();
+            tracing::warn!("Alpaca HTTP {status} for {method} {url}: {snippet}");
             self.rate_limiter.record_failure(is_429);
             anyhow::bail!("Alpaca HTTP {status}: {snippet}");
         }
@@ -477,7 +494,7 @@ impl ExchangeAdapter for AlpacaAdapter {
         // single-level book is the honest shape, never fabricated depth.
         let v = self
             .data_get(&format!(
-                "/v2/stocks/{}/quotes/latest",
+                "/v2/stocks/{}/quotes/latest?feed=iex",
                 urlencoding(&venue_sym)
             ))
             .await?;
@@ -849,7 +866,25 @@ impl ExchangeAdapter for AlpacaAdapter {
     /// clock. The symbol maps through the same `to_venue_symbol` the order
     /// path uses, so an unmapped spelling fails closed to session-bound.
     fn cash_session_bound(&self, symbol: &str) -> bool {
-        match Self::to_venue_symbol(symbol) {
+        let s = symbol.trim();
+        if let Ok(v) = Self::to_venue_symbol(s) {
+            if Self::is_crypto_symbol(&v) {
+                return false;
+            }
+        }
+        let b = arbitrageur_core::symbol::canonical_base(s);
+        const ALPACA_CRYPTO_BASES: &[&str] = &[
+            "BTC", "ETH", "SOL", "ADA", "DOGE", "AVAX", "LINK", "DOT", "UNI", "LTC", "BCH", "SHIB",
+            "NEAR", "ATOM", "XLM", "ALGO", "MATIC", "POL", "AAVE", "SUSHI", "CRV", "MKR", "SNX",
+            "COMP", "YFI", "BAT", "GRT", "WIF", "PEPE", "BONK", "RENDER",
+        ];
+        if ALPACA_CRYPTO_BASES
+            .iter()
+            .any(|c| c.eq_ignore_ascii_case(&b))
+        {
+            return false;
+        }
+        match Self::to_venue_symbol(s) {
             Ok(v) => !Self::is_crypto_symbol(&v),
             Err(_) => true,
         }
@@ -977,6 +1012,7 @@ mod tests {
             AlpacaAdapter::to_venue_symbol("BTC/USD").unwrap(),
             "BTC/USD"
         );
+        assert_eq!(AlpacaAdapter::to_venue_symbol("ADA").unwrap(), "ADA/USD");
         assert_eq!(AlpacaAdapter::to_venue_symbol("aapl").unwrap(), "AAPL");
         assert!(AlpacaAdapter::to_venue_symbol("BTC/USD/EXTRA").is_err());
         assert!(AlpacaAdapter::to_venue_symbol("").is_err());

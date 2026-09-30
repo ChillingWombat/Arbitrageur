@@ -185,18 +185,18 @@ fn main() {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
             loop {
                 interval.tick().await;
+                let mut breaker_feed = Vec::new();
                 for (vid, _name, adapter) in bg_state.get_venues() {
                     if let Ok((mut acc, _stale)) =
                         execution::live_account_or_cached(&bg_state, vid, &adapter).await
                     {
                         bg_state.normalize_account_usd(vid, &mut acc);
-                        execution::feed_breaker_equity_usd(
-                            &bg_state,
-                            vid,
-                            acc.equity,
-                            &acc.balances,
-                        );
+                        let econ_key = execution::breaker_account_key(&bg_state, vid);
+                        breaker_feed.push((econ_key, acc.equity, acc.balances));
                     }
+                }
+                if !breaker_feed.is_empty() {
+                    execution::feed_breaker_equity(&bg_state, &breaker_feed);
                 }
             }
         });

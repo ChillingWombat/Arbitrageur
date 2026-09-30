@@ -605,7 +605,12 @@ pub async fn scan_options_packages_impl(
     if !matches!(ccy.as_str(), "BTC" | "ETH") {
         return Err("options packages support BTC or ETH".into());
     }
-    let qty_base = params.qty_base.unwrap_or(0.1);
+    let mut qty_base = params
+        .qty_base
+        .unwrap_or(if ccy == "ETH" { 1.0 } else { 0.1 });
+    if ccy == "ETH" && qty_base < 1.0 {
+        qty_base = 1.0;
+    }
     if !qty_base.is_finite() || qty_base <= 0.0 {
         return Err("qty_base must be a finite positive number".into());
     }
@@ -668,7 +673,9 @@ pub async fn scan_options_packages_impl(
                         let [l0, l1, l2, l3] = ev.legs;
                         push(OptionsPackageOpportunityDto {
                             id: format!(
-                                "obox-{ccy}-{expiry_ms}-{k1}-{k2}-{}",
+                                "obox-{ccy}-{expiry_ms}-{}-{}-{}",
+                                k1.normalize(),
+                                k2.normalize(),
                                 if ev.label.starts_with("LONG") {
                                     "long"
                                 } else {
@@ -782,7 +789,9 @@ pub async fn scan_options_packages_impl(
                             let [n0, n1, n2, n3, f0, f1, f2, f3] = ev.legs;
                             push(OptionsPackageOpportunityDto {
                                 id: format!(
-                                    "ojel-{ccy}-{t1_ms}-{t2_ms}-{k1}-{k2}-{}",
+                                    "ojel-{ccy}-{t1_ms}-{t2_ms}-{}-{}-{}",
+                                    k1.normalize(),
+                                    k2.normalize(),
                                     if ev.label.starts_with("LONG") {
                                         "long"
                                     } else {
@@ -860,7 +869,10 @@ pub async fn scan_options_packages_impl(
                     let body = if ev.is_call { c2 } else { p2 };
                     push(OptionsPackageOpportunityDto {
                         id: format!(
-                            "ocvx-{ccy}-{expiry_ms}-{k1}-{k2}-{k3}-{}",
+                            "ocvx-{ccy}-{expiry_ms}-{}-{}-{}-{}",
+                            k1.normalize(),
+                            k2.normalize(),
+                            k3.normalize(),
                             if ev.is_call { "call" } else { "put" }
                         ),
                         substrategy_id: "convexity".into(),
@@ -1107,8 +1119,13 @@ pub async fn execute_options_package_impl(
                 book.symbol
             ));
         }
-        book.validate_for_execution()
+        let leg_side = match leg.side.to_lowercase().as_str() {
+            "sell" => arbitrageur_core::types::Side::Sell,
+            _ => arbitrageur_core::types::Side::Buy,
+        };
+        book.validate_for_side(leg_side)
             .map_err(|e| format!("dispatch book for {sym}: {e}"))?;
+        state.market_data_hub.update_orderbook(book.clone());
         books.push(book);
     }
 
@@ -1361,7 +1378,12 @@ pub async fn execute_options_package_impl(
             .ok()
             .flatten()
             .map(|s| s.status);
-        if current != Some(SignalStatus::InFlight) {
+        // The background reconciler may have polled an earlier leg while
+        // subsequent legs were still dispatching, advancing it from InFlight
+        // to Balanced or Unresolved. Override any non-terminal state so a
+        // partial cycle always marks filled legs Imbalanced and a completed
+        // cycle stamps the uniform cycle note.
+        if matches!(current, Some(SignalStatus::Closed | SignalStatus::Failed)) {
             continue;
         }
         if cycle_complete {
@@ -1384,7 +1406,7 @@ pub async fn execute_options_package_impl(
                 SignalStatus::Imbalanced,
                 Some("options package partial — residual leg; flatten the instrument to unwind"),
             );
-        } else {
+        } else if current == Some(SignalStatus::InFlight) {
             let _ = state.state_store.update_signal_status(
                 sid,
                 SignalStatus::Failed,
@@ -1445,7 +1467,7 @@ pub async fn execute_options_package_impl(
                 success: false,
                 gross_profit: 0.0,
                 fees: fee_total_f,
-                net_profit: attempt_pnl_f,
+                net_profit: -fee_total_f,
                 latency_us,
                 note: format!(
                     "Options package {tag} record errors: {}",
@@ -1480,7 +1502,7 @@ pub async fn execute_options_package_impl(
             success: false,
             gross_profit: 0.0,
             fees: fee_total_f,
-            net_profit: attempt_pnl_f,
+            net_profit: -fee_total_f,
             latency_us,
             note: format!(
                 "Options package {tag} PARTIAL: {}. Residual legs recorded as imbalanced '{strategy_id}' signals — flatten each instrument to unwind.",
@@ -1515,7 +1537,7 @@ pub async fn execute_options_package_impl(
         success: true,
         gross_profit: 0.0,
         fees: fee_total_f,
-        net_profit: attempt_pnl_f,
+        net_profit: -fee_total_f,
         latency_us,
         note: format!(
             "Options package {tag} {} completed {}/{} legs; premium cashflow ${attempt_pnl_f:.2} booked, locked edge unrealized until expiry.",
