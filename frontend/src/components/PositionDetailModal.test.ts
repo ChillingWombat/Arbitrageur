@@ -66,8 +66,8 @@ test("PositionDetailModal renders Net PnL sparkline with safe dimensions and $0 
     })
   );
 
-  // Chart SVG must exist with 800x140 viewBox
-  assert.match(html, /viewBox="0 0 800 140"/);
+  // Chart SVG must exist with 800x200 viewBox
+  assert.match(html, /viewBox="0 0 800 200"/);
 
   // Must render $0 zero line label
   assert.match(html, />\$0<\/text>/);
