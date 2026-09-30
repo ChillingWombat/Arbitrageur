@@ -128,7 +128,68 @@ impl AlpacaAdapter {
         "BTC", "ETH", "SOL", "ADA", "DOGE", "AVAX", "LINK", "LTC", "BCH", "UNI", "AAVE", "SHIB",
         "DOT", "MATIC", "POL", "ATOM", "ALGO", "NEAR", "XRP", "TRX", "XLM", "ICP", "FIL", "APT",
         "SUI", "ARB", "OP", "PEPE", "WIF", "BONK", "FLOKI", "RENDER", "FET", "INJ", "TIA", "SEI",
-        "TAO", "RUNE", "MKR", "CRV", "SNX", "LDO", "GRT",
+        "TAO", "RUNE", "MKR", "CRV", "SNX", "LDO", "GRT", "ONDO", "BNB", "HBAR", "DYDX", "AERO",
+        "PENDLE", "POPCAT", "JUP", "JTO", "HYPE", "KAITO", "BERA", "BIO", "CC", "CHIP", "DASH",
+        "DIA", "EIGEN", "FARTCOIN", "FOGO", "GRASS", "IP", "LIT", "MEGA", "MET", "MON", "MORPHO",
+        "PAXG", "PENGU", "PROVE", "PUMP", "PYTH", "RESOLV", "S", "SKR", "SKY", "STABLE", "STBL",
+        "SUSHI", "SYRUP", "TON", "TRUMP", "USELESS", "VIRTUAL", "VVV", "WLD", "WLFI", "XMR", "XPL",
+        "ZEC", "ZK", "ZORA", "ZRO", "0G", "1000SHIB", "2Z", "ASTER", "AVNT", "AXS", "AZTEC",
+    ];
+
+    const EQUITY_TICKERS: &'static [&'static str] = &[
+        "AAPL",
+        "MSFT",
+        "GOOGL",
+        "AMZN",
+        "NVDA",
+        "TSLA",
+        "META",
+        "SPY",
+        "QQQ",
+        "IWM",
+        "DIA",
+        "COIN",
+        "PLTR",
+        "AMD",
+        "INTC",
+        "MRVL",
+        "MU",
+        "ORCL",
+        "TSM",
+        "ASML",
+        "BABA",
+        "GME",
+        "HOOD",
+        "MSTR",
+        "SPACEX",
+        "TTWO",
+        "HYUNDAIUSD",
+        "SAMSUNGUSD",
+        "SKHYNIXUSD",
+        "SPX",
+        "SPX500",
+        "US100",
+        "US500",
+        "US30",
+        "RUT2000",
+        "NAS100",
+        "EURUSD",
+        "USDJPY",
+        "USDCAD",
+        "USDCHF",
+        "GBPUSD",
+        "AUDUSD",
+        "NZDUSD",
+        "USDKRW",
+        "WTI",
+        "BRENTOIL",
+        "NATGAS",
+        "WHEAT",
+        "XAU",
+        "XAG",
+        "XPT",
+        "XPD",
+        "XCU",
     ];
 
     fn is_crypto_symbol(symbol: &str) -> bool {
@@ -136,6 +197,9 @@ impl AlpacaAdapter {
             return true;
         }
         let sym_upper = symbol.trim().to_ascii_uppercase();
+        if Self::EQUITY_TICKERS.iter().any(|&e| sym_upper == e) {
+            return false;
+        }
         Self::CRYPTO_BASES.iter().any(|&c| sym_upper == c)
     }
 
@@ -162,7 +226,7 @@ impl AlpacaAdapter {
     /// Canonical `BTC-USD` / `AAPL` → Alpaca `BTC/USD` / `AAPL`.
     /// Crypto venue symbols always carry the `/` quote separator; an
     /// equity ticker passes through uppercase-validated. Bare crypto bases
-    /// (e.g. `ADA`, `BTC`, `WIF`) default to the USD quote pair.
+    /// (e.g. `ADA`, `BTC`, `WIF`, `ONDO`) default to the USD quote pair.
     pub fn to_venue_symbol(symbol: &str) -> anyhow::Result<String> {
         let s = symbol.trim();
         if s.contains('/') {
@@ -180,7 +244,7 @@ impl AlpacaAdapter {
             }
         }
         let sym_upper = s.to_ascii_uppercase();
-        if Self::CRYPTO_BASES.iter().any(|&c| sym_upper == c) {
+        if Self::is_crypto_symbol(&sym_upper) {
             return Ok(format!("{sym_upper}/USD"));
         }
         if s.chars().all(|c| c.is_ascii_alphanumeric() || c == '.') && !s.is_empty() {
@@ -750,15 +814,10 @@ impl ExchangeAdapter for AlpacaAdapter {
                 "Alpaca equity orders of fractional qty must be DAY market orders (got {ty}/{tif})"
             );
         }
-        if order.reduce_only && crypto {
+        if order.reduce_only && order.side != Side::Sell {
             // Spot has no short to reduce — a sell is inherently
             // position-reducing and Alpaca rejects oversells natively.
-            if order.side != Side::Sell {
-                anyhow::bail!("reduce-only buy is meaningless on a spot venue");
-            }
-        }
-        if order.reduce_only && !crypto {
-            anyhow::bail!("reduce-only is not supported for Alpaca equities");
+            anyhow::bail!("reduce-only buy is meaningless on a spot venue");
         }
         let mut body = serde_json::json!({
             "symbol": venue_sym,
