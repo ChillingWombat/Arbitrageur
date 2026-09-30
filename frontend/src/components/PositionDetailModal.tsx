@@ -128,9 +128,9 @@ export const PositionDetailModal: React.FC<PositionDetailModalProps> = React.mem
   const entryPnl = -fees;
   const expectedNet = familyExpected ?? pos.expectedNetUsd;
   const hasProjection = expectedNet != null && Number.isFinite(expectedNet);
-  // Chart geometry: x in [t0, t1, t2], y auto-scaled with proper padding.
-  const W = 800, H = 150;
-  const PAD_LEFT = 70, PAD_RIGHT = 45, PAD_TOP = 24, PAD_BOTTOM = 28;
+  // Chart geometry: x in [t0, t1, t2], y auto-scaled with safe padding.
+  const W = 800, H = 140;
+  const PAD_LEFT = 75, PAD_RIGHT = 45, PAD_TOP = 22, PAD_BOTTOM = 26;
   const plotW = W - PAD_LEFT - PAD_RIGHT;
   const plotH = H - PAD_TOP - PAD_BOTTOM;
   const t0 = Date.parse(pos.openedAt);
@@ -351,6 +351,9 @@ export const PositionDetailModal: React.FC<PositionDetailModalProps> = React.mem
               )}
               {/* Zero line */}
               <line x1={PAD_LEFT} y1={zeroY} x2={W - PAD_RIGHT} y2={zeroY} stroke="#94a3b8" strokeWidth="1" strokeDasharray="2 3" />
+              <text x={PAD_LEFT - 6} y={zeroY + 3.5} fontSize="9" fill="#94a3b8" fontFamily="Inter, sans-serif" textAnchor="end">
+                $0
+              </text>
               {/* Projection divider line at t1 */}
               {hasProjection && (
                 <line x1={xPos(t1)} y1={PAD_TOP * 0.5} x2={xPos(t1)} y2={H - PAD_BOTTOM} stroke="#94a3b8" strokeWidth="1" strokeDasharray="3 3" opacity="0.7" />

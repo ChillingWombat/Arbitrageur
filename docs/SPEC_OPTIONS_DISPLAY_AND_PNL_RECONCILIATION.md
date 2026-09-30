@@ -79,9 +79,10 @@ A comprehensive full-stack quantitative solution spanning frontend visualization
     - Projected domain $[t_1, t_2]$ maps to horizontal range $[X_{\text{mid}}, X_{\text{end}}]$ representing 55% of plot width.
   - When `hasProjection` is false:
     - Realized domain $[t_0, t_1]$ maps to 100% of plot width.
-- Expanded chart canvas dimensions to $800 \times 150$ with calibrated margins ($P_{\text{left}} = 70$, $P_{\text{right}} = 45$, $P_{\text{top}} = 24$, $P_{\text{bottom}} = 28$).
+- Compact, high-clarity chart canvas dimensions: $800 \times 140$ with calibrated margins ($P_{\text{left}} = 75$, $P_{\text{right}} = 45$, $P_{\text{top}} = 22$, $P_{\text{bottom}} = 26$).
+- Zero-reference axis: Subtle `$0` label rendered on the zero breakeven dotted line with right-anchored alignment at $P_{\text{left}} - 6$, making breakeven visually distinct without clutter.
 - Applied vertical domain padding: $Y_{\text{pad}} = \max(1.5, 0.15 \times (Y_{\text{hi}} - Y_{\text{lo}}))$, ensuring all peak and trough nodes maintain comfortable clearance from horizontal borders.
-- Centered the current PnL text anchor over the partition node ($X_{\text{mid}}$) at $t_1$, ensuring text remains centrally balanced with over 300px of clearance on either side.
+- Dynamic text anchoring for the current PnL text label (`start` within 40px of left margin, `end` within 40px of right margin, `middle` otherwise), completely eliminating border clipping and canvas overflow across all screen widths.
 
 ### 3. Quantitative Accounting & State Store Recalibration
 - In options package execution (`options_packages.rs`), net premium financing cashflows route to `accumulate_premium_outlay`, and only venue transaction fees (`fee_total`) route to `accumulate_realized_profit`.
@@ -102,12 +103,13 @@ A comprehensive full-stack quantitative solution spanning frontend visualization
   2. *Backend Engine & State Store Seam*: Verify that execution log aggregations correctly separate capital financing from transaction fees, and verify that KV state persists accurate PnL totals upon startup.
 
 ### Modules Tested
-- `AtomicTransactionsTable` and `PositionDetailModal` (Frontend component test suites).
+- `AtomicTransactionsTable` and `PositionDetailModal` (`PositionDetailModal.test.ts` & `TradedOpportunitiesGadget.test.ts`).
 - `OptionsArbitrage` and `PositionsPanel` (Frontend options rendering test suites).
 - `state::tests` and `state_store::logs` (Backend Tauri engine and SQLite store suites).
 
 ### Prior Art
 - `frontend/src/components/AtomicTransactionsTable.tsx` & `PositionDetailModal.tsx`.
+- `frontend/src/components/PositionDetailModal.test.ts`.
 - `frontend/src/components/OptionsArbitrage.test.ts`.
 - `frontend/src-tauri/src/state.rs` test suite (`cargo test -p arbitrageur-desktop --bin arbitrageur-desktop state::tests`).
 
