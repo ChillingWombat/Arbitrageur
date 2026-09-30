@@ -1341,6 +1341,8 @@ impl ExchangeAdapter for HyperliquidAdapter {
             ),
             "canceled"
             | "marginCanceled"
+            | "reduceOnlyCanceled"
+            | "vaultWithdrawalCanceled"
             | "delistedCanceled"
             | "liquidatedCanceled"
             | "expired"
