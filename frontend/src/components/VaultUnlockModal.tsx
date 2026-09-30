@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { Lock, Shield, Eye, EyeOff, KeyRound, AlertTriangle } from "lucide-react";
+import { Lock, Shield, Eye, EyeOff, KeyRound, AlertTriangle, X } from "lucide-react";
 import { api } from "../services/api";
 import type { VaultStatus } from "../types";
 
@@ -53,6 +53,13 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [isOpen, loading, onClose, dismissible]);
+
+  // Auto-dismiss if the vault becomes unlocked (e.g. via dev RPC, background or session)
+  useEffect(() => {
+    if (isOpen && mode === "unlock" && vaultStatus?.is_unlocked) {
+      onSuccess(vaultStatus);
+    }
+  }, [isOpen, mode, vaultStatus, onSuccess]);
 
   if (!isOpen) return null;
 
@@ -135,6 +142,16 @@ export const VaultUnlockModal: React.FC<VaultUnlockModalProps> = ({
               </p>
             </div>
           </div>
+          {dismissible && onClose && (
+            <button
+              type="button"
+              onClick={onClose}
+              className="text-slate-400 hover:text-slate-600 transition p-1.5 rounded-lg hover:bg-slate-100 cursor-pointer -mr-1 -mt-1"
+              title="Close modal"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          )}
         </div>
 
         {error && (

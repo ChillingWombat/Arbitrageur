@@ -225,13 +225,32 @@ export const App: React.FC = () => {
   const [showVaultModal, setShowVaultModal] = useState(false);
   const vaultLockCancelRef = useRef<(() => void) | null>(null);
 
-  // Check vault status on app startup: if running in desktop app and vault is locked,
-  // prompt user immediately to unlock or create master password.
+  // Check vault status on app startup and keep it synchronized:
+  // if running in desktop app and vault is locked, prompt user immediately.
+  // When unlocked (via UI, RPC, or session), automatically clear the prompt.
   useEffect(() => {
     if (!api.isTauri) return;
+    let isMounted = true;
+    const syncVault = () => {
+      api
+        .getVaultStatus()
+        .then((status) => {
+          if (!isMounted) return;
+          setVaultStatus(status);
+          if (status?.is_unlocked) {
+            setShowVaultModal(false);
+          }
+        })
+        .catch((err) => {
+          console.warn("Vault status sync failed:", err);
+        });
+    };
+
+    // Initial check
     api
       .getVaultStatus()
       .then((status) => {
+        if (!isMounted) return;
         setVaultStatus(status);
         if (status && !status.is_unlocked) {
           setShowVaultModal(true);
@@ -240,6 +259,12 @@ export const App: React.FC = () => {
       .catch((err) => {
         console.warn("Startup vault status check failed:", err);
       });
+
+    const interval = setInterval(syncVault, 3000);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
   }, []);
 
   useEffect(() => {
@@ -1226,6 +1251,7 @@ export const App: React.FC = () => {
       <VaultUnlockModal
         isOpen={showVaultModal && api.isTauri}
         vaultStatus={vaultStatus}
+        dismissible={true}
         onClose={() => setShowVaultModal(false)}
         onSuccess={(status) => {
           setVaultStatus(status);
