@@ -208,18 +208,18 @@ test("getTickerActiveVenues returns only active venue subset", () => {
   assert.deepStrictEqual(activeVenues, ["HL", "RH"]);
 });
 
-test("getAdmittedVenueCodes counts only READ_ONLY venues — UNSUPPORTED and OFFLINE are not admitted", () => {
+test("getAdmittedVenueCodes counts ONLINE and READ_ONLY venues — UNSUPPORTED and OFFLINE are not admitted", () => {
   const status = {
     active_venues: [
-      { id: "hyperliquid", status: "OFFLINE" },
+      { id: "hyperliquid", status: "ONLINE" },
       { id: "lighter", status: "READ_ONLY" },
       { id: "robinhood", status: "READ_ONLY" },
       { id: "vanta", status: "UNSUPPORTED" },
-      { id: "binance", status: "UNSUPPORTED" },
+      { id: "binance", status: "OFFLINE" },
     ],
   };
   const codes = getAdmittedVenueCodes(status);
-  assert.deepStrictEqual(Array.from(codes).sort(), ["LGT", "RH"]);
+  assert.deepStrictEqual(Array.from(codes).sort(), ["HL", "LGT", "RH"]);
   // Two admitted venues unlock the RH-eligible ticker universe.
   assert.ok(filterAvailableTickers(PERP_TICKERS, codes, 2).length > 0);
 });
