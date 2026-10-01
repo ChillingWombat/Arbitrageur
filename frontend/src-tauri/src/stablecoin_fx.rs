@@ -148,6 +148,7 @@ impl StablecoinFx {
             global: Mutex::new(HashMap::new()),
             venue: Mutex::new(HashMap::new()),
             http: reqwest::Client::builder()
+                .user_agent("Arbitrageur/1.0 (Desktop Trading Engine)")
                 .timeout(Duration::from_secs(15))
                 .build()
                 .unwrap_or_default(),
