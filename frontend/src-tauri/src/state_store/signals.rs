@@ -611,7 +611,7 @@ impl StateStore {
                       AND l.venue_order_id NOT LIKE 'sim-%')
                      OR (l.client_order_id IS NOT NULL AND l.client_order_id != '')
                    )
-                   AND datetime(l.updated_at) > datetime('now', '-30 minutes')
+                   AND datetime(e.created_at) > datetime('now', '-30 minutes')
                  )
                )",
         );

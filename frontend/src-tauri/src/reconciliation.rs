@@ -511,7 +511,12 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
                         leg.fee_usd
                     );
                 }
-                if filled > leg.filled_qty || fee > leg.fee_usd || price.is_some() {
+                let price_changed = match (price, leg.fill_price) {
+                    (Some(new_p), Some(old_p)) => (new_p - old_p).abs() > 1e-9,
+                    (Some(_), None) => true,
+                    _ => false,
+                };
+                if filled > leg.filled_qty || fee > leg.fee_usd || price_changed {
                     match state
                         .state_store
                         .apply_leg_order_state(&exec.id, leg.side, filled, price, fee)
