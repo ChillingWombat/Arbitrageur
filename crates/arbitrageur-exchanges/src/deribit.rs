@@ -580,11 +580,17 @@ impl DeribitAdapter {
                     .get("is_active")
                     .and_then(|a| a.as_bool())
                     .unwrap_or(false);
-                let is_open = item
-                    .get("state")
-                    .and_then(|s| s.as_str())
-                    .map(|s| s == "open")
-                    .unwrap_or(false);
+                let is_open = if self.testnet {
+                    // Deribit testnet API (test.deribit.com) sets state: "halted" on
+                    // instruments even when actively trading/simulated. Only mainnet
+                    // reports truthful matching engine states.
+                    is_active
+                } else {
+                    item.get("state")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s == "open")
+                        .unwrap_or(false)
+                };
                 meta.insert(
                     name,
                     InstrumentMeta {
@@ -1689,6 +1695,14 @@ mod tests {
     fn url_encoding_encodes_reserved() {
         assert_eq!(urlencoding("a+b/c=d"), "a%2Bb%2Fc%3Dd");
         assert_eq!(urlencoding("plain_1.2-~"), "plain_1.2-~");
+    }
+
+    #[test]
+    fn testnet_deribit_considers_active_instruments_open() {
+        let tn = DeribitAdapter::for_testnet(None, None);
+        assert!(tn.is_testnet());
+        let prod = DeribitAdapter::new(None, None);
+        assert!(!prod.is_testnet());
     }
 
     /// Live testnet smoke test — validates real wire shapes against
