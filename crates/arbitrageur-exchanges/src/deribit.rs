@@ -851,11 +851,17 @@ impl ExchangeAdapter for DeribitAdapter {
                                 .get("instrument_name")
                                 .and_then(|s| s.as_str())
                                 .unwrap_or("");
+                            let is_open = item
+                                .get("state")
+                                .and_then(|s| s.as_str())
+                                .map(|s| s == "open")
+                                .unwrap_or(true);
                             if name.is_empty()
                                 || !item
                                     .get("is_active")
                                     .and_then(|a| a.as_bool())
                                     .unwrap_or(false)
+                                || !is_open
                             {
                                 continue;
                             }
@@ -1304,7 +1310,18 @@ impl ExchangeAdapter for DeribitAdapter {
             Side::Buy => "buy",
             Side::Sell => "sell",
         };
-        let v = self.private_get(&format!("/private/{verb}?{qs}")).await?;
+        let v = match self.private_get(&format!("/private/{verb}?{qs}")).await {
+            Ok(v) => v,
+            Err(e) => {
+                let err_str = e.to_string();
+                if err_str.contains("10031") || err_str.contains("invalid_args_for_instrument") {
+                    anyhow::bail!(
+                        "Deribit {verb} rejected ({instrument}): {err_str} (instrument may be halted or index locked by venue)"
+                    );
+                }
+                return Err(e);
+            }
+        };
         let o = v
             .get("order")
             .cloned()

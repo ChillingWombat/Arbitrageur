@@ -459,18 +459,43 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
                   <span className="text-[9px] px-1.5 py-px rounded bg-slate-100 text-slate-600 font-mono font-bold border border-slate-200/60 whitespace-nowrap">
                     {STRATEGY_SHORT[pos.strategyId] ?? pos.strategyId.toUpperCase()}
                   </span>
-                  <span
-                    className="text-[10px] font-semibold text-slate-500 tabular-nums shrink-0"
-                    title={
-                      pos.unrealizedPnlUsd !== null
-                        ? `Mark-to-market PnL net of $${pos.feesUsd.toFixed(2)} fees`
-                        : pos.expectedNetUsd !== null
-                        ? `Mark-to-market unavailable; entry-time expected net ${formatUsd(pos.expectedNetUsd)}`
-                        : "No mark-to-market data"
-                    }
-                  >
-                    {pos.unrealizedPnlUsd !== null ? formatUsd(pos.unrealizedPnlUsd) : "—"}
-                  </span>
+                  {pos.strategyId.startsWith("options_") && pos.expectedNetUsd !== null ? (
+                    <div className="flex items-center gap-1.5 tabular-nums shrink-0">
+                      <span
+                        className="text-[10px] font-bold text-emerald-600"
+                        title={`Expected net profit at expiration: ${formatUsd(pos.expectedNetUsd)}`}
+                      >
+                        Exp: {formatUsd(pos.expectedNetUsd)}
+                      </span>
+                      {pos.unrealizedPnlUsd !== null && (
+                        <span
+                          className="text-[9px] font-medium text-slate-400"
+                          title={`Current testnet mark-to-market (illiquid spread): ${formatUsd(pos.unrealizedPnlUsd)}`}
+                        >
+                          (MtM: {formatUsd(pos.unrealizedPnlUsd)})
+                        </span>
+                      )}
+                    </div>
+                  ) : (
+                    <span
+                      className={`text-[10px] font-semibold tabular-nums shrink-0 ${
+                        pos.unrealizedPnlUsd === null
+                          ? "text-slate-500"
+                          : pos.unrealizedPnlUsd >= 0
+                          ? "text-emerald-600"
+                          : "text-rose-600"
+                      }`}
+                      title={
+                        pos.unrealizedPnlUsd !== null
+                          ? `Mark-to-market PnL net of $${pos.feesUsd.toFixed(2)} fees`
+                          : pos.expectedNetUsd !== null
+                          ? `Mark-to-market unavailable; entry-time expected net ${formatUsd(pos.expectedNetUsd)}`
+                          : "No mark-to-market data"
+                      }
+                    >
+                      {pos.unrealizedPnlUsd !== null ? formatUsd(pos.unrealizedPnlUsd) : "—"}
+                    </span>
+                  )}
                 </div>
               </div>
             );
