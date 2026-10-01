@@ -515,16 +515,63 @@ pub struct ConvexityEval {
     pub label: &'static str,
     /// [wing K1 buy ×1, body K2 sell ×2, wing K3 buy ×1] executed prices.
     pub legs: [(bool, f64); 3],
+    #[allow(dead_code)]
     pub is_call: bool,
     pub gross_edge_usd: f64,
     pub est_fees_usd: f64,
     pub net_edge_usd: f64,
 }
 
+/// Evaluate one equidistant strike triple for a single option type (call or put).
+/// Convexity bound: C(K2) <= (C(K1)+C(K3))/2 (or P(K2) <= (P(K1)+P(K3))/2).
+/// Violation => riskless sell of the body.
+pub fn evaluate_convexity_side(
+    w1: &OptQuote,
+    body: &OptQuote,
+    w3: &OptQuote,
+    qty: f64,
+    index_usd: f64,
+    is_call: bool,
+) -> Option<ConvexityEval> {
+    if !qty.is_finite() || qty <= 0.0 || !index_usd.is_finite() || index_usd <= 0.0 {
+        return None;
+    }
+    let w1_ask = side_px(w1, true)?;
+    let w3_ask = side_px(w3, true)?;
+    let body_bid = side_px(body, false)?;
+    let edge_unit = 2.0 * body_bid - w1_ask - w3_ask;
+    if !edge_unit.is_finite() || edge_unit <= 0.0 {
+        return None;
+    }
+    let gross = edge_unit * qty * index_usd;
+    // Wings trade qty, the body trades 2×qty — per-contract fee on
+    // each leg's traded premium.
+    let fees = option_fee_usd(w1_ask * index_usd, index_usd, qty)?
+        + option_fee_usd(body_bid * index_usd, index_usd, qty * 2.0)?
+        + option_fee_usd(w3_ask * index_usd, index_usd, qty)?;
+    let net = gross - fees;
+    if !net.is_finite() || net <= 0.0 {
+        return None;
+    }
+    Some(ConvexityEval {
+        label: if is_call {
+            "SELL CALL FLY"
+        } else {
+            "SELL PUT FLY"
+        },
+        legs: [(true, w1_ask), (false, body_bid), (true, w3_ask)],
+        is_call,
+        gross_edge_usd: gross,
+        est_fees_usd: fees,
+        net_edge_usd: net,
+    })
+}
+
 /// Evaluate one equidistant strike triple at one expiry. Convexity bound:
 /// C(K2) ≤ (C(K1)+C(K3))/2 — violation ⇒ riskless sell of the body.
 /// Only the buy-wings/sell-body direction is riskless; the inverse is a
 /// short butterfly whose payoff can go negative, so it is never emitted.
+#[allow(dead_code)]
 pub fn evaluate_convexity(
     k1: (&OptQuote, &OptQuote),
     k2: (&OptQuote, &OptQuote),
@@ -532,49 +579,13 @@ pub fn evaluate_convexity(
     qty: f64,
     index_usd: f64,
 ) -> Option<ConvexityEval> {
-    if !qty.is_finite() || qty <= 0.0 || !index_usd.is_finite() || index_usd <= 0.0 {
-        return None;
-    }
-    let mk = |is_call: bool| -> Option<ConvexityEval> {
-        let (w1, body, w3) = if is_call {
-            (k1.0, k2.0, k3.0)
-        } else {
-            (k1.1, k2.1, k3.1)
-        };
-        let w1_ask = side_px(w1, true)?;
-        let w3_ask = side_px(w3, true)?;
-        let body_bid = side_px(body, false)?;
-        let edge_unit = 2.0 * body_bid - w1_ask - w3_ask;
-        if !edge_unit.is_finite() || edge_unit <= 0.0 {
-            return None;
-        }
-        let gross = edge_unit * qty * index_usd;
-        // Wings trade qty, the body trades 2×qty — per-contract fee on
-        // each leg's traded premium.
-        let fees = option_fee_usd(w1_ask * index_usd, index_usd, qty)?
-            + option_fee_usd(body_bid * index_usd, index_usd, qty * 2.0)?
-            + option_fee_usd(w3_ask * index_usd, index_usd, qty)?;
-        let net = gross - fees;
-        if !net.is_finite() || net <= 0.0 {
-            return None;
-        }
-        Some(ConvexityEval {
-            label: if is_call {
-                "SELL CALL FLY"
-            } else {
-                "SELL PUT FLY"
-            },
-            legs: [(true, w1_ask), (false, body_bid), (true, w3_ask)],
-            is_call,
-            gross_edge_usd: gross,
-            est_fees_usd: fees,
-            net_edge_usd: net,
-        })
-    };
-    [mk(true), mk(false)]
-        .into_iter()
-        .flatten()
-        .max_by(|a, b| a.net_edge_usd.total_cmp(&b.net_edge_usd))
+    [
+        evaluate_convexity_side(k1.0, k2.0, k3.0, qty, index_usd, true),
+        evaluate_convexity_side(k1.1, k2.1, k3.1, qty, index_usd, false),
+    ]
+    .into_iter()
+    .flatten()
+    .max_by(|a, b| a.net_edge_usd.total_cmp(&b.net_edge_usd))
 }
 
 fn expiry_iso(expiry_ms: i64) -> String {
@@ -867,97 +878,126 @@ pub async fn scan_options_packages_impl(
                     continue;
                 }
                 let strike_list: Vec<Decimal> = strikes.keys().cloned().collect();
-                for i in 0..strike_list.len().saturating_sub(2) {
-                    let (k1, k2, k3) = (strike_list[i], strike_list[i + 1], strike_list[i + 2]);
-                    // Equidistant only — the 1/2/1 contract ratio hedges
-                    // exactly. Non-uniform spacings need fractional legs the
-                    // venue grid can't take.
-                    if (k2 - k1) != (k3 - k2) {
-                        continue;
-                    }
-                    let (
-                        Some((Some(c1), Some(p1))),
-                        Some((Some(c2), Some(p2))),
-                        Some((Some(c3), Some(p3))),
-                    ) = (strikes.get(&k1), strikes.get(&k2), strikes.get(&k3))
-                    else {
-                        continue;
-                    };
-                    let Some(ev) =
-                        evaluate_convexity((c1, p1), (c2, p2), (c3, p3), qty_base, index_usd)
-                    else {
-                        continue;
-                    };
-                    let edge_bps = if notional > 0.0 {
-                        ev.net_edge_usd / notional * 10_000.0
-                    } else {
-                        0.0
-                    };
-                    let [w1l, bd, w3l] = ev.legs;
-                    let body = if ev.is_call { c2 } else { p2 };
-                    push(OptionsPackageOpportunityDto {
-                        id: format!(
-                            "ocvx-{ccy}-{expiry_ms}-{}-{}-{}-{}",
-                            k1.normalize(),
-                            k2.normalize(),
-                            k3.normalize(),
-                            if ev.is_call { "call" } else { "put" }
-                        ),
-                        substrategy_id: "convexity".into(),
-                        venue: "deribit".into(),
-                        currency: ccy.clone(),
-                        label: ev.label.to_string(),
-                        expiry_ms: *expiry_ms,
-                        expiry_iso: expiry_iso(*expiry_ms),
-                        expiry2_ms: None,
-                        expiry2_iso: None,
-                        strikes: vec![to_f64(k1), to_f64(k2), to_f64(k3)],
-                        legs: vec![
-                            leg_dto(
-                                &(if ev.is_call { c1 } else { p1 }).name,
-                                w1l.0,
-                                w1l.1,
-                                1,
-                                snap.index,
-                            ),
-                            leg_dto(&body.name, bd.0, bd.1, 2, snap.index),
-                            leg_dto(
-                                &(if ev.is_call { c3 } else { p3 }).name,
-                                w3l.0,
-                                w3l.1,
-                                1,
-                                snap.index,
-                            ),
-                        ],
-                        implied_rate_pct: None,
-                        benchmark_rate_pct: None,
-                        gross_edge_usd: ev.gross_edge_usd,
-                        est_fees_usd: ev.est_fees_usd,
-                        net_edge_usd: ev.net_edge_usd,
-                        edge_bps,
-                        index_price_usd: index_usd,
-                        qty_base_suggested: qty_base,
-                        is_executable: if ev.is_call {
-                            c1.is_open && c2.is_open && c3.is_open
-                        } else {
-                            p1.is_open && p2.is_open && p3.is_open
-                        },
-                        reason: {
-                            let open = if ev.is_call {
-                                c1.is_open && c2.is_open && c3.is_open
-                            } else {
-                                p1.is_open && p2.is_open && p3.is_open
-                            };
-                            if !open {
-                                Some(
-                                    "One or more option legs are halted on venue matching engine"
-                                        .to_string(),
-                                )
-                            } else {
-                                None
+                for i in 0..strike_list.len() {
+                    let hi = strike_list.len().min(i + 1 + MAX_STRIKE_GAP_MULT);
+                    for j in (i + 1)..hi {
+                        let (k1, k2) = (strike_list[i], strike_list[j]);
+                        let step = k2 - k1;
+                        let k3 = k2 + step;
+                        let Some(s3) = strikes.get(&k3) else {
+                            continue;
+                        };
+                        let Some(s1) = strikes.get(&k1) else {
+                            continue;
+                        };
+                        let Some(s2) = strikes.get(&k2) else {
+                            continue;
+                        };
+                        // Evaluate Calls if c1, c2, c3 are present
+                        if let (Some(c1), Some(c2), Some(c3)) = (&s1.0, &s2.0, &s3.0) {
+                            if let Some(ev) =
+                                evaluate_convexity_side(c1, c2, c3, qty_base, index_usd, true)
+                            {
+                                let edge_bps = if notional > 0.0 {
+                                    ev.net_edge_usd / notional * 10_000.0
+                                } else {
+                                    0.0
+                                };
+                                let [w1l, bd, w3l] = ev.legs;
+                                push(OptionsPackageOpportunityDto {
+                                    id: format!(
+                                        "ocvx-{ccy}-{expiry_ms}-{}-{}-{}-call",
+                                        k1.normalize(),
+                                        k2.normalize(),
+                                        k3.normalize(),
+                                    ),
+                                    substrategy_id: "convexity".into(),
+                                    venue: "deribit".into(),
+                                    currency: ccy.clone(),
+                                    label: ev.label.to_string(),
+                                    expiry_ms: *expiry_ms,
+                                    expiry_iso: expiry_iso(*expiry_ms),
+                                    expiry2_ms: None,
+                                    expiry2_iso: None,
+                                    strikes: vec![to_f64(k1), to_f64(k2), to_f64(k3)],
+                                    legs: vec![
+                                        leg_dto(&c1.name, w1l.0, w1l.1, 1, snap.index),
+                                        leg_dto(&c2.name, bd.0, bd.1, 2, snap.index),
+                                        leg_dto(&c3.name, w3l.0, w3l.1, 1, snap.index),
+                                    ],
+                                    implied_rate_pct: None,
+                                    benchmark_rate_pct: None,
+                                    gross_edge_usd: ev.gross_edge_usd,
+                                    est_fees_usd: ev.est_fees_usd,
+                                    net_edge_usd: ev.net_edge_usd,
+                                    edge_bps,
+                                    index_price_usd: index_usd,
+                                    qty_base_suggested: qty_base,
+                                    is_executable: c1.is_open && c2.is_open && c3.is_open,
+                                    reason: if c1.is_open && c2.is_open && c3.is_open {
+                                        None
+                                    } else {
+                                        Some(
+                                            "One or more option legs are halted on venue matching engine"
+                                                .to_string(),
+                                        )
+                                    },
+                                });
                             }
-                        },
-                    });
+                        }
+                        // Evaluate Puts if p1, p2, p3 are present
+                        if let (Some(p1), Some(p2), Some(p3)) = (&s1.1, &s2.1, &s3.1) {
+                            if let Some(ev) =
+                                evaluate_convexity_side(p1, p2, p3, qty_base, index_usd, false)
+                            {
+                                let edge_bps = if notional > 0.0 {
+                                    ev.net_edge_usd / notional * 10_000.0
+                                } else {
+                                    0.0
+                                };
+                                let [w1l, bd, w3l] = ev.legs;
+                                push(OptionsPackageOpportunityDto {
+                                    id: format!(
+                                        "ocvx-{ccy}-{expiry_ms}-{}-{}-{}-put",
+                                        k1.normalize(),
+                                        k2.normalize(),
+                                        k3.normalize(),
+                                    ),
+                                    substrategy_id: "convexity".into(),
+                                    venue: "deribit".into(),
+                                    currency: ccy.clone(),
+                                    label: ev.label.to_string(),
+                                    expiry_ms: *expiry_ms,
+                                    expiry_iso: expiry_iso(*expiry_ms),
+                                    expiry2_ms: None,
+                                    expiry2_iso: None,
+                                    strikes: vec![to_f64(k1), to_f64(k2), to_f64(k3)],
+                                    legs: vec![
+                                        leg_dto(&p1.name, w1l.0, w1l.1, 1, snap.index),
+                                        leg_dto(&p2.name, bd.0, bd.1, 2, snap.index),
+                                        leg_dto(&p3.name, w3l.0, w3l.1, 1, snap.index),
+                                    ],
+                                    implied_rate_pct: None,
+                                    benchmark_rate_pct: None,
+                                    gross_edge_usd: ev.gross_edge_usd,
+                                    est_fees_usd: ev.est_fees_usd,
+                                    net_edge_usd: ev.net_edge_usd,
+                                    edge_bps,
+                                    index_price_usd: index_usd,
+                                    qty_base_suggested: qty_base,
+                                    is_executable: p1.is_open && p2.is_open && p3.is_open,
+                                    reason: if p1.is_open && p2.is_open && p3.is_open {
+                                        None
+                                    } else {
+                                        Some(
+                                            "One or more option legs are halted on venue matching engine"
+                                                .to_string(),
+                                        )
+                                    },
+                                });
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1875,5 +1915,29 @@ mod tests {
         assert!(
             evaluate_convexity((&k1.0, &k1.1), (&k2.0, &k2.1), (&k3.0, &k3.1), 1.0, IDX,).is_none()
         );
+    }
+
+    #[test]
+    fn convexity_side_evaluates_calls_when_puts_absent() {
+        let (k1, k2, k3) = convexity_fixture();
+        let ev = evaluate_convexity_side(&k1.0, &k2.0, &k3.0, 1.0, IDX, true)
+            .expect("call fly works without put quotes");
+        assert_eq!(ev.label, "SELL CALL FLY");
+        assert!(ev.is_call);
+        assert!((ev.gross_edge_usd - 400.0).abs() < 1e-6);
+        assert!((ev.net_edge_usd - 280.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn convexity_side_evaluates_puts_when_calls_absent() {
+        let p_k1 = q("P-K1", 0.048, 0.050);
+        let p_k2 = q("P-K2", 0.032, 0.034);
+        let p_k3 = q("P-K3", 0.009, 0.010);
+        let ev = evaluate_convexity_side(&p_k1, &p_k2, &p_k3, 1.0, IDX, false)
+            .expect("put fly works without call quotes");
+        assert_eq!(ev.label, "SELL PUT FLY");
+        assert!(!ev.is_call);
+        assert!((ev.gross_edge_usd - 400.0).abs() < 1e-6);
+        assert!((ev.net_edge_usd - 280.0).abs() < 1e-6);
     }
 }

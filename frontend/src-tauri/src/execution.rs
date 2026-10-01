@@ -2123,7 +2123,7 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
             // stays under manual-flatten control and the check reports
             // Unwatched instead of inventing a baseline.
             let mut baseline_note = String::new();
-            if strategy_id == "futures" {
+            if strategy_id == "futures" || strategy_id == "radar" {
                 let row = crate::state_store::SpatialEntryBaseline {
                     signal_id: signal_id.clone(),
                     symbol: symbol.to_string(),
@@ -5708,6 +5708,17 @@ async fn flatten_positions_inner(
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let action_desc = match close_status {
+            CycleStatus::Closed => "close",
+            CycleStatus::StoppedOut => "stop-out unwind",
+            CycleStatus::TimedOut => "timeout unwind",
+            _ => "flatten",
+        };
+        let action_prefix = if execution_type == Some("emergency_market") {
+            "emergency flatten"
+        } else {
+            action_desc
+        };
         state
             .state_store
             .record_signal_execution(
@@ -5717,7 +5728,7 @@ async fn flatten_positions_inner(
                     symbol: sig.symbol.clone(),
                     route_id: sig.route_id.clone(),
                     expected_net_usd: None,
-                    note: Some(format!("emergency flatten of {}", sig.id)),
+                    note: Some(format!("{action_prefix} of {}", sig.id)),
                     legs: child_legs,
                 },
                 state.env().as_str(),
@@ -5878,7 +5889,7 @@ async fn flatten_positions_inner(
             }
         }
 
-        let note = format!("emergency flatten via {close_id}");
+        let note = format!("{action_prefix} via {close_id}");
         // Realized PnL comes from the attributed ledger lot when the exit
         // fills cover it; single-leg residuals (e.g. triangle legs) realize
         // purely through their signal legs and keep the 0.0 log convention.
