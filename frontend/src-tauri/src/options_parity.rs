@@ -334,7 +334,17 @@ pub async fn scan_options_parity_impl(
     let mut out: Vec<OptionsParityOpportunityDto> = Vec::new();
     // Group the chain into (expiry, strike) pairs with both call and put.
     use std::collections::BTreeMap;
-    let mut pairs: BTreeMap<(i64, Decimal), (Option<String>, Option<String>)> = BTreeMap::new();
+    #[derive(Default)]
+    struct ParityOptionLeg {
+        name: String,
+        is_open: bool,
+    }
+    #[derive(Default)]
+    struct ParityPairEntry {
+        call: Option<ParityOptionLeg>,
+        put: Option<ParityOptionLeg>,
+    }
+    let mut pairs: BTreeMap<(i64, Decimal), ParityPairEntry> = BTreeMap::new();
     for inst in &chain {
         if inst.settlement_currency != ccy {
             continue;
@@ -346,18 +356,28 @@ pub async fn scan_options_parity_impl(
         let entry = pairs.entry((inst.expiration_ms, inst.strike)).or_default();
         match inst.option_type {
             arbitrageur_exchanges::deribit::DeribitOptionType::Call => {
-                entry.0 = Some(inst.name.clone())
+                entry.call = Some(ParityOptionLeg {
+                    name: inst.name.clone(),
+                    is_open: inst.is_open,
+                });
             }
             arbitrageur_exchanges::deribit::DeribitOptionType::Put => {
-                entry.1 = Some(inst.name.clone())
+                entry.put = Some(ParityOptionLeg {
+                    name: inst.name.clone(),
+                    is_open: inst.is_open,
+                });
             }
         }
     }
 
-    for ((expiry_ms, strike), (call_name, put_name)) in pairs {
-        let (Some(call_name), Some(put_name)) = (call_name, put_name) else {
+    for ((expiry_ms, strike), pair) in pairs {
+        let (Some(call_leg), Some(put_leg)) = (pair.call, pair.put) else {
             continue;
         };
+        let call_name = call_leg.name;
+        let call_open = call_leg.is_open;
+        let put_name = put_leg.name;
+        let put_open = put_leg.is_open;
         let call = summary_map.get(&call_name);
         let put = summary_map.get(&put_name);
         let (Some(call), Some(put)) = (call, put) else {
@@ -405,7 +425,8 @@ pub async fn scan_options_parity_impl(
             }
             ParityDirection::Reversal => (call_ask, put_bid, Some(perp_bid), "buy", "sell", "sell"),
         };
-        let executable = eval.net_edge_usd > dec!(0) && perp_quotes_live;
+        let all_open = call_open && put_open;
+        let executable = eval.net_edge_usd > dec!(0) && perp_quotes_live && all_open;
         let to_f = |d: Option<Decimal>| {
             d.and_then(|v| v.to_string().parse::<f64>().ok())
                 .unwrap_or(0.0)
@@ -458,7 +479,9 @@ pub async fn scan_options_parity_impl(
             index_price_usd: index.to_string().parse().unwrap_or(0.0),
             qty_base_suggested: qty_base,
             is_executable: executable,
-            reason: if !perp_quotes_live {
+            reason: if !all_open {
+                Some("Option leg is halted on Deribit matching engine".to_string())
+            } else if !perp_quotes_live {
                 Some("Deribit perp orderbook has no resting quotes".to_string())
             } else if eval.net_edge_usd <= dec!(0) {
                 Some("edge is fee-eaten at this size".to_string())
@@ -1351,6 +1374,7 @@ mod tests {
             "instrument_name": name,
             "kind": kind,
             "is_active": true,
+            "state": "open",
             "tick_size": if kind == "option" { 0.0001 } else { 0.5 },
             "min_trade_amount": if kind == "option" { 0.1 } else { 10.0 },
             "contract_size": if kind == "option" { 1.0 } else { 10.0 },

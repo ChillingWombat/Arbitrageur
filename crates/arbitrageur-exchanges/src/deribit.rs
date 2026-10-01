@@ -58,6 +58,7 @@ struct InstrumentMeta {
     option_type: Option<DeribitOptionType>,
     expiration_ms: Option<i64>,
     is_active: bool,
+    is_open: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -99,6 +100,7 @@ pub struct DeribitOptionInstrument {
     pub min_amount: Decimal,
     pub contract_size: Decimal,
     pub settlement_currency: String,
+    pub is_open: bool,
 }
 
 struct CachedInstruments {
@@ -444,6 +446,7 @@ impl DeribitAdapter {
                     min_amount: m.min_amount,
                     contract_size: m.contract_size,
                     settlement_currency: m.settlement_currency.clone(),
+                    is_open: m.is_open,
                 })
             })
             .collect();
@@ -577,6 +580,11 @@ impl DeribitAdapter {
                     .get("is_active")
                     .and_then(|a| a.as_bool())
                     .unwrap_or(false);
+                let is_open = item
+                    .get("state")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s == "open")
+                    .unwrap_or(false);
                 meta.insert(
                     name,
                     InstrumentMeta {
@@ -603,6 +611,7 @@ impl DeribitAdapter {
                         },
                         expiration_ms: item.get("expiration_timestamp").and_then(|t| t.as_i64()),
                         is_active,
+                        is_open,
                     },
                 );
             }
@@ -1213,6 +1222,12 @@ impl ExchangeAdapter for DeribitAdapter {
             anyhow::bail!("Deribit unsupported instrument '{instrument}'");
         }
         let meta = self.instrument_meta(&instrument).await?;
+        if !meta.is_open {
+            anyhow::bail!(
+                "Cannot place order on Deribit: instrument '{instrument}' is currently {} on venue matching engine (orders rejected by venue)",
+                if meta.is_active { "halted" } else { "inactive" }
+            );
+        }
         let currency = instrument_currency(&instrument)
             .unwrap_or("BTC")
             .to_string();
@@ -1557,6 +1572,7 @@ mod tests {
             option_type: Some(DeribitOptionType::Call),
             expiration_ms: Some(1_790_323_200_000),
             is_active: true,
+            is_open: true,
         }
     }
 
