@@ -169,7 +169,13 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
                 <td colSpan={10}>
                   <EmptyState
                     title="No Transactions Found"
-                    hint={<>No execution records for <span className="font-medium text-slate-700">{symbol}</span> matching the active filters.</>}
+                    hint={
+                      symbol ? (
+                        <>No execution records for <span className="font-medium text-slate-700">{symbol}</span> matching the active filters.</>
+                      ) : (
+                        "No execution records matching the active filters."
+                      )
+                    }
                   />
                 </td>
               </tr>
