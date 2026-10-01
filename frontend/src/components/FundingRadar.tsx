@@ -1231,6 +1231,174 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
     [selectedOpp, fundingOpps]
   );
 
+  // --- Top Telemetry Metric Strip ---
+  // 1. Total Net Profit & completed cycles count
+  const totalNetProfit = useMemo(() => {
+    return fundingLogs.reduce(
+      (sum, l) => sum + (l.net_pnl ?? l.net_profit ?? 0),
+      0
+    );
+  }, [fundingLogs]);
+
+  const closedFundingCount = useMemo(() => {
+    const fromLogs = fundingLogs.filter(
+      (l) => l.net_pnl != null || l.net_profit != null
+    ).length;
+    if (fromLogs > 0) return fromLogs;
+    return (tradedOpps ?? []).filter(
+      (o) =>
+        ["funding", "funding_rate"].includes((o.strategyId ?? "").toLowerCase()) &&
+        (o.status === "closed" || o.lotStatus === "closed")
+    ).length;
+  }, [fundingLogs, tradedOpps]);
+
+  // 4. Open Positions & total notional
+  const totalFundingNotional = useMemo(() => {
+    return fundingPositions.reduce((acc, p) => acc + (p.notionalUsd ?? 0), 0);
+  }, [fundingPositions]);
+
+  // Candidate scanning for Est. 24h Yield fallback
+  const topOpp = useMemo(() => {
+    if (!opportunities || opportunities.length === 0) return null;
+    return [...opportunities].sort(
+      (a, b) => (b.net_apr_pct ?? -Infinity) - (a.net_apr_pct ?? -Infinity)
+    )[0];
+  }, [opportunities]);
+
+  // 2. Total APR since the start of system (first trade)
+  const firstTradeTs = useMemo(() => {
+    let earliest: number | null = null;
+    for (const l of fundingLogs) {
+      const isTrade =
+        l.success === true ||
+        (l.net_pnl != null && l.net_pnl !== 0) ||
+        (l.net_profit != null && l.net_profit !== 0) ||
+        l.leg_a_status === "filled" ||
+        l.leg_b_status === "filled";
+      if (isTrade && l.timestamp) {
+        const t = Date.parse(l.timestamp);
+        if (Number.isFinite(t)) {
+          if (earliest === null || t < earliest) earliest = t;
+        }
+      }
+    }
+    for (const o of fundingOpps) {
+      if (o.status === "closed" || o.status === "balanced" || o.lotStatus === "closed") {
+        const t = Date.parse(o.createdAt);
+        if (Number.isFinite(t)) {
+          if (earliest === null || t < earliest) earliest = t;
+        }
+      }
+    }
+    if (earliest === null) {
+      for (const l of fundingLogs) {
+        if (l.timestamp) {
+          const t = Date.parse(l.timestamp);
+          if (Number.isFinite(t)) {
+            if (earliest === null || t < earliest) earliest = t;
+          }
+        }
+      }
+      for (const o of fundingOpps) {
+        const t = Date.parse(o.createdAt);
+        if (Number.isFinite(t)) {
+          if (earliest === null || t < earliest) earliest = t;
+        }
+      }
+    }
+    return earliest;
+  }, [fundingLogs, fundingOpps]);
+
+  const { totalApr, totalAprSubtext, totalAprTooltip } = useMemo(() => {
+    if (firstTradeTs == null) {
+      return {
+        totalApr: null,
+        totalAprSubtext: "No trades yet",
+        totalAprTooltip: "Total APR will be computed after the first trade executes.",
+      };
+    }
+
+    const now = Date.now();
+    const elapsedMs = Math.max(now - firstTradeTs, 3600_000); // 1h baseline to avoid microsecond blowup
+    const elapsedDays = elapsedMs / (86_400 * 1000);
+    const capitalBase =
+      tradeSize > 0
+        ? tradeSize
+        : totalFundingNotional > 0
+        ? totalFundingNotional
+        : 500;
+
+    const returnRate = totalNetProfit / capitalBase;
+    const apr = returnRate * (365 / elapsedDays) * 100;
+
+    const daysStr =
+      elapsedDays >= 1
+        ? `${elapsedDays.toFixed(1)}d`
+        : `${Math.max(1, Math.round(elapsedMs / 3600_000))}h`;
+
+    const subtext = `since first trade (${daysStr})`;
+    const dateStr = new Date(firstTradeTs).toLocaleDateString(undefined, {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    });
+    const tooltip = `Total APR: ${apr >= 0 ? "+" : ""}${apr.toFixed(2)}% annualized over ${elapsedDays.toFixed(2)} days (${closedFundingCount} completed cycles, net profit ${totalNetProfit >= 0 ? "+" : ""}$${totalNetProfit.toFixed(2)} on $${capitalBase.toLocaleString()} trade size base since ${dateStr})`;
+
+    return {
+      totalApr: Number.isFinite(apr) ? apr : null,
+      totalAprSubtext: subtext,
+      totalAprTooltip: tooltip,
+    };
+  }, [firstTradeTs, tradeSize, totalFundingNotional, totalNetProfit, closedFundingCount]);
+
+  // 3. Average Net APR across positive carry opportunities
+  const avgNetApr = useMemo(() => {
+    const positiveOpps = opportunities.filter((o) => (o.net_apr_pct ?? 0) > 0);
+    if (positiveOpps.length === 0) return null;
+    const sum = positiveOpps.reduce((acc, o) => acc + (o.net_apr_pct ?? 0), 0);
+    return sum / positiveOpps.length;
+  }, [opportunities]);
+
+  // 5. Est. 24h Yield
+  const { estDailyYield, yieldSubtext } = useMemo(() => {
+    if (fundingPositions.length > 0) {
+      let openIncome = 0;
+      let matchedCount = 0;
+      for (const pos of fundingPositions) {
+        const matchedOpp = opportunities.find((o) => {
+          const oBase = o.symbol.replace(/[-_/](USDC|USDT|USD)$/i, "");
+          const pBase = pos.symbol.replace(/[-_/](USDC|USDT|USD)$/i, "");
+          return o.symbol === pos.symbol || oBase === pBase;
+        });
+        if (matchedOpp && matchedOpp.estimated_daily_income_usd != null) {
+          const ratio =
+            pos.notionalUsd && matchedOpp.trade_size_usd
+              ? pos.notionalUsd / (matchedOpp.trade_size_usd * 2)
+              : 1;
+          openIncome += matchedOpp.estimated_daily_income_usd * ratio;
+          matchedCount++;
+        }
+      }
+      if (matchedCount > 0) {
+        return {
+          estDailyYield: openIncome,
+          yieldSubtext: `from ${fundingPositions.length} open position${fundingPositions.length === 1 ? "" : "s"}`,
+        };
+      }
+    }
+    // Fallback to top carry candidate
+    if (topOpp && topOpp.estimated_daily_income_usd != null) {
+      return {
+        estDailyYield: topOpp.estimated_daily_income_usd,
+        yieldSubtext: `top candidate (${topOpp.symbol.replace(/[-_/](USDC|USDT|USD)$/i, "")})`,
+      };
+    }
+    return {
+      estDailyYield: 0,
+      yieldSubtext: "no active yield",
+    };
+  }, [fundingPositions, opportunities, topOpp]);
+
   // Bot lifecycle is strategy-wide for Funding Rate carry, not locked to a single ticker
   const bot = useBotLifecycle({ strategyId: "funding" });
   const lastAutoCarryExecRef = useRef<number>(0);
@@ -1365,6 +1533,109 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
               Execution blocked: {execError}
             </span>
           )}
+        </div>
+      </div>
+
+      {/* 5-Card Top Telemetry Strip */}
+      <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3.5 shrink-0">
+        {/* 1. Total Net Profit */}
+        <div className="bg-surface p-3.5 rounded-xl border border-surface-border shadow-card space-y-1 hover:border-slate-300 transition-all">
+          <span className="text-[11px] font-sans tracking-wider uppercase text-slate-500 font-semibold">
+            Total Net Profit
+          </span>
+          <div
+            className={`text-xl font-bold font-mono tracking-tight tabular-nums ${
+              totalNetProfit >= 0 ? "text-profit" : "text-loss"
+            }`}
+          >
+            {totalNetProfit === 0
+              ? "$0.00"
+              : totalNetProfit > 0
+              ? `+$${totalNetProfit.toFixed(2)}`
+              : `-$${Math.abs(totalNetProfit).toFixed(2)}`}
+          </div>
+          <div className="text-xs text-slate-500 font-mono truncate">
+            {closedFundingCount} completed cycles
+          </div>
+        </div>
+
+        {/* 2. Total APR */}
+        <div className="bg-surface p-3.5 rounded-xl border border-surface-border shadow-card space-y-1 hover:border-slate-300 transition-all">
+          <span
+            className="text-[11px] font-sans tracking-wider uppercase text-slate-500 font-semibold"
+            title="Total annualized percentage rate realized since the first trade"
+          >
+            Total APR
+          </span>
+          <div
+            className={`text-xl font-bold font-mono tracking-tight tabular-nums ${
+              totalApr != null && totalApr >= 0
+                ? "text-profit"
+                : totalApr != null
+                ? "text-loss"
+                : "text-muted"
+            }`}
+          >
+            {totalApr != null && Number.isFinite(totalApr)
+              ? `${totalApr >= 0 ? "+" : ""}${totalApr.toFixed(1)}% APR`
+              : "—"}
+          </div>
+          <div className="text-xs text-slate-500 font-mono truncate" title={totalAprTooltip}>
+            {totalAprSubtext}
+          </div>
+        </div>
+
+        {/* 3. Average Net APR */}
+        <div className="bg-surface p-3.5 rounded-xl border border-surface-border shadow-card space-y-1 hover:border-slate-300 transition-all">
+          <span className="text-[11px] font-sans tracking-wider uppercase text-slate-500 font-semibold">
+            Average Net APR
+          </span>
+          <div
+            className={`text-xl font-bold font-mono tracking-tight tabular-nums ${
+              avgNetApr != null && avgNetApr > 0 ? "text-profit" : "text-muted"
+            }`}
+          >
+            {avgNetApr != null && Number.isFinite(avgNetApr)
+              ? `+${avgNetApr.toFixed(1)}% APR`
+              : "—"}
+          </div>
+          <div className="text-xs text-slate-500 font-mono truncate">
+            across {opportunities.length} pairs
+          </div>
+        </div>
+
+        {/* 4. Open Positions */}
+        <div className="bg-surface p-3.5 rounded-xl border border-surface-border shadow-card space-y-1 hover:border-slate-300 transition-all">
+          <span className="text-[11px] font-sans tracking-wider uppercase text-slate-500 font-semibold">
+            Open Positions
+          </span>
+          <div className="text-xl font-bold font-mono tracking-tight tabular-nums text-slate-900">
+            {fundingPositions.length}
+          </div>
+          <div className="text-xs text-slate-500 font-mono truncate">
+            ${Math.round(totalFundingNotional).toLocaleString()} USD
+          </div>
+        </div>
+
+        {/* 5. Est. 24h Yield */}
+        <div className="bg-surface p-3.5 rounded-xl border border-surface-border shadow-card space-y-1 hover:border-slate-300 transition-all">
+          <span className="text-[11px] font-sans tracking-wider uppercase text-slate-500 font-semibold">
+            Est. 24h Yield
+          </span>
+          <div
+            className={`text-xl font-bold font-mono tracking-tight tabular-nums ${
+              estDailyYield >= 0 ? "text-profit" : "text-loss"
+            }`}
+          >
+            {estDailyYield === 0
+              ? "$0.00 / day"
+              : estDailyYield > 0
+              ? `+$${estDailyYield.toFixed(2)} / day`
+              : `-$${Math.abs(estDailyYield).toFixed(2)} / day`}
+          </div>
+          <div className="text-xs text-slate-500 font-mono truncate" title={yieldSubtext}>
+            {yieldSubtext}
+          </div>
         </div>
       </div>
 
@@ -1624,43 +1895,33 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
       </div>
       {/* Bottom dock: Current Position vs Execution History vs Opportunity History vs Log Monitor */}
       <div className="bg-surface rounded-xl border border-surface-border shadow-card overflow-hidden shrink-0">
-        <div className="flex items-stretch border-b border-surface-border bg-slate-50/80 select-none">
-          <div className="grid grid-cols-4 flex-1 divide-x divide-surface-border">
-            {(
-              [
-                { id: "position", label: "Current Position", icon: Wallet, count: fundingPositions.length },
-                { id: "history", label: "Execution History", icon: History, count: fundingLogs.length },
-                { id: "opps", label: "Opportunity History", icon: Radar, count: fundingOpps.length },
-                { id: "logs", label: "Log Monitor", icon: Terminal, count: null },
-              ] as const
-            ).map(({ id, label, icon: Icon, count }) => (
-              <button
-                key={id}
-                type="button"
-                onClick={() => setDockTab(id)}
-                className={`relative h-9 flex items-center justify-center space-x-2 px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
-                  dockTab === id
-                    ? "text-accent-strong font-bold bg-surface"
-                    : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
+        <div className="grid grid-cols-4 border-b border-surface-border bg-slate-50/60 select-none pt-1 px-1 gap-1">
+          {(
+            [
+              { id: "position", label: "Open Positions", icon: Wallet },
+              { id: "opps", label: "Opportunity History", icon: Radar },
+              { id: "history", label: "Execution History", icon: History },
+              { id: "logs", label: "Log Monitor", icon: Terminal },
+            ] as const
+          ).map(({ id, label, icon: Icon }) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => setDockTab(id)}
+              className={`w-full flex items-center justify-center space-x-2 py-2 px-3 text-xs font-sans transition select-none group cursor-pointer rounded-t-lg ${
+                dockTab === id
+                  ? "text-accent-strong font-bold bg-surface border-t border-x border-surface-border -mb-px shadow-2xs"
+                  : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/80 font-medium border-t border-x border-transparent"
+              }`}
+            >
+              <Icon
+                className={`w-3.5 h-3.5 transition shrink-0 ${
+                  dockTab === id ? "text-accent-strong" : "text-muted group-hover:text-slate-600"
                 }`}
-              >
-                <Icon
-                  className={`w-3.5 h-3.5 transition shrink-0 ${
-                    dockTab === id ? "text-accent-strong" : "text-muted group-hover:text-slate-600"
-                  }`}
-                />
-                <span>{label}</span>
-                {count != null && count > 0 && (
-                  <span className="px-1.5 py-0.5 rounded-md text-[11px] font-sans font-bold min-w-[16px] text-center leading-tight bg-accent-dim text-accent-strong border border-accent-line/60">
-                    {count}
-                  </span>
-                )}
-                {dockTab === id && (
-                  <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
-                )}
-              </button>
-            ))}
-          </div>
+              />
+              <span className="truncate">{label}</span>
+            </button>
+          ))}
         </div>
         <div className="p-3.5 h-96 overflow-y-auto">
           {dockTab === "position" ? (

@@ -59,6 +59,9 @@ pub struct OptionsPackageScanParams {
     pub min_hours_to_expiry: Option<f64>,
     pub max_days_to_expiry: Option<f64>,
     pub min_edge_bps: Option<f64>,
+    /// Minimum annualized expected yield percentage hurdle (e.g. 10.0 for 10% APR).
+    #[serde(default)]
+    pub min_expected_yield_pct: Option<f64>,
     /// Result cap — a display concern. Execution re-scans pass usize::MAX so
     /// a candidate cannot fall out of the top-N cut between scans.
     pub limit: Option<usize>,
@@ -71,6 +74,8 @@ pub struct OptionsPackageExecutionParams {
     pub currency: String,
     pub qty_base: f64,
     pub min_edge_bps: Option<f64>,
+    #[serde(default)]
+    pub min_expected_yield_pct: Option<f64>,
     #[serde(default)]
     pub auto: bool,
 }
@@ -113,6 +118,9 @@ pub struct OptionsPackageOpportunityDto {
     /// Net edge as bps of per-unit underlying notional (qty×index) — the
     /// same yardstick parity uses, so one hurdle fits every substrategy.
     pub edge_bps: f64,
+    /// Annualized expected yield (APR, percent) on notional capital to expiry.
+    #[serde(default)]
+    pub expected_yield_pct: f64,
     pub index_price_usd: f64,
     pub qty_base_suggested: f64,
     pub is_executable: bool,
@@ -644,6 +652,11 @@ pub async fn scan_options_packages_impl(
     let years_of = |expiry_ms: i64| (expiry_ms - snap.now_ms) as f64 / (3_600_000.0 * 24.0 * 365.0);
     let mut push = |o: OptionsPackageOpportunityDto| {
         if o.edge_bps >= min_edge_bps {
+            if let Some(min_yield) = params.min_expected_yield_pct {
+                if o.expected_yield_pct < min_yield {
+                    return;
+                }
+            }
             out.push(o);
         }
     };
@@ -683,6 +696,11 @@ pub async fn scan_options_packages_impl(
                         } else {
                             0.0
                         };
+                        let expected_yield_pct = if t_years > 0.0 {
+                            (edge_bps / 100.0) / t_years
+                        } else {
+                            0.0
+                        };
                         let [l0, l1, l2, l3] = ev.legs;
                         push(OptionsPackageOpportunityDto {
                             id: format!(
@@ -716,6 +734,7 @@ pub async fn scan_options_packages_impl(
                             est_fees_usd: ev.est_fees_usd,
                             net_edge_usd: ev.net_edge_usd,
                             edge_bps,
+                            expected_yield_pct,
                             index_price_usd: index_usd,
                             qty_base_suggested: qty_base,
                             is_executable: c1.is_open && c2.is_open && p1.is_open && p2.is_open,
@@ -806,6 +825,12 @@ pub async fn scan_options_packages_impl(
                             } else {
                                 0.0
                             };
+                            let t2_years = years_of(t2_ms);
+                            let expected_yield_pct = if t2_years > 0.0 {
+                                (edge_bps / 100.0) / t2_years
+                            } else {
+                                0.0
+                            };
                             let [n0, n1, n2, n3, f0, f1, f2, f3] = ev.legs;
                             push(OptionsPackageOpportunityDto {
                                 id: format!(
@@ -843,6 +868,7 @@ pub async fn scan_options_packages_impl(
                                 est_fees_usd: ev.est_fees_usd,
                                 net_edge_usd: ev.net_edge_usd,
                                 edge_bps,
+                                expected_yield_pct,
                                 index_price_usd: index_usd,
                                 qty_base_suggested: qty_base,
                                 is_executable: c1t.is_open
@@ -903,6 +929,12 @@ pub async fn scan_options_packages_impl(
                                 } else {
                                     0.0
                                 };
+                                let t_years = years_of(*expiry_ms);
+                                let expected_yield_pct = if t_years > 0.0 {
+                                    (edge_bps / 100.0) / t_years
+                                } else {
+                                    0.0
+                                };
                                 let [w1l, bd, w3l] = ev.legs;
                                 push(OptionsPackageOpportunityDto {
                                     id: format!(
@@ -931,6 +963,7 @@ pub async fn scan_options_packages_impl(
                                     est_fees_usd: ev.est_fees_usd,
                                     net_edge_usd: ev.net_edge_usd,
                                     edge_bps,
+                                    expected_yield_pct,
                                     index_price_usd: index_usd,
                                     qty_base_suggested: qty_base,
                                     is_executable: c1.is_open && c2.is_open && c3.is_open,
@@ -952,6 +985,12 @@ pub async fn scan_options_packages_impl(
                             {
                                 let edge_bps = if notional > 0.0 {
                                     ev.net_edge_usd / notional * 10_000.0
+                                } else {
+                                    0.0
+                                };
+                                let t_years = years_of(*expiry_ms);
+                                let expected_yield_pct = if t_years > 0.0 {
+                                    (edge_bps / 100.0) / t_years
                                 } else {
                                     0.0
                                 };
@@ -983,6 +1022,7 @@ pub async fn scan_options_packages_impl(
                                     est_fees_usd: ev.est_fees_usd,
                                     net_edge_usd: ev.net_edge_usd,
                                     edge_bps,
+                                    expected_yield_pct,
                                     index_price_usd: index_usd,
                                     qty_base_suggested: qty_base,
                                     is_executable: p1.is_open && p2.is_open && p3.is_open,
@@ -1058,6 +1098,7 @@ pub async fn execute_options_package_impl(
             min_hours_to_expiry: Some(0.0),
             max_days_to_expiry: Some(365.0),
             min_edge_bps: params.min_edge_bps,
+            min_expected_yield_pct: params.min_expected_yield_pct,
             // Re-verify must see the whole board: the display cap could drop
             // a live edge when borderline candidates reshuffle between scans.
             limit: Some(usize::MAX),
@@ -1077,6 +1118,22 @@ pub async fn execute_options_package_impl(
             opp.id,
             opp.reason.clone().unwrap_or_default()
         ));
+    }
+    if let Some(hurdle) = params.min_edge_bps {
+        if opp.edge_bps < hurdle {
+            return Err(format!(
+                "options package edge {:.1} BPS is below the {:.1} BPS hurdle — not executed",
+                opp.edge_bps, hurdle
+            ));
+        }
+    }
+    if let Some(yield_hurdle) = params.min_expected_yield_pct {
+        if opp.expected_yield_pct < yield_hurdle {
+            return Err(format!(
+                "options package expected yield {:.2}% is below the {:.2}% hurdle — not executed",
+                opp.expected_yield_pct, yield_hurdle
+            ));
+        }
     }
 
     let _execution_guard = state.execution_lock.lock().await;
@@ -1939,5 +1996,23 @@ mod tests {
         assert!(!ev.is_call);
         assert!((ev.gross_edge_usd - 400.0).abs() < 1e-6);
         assert!((ev.net_edge_usd - 280.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn package_expected_yield_annualization_math() {
+        // edge_bps = 25.0 bps (0.25% return on notional)
+        // expiry = 30 days = 30 / 365 years ≈ 0.08219 years
+        // expected_yield_pct = (25.0 / 100.0) / (30.0 / 365.0) = 0.25 * 365 / 30 = 3.04167%
+        let edge_bps: f64 = 25.0;
+        let t_years: f64 = 30.0 / 365.0;
+        let expected_yield_pct: f64 = (edge_bps / 100.0) / t_years;
+        assert!((expected_yield_pct - 3.0416666_f64).abs() < 1e-5);
+
+        // If edge_bps = 10.0 bps on a 2-day option (2 / 365 years):
+        // expected_yield_pct = 0.1 * 365 / 2 = 18.25% APR (> 10% hurdle)
+        let edge_bps_2d: f64 = 10.0;
+        let t_years_2d: f64 = 2.0 / 365.0;
+        let yield_2d: f64 = (edge_bps_2d / 100.0) / t_years_2d;
+        assert!((yield_2d - 18.25_f64).abs() < 1e-5);
     }
 }

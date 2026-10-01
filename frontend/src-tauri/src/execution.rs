@@ -3012,13 +3012,94 @@ pub async fn get_strategy_capabilities(
 }
 
 /// Aggregated current open positions across signal executions, grouped by
-/// strategy + symbol + venue set. `unrealizedPnlUsd` is mark-to-market only
-/// when every filled leg has an entry price and a fresh venue book; otherwise
-/// `null` — never fabricated. `strategyId` scopes to one strategy.
-#[tauri::command]
-pub async fn get_open_positions(
+static DERIBIT_MARKS_LAST_FETCH: parking_lot::Mutex<Option<(std::time::Instant, String)>> =
+    parking_lot::Mutex::new(None);
+
+/// Proactively refresh public Deribit option and future mark prices into MarketDataHub
+/// whenever open Deribit positions exist and the cache is older than 15 seconds.
+/// Fully public — does not require or touch vault credentials.
+async fn refresh_deribit_open_marks(
+    state: &AppEngineState,
+    signals: &[crate::state_store::SignalExecution],
+) {
+    let mut need_btc = false;
+    let mut need_eth = false;
+    for s in signals {
+        if !s.status.counts_as_open() {
+            continue;
+        }
+        for l in &s.legs {
+            if l.venue.eq_ignore_ascii_case("deribit") {
+                let sym = l.symbol.to_ascii_uppercase();
+                if sym.starts_with("BTC") {
+                    need_btc = true;
+                } else if sym.starts_with("ETH") {
+                    need_eth = true;
+                }
+            }
+        }
+    }
+    if !need_btc && !need_eth {
+        return;
+    }
+
+    let should_fetch = {
+        let guard = DERIBIT_MARKS_LAST_FETCH.lock();
+        match *guard {
+            Some((at, ref env)) if env == state.env().as_str() => {
+                at.elapsed() > std::time::Duration::from_secs(15)
+            }
+            _ => true,
+        }
+    };
+    if !should_fetch {
+        return;
+    }
+
+    let Ok(adapter) = crate::options_parity::deribit_for_env(state) else {
+        return;
+    };
+    *DERIBIT_MARKS_LAST_FETCH.lock() =
+        Some((std::time::Instant::now(), state.env().as_str().to_string()));
+
+    let currencies = match (need_btc, need_eth) {
+        (true, true) => vec!["BTC", "ETH"],
+        (true, false) => vec!["BTC"],
+        (false, true) => vec!["ETH"],
+        (false, false) => vec![],
+    };
+
+    for ccy in currencies {
+        let _ = adapter.index_price_usd(ccy).await;
+        if let Ok(summaries) = adapter.book_summaries(ccy).await {
+            for s in summaries {
+                let mut book = arbitrageur_core::quote::OrderBook::new(
+                    arbitrageur_core::types::VenueId::from("deribit"),
+                    s.name.clone(),
+                );
+                if let Some(bid) = s.bid {
+                    book.bids.push(arbitrageur_core::quote::BookLevel::new(
+                        bid,
+                        rust_decimal::Decimal::ONE,
+                    ));
+                }
+                if let Some(ask) = s.ask {
+                    book.asks.push(arbitrageur_core::quote::BookLevel::new(
+                        ask,
+                        rust_decimal::Decimal::ONE,
+                    ));
+                }
+                book.mark_price = s.mark;
+                book.timestamp = chrono::Utc::now();
+                state.market_data_hub.update_orderbook(book);
+            }
+        }
+    }
+}
+
+pub async fn get_open_positions_impl(
     strategy_id: Option<String>,
-    state: tauri::State<'_, Arc<AppEngineState>>,
+    state: &AppEngineState,
 ) -> Result<Vec<crate::state_store::OpenPositionDto>, String> {
     let sid = match strategy_id.as_deref() {
         Some(raw) => {
@@ -3033,8 +3114,11 @@ pub async fn get_open_positions(
     if let Some(sid) = sid {
         signals.retain(|s| s.strategy_id.eq_ignore_ascii_case(&sid));
     }
+
+    refresh_deribit_open_marks(state, &signals).await;
+
     let hub = &state.market_data_hub;
-    let engine: &AppEngineState = &state;
+    let engine: &AppEngineState = state;
     let mut positions = crate::state_store::aggregate_open_positions(&signals, &|venue, symbol| {
         hub.get_valid_orderbook(&VenueId::from(venue), symbol, Some(MARK_READ_TTL))
             // Valuation fallback: a one-sided book has no mid but may carry
@@ -3065,6 +3149,18 @@ pub async fn get_open_positions(
         p.reduce_only = trade_reduce_only(engine, p)?;
     }
     Ok(positions)
+}
+
+/// Aggregated open positions across all active strategies, grouped by
+/// strategy + symbol + venue set. `unrealizedPnlUsd` is mark-to-market only
+/// when every filled leg has an entry price and a fresh venue book; otherwise
+/// `null` — never fabricated. `strategyId` scopes to one strategy.
+#[tauri::command]
+pub async fn get_open_positions(
+    strategy_id: Option<String>,
+    state: tauri::State<'_, Arc<AppEngineState>>,
+) -> Result<Vec<crate::state_store::OpenPositionDto>, String> {
+    get_open_positions_impl(strategy_id, &state).await
 }
 
 #[tauri::command]
@@ -3763,6 +3859,8 @@ pub struct EmergencyShutdownReportDto {
     pub circuit_breaker_tripped: bool,
     #[serde(alias = "enginePaused")]
     pub engine_paused: bool,
+    #[serde(alias = "engineStopped", default)]
+    pub engine_stopped: bool,
     #[serde(alias = "cancelledOrdersCount")]
     pub cancelled_orders_count: usize,
     #[serde(alias = "cancelledOrdersFailed")]
@@ -3799,8 +3897,10 @@ pub async fn execute_emergency_stop_all_impl(
         .circuit_breaker
         .trip("EMERGENCY KILLSWITCH ENGAGED BY OPERATOR");
     *state.is_paused.write() = true;
+    *state.is_stopped.write() = true;
     let _ = state.state_store.kv_set("engine.paused", "1");
     let _ = state.state_store.kv_set("engine.is_paused", "true");
+    let _ = state.state_store.kv_set("engine.stopped", "1");
     stop_all_bots(state);
 
     // Sync vault credentials so risk-reducing exits authenticate on configured venues
@@ -4108,6 +4208,7 @@ pub async fn execute_emergency_stop_all_impl(
     let report = EmergencyShutdownReportDto {
         circuit_breaker_tripped: state.circuit_breaker.is_tripped(),
         engine_paused: *state.is_paused.read(),
+        engine_stopped: *state.is_stopped.read(),
         cancelled_orders_count,
         cancelled_orders_failed,
         closed_engine_positions,
@@ -5855,23 +5956,23 @@ async fn flatten_positions_inner(
                         ));
                     }
                     Ok(Some(p)) => {
-                        // In emergency flatten or terminal close, check if the remaining venue position
-                        // is untradeable dust (< $1 notional) or sub-lot increment.
+                        // In emergency flatten or terminal close, check if this family's remaining residual
+                        // (capped at the venue position) is untradeable dust (< $10 notional) or sub-lot increment.
+                        let test_qty = residual.min(p.quantity);
                         let wire_qty = adapter
-                            .wire_base_qty(&p.symbol, p.quantity)
+                            .wire_base_qty(&p.symbol, test_qty)
                             .await
-                            .unwrap_or(p.quantity);
+                            .unwrap_or(test_qty);
                         let notional_usd =
-                            dec_to_f64(p.quantity * p.mark_price, "residual notional")
-                                .unwrap_or(0.0);
+                            dec_to_f64(test_qty * p.mark_price, "residual notional").unwrap_or(0.0);
                         let is_dust = wire_qty == Decimal::ZERO || notional_usd < 10.0;
                         if is_dust
                             && (execution_type == Some("emergency_market")
                                 || close_status == CycleStatus::Closed)
                         {
                             out.notes.push(format!(
-                                "{}: {} remaining venue position {} is untradeable dust (${:.2}) — closed under emergency flatten",
-                                sig.id, exp.exact_symbol, p.quantity, notional_usd
+                                "{}: {} residual {} (venue holds {}) is untradeable dust (${:.2}) — closed under emergency flatten",
+                                sig.id, exp.exact_symbol, test_qty, p.quantity, notional_usd
                             ));
                         } else {
                             fully_flat = false;

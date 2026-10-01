@@ -35,7 +35,7 @@ test("getEnabledConnectedVenueCodes returns enabled testnet-capable venues and i
     arcus_enabled: true, // testnet-admitted (real public /v1 API)
     aster_enabled: true, // no public testnet — live-only venue
     popdex_enabled: true,
-    kraken_enabled: true,
+    kraken_enabled: true, // no public testnet — live-only venue
     polymarket_enabled: true, // unsupported
     kalshi_enabled: true, // prediction venue, not in the perp set
     coinbase_enabled: true, // no public testnet — live-only venue
@@ -46,7 +46,6 @@ test("getEnabledConnectedVenueCodes returns enabled testnet-capable venues and i
     "ARC",
     "DCB",
     "HL",
-    "KRK",
     "LGT",
     "POP",
     "RH",

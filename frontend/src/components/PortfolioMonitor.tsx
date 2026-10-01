@@ -4,7 +4,6 @@ import {
   Activity,
   ShieldCheck,
   AlertTriangle,
-  Wallet,
   Percent,
   Target,
   Sigma,
@@ -639,12 +638,13 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
     return items;
   }, [isTripped, status, riskData, margin, venueBalances, openPositions]);
 
-  // Canonical trading-state wording: Halted = circuit breaker tripped
-  // (is_halted and circuit_breaker_tripped are the same boolean). Paused =
-  // engine paused, positions preserved. Unknown = no backend snapshot —
-  // claiming "Healthy" with no data is how halted engines get missed.
+  // Canonical trading-state wording: Stopped = emergency exit via Stop All.
+  // Halted = circuit breaker tripped. Paused = engine paused, positions preserved.
+  const isStopped = status?.is_stopped ?? (isTripped && status?.circuit_breaker_status?.includes("KILLSWITCH")) ?? false;
   const verdict = !backendKnown
     ? { label: "Unknown", cls: "bg-surface-hover text-slate-500 border-border" }
+    : isStopped
+    ? { label: "Stopped", cls: "bg-surface-raised text-slate-500 border-surface-border" }
     : isTripped
     ? { label: "Halted", cls: "bg-loss-dim text-loss border-loss-border" }
     : isPaused
@@ -802,10 +802,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
           {/* 1. Net Equity */}
           <div className="bg-surface p-3.5 rounded-xl border border-surface-border shadow-card space-y-1">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-medium text-muted font-mono">Net Equity</span>
-              <Wallet className="w-4 h-4 text-accent" />
-            </div>
+            <div className="text-xs font-medium text-muted font-mono">Net Equity</div>
             <div className="text-lg font-bold text-slate-900 font-mono tabular-nums tracking-tight">
               {usdPlain(equity)}
             </div>
@@ -816,10 +813,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
 
           {/* 2. Realized PnL */}
           <div className="bg-surface p-3.5 rounded-xl border border-surface-border shadow-card space-y-1">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-medium text-muted font-mono">Realized P&L</span>
-              <TrendingUp className="w-4 h-4 text-emerald-600" />
-            </div>
+            <div className="text-xs font-medium text-muted font-mono">Realized P&L</div>
             <div className={`text-lg font-bold font-mono tabular-nums ${pnlTone(totalPnlUsd)}`}>
               {usd(totalPnlUsd)}
             </div>
@@ -830,10 +824,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
 
           {/* 3. Unrealized PnL */}
           <div className="bg-surface p-3.5 rounded-xl border border-surface-border shadow-card space-y-1">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-medium text-muted font-mono">Unrealized P&L</span>
-              <Activity className="w-4 h-4 text-sky-600" />
-            </div>
+            <div className="text-xs font-medium text-muted font-mono">Unrealized P&L</div>
             <div className={`text-lg font-bold font-mono tabular-nums ${pnlTone(unrealizedUsd)}`}>
               {markedPositions.length > 0 ? usd(unrealizedUsd) : "$0.00"}
             </div>
@@ -844,10 +835,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
 
           {/* 4. Deployed / Margin Utilization */}
           <div className="bg-surface p-3.5 rounded-xl border border-surface-border shadow-card space-y-1">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-medium text-muted font-mono">Margin / Deployed</span>
-              <Percent className="w-4 h-4 text-indigo-600" />
-            </div>
+            <div className="text-xs font-medium text-muted font-mono">Margin / Deployed</div>
             <div className="text-lg font-bold text-slate-900 font-mono tabular-nums">
               {margin ? `${margin.margin_ratio_pct.toFixed(0)}%` : "0%"}
             </div>
@@ -858,10 +846,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
 
           {/* 5. Trading Status */}
           <div className="bg-surface p-3.5 rounded-xl border border-surface-border shadow-card space-y-1">
-            <div className="flex items-center justify-between">
-              <span className="text-xs font-medium text-muted font-mono">Trading Status</span>
-              <ShieldCheck className="w-4 h-4 text-accent-strong" />
-            </div>
+            <div className="text-xs font-medium text-muted font-mono">Trading Status</div>
             <div className="mt-0.5">
               <span
                 className={`inline-block px-2.5 py-0.5 rounded-md text-xs font-mono font-bold border tracking-wider ${verdict.cls}`}
@@ -870,7 +855,11 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
               </span>
             </div>
             <div className="text-xs text-slate-500 font-mono truncate">
-              {isTripped
+              {isStopped
+                ? isTripped
+                  ? "Engine stopped (killswitch tripped)"
+                  : "Engine stopped"
+                : isTripped
                 ? "Circuit breaker tripped"
                 : isPaused
                 ? "Engine paused"
@@ -888,7 +877,7 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
           <div>
             <h2 className="text-[13px] font-mono tracking-wider text-slate-900 font-bold flex items-center space-x-2">
               <TrendingUp className="w-5 h-5 text-accent-strong" />
-              <span>Multi-Strategy PnL & Cycle Attribution</span>
+              <span>Strategy Performance</span>
             </h2>
           </div>
           <span className="text-xs font-mono font-bold text-slate-600">
@@ -926,9 +915,8 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
                           <span className="p-1.5 bg-surface rounded-md border border-surface-border shadow-xs">
                             {getStrategyIcon(r.ledgerId)}
                           </span>
-                          <div className="min-w-0">
-                            <div className="font-bold text-[13px] text-slate-900 truncate">{formatStrategyName(r.ledgerId)}</div>
-                            <div className="text-[11px] text-muted">{r.ledgerId}</div>
+                          <div className="min-w-0 font-bold text-[13px] text-slate-900 truncate">
+                            {formatStrategyName(r.ledgerId)}
                           </div>
                         </div>
                       </td>
@@ -1275,8 +1263,8 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
           <div className="flex items-center justify-between border-b border-surface-border pb-2.5">
             <div>
               <h2 className="text-[13px] font-mono tracking-wider text-slate-900 font-bold flex items-center space-x-2">
-                <ShieldCheck className="w-5 h-5 text-accent-strong" />
-                <span>DeltaGuard Cross-Exchange Signed Net Exposure</span>
+                <ShieldCheck className="w-4 h-4 text-accent-strong" />
+                <span>Net Delta Exposure</span>
               </h2>
             </div>
           </div>
@@ -1284,26 +1272,26 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs font-mono tabular-nums">
               <thead className="bg-surface-raised/60">
-                <tr className="border-b border-surface-border text-slate-500 text-xs font-semibold tracking-wider">
-                  <th className="py-2.5 px-3">Base Asset</th>
-                  <th className="py-2.5 px-3">Net Quantity</th>
-                  <th className="py-2.5 px-3">Signed USD Exposure</th>
-                  <th className="py-2.5 px-3">Tolerance Limit</th>
-                  <th className="py-2.5 px-3 text-right">Status</th>
+                <tr className="border-b border-surface-border text-slate-500 text-[11px] font-semibold tracking-wider">
+                  <th className="py-2 px-3">Base Asset</th>
+                  <th className="py-2 px-3">Net Quantity</th>
+                  <th className="py-2 px-3">Signed USD Exposure</th>
+                  <th className="py-2 px-3">Tolerance Limit</th>
+                  <th className="py-2 px-3 text-right">Status</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-surface-border">
+              <tbody className="divide-y divide-surface-border text-xs">
                 {riskData && riskData.net_deltas.length > 0 ? (
                   riskData.net_deltas.map((delta) => {
                     const overLimit = Math.abs(delta.net_exposure_usd) > delta.delta_limit_usd;
                     const isFlat = Math.abs(delta.net_quantity) <= 1e-8;
                     return (
                       <tr key={delta.asset} className="hover:bg-surface-raised/40 transition">
-                        <td className="py-2.5 px-3 font-bold text-sm text-slate-900">{delta.asset}</td>
-                        <td className="py-2.5 px-3 text-slate-700">
+                        <td className="py-2 px-3 font-bold text-xs text-slate-900">{delta.asset}</td>
+                        <td className="py-2 px-3 text-slate-700">
                           {delta.net_quantity >= 0 ? `+${delta.net_quantity.toFixed(4)}` : delta.net_quantity.toFixed(4)}
                         </td>
-                        <td className="py-2.5 px-3">
+                        <td className="py-2 px-3">
                           <span
                             className={`font-bold ${
                               Math.abs(delta.net_exposure_usd) > delta.delta_limit_usd ? "text-loss" : "text-slate-900"
@@ -1312,18 +1300,18 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
                             {Number.isFinite(delta.net_exposure_usd) ? `$${delta.net_exposure_usd.toFixed(2)}` : "—"}
                           </span>
                         </td>
-                        <td className="py-2.5 px-3 text-slate-500">${delta.delta_limit_usd.toLocaleString("en-US")} max</td>
-                        <td className="py-2.5 px-3 text-right whitespace-nowrap">
+                        <td className="py-2 px-3 text-slate-500">${delta.delta_limit_usd.toLocaleString("en-US")} max</td>
+                        <td className="py-2 px-3 text-right whitespace-nowrap">
                           {overLimit ? (
-                            <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-loss-dim text-loss border border-loss-border whitespace-nowrap inline-block">
+                            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-loss-dim text-loss border border-loss-border whitespace-nowrap inline-block">
                               Exposure Skew
                             </span>
                           ) : isFlat ? (
-                            <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-profit-dim text-profit border border-profit-border whitespace-nowrap inline-block">
+                            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-profit-dim text-profit border border-profit-border whitespace-nowrap inline-block">
                               Delta Neutral
                             </span>
                           ) : (
-                            <span className="px-2.5 py-0.5 rounded-full text-xs font-bold bg-warn-dim text-warn-strong border border-warn-border whitespace-nowrap inline-block">
+                            <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-warn-dim text-warn-strong border border-warn-border whitespace-nowrap inline-block">
                               Residual
                             </span>
                           )}

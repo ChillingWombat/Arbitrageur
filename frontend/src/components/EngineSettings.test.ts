@@ -62,10 +62,10 @@ test("testnet sidebar lists only venues with a real demo endpoint", () => {
   }
   // Spot-check known live-only venues are gone in Testnet mode.
   const ids = new Set<string>(visible.map((ex) => ex.id));
-  for (const liveOnly of ["coinbase", "aster", "evm_wallet", "variational"]) {
+  for (const liveOnly of ["coinbase", "aster", "evm_wallet", "variational", "kraken"]) {
     assert.ok(!ids.has(liveOnly), `${liveOnly} must hide in Testnet mode`);
   }
-  for (const tn of ["hyperliquid", "alpaca", "deribit", "binance", "robinhood", "arcus"]) {
+  for (const tn of ["hyperliquid", "alpaca", "deribit", "binance", "robinhood", "arcus", "ibkr"]) {
     assert.ok(ids.has(tn), `${tn} should stay visible in Testnet mode`);
   }
 });

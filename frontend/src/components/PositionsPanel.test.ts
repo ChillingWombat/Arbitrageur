@@ -147,7 +147,7 @@ test("position card renders Reduce-Only badge when the DTO flag is set", () => {
   assert.match(html, /No new step increases; position closes on target profit/);
 });
 
-test("options position card renders expected profit alongside MtM", () => {
+test("options position card renders simple current Net Profit without Exp/MtM", () => {
   const optionsPos: OpenPositionDto = {
     ...position,
     key: "options_box_spread|box1",
@@ -162,6 +162,56 @@ test("options position card renders expected profit alongside MtM", () => {
     }),
   );
   assert.match(html, />BOX</);
-  assert.match(html, /Exp:\s*\+\$375\.84/);
-  assert.match(html, /\(MtM:\s*-\$673\.07\)/);
+  assert.match(html, /[-−]\$673\.07/);
+  assert.doesNotMatch(html, /Exp:/);
+  assert.doesNotMatch(html, /MtM:/);
+});
+
+test("position cards render SPREAD for radar and FUNDING RATE for funding", () => {
+  const radarPos: OpenPositionDto = {
+    ...position,
+    key: "radar|rad1",
+    strategyId: "radar",
+  };
+  const fundingPos: OpenPositionDto = {
+    ...position,
+    key: "funding|fund1",
+    strategyId: "funding",
+  };
+  const html = renderToStaticMarkup(
+    React.createElement(PositionsPanel, {
+      ...baseProps,
+      positions: [radarPos, fundingPos],
+    }),
+  );
+  assert.match(html, />SPREAD</);
+  assert.match(html, />FUNDING RATE</);
+  assert.doesNotMatch(html, />RADAR</);
+});
+
+test("PositionsPanel renders Stopped rather than Paused when engine is stopped after emergency exit", () => {
+  const stoppedStatus: SystemStatusDto = {
+    is_live_mode: false,
+    environment: "testnet",
+    is_paused: true,
+    is_stopped: true,
+    total_realized_pnl: 0,
+    total_trades_count: 0,
+    successful_trades_count: 0,
+    circuit_breaker_status: "ACTIVE",
+    circuit_breaker_tripped: false,
+    current_drawdown_usd: 0,
+    max_drawdown_usd: 1000,
+    consecutive_failures: 0,
+    active_venues: [],
+  };
+  const html = renderToStaticMarkup(
+    React.createElement(PositionsPanel, {
+      ...baseProps,
+      status: stoppedStatus,
+      positions: [],
+    }),
+  );
+  assert.match(html, /<span>Stopped<\/span>/, "badge must render Stopped");
+  assert.doesNotMatch(html, /<span>Paused<\/span>/, "badge must never render Paused when stopped");
 });

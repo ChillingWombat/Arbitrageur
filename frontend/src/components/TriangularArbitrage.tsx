@@ -221,7 +221,6 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
   params,
 }) => {
   const [opportunities, setOpportunities] = useState<TriangleOpportunityDto[]>([]);
-  const [selectedAsset, setSelectedAsset] = useState<string>("ALL");
   const [selectedOpp, setSelectedOpp] = useState<TriangleOpportunityDto | null>(null);
   const [detailOppId, setDetailOppId] = useState<string | null>(null);
 
@@ -235,11 +234,9 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
   const [botStatus, setBotStatus] = useState<"idle" | "verifying" | "dispatching" | "filled" | "error">("idle");
   const [botMessage, setBotMessage] = useState<string>("");
 
-  const assets = ["ALL", "BTC", "ETH", "SOL", "BNB", "XRP"];
-
   const loadTriangleOpps = async () => {
     try {
-      const data = await api.scanTriangleOpportunities(selectedAsset === "ALL" ? "" : selectedAsset);
+      const data = await api.scanTriangleOpportunities("");
       setOpportunities(data);
       if (selectedOpp) {
         const refreshed = data.find((o) => o.id === selectedOpp.id);
@@ -256,7 +253,7 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
     loadTriangleOpps();
     const interval = setInterval(loadTriangleOpps, 3000);
     return () => clearInterval(interval);
-  }, [selectedAsset]);
+  }, []);
 
   const handleSelectOpp = (opp: TriangleOpportunityDto) => {
     setSelectedOpp(opp);
@@ -595,24 +592,9 @@ export const TriangularArbitrage: React.FC<TriangularArbitrageProps> = ({
           <h2 className="text-[13px] font-bold font-mono tracking-wider text-slate-900">
             Opportunity Scanner
           </h2>
-          <div className="flex items-center space-x-3">
-            {/* Asset Filters */}
-            <div className="flex items-center bg-surface-raised p-1 rounded-lg border border-surface-border space-x-1">
-              {assets.map((asset) => (
-                <button
-                  key={asset}
-                  onClick={() => setSelectedAsset(asset)}
-                  className={`px-2 py-2 rounded-lg text-[11px] font-mono font-medium transition cursor-pointer ${
-                    selectedAsset === asset
-                      ? "bg-accent text-white shadow-2xs"
-                      : "text-slate-600 hover:text-slate-900"
-                  }`}
-                >
-                  {asset}
-                </button>
-              ))}
-            </div>
-          </div>
+          <span className="text-[11px] font-mono text-muted">
+            All Spot & Derivative Assets
+          </span>
         </div>
 
         <div className="overflow-x-auto">

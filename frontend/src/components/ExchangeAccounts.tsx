@@ -149,9 +149,21 @@ export const ACCOUNT_CREDENTIAL_FIELDS: Record<string, CredFieldSpec[]> = {
       hint: "Optional. Only needed if using an authenticated private Aptos RPC node.",
     },
   ],
-  // Interactive Brokers: API connects via the TWS/IB Gateway session — account ID is the only stored credential
+  // Interactive Brokers: Client Portal Web API / TWS Gateway — account ID is required, Gateway URL defaults to https://127.0.0.1:5000/v1/api
   ibkr: [
-    { key: "accountId", label: "Account ID", placeholder: "e.g. U1234567 / DU1234567" },
+    {
+      key: "baseUrl",
+      label: "Gateway URL",
+      optional: true,
+      placeholder: "https://127.0.0.1:5000/v1/api",
+      hint: "Default: https://127.0.0.1:5000/v1/api. Local IBKR Client Portal gateway or TWS REST endpoint.",
+    },
+    {
+      key: "accountId",
+      label: "Account ID",
+      placeholder: "e.g. U1234567 (Live) / DU1234567 (Paper)",
+      hint: "Paper trading accounts typically start with DU or DF; live accounts start with U.",
+    },
   ],
   // IG Trading: API key header + identifier/password session login
   ig: [
@@ -884,9 +896,6 @@ const diyCommand = (built: ApproveTxDto, agent: string, mainAddr: string): strin
  * key (signed once in this modal and never stored — or via a DIY shell
  * command for the cautious) → verify on-chain → save. */
 const POPDEX_API_DOCS = "https://popdex.xyz/docs/product-docs/onboarding/how-to-trade-via-api";
-const POPDEX_TESTNET_APP = "https://testnet-app.popdex.xyz";
-const POPDEX_MAINNET_APP = "https://app.popdex.xyz";
-const POPDEX_TEST_FAUCET = "https://crypto-chief.com/faucet/arbitrum-sepolia/";
 const openDoc = (url: string, setError: (e: string | null) => void) => {
   api.openExternalUrl(url).catch((e) => setError(e instanceof Error ? e.message : String(e)));
 };
@@ -968,9 +977,6 @@ const PopdexAgentToolkit: React.FC<{
               {n === "mainnet" ? "Mainnet" : "Testnet"}
             </button>
           ))}
-          {network === "testnet" && (
-            <span className="text-[10px] font-sans text-muted">free test USDT from the <button type="button" onClick={() => openDoc(POPDEX_TEST_FAUCET, setError)} className="text-slate-500 underline hover:text-slate-800 cursor-pointer">faucet</button></span>
-          )}
         </div>
 
         <div className={stepCard}>
@@ -983,14 +989,6 @@ const PopdexAgentToolkit: React.FC<{
             spellCheck={false}
             className="w-full px-3 py-2 bg-surface-raised border border-surface-border rounded-lg text-xs font-mono text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent"
           />
-          <p className="text-[10px] font-sans text-muted">
-            Must already hold a deposit — the chain rejects every transaction (error -32000) until the first deposit.{" "}
-            {network === "testnet" ? (
-              <>Claim free test USDT from the <button type="button" onClick={() => openDoc(POPDEX_TEST_FAUCET, setError)} className="text-slate-500 underline hover:text-slate-800 cursor-pointer">faucet</button>, then deposit in the <button type="button" onClick={() => openDoc(POPDEX_TESTNET_APP, setError)} className="text-slate-500 underline hover:text-slate-800 cursor-pointer">testnet app</button>.</>
-            ) : (
-              <>Deposit USDT in the <button type="button" onClick={() => openDoc(POPDEX_MAINNET_APP, setError)} className="text-slate-500 underline hover:text-slate-800 cursor-pointer">PopDEX app</button> first, then approve here.</>
-            )}
-          </p>
         </div>
 
         <div className={stepCard}>

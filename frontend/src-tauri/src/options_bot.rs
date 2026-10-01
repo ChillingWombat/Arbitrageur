@@ -46,6 +46,12 @@ const DEFAULT_MIN_HOURS_TO_EXPIRY: f64 = 48.0;
 const DEFAULT_MAX_DAYS_TO_EXPIRY: f64 = 60.0;
 const DEFAULT_POLL_SECS: u64 = 30;
 const DEFAULT_MAX_OPEN: u32 = 2;
+pub const DEFAULT_MIN_EXPECTED_YIELD_PCT: f64 = 10.0;
+
+fn default_min_expected_yield_pct() -> f64 {
+    DEFAULT_MIN_EXPECTED_YIELD_PCT
+}
+
 /// A refused candidate id cools down this long — an edge that evaporates
 /// on re-verification must not re-dispatch every poll against flickering
 /// testnet books.
@@ -60,6 +66,7 @@ pub struct OptionsBotPolicy {
     pub max_days_to_expiry: f64,
     pub poll_interval_secs: u64,
     pub max_open_positions: usize,
+    pub min_expected_yield_pct: f64,
 }
 
 impl Default for OptionsBotPolicy {
@@ -71,6 +78,7 @@ impl Default for OptionsBotPolicy {
             max_days_to_expiry: DEFAULT_MAX_DAYS_TO_EXPIRY,
             poll_interval_secs: DEFAULT_POLL_SECS,
             max_open_positions: DEFAULT_MAX_OPEN as usize,
+            min_expected_yield_pct: DEFAULT_MIN_EXPECTED_YIELD_PCT,
         }
     }
 }
@@ -89,6 +97,8 @@ pub struct OptionsBotConfigDto {
     pub max_days_to_expiry: f64,
     pub poll_interval_secs: u64,
     pub max_open_positions: u32,
+    #[serde(default = "default_min_expected_yield_pct")]
+    pub min_expected_yield_pct: f64,
 }
 
 impl OptionsBotConfigDto {
@@ -123,6 +133,11 @@ impl OptionsBotConfigDto {
         if !(1..=10).contains(&self.max_open_positions) {
             return Err("maxOpenPositions must be within [1, 10]".into());
         }
+        if !finite(self.min_expected_yield_pct)
+            || !(0.0..=10_000.0).contains(&self.min_expected_yield_pct)
+        {
+            return Err("minExpectedYieldPct must be within [0, 10000]".into());
+        }
         Ok((
             OptionsBotPolicy {
                 qty_base: self.qty_base,
@@ -131,6 +146,7 @@ impl OptionsBotConfigDto {
                 max_days_to_expiry: self.max_days_to_expiry,
                 poll_interval_secs: self.poll_interval_secs,
                 max_open_positions: self.max_open_positions as usize,
+                min_expected_yield_pct: self.min_expected_yield_pct,
             },
             mode,
         ))
@@ -147,6 +163,7 @@ impl OptionsBotConfigDto {
             max_days_to_expiry: cfg.max_days_to_expiry,
             poll_interval_secs: cfg.poll_interval_secs,
             max_open_positions: cfg.max_open_positions as u32,
+            min_expected_yield_pct: cfg.min_expected_yield_pct,
         }
     }
 }
@@ -444,6 +461,7 @@ impl OptionsBotExecutor {
                         min_hours_to_expiry: Some(cfg.min_hours_to_expiry),
                         max_days_to_expiry: Some(cfg.max_days_to_expiry),
                         min_edge_bps: Some(cfg.min_edge_bps),
+                        min_expected_yield_pct: Some(cfg.min_expected_yield_pct),
                         limit: None,
                     },
                     state,
@@ -453,7 +471,10 @@ impl OptionsBotExecutor {
                     Ok(v) => {
                         status.rows_scanned += v.len();
                         v.into_iter()
-                            .filter(|o| o.is_executable)
+                            .filter(|o| {
+                                o.is_executable
+                                    && o.expected_yield_pct >= cfg.min_expected_yield_pct
+                            })
                             .map(|o| {
                                 let legs = vec![
                                     o.call_leg.instrument.to_ascii_uppercase(),
@@ -477,6 +498,7 @@ impl OptionsBotExecutor {
                         min_hours_to_expiry: Some(cfg.min_hours_to_expiry),
                         max_days_to_expiry: Some(cfg.max_days_to_expiry),
                         min_edge_bps: Some(cfg.min_edge_bps),
+                        min_expected_yield_pct: Some(cfg.min_expected_yield_pct),
                         limit: None,
                     },
                     state,
@@ -486,7 +508,10 @@ impl OptionsBotExecutor {
                     Ok(v) => {
                         status.rows_scanned += v.len();
                         v.into_iter()
-                            .filter(|o| o.is_executable)
+                            .filter(|o| {
+                                o.is_executable
+                                    && o.expected_yield_pct >= cfg.min_expected_yield_pct
+                            })
                             .map(|o| {
                                 let legs = o
                                     .legs
@@ -541,6 +566,7 @@ impl OptionsBotExecutor {
                             currency: ccy.to_string(),
                             qty_base: scan_qty,
                             min_edge_bps: Some(cfg.min_edge_bps),
+                            min_expected_yield_pct: Some(cfg.min_expected_yield_pct),
                             auto: true,
                         },
                         state,
@@ -555,6 +581,7 @@ impl OptionsBotExecutor {
                             currency: ccy.to_string(),
                             qty_base: scan_qty,
                             min_edge_bps: Some(cfg.min_edge_bps),
+                            min_expected_yield_pct: Some(cfg.min_expected_yield_pct),
                             auto: true,
                         },
                         state,
@@ -628,6 +655,7 @@ mod tests {
             max_days_to_expiry: 60.0,
             poll_interval_secs: 30,
             max_open_positions: 2,
+            min_expected_yield_pct: 10.0,
         }
     }
 
@@ -639,11 +667,15 @@ mod tests {
         let (policy, mode) = OptionsBotExecutor::load_config(&st, "parity");
         assert_eq!(mode, BotMode::Auto);
         assert_eq!(policy.max_open_positions, 2);
+        assert_eq!(policy.min_expected_yield_pct, 10.0);
 
-        // Package substrategies arm independently.
-        OptionsBotExecutor::save_config(&st, &armed("box_spread")).expect("box bot arms");
-        let (_, mode) = OptionsBotExecutor::load_config(&st, "box_spread");
+        // Package substrategies arm independently and keep custom expected yield.
+        let mut box_dto = armed("box_spread");
+        box_dto.min_expected_yield_pct = 15.5;
+        OptionsBotExecutor::save_config(&st, &box_dto).expect("box bot arms");
+        let (box_policy, mode) = OptionsBotExecutor::load_config(&st, "box_spread");
         assert_eq!(mode, BotMode::Auto);
+        assert_eq!(box_policy.min_expected_yield_pct, 15.5);
 
         // Pending substrategies cannot arm.
         assert!(OptionsBotExecutor::save_config(&st, &armed("dividend")).is_err());
@@ -654,6 +686,33 @@ mod tests {
         assert!(OptionsBotExecutor::save_config(&st, &bad).is_err());
         let (_, mode) = OptionsBotExecutor::load_config(&st, "parity");
         assert_eq!(mode, BotMode::Auto); // previous config untouched
+
+        // Bad expected yield (< 0, > 10000, NaN) fails validation.
+        let mut bad_yield = armed("parity");
+        bad_yield.min_expected_yield_pct = -1.0;
+        assert!(OptionsBotExecutor::save_config(&st, &bad_yield).is_err());
+        bad_yield.min_expected_yield_pct = f64::NAN;
+        assert!(OptionsBotExecutor::save_config(&st, &bad_yield).is_err());
+        bad_yield.min_expected_yield_pct = 10_001.0;
+        assert!(OptionsBotExecutor::save_config(&st, &bad_yield).is_err());
+
+        // Backward compatibility: JSON missing minExpectedYieldPct defaults to 10.0.
+        let legacy_json = r#"{
+            "substrategyId": "parity",
+            "enabled": true,
+            "mode": "auto",
+            "qtyBase": 0.1,
+            "minEdgeBps": 5.0,
+            "minHoursToExpiry": 48.0,
+            "maxDaysToExpiry": 60.0,
+            "pollIntervalSecs": 30,
+            "maxOpenPositions": 2
+        }"#;
+        let legacy_dto: OptionsBotConfigDto =
+            serde_json::from_str(legacy_json).expect("deserialize legacy JSON");
+        assert_eq!(legacy_dto.min_expected_yield_pct, 10.0);
+        let (legacy_policy, _) = legacy_dto.to_policy().expect("convert legacy to policy");
+        assert_eq!(legacy_policy.min_expected_yield_pct, 10.0);
     }
 
     #[test]

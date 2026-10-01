@@ -15,6 +15,7 @@ use arbitrageur_exchanges::evm_amm::{
     EvmAmmAdapter, ADMITTED_EVM_AMM_VENUE_IDS, LIVE_EVM_AMM_VENUE_IDS,
 };
 use arbitrageur_exchanges::hyperliquid::HyperliquidAdapter;
+use arbitrageur_exchanges::ibkr::IbkrAdapter;
 use arbitrageur_exchanges::kraken::KrakenAdapter;
 use arbitrageur_exchanges::lighter::LighterAdapter;
 use arbitrageur_exchanges::okx::OkxAdapter;
@@ -109,6 +110,8 @@ struct EnvCredentials {
     decibel_pk: Option<String>,
     popdex_wallet: Option<String>,
     popdex_agent: Option<String>,
+    ibkr_account: Option<String>,
+    ibkr_url: Option<String>,
     dex_perp: std::collections::HashMap<&'static str, ExchangeCredentials>,
     evm_amm: std::collections::HashMap<&'static str, ExchangeCredentials>,
     /// Pendle Boros agent credentials: private_key = agent key,
@@ -162,6 +165,8 @@ impl Drop for EnvCredentials {
         z(&mut self.decibel_pk);
         z(&mut self.popdex_wallet);
         z(&mut self.popdex_agent);
+        z(&mut self.ibkr_account);
+        z(&mut self.ibkr_url);
     }
 }
 
@@ -1378,6 +1383,8 @@ pub struct AppEngineState {
     /// Alpaca — US equities + crypto spot broker (REST). Spot-only: no
     /// funding streams, no perp positions.
     pub live_alpaca: Arc<AlpacaAdapter>,
+    /// Interactive Brokers (IBKR) — Client Portal Web API / TWS Gateway (live).
+    pub live_ibkr: Arc<IbkrAdapter>,
     pub live_deribit: Arc<DeribitAdapter>,
     pub live_decibel: Arc<DecibelAdapter>,
     // Long-tail perp venues (one shared adapter type, per-venue specs).
@@ -1407,10 +1414,11 @@ pub struct AppEngineState {
     pub tn_vanta: Arc<VantaAdapter>,
     pub tn_binance: Arc<BinanceAdapter>,
     pub tn_okx: Arc<OkxAdapter>,
-    pub tn_kraken: Arc<KrakenAdapter>,
     /// Alpaca paper-trading environment (paper-api.alpaca.markets) — a real
     /// venue sandbox, not a local simulation.
     pub tn_alpaca: Arc<AlpacaAdapter>,
+    /// Interactive Brokers (IBKR) — paper-trading on local gateway (DU account).
+    pub tn_ibkr: Arc<IbkrAdapter>,
     pub tn_deribit: Arc<DeribitAdapter>,
     pub tn_decibel: Arc<DecibelAdapter>,
     pub tn_popdex: Arc<PopDexAdapter>,
@@ -1535,6 +1543,7 @@ pub struct AppEngineState {
     pub state_store: Arc<crate::state_store::StateStore>,
     pub virtual_ledger: RwLock<arbitrageur_execution::virtual_ledger::VirtualStrategyLedger>,
     pub is_paused: RwLock<bool>,
+    pub is_stopped: RwLock<bool>,
     pub execution_lock: tokio::sync::Mutex<()>,
     /// Serializes reconciliation passes so the periodic supervisor and any
     /// manual trigger never run overlapping venue polls.
@@ -1668,6 +1677,7 @@ pub(crate) fn canonical_venue_id(input: &str) -> Option<&'static str> {
         "coinbase" | "cb" | "coinbase exchange" => Some("coinbase"),
         "kraken" | "krk" | "kfut" | "kraken futures" | "kraken spot" => Some("kraken"),
         "alpaca" | "alp" | "alpaca markets" | "alpaca crypto" => Some("alpaca"),
+        "ibkr" | "ib" | "interactive brokers" | "interactive_brokers" => Some("ibkr"),
         "deribit" | "dbit" | "deribit options" => Some("deribit"),
         "decibel" | "dcb" | "decibel (aptos)" => Some("decibel"),
         // Long-tail perp venues: common display/alias spellings first, then
@@ -1745,6 +1755,7 @@ pub(crate) fn venue_has_adapter(venue_id: &str) -> bool {
             | "coinbase"
             | "kraken"
             | "alpaca"
+            | "ibkr"
             | "deribit"
             | "decibel"
             | "boros"
@@ -2045,6 +2056,8 @@ impl AppEngineState {
         // Alpaca paper trading is a real venue sandbox (separate host +
         // separate key namespace) — testnet admits it honestly.
         let tn_alpaca = Arc::new(AlpacaAdapter::for_paper(None, None));
+        let live_ibkr = Arc::new(IbkrAdapter::new(None, None));
+        let tn_ibkr = Arc::new(IbkrAdapter::for_paper(None, None));
         let live_kraken = Arc::new(KrakenAdapter::new(
             endpoint(&initial_settings.kraken_futures_url),
             endpoint(&initial_settings.kraken_spot_url),
@@ -2100,15 +2113,6 @@ impl AppEngineState {
         // `x-simulated-trading: 1` header routes it to the demo namespace,
         // which requires keys minted under a demo account.
         let tn_okx = Arc::new(OkxAdapter::for_testnet(None, None, None, None));
-        let tn_kraken = Arc::new(KrakenAdapter::new(
-            Some("https://demo-futures.kraken.com/derivatives/api/v3".to_string()),
-            // Kraken spot has no public testnet; production public market
-            // data stays readable — order paths only ever hit the futures
-            // base URL.
-            None,
-            None,
-            None,
-        ));
         let tn_decibel = Arc::new(DecibelAdapter::for_testnet(None, None));
         let tn_popdex = Arc::new(PopDexAdapter::new(Some("testnet".to_string())));
         let tn_deribit = Arc::new(DeribitAdapter::for_testnet(None, None));
@@ -2219,6 +2223,11 @@ impl AppEngineState {
             .ok()
             .flatten()
             .is_some_and(|v| v == "1");
+        let engine_stopped_initial = state_store
+            .kv_get("engine.stopped")
+            .ok()
+            .flatten()
+            .is_some_and(|v| v == "1");
         let delta_guard = RwLock::new(DeltaGuard::new(
             Decimal::from_f64_retain(initial_settings.delta_max_unhedged_usd_per_asset)
                 .unwrap_or(dec!(2500.0)),
@@ -2231,8 +2240,9 @@ impl AppEngineState {
         // Reload the persisted execution log so the Log Monitor keeps history
         // across restarts (failures included since v21). A store failure
         // starts empty rather than bricking startup.
-        let initial_logs: Vec<ExecutionLogEntry> =
-            state_store.load_execution_logs(500).unwrap_or_default();
+        let mut initial_logs: Vec<ExecutionLogEntry> =
+            state_store.load_execution_logs(5000).unwrap_or_default();
+        initial_logs.reverse();
         let vault = RwLock::new(crate::vault::SecureVault::new_with_path(vault_path));
         let evm_stronghold = RwLock::new(None);
         // The virtual cycle ledger is durable (schema v30): hydrate all lots
@@ -2562,7 +2572,9 @@ impl AppEngineState {
             live_coinbase,
             live_kraken,
             live_alpaca,
+            live_ibkr,
             tn_alpaca,
+            tn_ibkr,
             live_deribit,
             live_decibel,
             live_dex_perps,
@@ -2575,7 +2587,6 @@ impl AppEngineState {
             tn_vanta,
             tn_binance,
             tn_okx,
-            tn_kraken,
             tn_deribit,
             tn_decibel,
             tn_popdex,
@@ -2651,6 +2662,7 @@ impl AppEngineState {
             state_store,
             virtual_ledger,
             is_paused: RwLock::new(engine_paused_initial),
+            is_stopped: RwLock::new(engine_stopped_initial),
             execution_lock: tokio::sync::Mutex::new(()),
             reconcile_lock: tokio::sync::Mutex::new(()),
             #[cfg(test)]
@@ -2907,6 +2919,7 @@ impl AppEngineState {
         self.live_coinbase.update_credentials(None, None, None);
         self.live_kraken.update_credentials(None, None);
         self.live_alpaca.update_credentials(None, None);
+        self.live_ibkr.update_credentials(None, None);
         self.live_deribit.update_credentials(None, None);
         self.live_decibel.update_credentials(None, None, None, None);
         for adapter in &self.live_dex_perps {
@@ -2925,8 +2938,8 @@ impl AppEngineState {
         self.tn_binance.update_credentials(None, None);
         self.tn_okx.update_credentials(None, None, None);
         let _ = self.tn_okx.set_base_url(None);
-        self.tn_kraken.update_credentials(None, None);
         self.tn_alpaca.update_credentials(None, None);
+        self.tn_ibkr.update_credentials(None, None);
         self.tn_deribit.update_credentials(None, None);
         self.tn_decibel.update_credentials(None, None, None, None);
         let _ = self.tn_popdex.update_credentials(None, None, None);
@@ -3084,6 +3097,12 @@ impl AppEngineState {
                 creds.alpaca_sec = Some(cred.api_secret.clone());
             }
         }
+        if let Some(cred) =
+            get_active_cred(&["ibkr", "interactive_brokers", "interactive brokers", "ib"])
+        {
+            creds.ibkr_account = cred.account_id.clone().filter(|a| !a.trim().is_empty());
+            creds.ibkr_url = cred.base_url.clone().filter(|u| !u.trim().is_empty());
+        }
         if let Some(cred) = get_active_cred(&["deribit", "dbit"]) {
             if !cred.api_key.trim().is_empty() && !cred.api_secret.trim().is_empty() {
                 creds.deribit_id = Some(cred.api_key.clone());
@@ -3187,6 +3206,8 @@ impl AppEngineState {
             .update_credentials(c.kraken_key.clone(), c.kraken_sec.clone());
         self.live_alpaca
             .update_credentials(c.alpaca_key.clone(), c.alpaca_sec.clone());
+        self.live_ibkr
+            .update_credentials(c.ibkr_account.clone(), c.ibkr_url.clone());
         self.live_deribit
             .update_credentials(c.deribit_id.clone(), c.deribit_sec.clone());
         self.live_decibel.update_credentials(
@@ -3345,13 +3366,13 @@ impl AppEngineState {
                 c.okx_pass.clone(),
             );
         }
-        self.tn_kraken
-            .update_credentials(c.kraken_key.clone(), c.kraken_sec.clone());
         // Alpaca paper keys are a separate namespace minted in the paper
         // dashboard — the same record resolves to the paper host via the
         // env-scoped account, never reusing a live key pair.
         self.tn_alpaca
             .update_credentials(c.alpaca_key.clone(), c.alpaca_sec.clone());
+        self.tn_ibkr
+            .update_credentials(c.ibkr_account.clone(), c.ibkr_url.clone());
         self.tn_deribit
             .update_credentials(c.deribit_id.clone(), c.deribit_sec.clone());
         self.tn_decibel.update_credentials(
@@ -3468,6 +3489,9 @@ impl AppEngineState {
             if s.alpaca_enabled || account_enabled("alpaca") {
                 list.push(("alpaca", "Alpaca", self.live_alpaca.clone()));
             }
+            if s.ibkr_enabled || account_enabled("ibkr") {
+                list.push(("ibkr", "Interactive Brokers", self.live_ibkr.clone()));
+            }
             if s.decibel_enabled || account_enabled("decibel") {
                 list.push(("decibel", "Decibel", self.live_decibel.clone()));
             }
@@ -3529,11 +3553,11 @@ impl AppEngineState {
             if s.okx_enabled || account_enabled("okx") {
                 list.push(("okx", "OKX", self.tn_okx.clone()));
             }
-            if s.kraken_enabled || s.kraken_futures_enabled || account_enabled("kraken") {
-                list.push(("kraken", "Kraken", self.tn_kraken.clone()));
-            }
             if s.alpaca_enabled || account_enabled("alpaca") {
                 list.push(("alpaca", "Alpaca", self.tn_alpaca.clone()));
+            }
+            if s.ibkr_enabled || account_enabled("ibkr") {
+                list.push(("ibkr", "Interactive Brokers", self.tn_ibkr.clone()));
             }
             if s.decibel_enabled || account_enabled("decibel") {
                 list.push(("decibel", "Decibel", self.tn_decibel.clone()));
@@ -4391,5 +4415,28 @@ mod tests {
                 "{junk:?} must not resolve"
             );
         }
+    }
+
+    #[test]
+    fn kraken_is_live_only_and_ineligible_in_testnet() {
+        let state = AppEngineState::new();
+        {
+            let mut s = state.settings.write();
+            s.kraken_enabled = true;
+            s.kraken_futures_enabled = true;
+        }
+        // Testnet: Kraken must not be admitted because it has no public testnet.
+        let tn_venues = state.venues_for_env(TradingEnvironment::Testnet);
+        assert!(
+            !tn_venues.iter().any(|(v, _, _)| *v == "kraken"),
+            "Kraken must never be admitted in Testnet mode"
+        );
+
+        // Live: Kraken must be admitted when enabled.
+        let live_venues = state.venues_for_env(TradingEnvironment::Live);
+        assert!(
+            live_venues.iter().any(|(v, _, _)| *v == "kraken"),
+            "Kraken must be admitted in Live mode when enabled"
+        );
     }
 }

@@ -8,6 +8,10 @@ import {
   ChevronRight,
   CircleHelp,
   SlidersHorizontal,
+  Radar,
+  Wallet,
+  History,
+  Terminal,
 } from "lucide-react";
 import { api } from "../services/api";
 import type {
@@ -17,6 +21,8 @@ import type {
   OptionsPackageExecutionParams,
   OptionsBotConfigDto,
   ExecutionLogEntry,
+  OpenPositionDto,
+  TradedOpportunityDto,
 } from "../types";
 import { defaultOptionsBotConfig } from "../services/optionsBot";
 import { flattenResidualMessage } from "../services/flatten";
@@ -27,7 +33,13 @@ import { DetailField, DetailSection } from "./DetailBits";
 import { TickerLogMonitor } from "./TickerLogMonitor";
 import { BotPhaseBadge, BotLifecycleControls } from "./BotLifecycleControls";
 import { registerBotResetListener, type BotPhase } from "../hooks/useBotLifecycle";
-import { SaveButton, useSaveButton } from "./SaveButton";
+import { OptionsConfigModal } from "./OptionsConfigModal";
+import {
+  TradedOpportunitiesTable,
+  TradedOpportunityDetailModal,
+} from "./TradedOpportunitiesGadget";
+import { PositionDetailModal } from "./PositionDetailModal";
+import { TickerTransactionHistory } from "./TickerTransactionHistory";
 
 /**
  * Options strategy catalog — the taxonomy from
@@ -188,6 +200,7 @@ interface OptionsArbitrageProps {
   /** Net premium financing held inside open option packages — options-wide,
    *  so it surfaces here rather than on the system-wide panels. */
   premiumOutlayUsd?: number | null;
+  openPositions?: OpenPositionDto[];
 }
 
 const fmtUsd = (v: number): string =>
@@ -313,6 +326,14 @@ export const OptionsParityCard: React.FC<OptionsParityCardProps> = ({
               </span>
             }
           />
+          <DetailField
+            label="Expected yield"
+            value={
+              <span className={o.expected_yield_pct > 0 ? "text-profit" : "text-loss"}>
+                {o.expected_yield_pct != null ? `${o.expected_yield_pct.toFixed(2)}%` : "—"}
+              </span>
+            }
+          />
         </div>
       </DetailSection>
       <div className="shrink-0 self-center">
@@ -399,6 +420,14 @@ export const OptionsPackageCard: React.FC<OptionsPackageCardProps> = ({
                 </span>
               }
             />
+            <DetailField
+              label="Expected yield"
+              value={
+                <span className={o.expected_yield_pct > 0 ? "text-profit" : "text-loss"}>
+                  {o.expected_yield_pct != null ? `${o.expected_yield_pct.toFixed(2)}%` : "—"}
+                </span>
+              }
+            />
           </div>
         </DetailSection>
         <div className="shrink-0 self-center">
@@ -440,15 +469,12 @@ const SubstrategyRail: React.FC<{
     return order.map((f) => ({ family: f, items: map.get(f)! }));
   }, []);
   return (
-    <aside className="w-64 shrink-0 border-r border-surface-border bg-surface flex flex-col min-h-0">
-      <div className="px-3 pt-3 pb-2 border-b border-surface-border">
+    <aside className="w-64 shrink-0 bg-surface border border-surface-border rounded-xl shadow-2xs flex flex-col min-h-0 select-none overflow-hidden">
+      <div className="px-3.5 py-3 border-b border-surface-border">
         <div className="flex items-center gap-1.5 text-[11px] font-bold font-mono tracking-wider text-slate-900 uppercase">
           <Option className="w-3.5 h-3.5 text-accent-strong" />
           <span>Substrategies</span>
         </div>
-        <p className="mt-1 text-[11px] text-slate-500 leading-snug">
-          All listed underlyings — crypto, equities and index — not perps only.
-        </p>
       </div>
       <div className="flex-1 overflow-y-auto p-2 space-y-1">
         <button
@@ -544,6 +570,7 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
   isLive = false,
   optionsVenueAvailable = false,
   premiumOutlayUsd = null,
+  openPositions: propOpenPositions = [],
 }) => {
   const [selected, setSelected] = useState<string>("all");
   const [dirFilter, setDirFilter] = useState<"all" | "conversion" | "reversal">("all");
@@ -557,10 +584,15 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
   const [confirmOpp, setConfirmOpp] = useState<OptionsScannedOpp | null>(null);
   const [botCfg, setBotCfg] = useState<OptionsBotConfigDto | null>(null);
   const [botError, setBotError] = useState<string | null>(null);
-  const [openPositions, setOpenPositions] = useState(0);
+  const [openCyclesCount, setOpenCyclesCount] = useState(0);
   const [flattening, setFlattening] = useState(false);
   const [flattenError, setFlattenError] = useState<string | null>(null);
   const [showBotConfig, setShowBotConfig] = useState(false);
+  const [dockTab, setDockTab] = useState<"position" | "opps" | "history" | "logs">("position");
+  const [tradedOpps, setTradedOpps] = useState<TradedOpportunityDto[] | null>(null);
+  const [tradedFailed, setTradedFailed] = useState(false);
+  const [selectedTradedOpp, setSelectedTradedOpp] = useState<TradedOpportunityDto | null>(null);
+  const [selectedDetailPos, setSelectedDetailPos] = useState<OpenPositionDto | null>(null);
 
   const selDef = OPTIONS_SUBSTRATEGIES.find((s) => s.id === selected);
   /** Parity-specific chrome (conversion/reversal direction filter). */
@@ -573,6 +605,28 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
   const botSubstrategy = selDef && selDef.status === "live" ? selDef : null;
   const env = isLive ? "live" : "testnet";
 
+  // Poll traded opportunities ledger for Opportunity History
+  useEffect(() => {
+    let alive = true;
+    const load = async () => {
+      try {
+        const rows = await api.listTradedOpportunities();
+        if (!alive) return;
+        setTradedOpps(Array.isArray(rows) ? rows : []);
+        setTradedFailed(false);
+      } catch {
+        if (!alive) return;
+        setTradedFailed(true);
+      }
+    };
+    void load();
+    const interval = setInterval(load, 5000);
+    return () => {
+      alive = false;
+      clearInterval(interval);
+    };
+  }, []);
+
   // Poll the selected substrategy's persisted bot config + its open signal
   // count — the same sources the backend executor drains against.
   useEffect(() => {
@@ -580,7 +634,7 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
     const sub = selDef && selDef.status === "live" ? selDef : null;
     if (!sub) {
       setBotCfg(null);
-      setOpenPositions(0);
+      setOpenCyclesCount(0);
       return;
     }
     const load = async () => {
@@ -593,7 +647,7 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
         setBotCfg(cfg);
         // One parity cycle persists three leg signals ({cycle}-legN) — count
         // distinct cycles, mirroring the executor's open-position book.
-        setOpenPositions(
+        setOpenCyclesCount(
           new Set(
             sigs
               .filter(
@@ -722,6 +776,27 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
   );
   const realizedPnl = filteredLogs.reduce((acc, l) => acc + (l.net_profit || 0), 0);
 
+  const optionsTradedOpps = useMemo(() => {
+    if (tradedOpps == null) return null;
+    const optStrategies = new Set(OPTIONS_SUBSTRATEGIES.map((s) => s.logStrategyId));
+    return tradedOpps.filter((r) => {
+      const s = (r.strategyId ?? "").toLowerCase();
+      if (!s.startsWith("options") && !optStrategies.has(s)) return false;
+      if (selected === "all") return true;
+      return s === selDef?.logStrategyId;
+    });
+  }, [tradedOpps, selected, selDef]);
+
+  const optionsPositions = useMemo(() => {
+    const optStrategies = new Set(OPTIONS_SUBSTRATEGIES.map((s) => s.logStrategyId));
+    return propOpenPositions.filter((p) => {
+      const s = (p.strategyId ?? "").toLowerCase();
+      if (!s.startsWith("options") && !optStrategies.has(s)) return false;
+      if (selected === "all") return true;
+      return s === selDef?.logStrategyId;
+    });
+  }, [propOpenPositions, selected, selDef]);
+
   const scan = useCallback(async () => {
     setScanning(true);
     setError(null);
@@ -745,6 +820,7 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
               min_edge_bps: scanEdge,
               min_hours_to_expiry: botCfg?.minHoursToExpiry,
               max_days_to_expiry: botCfg?.maxDaysToExpiry,
+              min_expected_yield_pct: botCfg?.minExpectedYieldPct,
             });
             return v.map((p) => ({ kind: "parity" as const, p }));
           }
@@ -755,6 +831,7 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
             min_edge_bps: scanEdge,
             min_hours_to_expiry: botCfg?.minHoursToExpiry,
             max_days_to_expiry: botCfg?.maxDaysToExpiry,
+            min_expected_yield_pct: botCfg?.minExpectedYieldPct,
           });
           return v.map((p) => ({ kind: "package" as const, p }));
         }),
@@ -798,6 +875,7 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
                 currency: opp.p.currency,
                 qty_base: opp.p.qty_base_suggested,
                 min_edge_bps: scanEdge,
+                min_expected_yield_pct: botCfg?.minExpectedYieldPct,
               } satisfies OptionsParityExecutionParams)
             : await api.executeOptionsPackage({
                 id: opp.p.id,
@@ -805,6 +883,7 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
                 currency: opp.p.currency,
                 qty_base: opp.p.qty_base_suggested,
                 min_edge_bps: scanEdge,
+                min_expected_yield_pct: botCfg?.minExpectedYieldPct,
               } satisfies OptionsPackageExecutionParams);
         setExecuted((s) => new Set(s).add(opp.p.id));
         setMessage(res.message);
@@ -820,7 +899,7 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
   );
 
   return (
-    <div className="flex h-full overflow-hidden bg-background">
+    <div className="flex h-full overflow-hidden bg-background p-4 gap-4">
       <SubstrategyRail
         selected={selected}
         onSelect={setSelected}
@@ -828,7 +907,7 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
         totalOpps={opps.length}
       />
 
-      <div className="flex-1 overflow-y-auto p-4 pr-5 space-y-4 pb-24 min-w-0">
+      <div className="flex-1 overflow-y-auto space-y-4 pb-20 min-w-0 pr-1">
         {/* Strategy Status ribbon — mirrors the other strategy pages:
             read-only params + phase badge left, configurator, scan and the
             substrategy bot's lifecycle buttons right. The "All" view stays
@@ -897,7 +976,7 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
             {botSubstrategy && (
               <BotLifecycleControls
                 phase={botPhase}
-                hasOpenPositions={openPositions > 0}
+                hasOpenPositions={openCyclesCount > 0}
                 disabled={botCfg == null}
                 allowStartWithOpenPositions
                 onStart={() => void handleBotMode("auto")}
@@ -1015,13 +1094,18 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
           </div>
         )}
 
-        {/* Opportunities — filtered by substrategy and, within parity, by
-            conversion/reversal direction. */}
-        <div className="space-y-3">
-          <div className="flex items-center justify-between gap-3 flex-wrap">
-            <h2 className="text-[13px] font-bold font-mono tracking-wider text-slate-900">
-              Opportunities
-            </h2>
+        {/* Opportunity Scanner — dedicated bordered card */}
+        <div className="bg-surface rounded-xl border border-surface-border p-4 shadow-card min-h-[360px] flex flex-col">
+          <div className="flex items-center justify-between gap-3 mb-3 pb-3 border-b border-surface-border shrink-0">
+            <div className="flex items-center space-x-2">
+              <Radar className="w-4 h-4 text-accent-strong" />
+              <h2 className="text-[13px] font-bold font-mono tracking-wider text-slate-900">
+                Opportunity Scanner
+              </h2>
+              <span className="text-[11px] font-mono text-slate-500">
+                ({filteredOpps.length} {filteredOpps.length === 1 ? "setup" : "setups"})
+              </span>
+            </div>
             {parityVisible && opps.length > 0 && (
               <div className="flex items-center bg-surface-raised p-1 rounded-lg border border-surface-border space-x-1">
                 {(["all", "conversion", "reversal"] as const).map((d) => (
@@ -1042,57 +1126,186 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
             )}
           </div>
 
-          {scanned && filteredOpps.length === 0 && !error && (
-            <EmptyState
-              icon={Option}
-              plain
-              title={
-                selDef && selected !== "all"
-                  ? `No ${selDef.name.toLowerCase()} edge right now`
-                  : dirFilter === "all"
-                    ? "No options edge right now"
-                    : `No ${dirFilter} edge right now`
-              }
-              hint={
-                selDef && selected !== "all"
-                  ? selDef.tagline
-                  : "Every live scanner sits inside fees on the quoted chains."
-              }
-            />
-          )}
-
-          {filteredOpps.map((o) =>
-            o.kind === "parity" ? (
-              <OptionsParityCard
-                key={o.p.id}
-                opp={o.p}
-                executing={executing === o.p.id}
-                executed={executed.has(o.p.id)}
-                disabled={!o.p.is_executable || isPaused || scanning}
-                onExecute={() => setConfirmOpp(o)}
+          <div className="flex-1 overflow-y-auto space-y-3">
+            {!scanned && opps.length === 0 ? (
+              <EmptyState
+                icon={Radar}
+                plain
+                title="Opportunity Scanner Ready"
+                hint={
+                  selDef && selected !== "all"
+                    ? `Click 'Scan' to sweep live ${selDef.name} option chains on Deribit.`
+                    : "Click 'Scan' to sweep all live option strategies across BTC & ETH chains on Deribit."
+                }
+              />
+            ) : scanned && filteredOpps.length === 0 && !error ? (
+              <EmptyState
+                icon={Option}
+                plain
+                title={
+                  selDef && selected !== "all"
+                    ? `No ${selDef.name.toLowerCase()} edge right now`
+                    : dirFilter === "all"
+                      ? "No options edge right now"
+                      : `No ${dirFilter} edge right now`
+                }
+                hint={
+                  selDef && selected !== "all"
+                    ? selDef.tagline
+                    : "Every live scanner sits inside fees on the quoted chains."
+                }
               />
             ) : (
-              <OptionsPackageCard
-                key={o.p.id}
-                opp={o.p}
-                executing={executing === o.p.id}
-                executed={executed.has(o.p.id)}
-                disabled={!o.p.is_executable || isPaused || scanning}
-                onExecute={() => setConfirmOpp(o)}
-              />
-            ),
-          )}
+              filteredOpps.map((o) =>
+                o.kind === "parity" ? (
+                  <OptionsParityCard
+                    key={o.p.id}
+                    opp={o.p}
+                    executing={executing === o.p.id}
+                    executed={executed.has(o.p.id)}
+                    disabled={!o.p.is_executable || isPaused || scanning}
+                    onExecute={() => setConfirmOpp(o)}
+                  />
+                ) : (
+                  <OptionsPackageCard
+                    key={o.p.id}
+                    opp={o.p}
+                    executing={executing === o.p.id}
+                    executed={executed.has(o.p.id)}
+                    disabled={!o.p.is_executable || isPaused || scanning}
+                    onExecute={() => setConfirmOpp(o)}
+                  />
+                ),
+              )
+            )}
+          </div>
         </div>
 
-        {/* Execution monitor — filtered by the same substrategy selection. */}
-        <TickerLogMonitor
-          symbol=""
-          namespace="options"
-          strategyName="Options Strategies"
-          executionLogs={filteredLogs}
-          matchAllSymbols
-          isPaused={isPaused}
-        />
+        {/* Bottom dock: Open Positions vs Opportunity History vs Execution History vs Log Monitor */}
+        <div className="bg-surface rounded-xl border border-surface-border shadow-card overflow-hidden shrink-0">
+          <div className="grid grid-cols-4 border-b border-surface-border bg-slate-50/60 select-none pt-1 px-1 gap-1">
+            {(
+              [
+                { id: "position", label: "Open Positions", icon: Wallet },
+                { id: "opps", label: "Opportunity History", icon: Radar },
+                { id: "history", label: "Execution History", icon: History },
+                { id: "logs", label: "Log Monitor", icon: Terminal },
+              ] as const
+            ).map(({ id, label, icon: Icon }) => (
+              <button
+                key={id}
+                type="button"
+                onClick={() => setDockTab(id)}
+                className={`w-full flex items-center justify-center space-x-2 py-2 px-3 text-xs font-sans transition select-none group cursor-pointer rounded-t-lg ${
+                  dockTab === id
+                    ? "text-accent-strong font-bold bg-surface border-t border-x border-surface-border -mb-px shadow-2xs"
+                    : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/80 font-medium border-t border-x border-transparent"
+                }`}
+              >
+                <Icon
+                  className={`w-3.5 h-3.5 transition shrink-0 ${
+                    dockTab === id ? "text-accent-strong" : "text-muted group-hover:text-slate-600"
+                  }`}
+                />
+                <span className="truncate">{label}</span>
+              </button>
+            ))}
+          </div>
+
+          <div className="p-3.5 h-96 overflow-y-auto">
+            {dockTab === "position" ? (
+              optionsPositions.length === 0 ? (
+                <EmptyState
+                  plain
+                  title="No Open Options Positions"
+                  hint="Executed option conversions, box spreads, and jelly rolls aggregate here per trade with live unrealized PnL and leg breakdown."
+                />
+              ) : (
+                <table className="w-full text-left text-xs font-mono tabular-nums">
+                  <thead>
+                    <tr className="border-b border-surface-border text-slate-500 text-xs font-semibold tracking-wider">
+                      <th className="py-2.5 px-3">Trade / Symbol</th>
+                      <th className="py-2.5 px-3">Substrategy</th>
+                      <th className="py-2.5 px-3">Legs</th>
+                      <th className="py-2.5 px-3 text-right">Notional</th>
+                      <th className="py-2.5 px-3 text-right">Unrealized P&L</th>
+                      <th className="py-2.5 px-3 text-right">Expected Net</th>
+                      <th className="py-2.5 px-3 text-right">Fees</th>
+                      <th className="py-2.5 px-3 text-right">Status</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-surface-border">
+                    {optionsPositions.map((pos) => {
+                      const pnl = pos.unrealizedPnlUsd;
+                      return (
+                        <tr
+                          key={pos.key}
+                          onClick={() => setSelectedDetailPos(pos)}
+                          className="hover:bg-surface-raised/60 transition cursor-pointer"
+                          title="Click to view position details and atomic legs"
+                        >
+                          <td className="py-2.5 px-3 whitespace-nowrap font-bold text-slate-900">
+                            {pos.symbol}
+                          </td>
+                          <td className="py-2.5 px-3 whitespace-nowrap text-slate-600">
+                            {OPTIONS_SUBSTRATEGIES.find((s) => s.logStrategyId === pos.strategyId)?.name ?? pos.strategyId}
+                          </td>
+                          <td className="py-2.5 px-3 text-slate-700">
+                            {pos.venues.map((v) => `${v.symbol}: ${v.netQty}`).join(" / ")}
+                          </td>
+                          <td className="py-2.5 px-3 text-right text-slate-700">
+                            {pos.notionalUsd != null ? fmtUsd(pos.notionalUsd) : "—"}
+                          </td>
+                          <td className={`py-2.5 px-3 text-right font-bold ${pnl != null && pnl < 0 ? "text-loss" : "text-profit"}`}>
+                            {pnl != null ? `${pnl >= 0 ? "+" : "-"}$${Math.abs(pnl).toFixed(2)}` : "—"}
+                          </td>
+                          <td className={`py-2.5 px-3 text-right ${pos.expectedNetUsd != null && pos.expectedNetUsd < 0 ? "text-loss" : "text-slate-700"}`}>
+                            {pos.expectedNetUsd != null ? fmtUsd(pos.expectedNetUsd) : "—"}
+                          </td>
+                          <td className="py-2.5 px-3 text-right text-slate-500">
+                            {pos.feesUsd !== 0 ? `−$${Math.abs(pos.feesUsd).toFixed(2)}` : "—"}
+                          </td>
+                          <td className="py-2.5 px-3 text-right whitespace-nowrap">
+                            {pos.reduceOnly ? (
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold border border-warn-border bg-warn-dim/40 text-warn-strong">
+                                Reduce-only
+                              </span>
+                            ) : (
+                              <span className="px-2 py-0.5 rounded-full text-[10px] font-bold border border-profit-border bg-profit-dim/40 text-profit">
+                                Working
+                              </span>
+                            )}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )
+            ) : dockTab === "opps" ? (
+              <TradedOpportunitiesTable
+                opps={optionsTradedOpps}
+                failed={tradedFailed}
+                onSelect={setSelectedTradedOpp}
+              />
+            ) : dockTab === "history" ? (
+              <TickerTransactionHistory
+                symbol=""
+                logs={filteredLogs}
+                matchAllSymbols
+              />
+            ) : (
+              <TickerLogMonitor
+                symbol=""
+                namespace="options"
+                strategyName="Options Strategies"
+                executionLogs={filteredLogs}
+                matchAllSymbols
+                isPaused={isPaused}
+              />
+            )}
+          </div>
+        </div>
       </div>
 
       <ConfirmActionModal
@@ -1123,184 +1336,52 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
         onError={(m) => setError(m)}
       />
 
-      {botSubstrategy && botCfg && showBotConfig && (
-        <OptionsBotConfigModal
-          cfg={botCfg}
-          name={botSubstrategy.name}
+      {showBotConfig && (
+        <OptionsConfigModal
+          isOpen={showBotConfig}
+          initialSubstrategyId={botSubstrategy?.id ?? "parity"}
+          cfg={botCfg ?? undefined}
           onSave={saveBotConfig}
           onClose={() => setShowBotConfig(false)}
+        />
+      )}
+
+      {selectedDetailPos && (
+        <PositionDetailModal
+          pos={selectedDetailPos}
+          onClose={() => setSelectedDetailPos(null)}
+        />
+      )}
+
+      {selectedTradedOpp && (
+        <TradedOpportunityDetailModal
+          opp={selectedTradedOpp}
+          onClose={() => setSelectedTradedOpp(null)}
         />
       )}
     </div>
   );
 };
 
-const BOT_FIELD_DEFS: {
-  key: keyof OptionsBotConfigDto;
-  label: string;
-  tooltip: string;
-  step?: string;
-}[] = [
-  {
-    key: "qtyBase",
-    label: "Entry size (base units)",
-    tooltip: "Per-entry size in base units (BTC or ETH) — the manual Scan uses this size too.",
-  },
-  {
-    key: "minEdgeBps",
-    label: "Min net edge (bps)",
-    tooltip: "Net-of-fees edge hurdle an entry must clear — the manual Scan reports at this hurdle too.",
-    step: "0.5",
-  },
-  {
-    key: "minHoursToExpiry",
-    label: "Min hours to expiry",
-    tooltip: "Skip setups expiring sooner — too little time for convergence.",
-    step: "1",
-  },
-  {
-    key: "maxDaysToExpiry",
-    label: "Max days to expiry",
-    tooltip: "Skip setups expiring later — carry cost dominates the edge.",
-    step: "1",
-  },
-  {
-    key: "pollIntervalSecs",
-    label: "Poll interval (s)",
-    tooltip: "How often the bot scans for entries.",
-    step: "1",
-  },
-  {
-    key: "maxOpenPositions",
-    label: "Max open positions",
-    tooltip: "Cap on simultaneously managed parity positions.",
-    step: "1",
-  },
-];
-
-const BOT_INPUT_CLS =
-  "w-32 shrink-0 px-3 py-2 bg-surface border border-surface-border rounded-lg text-slate-900 font-bold text-xs focus:outline-none focus:ring-2 focus:ring-accent/20 focus:border-accent transition-all h-[38px] font-mono tabular-nums shadow-2xs";
-
-/** Per-substrategy bot configurator — edits scan/entry profile and the
- *  bot's loop parameters. Mode is owned by the lifecycle buttons, never
- *  silently flipped here. */
+/**
+ * Backward-compatibility wrapper delegating to the unified multi-section OptionsConfigModal.
+ */
 export const OptionsBotConfigModal: React.FC<{
   cfg: OptionsBotConfigDto;
-  name: string;
+  name?: string;
   onSave: (cfg: OptionsBotConfigDto) => Promise<void>;
   onClose: () => void;
-}> = ({ cfg, name, onSave, onClose }) => {
-  const [draft, setDraft] = useState<OptionsBotConfigDto>(cfg);
-  const [error, setError] = useState<string | null>(null);
-  const saveBtn = useSaveButton();
-
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
-    };
-    window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [onClose]);
-
-  const set = <K extends keyof OptionsBotConfigDto>(k: K, v: OptionsBotConfigDto[K]) => {
-    setError(null);
-    setDraft((d) => ({ ...d, [k]: v }));
-  };
-
-  const handleResetDefaults = () => {
-    setError(null);
-    setDraft((d) => ({ ...defaultOptionsBotConfig(d.substrategyId), mode: d.mode }));
-  };
-
-  const handleSave = async () => {
-    setError(null);
-    const ok = await saveBtn.run(async () => {
-      try {
-        await onSave(draft);
-      } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
-        throw e; // lands the save button on "Failed!"
-      }
-    });
-    if (ok) setTimeout(onClose, 400);
-  };
-
+}> = ({ cfg, onSave, onClose }) => {
   return (
-    <div
-      className="fixed inset-0 z-50 bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-3 sm:p-6 select-none animate-in fade-in duration-150"
-      onClick={(e) => {
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
-      <div className="bg-surface border border-surface-border rounded-2xl w-[520px] max-w-[96vw] max-h-[92vh] flex flex-col shadow-2xl overflow-hidden animate-in zoom-in-95 duration-150">
-        <div className="flex items-center justify-between px-6 py-3.5 border-b border-surface-border bg-surface shrink-0">
-          <div className="flex items-center space-x-3">
-            <div className="w-8 h-8 rounded-lg bg-accent-dim border border-accent-line flex items-center justify-center text-accent-strong shadow-2xs">
-              <SlidersHorizontal className="w-4 h-4" />
-            </div>
-            <div>
-              <h2 className="text-sm font-bold font-sans tracking-tight text-slate-900 leading-tight">
-                {name} Bot Configurator
-              </h2>
-              <p className="text-[11px] text-muted font-sans">
-                Scan and entry profile for this substrategy — Start/Pause are on the page ribbon
-              </p>
-            </div>
-          </div>
-        </div>
-
-        <div className="flex-1 overflow-y-auto px-6 py-5 space-y-4">
-          {BOT_FIELD_DEFS.map((f) => (
-            <div key={f.key} className="flex items-center justify-between gap-4">
-              <label
-                className="text-xs text-slate-700 font-medium flex items-center font-sans"
-                title={f.tooltip}
-              >
-                {f.label}
-                <CircleHelp className="w-3 h-3 ml-1.5 text-slate-400" aria-hidden />
-              </label>
-              <input
-                type="number"
-                step={f.step ?? "any"}
-                className={BOT_INPUT_CLS}
-                value={Number(draft[f.key])}
-                onChange={(e) => {
-                  const n = Number(e.target.value);
-                  if (Number.isFinite(n)) set(f.key, n as never);
-                }}
-              />
-            </div>
-          ))}
-          {error && (
-            <div className="p-2.5 rounded-lg border border-loss-border text-loss text-xs flex items-center gap-2">
-              <AlertCircle className="w-4 h-4 shrink-0" />
-              {error}
-            </div>
-          )}
-        </div>
-
-        <div className="flex items-center justify-between gap-3 px-6 py-3.5 border-t border-surface-border bg-surface shrink-0">
-          <button
-            type="button"
-            onClick={handleResetDefaults}
-            className="text-xs font-sans font-medium text-slate-500 hover:text-slate-700 cursor-pointer"
-          >
-            Reset defaults
-          </button>
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={onClose}
-              className="btn-secondary !text-xs !py-2 !px-3 font-sans cursor-pointer"
-            >
-              Cancel
-            </button>
-            <SaveButton state={saveBtn.state} onClick={handleSave} />
-          </div>
-        </div>
-      </div>
-    </div>
+    <OptionsConfigModal
+      isOpen={true}
+      initialSubstrategyId={cfg.substrategyId}
+      cfg={cfg}
+      onSave={onSave}
+      onClose={onClose}
+    />
   );
 };
 
 export default OptionsArbitrage;
+

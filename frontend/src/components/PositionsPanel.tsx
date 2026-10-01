@@ -47,8 +47,8 @@ interface PositionsPanelProps {
 
 const STRATEGY_SHORT: Record<string, string> = {
   futures: "SPREAD",
-  radar: "RADAR",
-  funding: "FUNDING",
+  radar: "SPREAD",
+  funding: "FUNDING RATE",
   spot: "SPOT",
   prediction: "PREDICT",
   stat_arb: "STAT ARB",
@@ -92,6 +92,7 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
   // healthy claim with no data behind it.
   const statusKnown = status != null;
   const isTripped = status?.circuit_breaker_tripped ?? false;
+  const isStopped = status?.is_stopped ?? (isTripped && status?.circuit_breaker_status?.includes("KILLSWITCH")) ?? false;
   const isPaused = propIsPaused ?? status?.is_paused ?? false;
 
   const [scope, setScope] = useState<PositionScope>("all");
@@ -459,43 +460,24 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
                   <span className="text-[9px] px-1.5 py-px rounded bg-slate-100 text-slate-600 font-mono font-bold border border-slate-200/60 whitespace-nowrap">
                     {STRATEGY_SHORT[pos.strategyId] ?? pos.strategyId.toUpperCase()}
                   </span>
-                  {pos.strategyId.startsWith("options_") && pos.expectedNetUsd !== null ? (
-                    <div className="flex items-center gap-1.5 tabular-nums shrink-0">
-                      <span
-                        className="text-[10px] font-bold text-emerald-600"
-                        title={`Expected net profit at expiration: ${formatUsd(pos.expectedNetUsd)}`}
-                      >
-                        Exp: {formatUsd(pos.expectedNetUsd)}
-                      </span>
-                      {pos.unrealizedPnlUsd !== null && (
-                        <span
-                          className="text-[9px] font-medium text-slate-400"
-                          title={`Current testnet mark-to-market (illiquid spread): ${formatUsd(pos.unrealizedPnlUsd)}`}
-                        >
-                          (MtM: {formatUsd(pos.unrealizedPnlUsd)})
-                        </span>
-                      )}
-                    </div>
-                  ) : (
-                    <span
-                      className={`text-[10px] font-semibold tabular-nums shrink-0 ${
-                        pos.unrealizedPnlUsd === null
-                          ? "text-slate-500"
-                          : pos.unrealizedPnlUsd >= 0
-                          ? "text-emerald-600"
-                          : "text-rose-600"
-                      }`}
-                      title={
-                        pos.unrealizedPnlUsd !== null
-                          ? `Mark-to-market PnL net of $${pos.feesUsd.toFixed(2)} fees`
-                          : pos.expectedNetUsd !== null
-                          ? `Mark-to-market unavailable; entry-time expected net ${formatUsd(pos.expectedNetUsd)}`
-                          : "No mark-to-market data"
-                      }
-                    >
-                      {pos.unrealizedPnlUsd !== null ? formatUsd(pos.unrealizedPnlUsd) : "—"}
-                    </span>
-                  )}
+                  <span
+                    className={`text-[10px] font-semibold tabular-nums shrink-0 ${
+                      pos.unrealizedPnlUsd === null
+                        ? "text-slate-500"
+                        : pos.unrealizedPnlUsd >= 0
+                        ? "text-emerald-600"
+                        : "text-rose-600"
+                    }`}
+                    title={
+                      pos.unrealizedPnlUsd !== null
+                        ? `Current Net Profit (mark-to-market net of $${pos.feesUsd.toFixed(2)} fees)`
+                        : pos.expectedNetUsd !== null
+                        ? `Mark-to-market unavailable; entry expected net ${formatUsd(pos.expectedNetUsd)}`
+                        : "No mark-to-market data"
+                    }
+                  >
+                    {pos.unrealizedPnlUsd !== null ? formatUsd(pos.unrealizedPnlUsd) : "—"}
+                  </span>
                 </div>
               </div>
             );
@@ -525,6 +507,8 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
               className={`px-2.5 py-1 rounded-full border flex items-center space-x-1.5 text-[11px] font-sans font-semibold ${
                 !statusKnown
                   ? "bg-surface-hover border-border text-slate-500"
+                  : isStopped
+                  ? "bg-surface-raised border-surface-border text-slate-500"
                   : isTripped
                   ? "bg-loss-dim border-loss-border text-loss"
                   : isPaused
@@ -534,6 +518,8 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
               title={
                 !statusKnown
                   ? "Unknown — no backend status snapshot loaded yet"
+                  : isStopped
+                  ? "Stopped — emergency exit executed via Stop All. All positions cleared."
                   : isTripped
                   ? "Halted — circuit breaker tripped: risk limits breached or Emergency Stop triggered. Reset in Portfolio Monitor."
                   : isPaused
@@ -545,6 +531,8 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
                 className={`w-1.5 h-1.5 rounded-full ${
                   !statusKnown
                     ? "bg-slate-400"
+                    : isStopped
+                    ? "bg-slate-400"
                     : isTripped
                     ? "bg-loss animate-pulse"
                     : isPaused
@@ -553,7 +541,7 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
                 }`}
               />
               <span>
-                {!statusKnown ? "Unknown" : isTripped ? "Halted" : isPaused ? "Paused" : "Healthy"}
+                {!statusKnown ? "Unknown" : isStopped ? "Stopped" : isTripped ? "Halted" : isPaused ? "Paused" : "Healthy"}
               </span>
             </div>
           </div>

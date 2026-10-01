@@ -90,13 +90,12 @@ The engine runs two real execution environments (`TradingEnvironment`); there is
 | Lighter | `testnet.zklighter.elliot.ai` (chain 300) |
 | Binance (USDT-M perp) | `testnet.binancefuture.com` |
 | OKX | main host + `x-simulated-trading: 1` demo header |
-| Kraken | `demo-futures.kraken.com` |
 | Vanta / Orderly | `testnet-api.orderly.org` |
 | Decibel | Aptos testnet (`testnet-app.decibel.trade` domain) |
 | PopDEX | Morph testnet (chain 34952, `testnet-api.popdex.xyz`) |
 | Alpaca | `paper-api.alpaca.markets` (separate paper key namespace) |
 
-Venues without a public demo endpoint — Coinbase, Aster, Robinhood, Arcus, Polymarket, all DexPerp long-tail venues, and all EVM AMMs — are ineligible in testnet; they are never simulated. Alpaca's paper host is a real venue sandbox (its own account namespace + keys), so Testnet admits it through `tn_alpaca`. Testnet account profiles are a separate credential set (`exchange_accounts.environment = 'testnet'`) managed while Testnet Trading is the active mode; fund them at each venue's own faucet.
+Venues without a public demo endpoint — Coinbase, Aster, Kraken, Robinhood, Arcus, Polymarket, all DexPerp long-tail venues, and all EVM AMMs — are ineligible in testnet; they are never simulated. Alpaca's paper host is a real venue sandbox (its own account namespace + keys), so Testnet admits it through `tn_alpaca`. Testnet account profiles are a separate credential set (`exchange_accounts.environment = 'testnet'`) managed while Testnet Trading is the active mode; fund them at each venue's own faucet.
 
 ## Live mode
 

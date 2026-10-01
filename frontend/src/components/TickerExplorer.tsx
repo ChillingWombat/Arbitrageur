@@ -80,6 +80,7 @@ interface TickerRowProps {
   tradeCount: number;
   netProfit: number;
   netProfitBps: number | undefined;
+  avgEntrySpreadBps?: number;
   avgVolumeUsd: number | undefined;
   showLiquidity: boolean;
   onSelect: (symbol: string) => void;
@@ -99,6 +100,7 @@ const TickerRow: React.FC<TickerRowProps> = React.memo(
     tradeCount,
     netProfit,
     netProfitBps,
+    avgEntrySpreadBps,
     avgVolumeUsd,
     showLiquidity,
     onSelect,
@@ -180,20 +182,27 @@ const TickerRow: React.FC<TickerRowProps> = React.memo(
               className={`text-xs font-bold tabular-nums ${
                 isProfit ? "text-profit" : isLoss ? "text-loss" : "text-slate-700"
               }`}
-              title={hasTrades ? `${tradeCount} txs · ${formatCurrencyPnl(netProfit)}` : "No trades executed"}
+              title={
+                hasTrades
+                  ? `${tradeCount} txs · ${formatCurrencyPnl(netProfit)}${
+                      avgEntrySpreadBps != null
+                        ? ` (avg entry sprd: ${avgEntrySpreadBps >= 0 ? "+" : ""}${avgEntrySpreadBps.toFixed(1)} bps)`
+                        : ""
+                    }`
+                  : "No trades executed"
+              }
             >
               {formatCurrencyPnl(netProfit)}
             </span>
             <span
-              className={`text-xs font-mono tabular-nums leading-none ${
-                showLiquidity
-                  ? "text-slate-500"
-                  : isProfit
-                  ? "text-profit"
-                  : isLoss
-                  ? "text-loss"
-                  : "text-muted"
+              className={`text-[11px] font-mono tabular-nums leading-none ${
+                showLiquidity ? "text-slate-500" : "text-muted"
               }`}
+              title={
+                !showLiquidity && avgEntrySpreadBps != null
+                  ? `entry sprd: ${avgEntrySpreadBps >= 0 ? "+" : ""}${avgEntrySpreadBps.toFixed(1)} bps`
+                  : undefined
+              }
             >
               {showLiquidity
                 ? avgVolumeUsd !== undefined
@@ -307,7 +316,10 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
 
   // Compute stats (transaction count, net profit, net bps, and risk/balance issues) per ticker
   const tickersWithStats: TickerWithStats[] = useMemo(() => {
-    const statsMap = new Map<string, { count: number; pnl: number; pnlBps: number; lastTime?: string }>();
+    const statsMap = new Map<
+      string,
+      { count: number; pnl: number; entrySpreadBpsSum: number; entrySpreadCount: number; lastTime?: string }
+    >();
 
     for (const log of executionLogs) {
       if (!log.symbol) continue;
@@ -318,11 +330,17 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
         baseKey = baseKey.slice(1);
       }
 
-      const cur = statsMap.get(baseKey) || { count: 0, pnl: 0, pnlBps: 0 };
+      const cur = statsMap.get(baseKey) || {
+        count: 0,
+        pnl: 0,
+        entrySpreadBpsSum: 0,
+        entrySpreadCount: 0,
+      };
       cur.count += 1;
       cur.pnl += log.net_profit || 0;
-      if (log.trigger_spread_bps) {
-        cur.pnlBps += log.trigger_spread_bps;
+      if (log.trigger_spread_bps != null && Number.isFinite(log.trigger_spread_bps)) {
+        cur.entrySpreadBpsSum += log.trigger_spread_bps;
+        cur.entrySpreadCount += 1;
       }
       if (!cur.lastTime || log.timestamp > cur.lastTime) {
         cur.lastTime = log.timestamp;
@@ -341,14 +359,13 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
       return true;
     });
     return baseList.map((t) => {
-      const stat = statsMap.get(t.base.toUpperCase()) || { count: 0, pnl: 0, pnlBps: 0 };
+      const stat = statsMap.get(t.base.toUpperCase()) || {
+        count: 0,
+        pnl: 0,
+        entrySpreadBpsSum: 0,
+        entrySpreadCount: 0,
+      };
       const netProfit = Math.round(stat.pnl * 100) / 100;
-      const netProfitBps =
-        stat.count > 0 && stat.pnlBps
-          ? Math.round((stat.pnlBps / stat.count) * 10) / 10
-          : t.basePrice > 0 && Math.abs(netProfit) > 0
-          ? Math.round((netProfit / (t.basePrice * 0.05)) * 10000 * 10) / 10
-          : 0;
 
       // Detect if positions are not balanced or there are other issues
       const netDelta = riskData?.net_deltas?.find((d) => d.asset.toUpperCase() === t.base.toUpperCase());
@@ -358,11 +375,39 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
             (Math.abs(netDelta.net_exposure_usd) >= 1.0 && Math.abs(netDelta.net_quantity) > 0.0001))
       );
       const config = _strategyConfigs?.get(t.symbol);
-      const maxUnits = deriveStepSizing(t.symbol, t.venues, t.basePrice, totalEquityUsd, {
+      const stepSizing = deriveStepSizing(t.symbol, t.venues, t.basePrice, totalEquityUsd, {
         stepSizeMult: futuresParams?.stepSizeMult ?? 10,
         maxStepUsd: futuresParams?.maxStepUsd ?? 2500,
         maxTickerEquityPct: futuresParams?.maxTickerEquityPct ?? 20,
-      }).maxSteps;
+      });
+      const maxUnits = stepSizing.maxSteps;
+
+      // Determine trade notional: derive from sizing, futuresParams maxStepUsd, or basePrice
+      const stepNotionalUsd =
+        stepSizing.stepBaseQty > 0 && t.basePrice > 0
+          ? stepSizing.stepBaseQty * t.basePrice
+          : (futuresParams?.maxStepUsd ?? 50);
+      const tradeNotional = stepNotionalUsd > 0 ? stepNotionalUsd : (futuresParams?.maxStepUsd ?? 50);
+      const totalNotional = Math.max(tradeNotional * Math.max(1, stat.count), 1);
+
+      let netProfitBps = 0;
+      if (netProfit !== 0 && totalNotional > 0) {
+        const rawBps = (netProfit / totalNotional) * 10_000;
+        netProfitBps = Math.round(rawBps * 10) / 10;
+        // Crucially: ensure Math.sign(netProfitBps) === Math.sign(netProfit).
+        // If netProfit < 0, netProfitBps is strictly negative!
+        if (netProfit < 0 && netProfitBps >= 0) {
+          netProfitBps = -0.1;
+        } else if (netProfit > 0 && netProfitBps <= 0) {
+          netProfitBps = 0.1;
+        }
+      }
+
+      const avgEntrySpreadBps =
+        stat.entrySpreadCount > 0
+          ? Math.round((stat.entrySpreadBpsSum / stat.entrySpreadCount) * 10) / 10
+          : undefined;
+
       const hasConfigIssue = Boolean(config && config.currentAccumulatedUnits > maxUnits);
       const hasIssue = hasUnbalancedPosition || hasConfigIssue;
       const issueDescription = hasUnbalancedPosition
@@ -376,6 +421,7 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
         tradeCount: stat.count,
         netProfit,
         netProfitBps,
+        avgEntrySpreadBps,
         hasIssue,
         issueDescription,
         lastTradeTime: stat.lastTime,
@@ -753,6 +799,7 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
               tradeCount={ticker.tradeCount}
               netProfit={ticker.netProfit}
               netProfitBps={ticker.netProfitBps}
+              avgEntrySpreadBps={ticker.avgEntrySpreadBps}
               avgVolumeUsd={ticker.avgVolumeUsd}
               showLiquidity={sortOption === "liquidity"}
               onSelect={onSelectTicker}

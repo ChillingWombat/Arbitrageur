@@ -110,6 +110,7 @@ async fn dispatch(line: &str, state: &Arc<AppEngineState>) -> Value {
             let p = args.get("paused").and_then(Value::as_bool).unwrap_or(false);
             crate::commands::set_engine_paused_impl(p, st).map(|v| json!(v))
         }
+        "start_engine" => crate::commands::start_engine_impl(st).map(|v| json!(v)),
         "engine_settings" => crate::commands::get_engine_settings_impl(st).map(|v| json!(v)),
         "acknowledge_signal" => crate::commands::acknowledge_signal_impl(
             arg(&args, "signal_id").unwrap_or_default(),
@@ -302,6 +303,7 @@ async fn dispatch(line: &str, state: &Arc<AppEngineState>) -> Value {
                 min_hours_to_expiry: arg_f64(&args, "min_hours_to_expiry"),
                 max_days_to_expiry: arg_f64(&args, "max_days_to_expiry"),
                 min_edge_bps: arg_f64(&args, "min_edge_bps"),
+                min_expected_yield_pct: arg_f64(&args, "min_expected_yield_pct"),
                 limit: arg_u32(&args, "limit").map(|n| n as usize),
             };
             crate::options_parity::scan_options_parity_impl(&params, st)
@@ -314,6 +316,7 @@ async fn dispatch(line: &str, state: &Arc<AppEngineState>) -> Value {
                 currency: arg(&args, "currency").unwrap_or("BTC").to_string(),
                 qty_base: arg_f64(&args, "qty_base").unwrap_or(0.1),
                 min_edge_bps: arg_f64(&args, "min_edge_bps"),
+                min_expected_yield_pct: arg_f64(&args, "min_expected_yield_pct"),
                 auto: args.get("auto").and_then(Value::as_bool).unwrap_or(false),
             };
             crate::options_parity::execute_options_parity_impl(params, st)
@@ -330,6 +333,7 @@ async fn dispatch(line: &str, state: &Arc<AppEngineState>) -> Value {
                 min_hours_to_expiry: arg_f64(&args, "min_hours_to_expiry"),
                 max_days_to_expiry: arg_f64(&args, "max_days_to_expiry"),
                 min_edge_bps: arg_f64(&args, "min_edge_bps"),
+                min_expected_yield_pct: arg_f64(&args, "min_expected_yield_pct"),
                 limit: arg_u32(&args, "limit").map(|n| n as usize),
             };
             crate::options_packages::scan_options_packages_impl(&params, st)
@@ -345,6 +349,7 @@ async fn dispatch(line: &str, state: &Arc<AppEngineState>) -> Value {
                 currency: arg(&args, "currency").unwrap_or("BTC").to_string(),
                 qty_base: arg_f64(&args, "qty_base").unwrap_or(0.1),
                 min_edge_bps: arg_f64(&args, "min_edge_bps"),
+                min_expected_yield_pct: arg_f64(&args, "min_expected_yield_pct"),
                 auto: args.get("auto").and_then(Value::as_bool).unwrap_or(false),
             };
             crate::options_packages::execute_options_package_impl(&params, st)
@@ -421,8 +426,12 @@ async fn dispatch(line: &str, state: &Arc<AppEngineState>) -> Value {
                 .map(|v| json!(v))
         }
 
-        // ── positions / signal ledger / bot ─────────────────────────────────
-        "open_positions" => open_positions(&args, st),
+        "open_positions" => {
+            let sid = arg(&args, "strategy_id").map(str::to_string);
+            crate::execution::get_open_positions_impl(sid, st)
+                .await
+                .map(|v| json!(v))
+        }
         "signal_executions" => signal_executions(&args, st),
         "traded_opportunities" => st
             .state_store
@@ -507,78 +516,6 @@ async fn cancel_order(args: &Value, state: &AppEngineState) -> Result<Value, Str
     Ok(json!(format!(
         "Cancel request accepted on {venue} for order {order_id}"
     )))
-}
-
-fn open_positions(args: &Value, state: &AppEngineState) -> Result<Value, String> {
-    // Same body as execution::get_open_positions.
-    let sid = match arg(args, "strategy_id") {
-        Some(raw) => {
-            Some(crate::state_store::normalize_strategy_id(raw).map_err(|e| e.to_string())?)
-        }
-        None => None,
-    };
-    let mut signals = state
-        .state_store
-        .list_signals(None, None)
-        .map_err(|e| e.to_string())?;
-    if let Some(sid) = sid {
-        signals.retain(|s| s.strategy_id.eq_ignore_ascii_case(&sid));
-    }
-    let hub = &state.market_data_hub;
-    let mut positions = crate::state_store::aggregate_open_positions(&signals, &|venue, symbol| {
-        let book = hub.get_valid_orderbook(
-            &arbitrageur_core::types::VenueId::from(venue),
-            symbol,
-            Some(crate::execution::MARK_READ_TTL),
-        );
-        let from_hub = book
-            .as_ref()
-            .and_then(|b| b.mid_price().or(b.mark_price))
-            .and_then(|m| crate::execution::dec_to_f64(m, "mark mid").ok())
-            .and_then(|p| crate::execution::ledger_px_usd(state, venue, symbol, p));
-        if from_hub.is_some() {
-            return from_hub;
-        }
-        let acct_key = format!("{}-{}", state.env().as_str(), venue.to_lowercase());
-        if let Some(mark_usd) =
-            state
-                .last_good_accounts
-                .lock()
-                .get(&acct_key)
-                .and_then(|(snap, ts_ms)| {
-                    let age_ms = chrono::Utc::now().timestamp_millis().saturating_sub(*ts_ms);
-                    if age_ms > crate::execution::MARK_READ_TTL.as_millis() as i64 {
-                        return None;
-                    }
-                    snap.positions
-                        .iter()
-                        .find(|p| {
-                            p.symbol.eq_ignore_ascii_case(symbol)
-                                && p.mark_price > arbitrageur_core::types::dec!(0)
-                        })
-                        .and_then(|p| {
-                            crate::execution::dec_to_f64(p.mark_price, "account mark").ok()
-                        })
-                })
-        {
-            return Some(mark_usd);
-        }
-        match &book {
-            None => tracing::warn!("open_positions mark miss: {venue}/{symbol} — no fresh hub book or account mark"),
-            Some(b) if b.mid_price().or(b.mark_price).is_none() => tracing::warn!(
-                "open_positions mark miss: {venue}/{symbol} — book present but no mid/mark (bids={} asks={} mark={:?})",
-                b.bids.len(),
-                b.asks.len(),
-                b.mark_price
-            ),
-            _ => {}
-        }
-        None
-    });
-    for p in &mut positions {
-        p.reduce_only = crate::execution::trade_reduce_only(state, p)?;
-    }
-    Ok(json!(positions))
 }
 
 fn signal_executions(args: &Value, state: &AppEngineState) -> Result<Value, String> {

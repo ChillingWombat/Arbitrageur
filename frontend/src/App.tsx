@@ -148,6 +148,7 @@ export const App: React.FC = () => {
   // Transient command-failure toast — command rejections surface here, the
   // fatal overlay stays reserved for render crashes.
   const [commandError, setCommandError] = useState<string | null>(null);
+  const [isStoppingAll, setIsStoppingAll] = useState(false);
   const notifyCommandError = useCallback((msg: string) => {
     setCommandError(msg);
   }, []);
@@ -689,12 +690,15 @@ export const App: React.FC = () => {
   }, [refreshAllData, notifyCommandError]);
 
   const handleEmergencyKillswitch = useCallback(async () => {
+    setIsStoppingAll(true);
     try {
       await api.triggerKillswitch();
       stopAllFrontendBots();
       await refreshAllData();
     } catch (err) {
       notifyCommandError(describeCommandError(err, "Killswitch trigger failed"));
+    } finally {
+      setIsStoppingAll(false);
     }
   }, [refreshAllData, notifyCommandError]);
 
@@ -981,6 +985,7 @@ export const App: React.FC = () => {
         isPaused={isPaused}
         onTogglePause={handleTogglePause}
         onEmergencyKillswitch={handleEmergencyKillswitch}
+        isStoppingAll={isStoppingAll}
         refreshing={refreshing}
         activeTab={activeTab}
         onSelectTab={handleSelectTab}
@@ -1183,6 +1188,7 @@ export const App: React.FC = () => {
               isLive={systemStatus?.is_live_mode === true}
               optionsVenueAvailable={activeVenueCodes.has("DBT")}
               premiumOutlayUsd={systemStatus?.total_premium_outlay_usd ?? null}
+              openPositions={openPositions}
             />
           )}
 
@@ -1213,6 +1219,7 @@ export const App: React.FC = () => {
               venueCaps={venueCaps}
               executionLogs={executionLogs}
               isPaused={isPaused}
+              openPositions={openPositions}
             />
           )}
 

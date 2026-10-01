@@ -115,56 +115,52 @@ export const AtomicTransactionsTable: React.FC<{ transactions: AtomicTransaction
   transactions,
 }) => (
   <>
-    <div className="overflow-x-auto -mx-3.5">
-      <table className="w-full text-left text-xs font-mono tabular-nums">
-        <thead className="bg-surface-raised/60">
-          <tr className="border-b border-surface-border text-slate-500 text-xs font-semibold tracking-wider">
-            <th className="py-2 px-3">Time</th>
-            <th className="py-2 px-3">Role</th>
-            <th className="py-2 px-3">Venue</th>
-            <th className="py-2 px-3">Action</th>
-            <th className="py-2 px-3">Type</th>
-            <th className="py-2 px-3">Instrument</th>
-            <th className="py-2 px-3 text-right">Qty Filled / Intended</th>
-            <th className="py-2 px-3 text-right">Fill / Intended Px</th>
-            <th className="py-2 px-3 text-right">Fee</th>
-            <th className="py-2 px-3 text-right">State</th>
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-surface-border">
-          {transactions.map((tx) => {
-            const role = roleChip(tx.role);
-            const fill = fillChip(tx.fillState);
-            const scaled = Math.abs(tx.unitScale - 1) > 1e-9;
-            const inst = parseInstrumentType(tx.symbol);
-            const isBuy = tx.orderSide === "buy";
-            const actionText = inst.isOption
-              ? (isBuy ? "BOUGHT" : "WROTE")
-              : (isBuy ? "BUY" : "SELL");
-            const actionColor = inst.isOption
-              ? (isBuy ? "text-profit font-bold" : "text-purple-600 dark:text-purple-400 font-bold")
-              : (isBuy ? "text-profit font-bold" : "text-loss font-bold");
+  <div className="overflow-x-auto -mx-3.5">
+    <table className="w-full text-left text-xs font-mono tabular-nums">
+      <thead className="bg-surface-raised/60">
+        <tr className="border-b border-surface-border text-slate-500 text-xs font-semibold tracking-wider">
+          <th className="py-2 px-3">Time</th>
+          <th className="py-2 px-3">Venue</th>
+          <th className="py-2 px-3">Instrument</th>
+          <th className="py-2 px-3">Action</th>
+          <th className="py-2 px-3">Role</th>
+          <th className="py-2 px-3 text-right">Qty Filled / Intended</th>
+          <th className="py-2 px-3 text-right" title="Executed fill price vs. intended limit order price at submission">Fill Px / Limit Px</th>
+          <th className="py-2 px-3 text-right">Fee</th>
+          <th className="py-2 px-3 text-right">Status</th>
+        </tr>
+      </thead>
+      <tbody className="divide-y divide-surface-border">
+        {transactions.map((tx) => {
+          const role = roleChip(tx.role);
+          const fill = fillChip(tx.fillState);
+          const scaled = Math.abs(tx.unitScale - 1) > 1e-9;
+          const inst = parseInstrumentType(tx.symbol);
+          const isBuy = tx.orderSide === "buy";
+          const actionText = inst.isOption
+            ? (isBuy ? "BOUGHT" : "WROTE")
+            : (isBuy ? "BUY" : "SELL");
+          const actionColor = inst.isOption
+            ? (isBuy ? "text-profit font-bold" : "text-purple-600 dark:text-purple-400 font-bold")
+            : (isBuy ? "text-profit font-bold" : "text-loss font-bold");
 
-            return (
-              <tr key={tx.legId} className="hover:bg-surface-raised/40 transition">
-                <td className="py-2 px-3 text-slate-600 whitespace-nowrap">{fmtTime(tx.createdAt)}</td>
-                <td className="py-2 px-3">
-                  <span className={`px-1.5 py-0.5 rounded-md text-[10px] font-bold border ${role.cls}`}>
-                    {role.label}
-                  </span>
-                </td>
-                <td className="py-2 px-3 whitespace-nowrap">
-                  <span className="inline-flex items-center gap-1">
-                    <VenueLogo venueId={(tx.venue ?? "").toLowerCase()} name={tx.venue} size={13} />
-                    {tx.venue}
-                  </span>
-                </td>
-                <td className="py-2 px-3 whitespace-nowrap">
-                  <span className={actionColor}>
-                    {actionText}
-                  </span>
-                </td>
-                <td className="py-2 px-3 whitespace-nowrap">
+          const tooltip = [
+            tx.venueOrderId ? `Venue Order ID: ${tx.venueOrderId}` : null,
+            tx.clientOrderId ? `Client Order ID: ${tx.clientOrderId}` : null,
+          ].filter(Boolean).join(" · ");
+
+          return (
+            <tr key={tx.legId} className="hover:bg-surface-raised/40 transition" title={tooltip || undefined}>
+              <td className="py-2 px-3 text-slate-600 whitespace-nowrap">{fmtTime(tx.createdAt)}</td>
+              <td className="py-2 px-3 whitespace-nowrap">
+                <span className="inline-flex items-center gap-1.5">
+                  <VenueLogo venueId={(tx.venue ?? "").toLowerCase()} name={tx.venue} size={13} />
+                  <span>{tx.venue}</span>
+                </span>
+              </td>
+              <td className="py-2 px-3 text-slate-700 whitespace-nowrap">
+                <span className="inline-flex items-center gap-1.5">
+                  <span>{tx.symbol}</span>
                   {inst.type === "CALL" ? (
                     <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20">
                       CALL
@@ -181,55 +177,61 @@ export const AtomicTransactionsTable: React.FC<{ transactions: AtomicTransaction
                     <span className="px-1.5 py-0.5 rounded text-[10px] font-semibold bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/20">
                       SPOT
                     </span>
-                  ) : (
-                    <span className="text-slate-400 text-[10px] font-mono">—</span>
-                  )}
-                </td>
-                <td className="py-2 px-3 text-slate-700 whitespace-nowrap">
-                  {tx.symbol}
+                  ) : null}
                   {scaled && (
                     <span className="text-slate-400" title={`${tx.unitScale} venue-units per parent unit`}>
                       ×{tx.unitScale.toPrecision(3)}
                     </span>
                   )}
-                </td>
-                <td className="py-2 px-3 text-right text-slate-700 whitespace-nowrap">
-                  {fmtQty(tx.filledQty)} / {fmtQty(tx.intendedQty)}
-                </td>
-                <td className="py-2 px-3 text-right text-slate-700 whitespace-nowrap">
-                  {fmtPx(tx.fillPrice)} / {fmtPx(tx.intendedPrice)}
-                </td>
-                <td className="py-2 px-3 text-right text-slate-700 whitespace-nowrap">
-                  {tx.feeUsd > 0 ? `-$${tx.feeUsd.toFixed(3)}` : "$0"}
-                </td>
-                <td className="py-2 px-3 text-right whitespace-nowrap">
-                  <span className={`px-1.5 py-0.5 rounded-md text-[10px] font-bold border ${fill.cls}`}>
-                    {fill.label}
-                  </span>
-                </td>
-              </tr>
-            );
-          })}
-          {transactions.length === 0 && (
-            <tr>
-              <td colSpan={10}>
-                <EmptyState plain title="No orders persisted for this signal." />
+                </span>
+              </td>
+              <td className="py-2 px-3 whitespace-nowrap">
+                <span className={actionColor}>
+                  {actionText}
+                </span>
+              </td>
+              <td className="py-2 px-3 whitespace-nowrap">
+                <span className={`px-1.5 py-0.5 rounded-md text-[10px] font-bold border ${role.cls}`}>
+                  {role.label}
+                </span>
+              </td>
+              <td className="py-2 px-3 text-right text-slate-700 whitespace-nowrap">
+                {fmtQty(tx.filledQty)} / {fmtQty(tx.intendedQty)}
+              </td>
+              <td className="py-2 px-3 text-right text-slate-700 whitespace-nowrap">
+                {fmtPx(tx.fillPrice)} / {fmtPx(tx.intendedPrice)}
+              </td>
+              <td className="py-2 px-3 text-right text-slate-700 whitespace-nowrap">
+                {tx.feeUsd > 0 ? `-$${tx.feeUsd.toFixed(3)}` : "$0"}
+              </td>
+              <td className="py-2 px-3 text-right whitespace-nowrap">
+                <span className={`px-1.5 py-0.5 rounded-md text-[10px] font-bold border ${fill.cls}`}>
+                  {fill.label}
+                </span>
               </td>
             </tr>
-          )}
-        </tbody>
-      </table>
-    </div>
-    <div className="space-y-1 pt-1">
-      {transactions
-        .filter((tx) => tx.venueOrderId || tx.clientOrderId)
-        .map((tx) => (
-          <div key={`${tx.legId}-ids`} className="text-[10px] font-mono text-slate-400 flex flex-wrap gap-x-3">
-            <span>{tx.venue}:{tx.symbol}</span>
-            {tx.venueOrderId && <span>venue {tx.venueOrderId}</span>}
-            {tx.clientOrderId && <span>client {tx.clientOrderId}</span>}
-          </div>
-        ))}
-    </div>
-  </>
+          );
+        })}
+        {transactions.length === 0 && (
+          <tr>
+            <td colSpan={9}>
+              <EmptyState plain title="No orders persisted for this signal." />
+            </td>
+          </tr>
+        )}
+      </tbody>
+    </table>
+  </div>
+  <div className="space-y-1 pt-1">
+    {transactions
+      .filter((tx) => tx.venueOrderId || tx.clientOrderId)
+      .map((tx) => (
+        <div key={`${tx.legId}-ids`} className="text-[10px] font-mono text-slate-400 flex flex-wrap gap-x-3">
+          <span>{tx.venue}:{tx.symbol}</span>
+          {tx.venueOrderId && <span>venue {tx.venueOrderId}</span>}
+          {tx.clientOrderId && <span>client {tx.clientOrderId}</span>}
+        </div>
+      ))}
+  </div>
+</>
 );

@@ -15,6 +15,9 @@ import {
   Terminal,
   TrendingUp,
   Wallet,
+  Wind,
+  ArrowLeftRight,
+  Plus,
   X,
 } from "lucide-react";
 import { BotLifecycleControls, BotPhaseBadge } from "./BotLifecycleControls";
@@ -23,6 +26,7 @@ import { BotStatCards } from "./BotStatCards";
 import { InfoTooltip } from "./InfoTooltip";
 import { SaveButton, useSaveButton } from "./SaveButton";
 import { SwitchToggle } from "./SwitchToggle";
+import { PositionDetailModal } from "./PositionDetailModal";
 import type {
   ExecutionLogEntry,
   MonitorSnapshotDto,
@@ -30,10 +34,19 @@ import type {
   MonitorConfigDto,
   RadarBotConfigDto,
   RadarBotStatusDto,
+  BotOpenPositionDto,
+  OpenPositionDto,
   SignalExecutionDto,
   StrategyFillPnl,
   VenueCaps,
+  StrategyAccountRouteDto,
+  AccountDto,
+  StrategyParamsDto,
+  PassiveUnwindDto,
 } from "../types";
+import { DEFAULT_PASSIVE_UNWIND } from "../types";
+import { PERP_TICKERS } from "../types/tickers";
+import { StrategyRouteCard, STRATEGIES } from "./ExchangeAccounts";
 import { api } from "../services/api";
 import {
   buildHeldSet,
@@ -53,6 +66,7 @@ import { VenueLogo } from "./VenueLogo";
 import { ExecuteButton } from "./ExecuteButton";
 import { CapacityChart } from "./CapacityChart";
 import { DetailField, DetailSection } from "./DetailBits";
+import { OpportunityTrendGraph } from "./OpportunityTrendGraph";
 
 /* ------------------------------------------------------------------ */
 /* Formatting helpers — missing data always renders as "—", never 0    */
@@ -739,8 +753,8 @@ interface SignalDetailModalProps {
   venueCaps?: VenueCaps;
 }
 
-const SignalDetailModal: React.FC<SignalDetailModalProps> = React.memo(
-  ({ row: r, held, sizeValue, executing, onSizeChange, onExecute, onClose, venueCaps }) => {
+export const SignalDetailModal: React.FC<SignalDetailModalProps> = React.memo(
+  ({ row: r, sizeValue, executing, onSizeChange, onExecute, onClose, venueCaps }) => {
     const rowKey = `${r.symbol}:${r.buyVenue}:${r.sellVenue}`;
     const live = isLiveCapableRoute(r.buyVenue, r.sellVenue, venueCaps);
     useEffect(() => {
@@ -775,14 +789,6 @@ const SignalDetailModal: React.FC<SignalDetailModalProps> = React.memo(
                 <VenueLogo venueId={r.sellVenue} name={VENUE_NAME[r.sellVenue] ?? r.sellVenue} size={15} />
                 {VENUE_LABEL[r.sellVenue] ?? r.sellVenue}
               </span>
-              {held && (
-                <span
-                  className="px-1.5 py-0.5 rounded-full border border-profit-border bg-profit-dim text-profit text-[10px] font-sans font-bold"
-                  title="Bot-managed convergence position open on this pair"
-                >
-                  bot
-                </span>
-              )}
               {!live && (
                 <span
                   className="px-1.5 py-0.5 rounded-full border text-[10px] font-sans font-bold border-surface-border bg-surface-raised text-slate-500"
@@ -850,6 +856,14 @@ const SignalDetailModal: React.FC<SignalDetailModalProps> = React.memo(
                 value={fmtDur(r.expectedConvergeSecs)}
                 tip="Expected time for the deviation to revert inside the band, from OU / episode statistics."
               />
+            </DetailSection>
+
+            <DetailSection
+              title="Spread Trend & Convergence Horizon"
+              tip="Historical spread trajectory leading up to current live deviation, with OU mean-reversion projection toward fair-value baseline by expected end time."
+              gridClassName="block"
+            >
+              <OpportunityTrendGraph row={r} />
             </DetailSection>
 
             <DetailSection title="Outcome evidence">
@@ -989,7 +1003,7 @@ interface RadarRowProps {
 }
 
 const RadarRow: React.FC<RadarRowProps> = React.memo(
-  ({ row: r, rowKey: k, held, sizeValue, executing, onOpenDetail, onSizeChange, onExecute, venueCaps }) => {
+  ({ row: r, rowKey: k, sizeValue, executing, onOpenDetail, onSizeChange, onExecute, venueCaps }) => {
     return (
       <React.Fragment>
         <tr
@@ -1005,14 +1019,6 @@ const RadarRow: React.FC<RadarRowProps> = React.memo(
                 title={`Tracked-instrument group: buy leg trades ${r.buyInstrument ?? r.symbol} on ${r.buyVenue}, sell leg trades ${r.sellInstrument ?? r.symbol} on ${r.sellVenue} — prices convert to ${r.symbol} units via the learned fair ratio.`}
               >
                 {r.buyInstrument ?? r.symbol}⇄{r.sellInstrument ?? r.symbol}
-              </span>
-            )}
-            {held && (
-              <span
-                className="ml-1.5 px-1.5 py-px rounded-full border border-profit-border bg-profit-dim text-profit text-[10px] font-mono font-bold"
-                title="Bot-managed convergence position open on this pair"
-              >
-                bot
               </span>
             )}
           </td>
@@ -1133,12 +1139,18 @@ interface OpportunityRadarProps {
   venueCaps?: VenueCaps;
   executionLogs?: ExecutionLogEntry[];
   isPaused?: boolean;
+  openPositions?: OpenPositionDto[];
+  initialBotStatus?: RadarBotStatusDto | null;
+  initialSelectedDetailPos?: OpenPositionDto | null;
 }
 
 const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({
   venueCaps,
   executionLogs = [],
   isPaused = false,
+  openPositions = [],
+  initialBotStatus = null,
+  initialSelectedDetailPos = null,
 }) => {
   const [snap, setSnap] = useState<MonitorSnapshotDto | null>(null);
   const [cfg, setCfg] = useState<MonitorConfigDto | null>(null);
@@ -1166,6 +1178,10 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
   const [detailKey, setDetailKey] = useState<string | null>(null);
+  const [selectedDetailPos, setSelectedDetailPos] = useState<OpenPositionDto | null>(
+    () => initialSelectedDetailPos ?? null,
+  );
+  const [livePositions, setLivePositions] = useState<OpenPositionDto[]>([]);
   const [executing, setExecuting] = useState<string | null>(null);
   const [execError, setExecError] = useState<string | null>(null);
   const [execSuccess, setExecSuccess] = useState<string | null>(null);
@@ -1173,7 +1189,7 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({
   // Autonomous convergence bot (opt-in). Backend BotMode is the
   // single source of truth — no page-local lifecycle phase.
   const [botCfg, setBotCfg] = useState<RadarBotConfigDto | null>(null);
-  const [botStatus, setBotStatus] = useState<RadarBotStatusDto | null>(null);
+  const [botStatus, setBotStatus] = useState<RadarBotStatusDto | null>(() => initialBotStatus ?? null);
   const [botError, setBotError] = useState<string | null>(null);
   const [flattening, setFlattening] = useState(false);
   const [flattenError, setFlattenError] = useState<string | null>(null);
@@ -1193,6 +1209,55 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({
     [executionLogs],
   );
   const openPos = botStatus?.openPositions ?? [];
+
+  const allPositions = useMemo(
+    () => (openPositions && openPositions.length > 0 ? openPositions : livePositions),
+    [openPositions, livePositions],
+  );
+
+  const handleOpenPositionClick = useCallback(
+    (p: BotOpenPositionDto) => {
+      // 1. Check if matching OpenPositionDto exists in backend open_positions
+      const match = allPositions.find((pos) => {
+        const strat = (pos.strategyId ?? "").toLowerCase();
+        if (strat !== "radar" && strat !== "spread" && strat !== "futures") return false;
+        if (pos.symbol.toUpperCase() === p.symbol.toUpperCase()) return true;
+        if (pos.legSymbols?.some((s) => s.toUpperCase().includes(p.symbol.toUpperCase()))) return true;
+        return false;
+      });
+      if (match) {
+        setSelectedDetailPos(match);
+        return;
+      }
+
+      // 2. Synthesize an honest OpenPositionDto from BotOpenPositionDto so details always open
+      const buyQty = p.sizeUsd > 0 ? p.sizeUsd / 2 : 1;
+      const sellQty = p.sizeUsd > 0 ? -(p.sizeUsd / 2) : -1;
+      const synth: OpenPositionDto = {
+        key: `radar|${p.symbol}-${p.buyVenue}-${p.sellVenue}-${p.entryTsMs}`,
+        tradeId: `${p.symbol}-${p.entryTsMs}`,
+        strategyId: "radar",
+        symbol: p.symbol,
+        legSymbols: [p.symbol],
+        signalCount: 2,
+        venues: [
+          { venue: p.buyVenue.toLowerCase(), symbol: p.symbol, netQty: buyQty },
+          { venue: p.sellVenue.toLowerCase(), symbol: p.symbol, netQty: sellQty },
+        ],
+        expectedNetUsd: Number.isFinite(p.entryDevBps) ? (p.sizeUsd * p.entryDevBps) / 10000 : null,
+        unrealizedPnlUsd:
+          p.liveDevBps != null && Number.isFinite(p.entryDevBps)
+            ? (p.sizeUsd * (p.liveDevBps - p.entryDevBps)) / 10000
+            : null,
+        feesUsd: 0,
+        notionalUsd: p.sizeUsd,
+        openedAt: new Date(p.entryTsMs || Date.now()).toISOString(),
+        reduceOnly: false,
+      };
+      setSelectedDetailPos(synth);
+    },
+    [allPositions],
+  );
 
   // Poll the snapshot while the tab is mounted.
   useEffect(() => {
@@ -1221,6 +1286,12 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({
         if (!dead) setFillPnl(pnl);
       } catch {
         /* attributed PnL unavailable — profit cell keeps the "—" fallback */
+      }
+      try {
+        const pList = await api.getOpenPositions("radar");
+        if (!dead) setLivePositions(pList);
+      } catch {
+        /* positions unreadable */
       }
     };
     tick();
@@ -1387,8 +1458,29 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({
   }, []);
 
   const handleSizeChange = useCallback((k: string, value: number) => {
-    setSizeUsd((m) => ({ ...m, [k]: value }));
+    setSizeUsd((prev) => ({ ...prev, [k]: value }));
   }, []);
+
+  const feesPaidUsd = useMemo(() => {
+    return radarLogs.reduce((sum, l) => sum + (l.fees_usd ?? 0), 0);
+  }, [radarLogs]);
+
+  const winRatePct = useMemo(() => {
+    const closed = radarLogs.filter((l) => l.net_pnl !== undefined && l.net_pnl !== null);
+    if (closed.length === 0) return null;
+    const wins = closed.filter((l) => (l.net_pnl ?? 0) > 0).length;
+    return (wins / closed.length) * 100;
+  }, [radarLogs]);
+
+  const openExposureUsd = useMemo(() => {
+    return openPos.reduce((sum, p) => sum + Math.abs(p.sizeUsd), 0);
+  }, [openPos]);
+
+  const topEdgeBps = useMemo(() => {
+    if (!snap || snap.rows.length === 0) return null;
+    const max = Math.max(...snap.rows.map((r) => r.expectedProfitBps ?? 0));
+    return Number.isFinite(max) ? max : null;
+  }, [snap]);
 
   return (
     <div className="h-full flex flex-col bg-background text-slate-700 overflow-hidden p-4 space-y-4">
@@ -1490,7 +1582,15 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({
         </div>
       </div>
 
-      <BotStatCards stats={cycleStats} />
+      <BotStatCards
+        stats={cycleStats}
+        winRatePct={winRatePct}
+        exitsToday={botStatus?.exitsToday ?? null}
+        openExposureUsd={openExposureUsd}
+        feesPaidUsd={feesPaidUsd > 0 ? feesPaidUsd : null}
+        scannedCount={snap?.rows.length ?? 0}
+        topEdgeBps={topEdgeBps}
+      />
 
       {attentionSignals.length > 0 && (
         <div
@@ -1788,44 +1888,34 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({
       {/* Bottom dock: Current Positions vs Execution History vs
           Opportunity History vs Log Monitor — same gadget window the other
           strategy pages carry, scoped to this page's radar strategy. */}
-      <div className="bg-surface rounded-lg border border-surface-border shadow-2xs overflow-hidden">
-        <div className="flex items-stretch border-b border-surface-border bg-slate-50/80 select-none">
-          <div className="grid grid-cols-4 flex-1 divide-x divide-surface-border">
-            {(
-              [
-                { id: "position", label: "Current Positions", icon: Wallet, count: openPos.length },
-                { id: "history", label: "Execution History", icon: History, count: radarLogs.length },
-                { id: "opps", label: "Opportunity History", icon: Radar, count: null },
-                { id: "logs", label: "Log Monitor", icon: Terminal, count: radarLogs.length },
-              ] as const
-            ).map(({ id, label, icon: Icon, count }) => (
-              <button
-                key={id}
-                type="button"
-                onClick={() => setDockTab(id)}
-                className={`relative h-9 flex items-center justify-center space-x-2 px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
-                  dockTab === id
-                    ? "text-accent-strong font-bold bg-surface"
-                    : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
+      <div className="bg-surface rounded-xl border border-surface-border shadow-card overflow-hidden shrink-0">
+        <div className="grid grid-cols-4 border-b border-surface-border bg-slate-50/60 select-none pt-1 px-1 gap-1">
+          {(
+            [
+              { id: "position", label: "Open Positions", icon: Wallet },
+              { id: "opps", label: "Opportunity History", icon: Radar },
+              { id: "history", label: "Execution History", icon: History },
+              { id: "logs", label: "Log Monitor", icon: Terminal },
+            ] as const
+          ).map(({ id, label, icon: Icon }) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => setDockTab(id)}
+              className={`w-full flex items-center justify-center space-x-2 py-2 px-3 text-xs font-sans transition select-none group cursor-pointer rounded-t-lg ${
+                dockTab === id
+                  ? "text-accent-strong font-bold bg-surface border-t border-x border-surface-border -mb-px shadow-2xs"
+                  : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/80 font-medium border-t border-x border-transparent"
+              }`}
+            >
+              <Icon
+                className={`w-3.5 h-3.5 transition shrink-0 ${
+                  dockTab === id ? "text-accent-strong" : "text-muted group-hover:text-slate-600"
                 }`}
-              >
-                <Icon
-                  className={`w-3 h-3 transition shrink-0 ${
-                    dockTab === id ? "text-accent-strong" : "text-muted group-hover:text-slate-600"
-                  }`}
-                />
-                <span>{label}</span>
-                {count != null && count > 0 && (
-                <span className="px-1.5 py-0.5 rounded-md text-[11px] font-sans font-bold min-w-[16px] text-center leading-tight bg-accent-dim text-accent-strong border border-accent-line/60">
-                  {count}
-                </span>
-                )}
-                {dockTab === id && (
-                  <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
-                )}
-              </button>
-            ))}
-          </div>
+              />
+              <span className="truncate">{label}</span>
+            </button>
+          ))}
         </div>
 
         <div className="p-3.5 h-96 overflow-y-auto">
@@ -1837,44 +1927,76 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({
                 hint="Bot-managed and manual radar entries aggregate here with live deviation and unwind deadline."
               />
             ) : (
-              <div className="divide-y divide-surface-border">
-                {openPos.map((p, i) => {
-                  const remainingSecs = (p.deadlineMs - Date.now()) / 1000;
-                  return (
-                    <div
-                      key={`${p.symbol}-${p.buyVenue}-${p.sellVenue}-${i}`}
-                      className="flex items-center justify-between gap-3 px-2 py-2.5"
-                    >
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="text-xs font-sans font-bold text-slate-900 truncate">{p.symbol}</span>
+              <table className="w-full text-left text-xs font-mono tabular-nums">
+                <thead>
+                  <tr className="border-b border-surface-border text-slate-500 text-xs font-semibold tracking-wider">
+                    <th className="py-2.5 px-3">Position</th>
+                    <th className="py-2.5 px-3">Long Leg</th>
+                    <th className="py-2.5 px-3">Short Leg</th>
+                    <th className="py-2.5 px-3 text-right">Size</th>
+                    <th className="py-2.5 px-3 text-right">Entry Dev</th>
+                    <th className="py-2.5 px-3 text-right">Live Dev</th>
+                    <th className="py-2.5 px-3 text-right">Deadline / Age</th>
+                    <th className="py-2.5 px-3 text-right">Status</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-surface-border">
+                  {openPos.map((p, i) => {
+                    const remainingSecs = (p.deadlineMs - Date.now()) / 1000;
+                    return (
+                      <tr
+                        key={`${p.symbol}-${p.buyVenue}-${p.sellVenue}-${i}`}
+                        onClick={() => handleOpenPositionClick(p)}
+                        className="hover:bg-surface-raised/60 transition cursor-pointer"
+                        title="Click to view position details, legs, and PnL trend"
+                      >
+                        <td className="py-2.5 px-3 font-semibold text-slate-800">
+                          {p.symbol}
+                        </td>
+                        <td className="py-2.5 px-3">
+                          <span className="inline-flex items-center gap-1 text-slate-700">
+                            <VenueLogo venueId={p.buyVenue.toLowerCase()} name={p.buyVenue} size={12} />
+                            <span>{p.buyVenue}</span>
+                          </span>
+                        </td>
+                        <td className="py-2.5 px-3">
+                          <span className="inline-flex items-center gap-1 text-slate-700">
+                            <VenueLogo venueId={p.sellVenue.toLowerCase()} name={p.sellVenue} size={12} />
+                            <span>{p.sellVenue}</span>
+                          </span>
+                        </td>
+                        <td className="py-2.5 px-3 text-right font-medium text-slate-800">
+                          {fmtUsd(p.sizeUsd)}
+                        </td>
+                        <td className="py-2.5 px-3 text-right text-slate-600">
+                          {fmtBpsU(p.entryDevBps)}
+                        </td>
+                        <td className="py-2.5 px-3 text-right font-bold text-slate-900">
+                          {p.liveDevBps != null ? fmtBpsU(p.liveDevBps) : "—"}
+                        </td>
+                        <td className="py-2.5 px-3 text-right text-slate-500">
+                          {remainingSecs > 0 ? `${fmtDur(remainingSecs)} left` : <span className="text-warn-strong font-medium">past deadline</span>}
+                        </td>
+                        <td className="py-2.5 px-3 text-right">
                           {p.unwatched ? (
-                            <span className="px-1.5 py-px rounded-md text-[10px] font-bold border bg-warn-dim text-warn-strong border-warn-border">
+                            <span className="px-1.5 py-0.5 rounded-md text-[10px] font-bold border bg-warn-dim text-warn-strong border-warn-border">
                               unwatched
                             </span>
                           ) : p.liveStatus ? (
-                            <span className="px-1.5 py-px rounded-md text-[10px] font-bold border bg-slate-100 text-slate-600 border-slate-200">
+                            <span className="px-1.5 py-0.5 rounded-md text-[10px] font-bold border bg-slate-100 text-slate-600 border-slate-200">
                               {p.liveStatus}
                             </span>
-                          ) : null}
-                        </div>
-                        <div className="text-[11px] font-sans text-slate-500 truncate">
-                          {p.buyVenue} → {p.sellVenue} · entry {fmtBpsU(p.entryDevBps)} · {fmtTs(p.entryTsMs)}
-                        </div>
-                      </div>
-                      <div className="text-right shrink-0">
-                        <div className="text-xs font-sans font-bold tabular-nums text-slate-900">
-                          {p.liveDevBps != null ? <>{fmtBpsU(p.liveDevBps)} live</> : "—"}
-                        </div>
-                        <div className="text-[11px] font-sans text-slate-500 tabular-nums">
-                          {fmtUsd(p.sizeUsd)} ·{" "}
-                          {remainingSecs > 0 ? `${fmtDur(remainingSecs)} left` : "past deadline"}
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
+                          ) : (
+                            <span className="px-1.5 py-0.5 rounded-md text-[10px] font-bold border bg-emerald-500/10 text-emerald-600 border-emerald-500/20">
+                              active
+                            </span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             )
           ) : dockTab === "history" ? (
             <TickerTransactionHistory symbol="" logs={radarLogs} matchAllSymbols />
@@ -1945,6 +2067,13 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({
         onCancel={() => setPendingAck(null)}
         onError={(msg) => setAckError(msg)}
       />
+
+      {selectedDetailPos && (
+        <PositionDetailModal
+          pos={selectedDetailPos}
+          onClose={() => setSelectedDetailPos(null)}
+        />
+      )}
     </div>
   );
 };
