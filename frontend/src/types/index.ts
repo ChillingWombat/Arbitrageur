@@ -2,6 +2,7 @@ export interface SystemStatusDto {
   is_live_mode: boolean;
   environment: string;
   is_paused?: boolean;
+  is_stopped?: boolean;
   total_realized_pnl: number;
   /** Cumulative option premium cashflow (paid − received at entry) —
    *  financing kept out of realized PnL; lands via close-path leg deltas. */
@@ -743,7 +744,9 @@ export interface ExecutionLogEntry {
   success: boolean;
   gross_profit: number;
   fees: number;
+  fees_usd?: number;
   net_profit: number;
+  net_pnl?: number;
   latency_us: number;
   note: string;
   is_live?: boolean;
@@ -1667,6 +1670,7 @@ export interface OptionsParityOpportunityDto {
   est_fees_usd: number;
   net_edge_usd: number;
   edge_bps: number;
+  expected_yield_pct: number;
   index_price_usd: number;
   qty_base_suggested: number;
   is_executable: boolean;
@@ -1679,6 +1683,7 @@ export interface OptionsParityScanParams {
   min_hours_to_expiry?: number;
   max_days_to_expiry?: number;
   min_edge_bps?: number;
+  min_expected_yield_pct?: number;
 }
 
 export interface OptionsParityExecutionParams {
@@ -1686,6 +1691,7 @@ export interface OptionsParityExecutionParams {
   currency: string;
   qty_base: number;
   min_edge_bps?: number;
+  min_expected_yield_pct?: number;
   auto?: boolean;
 }
 
@@ -1719,6 +1725,7 @@ export interface OptionsPackageOpportunityDto {
   est_fees_usd: number;
   net_edge_usd: number;
   edge_bps: number;
+  expected_yield_pct: number;
   index_price_usd: number;
   qty_base_suggested: number;
   is_executable: boolean;
@@ -1732,6 +1739,7 @@ export interface OptionsPackageScanParams {
   min_hours_to_expiry?: number;
   max_days_to_expiry?: number;
   min_edge_bps?: number;
+  min_expected_yield_pct?: number;
 }
 
 export interface OptionsPackageExecutionParams {
@@ -1740,6 +1748,7 @@ export interface OptionsPackageExecutionParams {
   currency: string;
   qty_base: number;
   min_edge_bps?: number;
+  min_expected_yield_pct?: number;
   auto?: boolean;
 }
 
@@ -1752,6 +1761,7 @@ export interface OptionsBotConfigDto {
   mode: "off" | "auto" | "paused" | "reduce_only" | string;
   qtyBase: number;
   minEdgeBps: number;
+  minExpectedYieldPct: number;
   minHoursToExpiry: number;
   maxDaysToExpiry: number;
   pollIntervalSecs: number;

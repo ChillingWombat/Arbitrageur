@@ -16,14 +16,13 @@
 | Lighter | `testnet.zklighter.elliot.ai` | Lighter testnet app → API keys (account/api key index) | Key-index scoped |
 | OKX demo | `www.okx.com` + `x-simulated-trading: 1` | OKX account → demo trading → demo API key | **Regional keys**: key minted under `us.okx.com` etc. only authenticates on that domain. Demo keys only, never mainnet keys. |
 | Vanta (Orderly) | `testnet-api.orderly.org` | Orderly testnet app → orderly key + account | Orderly network account |
-| Kraken Futures | `demo-futures.kraken.com` | Kraken Futures demo → API key | Spot has no testnet — spot side reads production market data only |
 | Decibel | testnet via `for_testnet` | Decibel testnet app | Aptos-based |
 | PopDEX | testnet profile | PopDEX testnet app | Alpha-stage venue |
 | Deribit | `test.deribit.com` | test.deribit.com account → API keys | Options + perp; very thin testnet books — expect empty/one-sided depth |
 | Alpaca | `paper-api.alpaca.markets` | Alpaca dashboard → Paper Trading → API keys | Real venue sandbox: separate host + separate key namespace. Crypto spot legs only. |
 
 Not in scope (no public testnet — must never be simulated locally):
-Coinbase, Aster, Robinhood, the DexPerp long-tail (GRVT, EdgeX,
+Coinbase, Aster, Kraken, Robinhood, the DexPerp long-tail (GRVT, EdgeX,
 Variational, dYdX, etc.), EVM AMMs, Boros (mainnet-only protocol).
 
 ## Preconditions

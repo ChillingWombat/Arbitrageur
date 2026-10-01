@@ -973,6 +973,12 @@ pub fn upsert_account_impl(
     migrate_evm_keys_to_stronghold(state);
     state.sync_vault_credentials_to_adapters();
 
+    // Reset failure cooldown and cached account for this venue so the next read attempts immediately
+    let fail_key = format!("{}-{}-account", profile.environment, profile.venue);
+    state.venue_fetch_failures.lock().remove(&fail_key);
+    let cache_key = format!("{}-{}", profile.environment, profile.venue);
+    state.last_good_accounts.lock().remove(&cache_key);
+
     let dto = accounts_with_presence(state, vec![profile])?
         .into_iter()
         .next()
@@ -1681,7 +1687,6 @@ pub async fn get_venue_balances_impl(
 ) -> Result<Vec<VenueBalanceInfo>, String> {
     let is_live = state.is_live();
     let env_str = state.env().as_str();
-    let env_label = if is_live { "live" } else { "testnet" };
     let monitor = margin_monitor_from_settings(state);
     let mut results = Vec::new();
 
@@ -1692,6 +1697,13 @@ pub async fn get_venue_balances_impl(
     }
 
     for (vid, name, adapter) in state.get_venues() {
+        let env_label = if is_live {
+            "live"
+        } else if vid == "ibkr" || vid == "alpaca" {
+            "paper"
+        } else {
+            "testnet"
+        };
         let def_acc_id = state
             .state_store
             .default_account(vid, env_str)

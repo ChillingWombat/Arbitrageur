@@ -255,6 +255,7 @@ fn main() {
             commands::get_venue_execution_capabilities,
             commands::set_trading_environment,
             commands::set_engine_paused,
+            commands::start_engine,
             commands::reconcile_orders_now,
             commands::list_fixed_yield_maturities,
             commands::resolve_fixed_yield_maturity,

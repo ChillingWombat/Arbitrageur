@@ -15,6 +15,7 @@ export interface TickerWithStats extends PerpTicker {
   tradeCount: number;
   netProfit: number;
   netProfitBps?: number;
+  avgEntrySpreadBps?: number;
   hasIssue?: boolean;
   issueDescription?: string;
   lastTradeTime?: string;
@@ -96,6 +97,20 @@ export const STRATEGY_DISPLAY_NAMES: Record<string, string> = {
   external: "External (manual)",
 };
 
+/** Canonical strategy categories in navigation tab order.
+ *  Matches Navigation top tabs switchers: Simple Spread, Spread Radar,
+ *  Funding Rate, Spatial, Triangle, Options, Prediction Market, Statistical. */
+export const STRATEGY_TAB_ORDER: string[] = [
+  "Simple Spread",
+  "Spread Radar",
+  "Funding Rate",
+  "Spatial",
+  "Triangle",
+  "Options",
+  "Prediction Market",
+  "Statistical",
+];
+
 /** Canonical ledger strategy id — mirrors backend
  *  `attribution::ledger_strategy_id`: signal ids normalize into their
  *  cycle-lot namespace so metrics, signals, and open positions join on
@@ -135,6 +150,7 @@ export const VENUE_ID_TO_CODE: Record<string, string> = {
   decibel: "DCB",
   deribit: "DBT",
   variational: "VAR",
+  ibkr: "IBKR",
 };
 
 export const VENUE_CODE_TO_ID: Record<string, string> = {
@@ -153,6 +169,7 @@ export const VENUE_CODE_TO_ID: Record<string, string> = {
   DCB: "decibel",
   DBT: "deribit",
   VAR: "variational",
+  IBKR: "ibkr",
 };
 
 /**
@@ -187,6 +204,7 @@ export interface VenueSettingsFilter {
   alpaca_enabled?: boolean;
   decibel_enabled?: boolean;
   deribit_enabled?: boolean;
+  ibkr_enabled?: boolean;
   polymarket_enabled?: boolean;
   polymarket_api_key?: string;
   polymarket_secret?: string;
@@ -197,18 +215,18 @@ export interface VenueSettingsFilter {
 }
 
 /**
- * Venue codes with public testnet/demo endpoints — the only venues the
- * engine admits in the Testnet environment. Mirrors the `tn_*` adapter set
- * in venues_for_env; venues without a demo endpoint (Aster, Coinbase,
- * long-tail perps, EVM AMMs, IBKR) are live-only.
+ * Venue codes with public testnet/demo endpoints or account-level paper trading —
+ * the venues the engine admits in the Testnet environment. Mirrors the `tn_*`
+ * adapter set in venues_for_env; venues without a demo or paper capability (Aster,
+ * Coinbase, Kraken, long-tail perps, EVM AMMs) are live-only.
  */
-const TESTNET_CAPABLE_CODES = new Set(["HL", "LGT", "RH", "VNT", "ARC", "POP", "BNB", "OKX", "KRK", "ALP", "DCB", "DBT"]);
+const TESTNET_CAPABLE_CODES = new Set(["HL", "LGT", "RH", "VNT", "ARC", "POP", "BNB", "OKX", "ALP", "DCB", "DBT", "IBKR", "IB"]);
 
 /**
- * Venue IDs with public testnet/demo endpoints — mirrors the backend `tn_*`
- * adapter set in venues_for_env. Used to badge account cards when the
- * active environment is Testnet: an account created for a venue without a
- * demo endpoint can never be admitted while the engine runs testnet.
+ * Venue IDs with public testnet/demo endpoints or account-level paper trading —
+ * mirrors the backend `tn_*` adapter set in venues_for_env. Used to badge account
+ * cards when the active environment is Testnet: an account created for a venue
+ * without a demo endpoint can never be admitted while the engine runs testnet.
  */
 export const TESTNET_CAPABLE_VENUE_IDS = new Set([
   "hyperliquid",
@@ -219,11 +237,10 @@ export const TESTNET_CAPABLE_VENUE_IDS = new Set([
   "popdex",
   "binance",
   "okx",
-  "kraken",
-  "kraken_futures",
   "alpaca",
   "decibel",
   "deribit",
+  "ibkr",
 ]);
 
 export function venueHasTestnet(venueId: string): boolean {
@@ -270,15 +287,10 @@ export function getEnabledConnectedVenueCodes(
   admit("POP", settings.popdex_enabled);
   admit("BNB", settings.binance_enabled);
   admit("OKX", settings.okx_enabled);
-  admit(
-    "KRK",
-    settings.kraken_enabled === true ||
-      settings.kraken_futures_enabled === true ||
-      settings.kraken_spot_enabled === true
-  );
   admit("ALP", settings.alpaca_enabled);
   admit("DCB", settings.decibel_enabled);
   admit("DBT", settings.deribit_enabled);
+  admit("IBKR", settings.ibkr_enabled);
   return active;
 }
 

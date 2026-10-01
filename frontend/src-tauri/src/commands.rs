@@ -70,6 +70,8 @@ pub struct SystemStatusDto {
     /// authoritative env label for the UI; `is_live_mode` derives from it.
     pub environment: String,
     pub is_paused: bool,
+    #[serde(default)]
+    pub is_stopped: bool,
     pub total_realized_pnl: f64,
     /// Cumulative option premium cashflow (paid minus received at entry,
     /// minus fees) for the active env — financing kept out of
@@ -1459,6 +1461,7 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
         is_live_mode: is_live,
         environment: state.env().as_str().to_string(),
         is_paused: *state.is_paused.read(),
+        is_stopped: *state.is_stopped.read(),
         total_realized_pnl: total_pnl,
         total_premium_outlay_usd: if is_live {
             state
@@ -2865,8 +2868,8 @@ pub fn get_venue_execution_capabilities_impl(state: &AppEngineState) -> Vec<Venu
 pub fn record_execution_log(state: &AppEngineState, entry: ExecutionLogEntry) {
     {
         let mut logs = state.execution_logs.write();
-        if logs.len() >= 2000 {
-            let drop = logs.len() - 1999;
+        if logs.len() >= 5000 {
+            let drop = logs.len() - 4999;
             logs.drain(..drop);
         }
         logs.push(entry.clone());
@@ -3234,10 +3237,18 @@ pub fn set_engine_paused_impl(paused: bool, state: &AppEngineState) -> Result<bo
         .kv_set("engine.paused", if paused { "1" } else { "0" })
         .map_err(|e| format!("Failed to persist pause state: {e}"))?;
     *state.is_paused.write() = paused;
+    if !paused {
+        *state.is_stopped.write() = false;
+        let _ = state.state_store.kv_set("engine.stopped", "0");
+    }
     if paused {
         crate::execution::stop_all_bots(state);
     }
     Ok(paused)
+}
+
+pub fn start_engine_impl(state: &AppEngineState) -> Result<bool, String> {
+    set_engine_paused_impl(false, state)
 }
 
 pub fn get_engine_settings_impl(state: &AppEngineState) -> Result<EngineSettingsDto, String> {
@@ -4598,6 +4609,11 @@ pub async fn set_engine_paused(
 }
 
 #[tauri::command]
+pub async fn start_engine(state: State<'_, Arc<AppEngineState>>) -> Result<bool, String> {
+    start_engine_impl(&state)
+}
+
+#[tauri::command]
 pub async fn reconcile_orders_now(
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<crate::reconciliation::ReconcileSummary, String> {
@@ -5931,7 +5947,7 @@ mod tests {
     #[tokio::test]
     async fn test_system_status_reflects_account_level_enablement() {
         let (state, dir) = test_state_with_vault("status-acct");
-        // Live environment: ibkr has no adapter at all and several venues
+        // Live environment: unadmitted venues like ig lack an adapter, and several venues
         // lack public testnets, so account-level enablement for them is
         // only visible under Live.
         state.set_environment(crate::state::TradingEnvironment::Live);
@@ -6033,8 +6049,8 @@ mod tests {
             .expect("binance row");
         assert_eq!(binance.status, "READ_ONLY");
 
-        // Venues with an enabled account but no admitted adapter remain
-        // UNSUPPORTED — enabled is not the same as stream-capable.
+        // IBKR has an admitted adapter: enabling an account admits the venue
+        // into get_venues and reports READ_ONLY.
         upsert_account_impl(
             AccountUpsertInput {
                 environment: None,
@@ -6056,7 +6072,32 @@ mod tests {
             .iter()
             .find(|v| v.id == "ibkr")
             .expect("ibkr row");
-        assert_eq!(ibkr.status, "UNSUPPORTED");
+        assert_eq!(ibkr.status, "READ_ONLY");
+
+        // Venues with an enabled account but no admitted adapter remain
+        // UNSUPPORTED — enabled is not the same as stream-capable.
+        upsert_account_impl(
+            AccountUpsertInput {
+                environment: None,
+                account_tier: None,
+                max_leverage: None,
+                id: None,
+                venue: "ig".into(),
+                label: "IG".into(),
+                enabled: true,
+                make_default: false,
+                credentials: None,
+            },
+            &state,
+        )
+        .expect("create ig account");
+        let status = get_system_status_impl(&state).await.expect("status");
+        let ig = status
+            .active_venues
+            .iter()
+            .find(|v| v.id == "ig")
+            .expect("ig row");
+        assert_eq!(ig.status, "UNSUPPORTED");
 
         // Polymarket/kalshi have account rows and engine flags but no
         // constructed adapter — UNSUPPORTED must hold even before the flag

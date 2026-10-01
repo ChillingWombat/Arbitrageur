@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { OctagonX, Pause, Play, ShieldAlert } from "lucide-react";
+import { Loader2, OctagonX, Pause, Play, ShieldAlert } from "lucide-react";
 import type { SystemStatusDto } from "../types";
 import { Navigation, type ActiveTab } from "./Navigation";
 import { ArbitrageurLogo } from "./ArbitrageurLogo";
@@ -9,6 +9,7 @@ interface HeaderProps {
   isPaused?: boolean;
   onTogglePause?: (paused: boolean) => void;
   onEmergencyKillswitch: () => void;
+  isStoppingAll?: boolean;
   refreshing: boolean;
   activeTab: ActiveTab;
   onSelectTab: (tab: ActiveTab) => void;
@@ -24,6 +25,7 @@ export const Header: React.FC<HeaderProps> = ({
   isPaused: propIsPaused,
   onTogglePause,
   onEmergencyKillswitch,
+  isStoppingAll = false,
   refreshing,
   activeTab,
   onSelectTab,
@@ -35,8 +37,19 @@ export const Header: React.FC<HeaderProps> = ({
 }) => {
   const [showKillModal, setShowKillModal] = useState(false);
 
+  const isStopped = status?.is_stopped ?? (status?.circuit_breaker_tripped && status?.circuit_breaker_status?.includes("KILLSWITCH")) ?? false;
   const isPaused = propIsPaused ?? status?.is_paused ?? false;
   const isTripped = status?.circuit_breaker_tripped ?? false;
+
+  const buttonTooltip = isTripped
+    ? isStopped
+      ? "Trading stopped by emergency stop all — reset in Portfolio Monitor before starting engine"
+      : "Trading halted by circuit breaker — reset in Portfolio Monitor before resuming engine"
+    : isStopped
+      ? "Start Engine: Start execution coordination. Automated bots remain stopped and must be started individually on each strategy page."
+      : isPaused
+        ? "Resume Engine: Resume execution coordination. Automated bots remain stopped and must be started individually on each strategy page."
+        : "Pause Engine: Temporarily suspend executions. Open positions are preserved.";
 
   return (
     <>
@@ -73,36 +86,29 @@ export const Header: React.FC<HeaderProps> = ({
 
         {/* Right: Metrics & Risk Actions — circuit-breaker reset lives only in Portfolio Monitor */}
         <div className="border-l border-surface-border flex items-center space-x-2 px-3 lg:px-4 shrink-0">
-          {/* Pause / Resume Button (To the left of STOP, preserves positions) */}
+          {/* Pause / Resume / Start Button (To the left of STOP, preserves positions on pause) */}
           <div
             className="relative inline-flex"
-            title={
-              isTripped
-                ? "Trading halted by circuit breaker — reset in Portfolio Monitor before resuming engine"
-                : isPaused
-                  ? "Resume Engine: Resume execution coordination. Automated bots remain stopped and must be started individually on each strategy page."
-                  : "Pause Engine: Temporarily suspend executions. Open positions are preserved."
-            }
+            title={buttonTooltip}
           >
             <button
-              onClick={() => onTogglePause?.(!isPaused)}
+              onClick={() => onTogglePause?.(!isPaused && !isStopped)}
               disabled={isTripped}
               className={
                 isTripped
                   ? "btn-secondary opacity-50 cursor-not-allowed pointer-events-none"
-                  : isPaused
+                  : isStopped || isPaused
                     ? "btn-warning-subtle animate-pulse"
                     : "btn-secondary"
               }
-              title={
-                isTripped
-                  ? "Trading halted by circuit breaker — reset in Portfolio Monitor before resuming engine"
-                  : isPaused
-                    ? "Resume Engine: Resume execution coordination. Automated bots remain stopped and must be started individually on each strategy page."
-                    : "Pause Engine: Temporarily suspend executions. Open positions are preserved."
-              }
+              title={buttonTooltip}
             >
-              {isPaused ? (
+              {isStopped ? (
+                <>
+                  <Play className="w-3.5 h-3.5 fill-current" />
+                  <span>Start Engine</span>
+                </>
+              ) : isPaused ? (
                 <>
                   <Play className="w-3.5 h-3.5 fill-current" />
                   <span>Resume Engine</span>
@@ -119,11 +125,23 @@ export const Header: React.FC<HeaderProps> = ({
           {/* Emergency Kill Switch */}
           <button
             onClick={() => setShowKillModal(true)}
-            className="btn-danger px-2 py-2 text-xs font-sans font-bold !gap-1 shadow-xs"
+            disabled={isStoppingAll}
+            className={`btn-danger px-2 py-2 text-xs font-sans font-bold !gap-1 shadow-xs ${
+              isStoppingAll ? "opacity-75 cursor-wait" : ""
+            }`}
             title="Emergency Killswitch: Stop All Trading"
           >
-            <OctagonX className="w-3.5 h-3.5" />
-            <span>Stop All</span>
+            {isStoppingAll ? (
+              <>
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                <span>Stopping...</span>
+              </>
+            ) : (
+              <>
+                <OctagonX className="w-3.5 h-3.5" />
+                <span>Stop All</span>
+              </>
+            )}
           </button>
         </div>
       </header>
@@ -152,13 +170,21 @@ export const Header: React.FC<HeaderProps> = ({
                 Cancel
               </button>
               <button
+                disabled={isStoppingAll}
                 onClick={() => {
                   onEmergencyKillswitch();
                   setShowKillModal(false);
                 }}
-                className="btn-danger px-2.5 py-2.5 text-sm font-bold shadow-sm"
+                className="btn-danger px-2.5 py-2.5 text-sm font-bold shadow-sm flex items-center gap-1.5"
               >
-                Confirm Stop All &amp; Flatten
+                {isStoppingAll ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>Stopping &amp; Flattening...</span>
+                  </>
+                ) : (
+                  <span>Confirm Stop All &amp; Flatten</span>
+                )}
               </button>
             </div>
           </div>

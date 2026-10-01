@@ -148,3 +148,35 @@ nodeTest("PortfolioMonitor renders Capital Allocation with By Venue and By Strat
   assert.match(html, />By Venue<\/button>/);
   assert.match(html, />By Strategy<\/button>/);
 });
+
+nodeTest("PortfolioMonitor renders Stopped rather than Paused when engine is stopped after emergency exit", () => {
+  const stoppedStatus = {
+    is_live_mode: false,
+    environment: "testnet",
+    is_paused: true,
+    is_stopped: true,
+    total_realized_pnl: 0,
+    total_trades_count: 0,
+    successful_trades_count: 0,
+    circuit_breaker_status: "ACTIVE",
+    circuit_breaker_tripped: false,
+    current_drawdown_usd: 0,
+    max_drawdown_usd: 1000,
+    consecutive_failures: 0,
+    active_venues: [],
+  };
+  const html = renderToStaticMarkup(
+    React.createElement(PortfolioMonitor, {
+      riskData: null,
+      status: stoppedStatus,
+      openPositions: [],
+      onResetCircuitBreaker: () => {},
+      onTriggerKillswitch: () => {},
+    }),
+  );
+
+  assert.match(html, />Stopped<\/span>/, "verdict badge must render Stopped");
+  assert.match(html, /Engine stopped/, "subtext must render Engine stopped");
+  assert.doesNotMatch(html, />Paused<\/span>/, "verdict badge must never render Paused when stopped");
+  assert.doesNotMatch(html, /Engine paused/, "subtext must never render Engine paused when stopped");
+});

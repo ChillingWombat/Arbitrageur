@@ -272,6 +272,25 @@ impl DeribitAdapter {
             == Some(13009)
     }
 
+    fn parse_collar_price(err_str: &str) -> Option<Decimal> {
+        for key in &["price_too_high", "price_too_low"] {
+            if let Some(idx) = err_str.find(key) {
+                let after = &err_str[idx + key.len()..];
+                let token = after
+                    .split(|c: char| {
+                        c.is_whitespace() || c == ')' || c == ';' || c == ',' || c == '"'
+                    })
+                    .find(|s| !s.is_empty())?;
+                if let Ok(d) = Decimal::from_str_exact(token) {
+                    if d > dec!(0) {
+                        return Some(d);
+                    }
+                }
+            }
+        }
+        None
+    }
+
     async fn get_raw(&self, path: &str, bearer: Option<&str>) -> anyhow::Result<serde_json::Value> {
         let url = format!("{}{}", self.base_url, path);
         let mut req = self.client.get(&url);
@@ -655,9 +674,13 @@ impl DeribitAdapter {
                 currency.to_ascii_lowercase()
             ))
             .await?;
-        dec_from_json(v.get("index_price"))
+        let px = dec_from_json(v.get("index_price"))
             .filter(|p| *p > dec!(0))
-            .ok_or_else(|| anyhow::anyhow!("Deribit {currency} index price missing"))
+            .ok_or_else(|| anyhow::anyhow!("Deribit {currency} index price missing"))?;
+        self.account_index_used
+            .write()
+            .insert(currency.to_ascii_uppercase(), px);
+        Ok(px)
     }
 
     /// Current mark price for an instrument (ticker mark_price, USD for
@@ -1351,7 +1374,46 @@ impl ExchangeAdapter for DeribitAdapter {
                         "Deribit {verb} rejected ({instrument}): {err_str} (instrument may be halted or index locked by venue)"
                     );
                 }
-                return Err(e);
+                let is_ioc = order.order_type == OrderType::ImmediateOrCancel
+                    || order.time_in_force == TimeInForce::ImmediateOrCancel;
+                if is_ioc
+                    && (err_str.contains("price_too_high") || err_str.contains("price_too_low"))
+                {
+                    if let Some(collar_px) = Self::parse_collar_price(&err_str) {
+                        let can_clamp = match order.side {
+                            Side::Buy => order.price.is_some_and(|p| collar_px <= p),
+                            Side::Sell => order.price.is_some_and(|p| collar_px >= p),
+                        };
+                        if can_clamp {
+                            let tick = Self::tick_at(&meta, collar_px);
+                            let rounded = match order.side {
+                                Side::Buy => (collar_px / tick).floor() * tick,
+                                Side::Sell => (collar_px / tick).ceil() * tick,
+                            };
+                            let mut retry_params = params.clone();
+                            if let Some(p) = retry_params.iter_mut().find(|(k, _)| k == "price") {
+                                p.1 = rounded.normalize().to_string();
+                            }
+                            let retry_qs = retry_params
+                                .iter()
+                                .map(|(k, v)| format!("{k}={}", urlencoding(v)))
+                                .collect::<Vec<_>>()
+                                .join("&");
+                            tracing::info!(
+                                "Deribit {verb} for {instrument}: clamped IOC price from {:?} to {rounded} on venue collar ({err_str}); retrying",
+                                order.price
+                            );
+                            self.private_get(&format!("/private/{verb}?{retry_qs}"))
+                                .await?
+                        } else {
+                            return Err(e);
+                        }
+                    } else {
+                        return Err(e);
+                    }
+                } else {
+                    return Err(e);
+                }
             }
         };
         let o = v
@@ -1701,8 +1763,27 @@ mod tests {
     fn testnet_deribit_considers_active_instruments_open() {
         let tn = DeribitAdapter::for_testnet(None, None);
         assert!(tn.is_testnet());
-        let prod = DeribitAdapter::new(None, None);
+        let prod = DeribitAdapter::new(None, None, None);
         assert!(!prod.is_testnet());
+    }
+
+    #[test]
+    fn parse_collar_price_extracts_bounds() {
+        let err_high =
+            "Deribit /private/buy?price=0.2395 error 10007: price_too_high 0.2385; residuals";
+        assert_eq!(
+            DeribitAdapter::parse_collar_price(err_high),
+            Some(dec!(0.2385))
+        );
+
+        let err_low = "Deribit /private/sell?price=0.0100 error 10007: price_too_low 0.0125";
+        assert_eq!(
+            DeribitAdapter::parse_collar_price(err_low),
+            Some(dec!(0.0125))
+        );
+
+        let err_none = "Deribit /private/buy error 10004: not_found";
+        assert_eq!(DeribitAdapter::parse_collar_price(err_none), None);
     }
 
     /// Live testnet smoke test — validates real wire shapes against

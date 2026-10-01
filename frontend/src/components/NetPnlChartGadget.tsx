@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { LineChart } from "lucide-react";
 import { EmptyState } from "./EmptyState";
 import { strategyCategory } from "./TradedOpportunitiesGadget";
-import { STRATEGY_DISPLAY_NAMES } from "../types/tickers";
+import { STRATEGY_DISPLAY_NAMES, STRATEGY_TAB_ORDER } from "../types/tickers";
 import { api } from "../services/api";
 import type { PnlHistoryDto, TradedOpportunityDto } from "../types";
 
@@ -14,9 +14,9 @@ export const EXTERNAL_CATEGORY = "External ops";
 
 /** Every broad family the ledger can produce — shown in the filter even
  *  before a family has realized rows, so the control doesn't lie about
- *  which strategies exist. Order follows the product nav. */
+ *  which strategies exist. Order follows the top tabs switchers. */
 export const KNOWN_PNL_CATEGORIES: string[] = [
-  "Options",
+  ...STRATEGY_TAB_ORDER,
   ...Object.keys(STRATEGY_DISPLAY_NAMES)
     .filter(
       (k) =>
@@ -95,6 +95,42 @@ const niceTicks = (lo: number, hi: number, count = 4): number[] => {
   return ticks;
 };
 
+export type Horizon = "1W" | "1M" | "1Y" | "ALL";
+
+/** Filter time points by horizon window (1W, 1M, 1Y, or ALL). */
+export const filterByHorizon = (
+  points: Pt[],
+  horizon: Horizon,
+  nowMs: number = Date.now(),
+): Pt[] => {
+  if (horizon === "ALL" || points.length === 0) return points;
+  const durMs =
+    horizon === "1W"
+      ? 7 * 86400 * 1000
+      : horizon === "1M"
+        ? 30 * 86400 * 1000
+        : 365 * 86400 * 1000;
+  const cutoff = nowMs - durMs;
+  const inRange = points.filter((p) => p.tsMs >= cutoff);
+  if (inRange.length === 0) {
+    const prev = points.filter((p) => p.tsMs < cutoff);
+    if (prev.length > 0) {
+      const lastVal = prev[prev.length - 1].valueUsd;
+      return [
+        { tsMs: cutoff, valueUsd: lastVal },
+        { tsMs: nowMs, valueUsd: lastVal },
+      ];
+    }
+    return [];
+  }
+  const prev = points.filter((p) => p.tsMs < cutoff);
+  if (prev.length > 0) {
+    const initialVal = prev[prev.length - 1].valueUsd;
+    return [{ tsMs: cutoff, valueUsd: initialVal }, ...inRange];
+  }
+  return inRange;
+};
+
 /** Small SVG time chart — step line for event-driven cumulative series,
  *  plain polyline for level series (equity). Same visual language as
  *  CapacityChart: mono ticks, slate grid, accent stroke. */
@@ -102,12 +138,11 @@ export const SeriesChart: React.FC<{
   points: Pt[];
   step?: boolean;
   height?: number;
-}> = ({ points, step = false, height = 160 }) => {
-  // Wide viewBox: the svg stretches to container width, so 8px glyphs only
-  // stay small if the coordinate space is near the rendered width.
-  const W = 760;
+}> = ({ points, step = false, height = 150 }) => {
+  // Wide viewBox (1200px) calibrated so stroke and glyphs match standard gadget scale
+  const W = 1200;
   const H = height;
-  const PAD = { l: 54, r: 12, t: 12, b: 22 };
+  const PAD = { l: 60, r: 20, t: 14, b: 24 };
   const iw = W - PAD.l - PAD.r;
   const ih = H - PAD.t - PAD.b;
 
@@ -136,7 +171,7 @@ export const SeriesChart: React.FC<{
     .join(" ");
 
   const yTicks = niceTicks(yMin, yMax, 4);
-  const xTicks = niceTicks(xMin, xMax, 4).filter((t) => t > xMin && t < xMax);
+  const xTicks = niceTicks(xMin, xMax, 5).filter((t) => t > xMin && t < xMax);
   const last = points[points.length - 1];
   const zeroY = yMin < 0 && yMax > 0 ? sy(0) : null;
   const up = last.valueUsd >= 0;
@@ -146,23 +181,23 @@ export const SeriesChart: React.FC<{
       {yTicks.map((t) => (
         <g key={t}>
           <line x1={PAD.l} y1={sy(t)} x2={W - PAD.r} y2={sy(t)} stroke="currentColor" strokeWidth="0.5" className="text-slate-200" />
-          <text x={PAD.l - 4} y={sy(t) + 2.5} textAnchor="end" fontSize="8" className="fill-slate-500 font-mono">
+          <text x={PAD.l - 6} y={sy(t) + 3} textAnchor="end" fontSize="9" className="fill-slate-500 font-mono">
             {fmtUsdAxis(t)}
           </text>
         </g>
       ))}
       {zeroY != null && (
-        <line x1={PAD.l} y1={zeroY} x2={W - PAD.r} y2={zeroY} stroke="currentColor" strokeWidth="1" strokeDasharray="2 2" className="text-muted" />
+        <line x1={PAD.l} y1={zeroY} x2={W - PAD.r} y2={zeroY} stroke="currentColor" strokeWidth="0.8" strokeDasharray="3 3" className="text-muted" />
       )}
       {xTicks.map((t) => (
-        <text key={t} x={sx(t)} y={H - 7} textAnchor="middle" fontSize="8" className="fill-slate-500 font-mono">
+        <text key={t} x={sx(t)} y={H - 8} textAnchor="middle" fontSize="9" className="fill-slate-500 font-mono">
           {fmtTs(t)}
         </text>
       ))}
       {points.length === 1 ? (
-        <circle cx={sx(last.tsMs)} cy={sy(last.valueUsd)} r="2.5" className={up ? "fill-profit" : "fill-loss"} />
+        <circle cx={sx(last.tsMs)} cy={sy(last.valueUsd)} r="2" className={up ? "fill-profit" : "fill-loss"} />
       ) : (
-        <path d={path} fill="none" strokeWidth="1.6" strokeLinejoin="round" className={up ? "stroke-profit" : "stroke-loss"} />
+        <path d={path} fill="none" strokeWidth="1.1" strokeLinejoin="round" className={up ? "stroke-profit" : "stroke-loss"} />
       )}
     </svg>
   );
@@ -206,6 +241,7 @@ export const NetPnlChartGadget: React.FC = () => {
   const [failed, setFailed] = useState(false);
   const [tab, setTab] = useState<"pnl" | "equity">("pnl");
   const [category, setCategory] = useState("all");
+  const [horizon, setHorizon] = useState<Horizon>("ALL");
 
   useEffect(() => {
     let alive = true;
@@ -251,7 +287,16 @@ export const NetPnlChartGadget: React.FC = () => {
   );
   const equityPoints = hist?.equity ?? [];
 
-  const active = tab === "pnl" ? pnlPoints : equityPoints;
+  const filteredPnlPoints = useMemo(
+    () => filterByHorizon(pnlPoints, horizon),
+    [pnlPoints, horizon],
+  );
+  const filteredEquityPoints = useMemo(
+    () => filterByHorizon(equityPoints, horizon),
+    [equityPoints, horizon],
+  );
+
+  const active = tab === "pnl" ? filteredPnlPoints : filteredEquityPoints;
   const lastVal = active.length ? active[active.length - 1].valueUsd : null;
 
   return (
@@ -260,7 +305,7 @@ export const NetPnlChartGadget: React.FC = () => {
         <div className="flex items-center gap-3 min-w-0 flex-wrap">
           <h2 className="text-[13px] font-mono tracking-wider text-slate-900 font-bold flex items-center space-x-2 shrink-0">
             <LineChart className="w-4 h-4 text-accent-strong" />
-            <span>P&amp;L &amp; Equity History</span>
+            <span>Performance History</span>
           </h2>
           {tab === "pnl" && (
             <select
@@ -280,7 +325,17 @@ export const NetPnlChartGadget: React.FC = () => {
             </select>
           )}
         </div>
-        <div className="flex items-center gap-3 shrink-0">
+        <div className="flex items-center gap-2.5 shrink-0 flex-wrap">
+          <Tab<Horizon>
+            value={horizon}
+            onChange={setHorizon}
+            options={[
+              ["1W", "1W"],
+              ["1M", "1M"],
+              ["1Y", "1Y"],
+              ["ALL", "ALL"],
+            ]}
+          />
           <Tab<"pnl" | "equity">
             value={tab}
             onChange={setTab}
@@ -290,11 +345,11 @@ export const NetPnlChartGadget: React.FC = () => {
             ]}
           />
           {lastVal != null && (
-            <div className="text-right">
+            <div className="text-right pl-1">
               <div className="text-[9px] font-mono uppercase tracking-wider text-slate-500">
                 {tab === "pnl" ? (category === "all" ? "All strategies" : category) : "Net equity"}
               </div>
-              <div className={`text-sm font-bold font-mono tabular-nums leading-tight ${lastVal >= 0 ? "text-profit" : "text-loss"}`}>
+              <div className={`text-xs font-bold font-mono tabular-nums leading-tight ${lastVal >= 0 ? "text-profit" : "text-loss"}`}>
                 {fmtUsdVal(lastVal)}
               </div>
             </div>
@@ -312,12 +367,12 @@ export const NetPnlChartGadget: React.FC = () => {
         opps == null && !failed ? (
           <EmptyState plain title="Loading P&L history…" />
         ) : (
-          <SeriesChart points={pnlPoints} step />
+          <SeriesChart points={filteredPnlPoints} step />
         )
-      ) : equityPoints.length === 0 && !failed ? (
+      ) : filteredEquityPoints.length === 0 && !failed ? (
         <EmptyState plain title="No equity history yet — margin snapshots accumulate while the engine runs." />
       ) : (
-        <SeriesChart points={equityPoints} />
+        <SeriesChart points={filteredEquityPoints} />
       )}
     </div>
   );

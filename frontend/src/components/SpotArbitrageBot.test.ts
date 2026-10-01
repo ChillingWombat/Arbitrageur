@@ -58,7 +58,7 @@ test("renders bottom dock container with 4 tabs and fixed height", () => {
     executeReady: true,
     reason: null,
   });
-  assert.match(html, /Current Positions/);
+  assert.match(html, /Open Positions/);
   assert.match(html, /Execution History/);
   assert.match(html, /Opportunity History/);
   assert.match(html, /Log Monitor/);

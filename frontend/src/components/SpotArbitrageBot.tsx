@@ -35,6 +35,7 @@ import {
   TradedOpportunitiesTable,
   TradedOpportunityDetailModal,
 } from "./TradedOpportunitiesGadget";
+import { PositionDetailModal } from "./PositionDetailModal";
 
 interface SpotArbitrageBotProps {
   executionLogs: ExecutionLogEntry[];
@@ -71,6 +72,7 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
   const [tradedOpps, setTradedOpps] = useState<TradedOpportunityDto[] | null>(null);
   const [tradedFailed, setTradedFailed] = useState(false);
   const [selectedTradedOpp, setSelectedTradedOpp] = useState<TradedOpportunityDto | null>(null);
+  const [selectedDetailPos, setSelectedDetailPos] = useState<OpenPositionDto | null>(null);
 
   // Bot lifecycle: Start / Pause / Reduce Only / Stop (stop flattens this
   // strategy's positions across venues until delta-neutral)
@@ -530,43 +532,33 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
 
       {/* Bottom Dock: Current Positions vs Execution History vs Opportunity History vs Log Monitor */}
       <div className="bg-surface rounded-xl border border-surface-border shadow-card overflow-hidden shrink-0">
-        <div className="flex items-stretch border-b border-surface-border bg-slate-50/80 select-none">
-          <div className="grid grid-cols-4 flex-1 divide-x divide-surface-border">
-            {(
-              [
-                { id: "position", label: "Current Positions", icon: Wallet, count: spotPositions.length },
-                { id: "history", label: "Execution History", icon: History, count: spotLogs.length },
-                { id: "opps", label: "Opportunity History", icon: Radar, count: tradedOpps?.length ?? 0 },
-                { id: "logs", label: "Log Monitor", icon: Terminal, count: null },
-              ] as const
-            ).map(({ id, label, icon: Icon, count }) => (
-              <button
-                key={id}
-                type="button"
-                onClick={() => setDockTab(id)}
-                className={`relative h-9 flex items-center justify-center space-x-2 px-2.5 text-[11px] font-mono transition select-none group cursor-pointer ${
-                  dockTab === id
-                    ? "text-accent-strong font-bold bg-surface"
-                    : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/70 font-medium"
+        <div className="grid grid-cols-4 border-b border-surface-border bg-slate-50/60 select-none pt-1 px-1 gap-1">
+          {(
+            [
+              { id: "position", label: "Open Positions", icon: Wallet },
+              { id: "opps", label: "Opportunity History", icon: Radar },
+              { id: "history", label: "Execution History", icon: History },
+              { id: "logs", label: "Log Monitor", icon: Terminal },
+            ] as const
+          ).map(({ id, label, icon: Icon }) => (
+            <button
+              key={id}
+              type="button"
+              onClick={() => setDockTab(id)}
+              className={`w-full flex items-center justify-center space-x-2 py-2 px-3 text-xs font-sans transition select-none group cursor-pointer rounded-t-lg ${
+                dockTab === id
+                  ? "text-accent-strong font-bold bg-surface border-t border-x border-surface-border -mb-px shadow-2xs"
+                  : "text-slate-600 hover:text-slate-900 hover:bg-slate-100/80 font-medium border-t border-x border-transparent"
+              }`}
+            >
+              <Icon
+                className={`w-3.5 h-3.5 transition shrink-0 ${
+                  dockTab === id ? "text-accent-strong" : "text-muted group-hover:text-slate-600"
                 }`}
-              >
-                <Icon
-                  className={`w-3.5 h-3.5 transition shrink-0 ${
-                    dockTab === id ? "text-accent-strong" : "text-muted group-hover:text-slate-600"
-                  }`}
-                />
-                <span>{label}</span>
-                {count != null && count > 0 && (
-                  <span className="px-1.5 py-0.5 rounded-md text-[11px] font-sans font-bold min-w-[16px] text-center leading-tight bg-accent-dim text-accent-strong border border-accent-line/60">
-                    {count}
-                  </span>
-                )}
-                {dockTab === id && (
-                  <div className="absolute bottom-0 left-0 right-0 h-[2.5px] bg-accent" />
-                )}
-              </button>
-            ))}
-          </div>
+              />
+              <span className="truncate">{label}</span>
+            </button>
+          ))}
         </div>
         <div className="p-3.5 h-96 overflow-y-auto">
           {dockTab === "position" ? (
@@ -591,7 +583,12 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
                   {spotPositions.map((pos) => {
                     const pnl = pos.unrealizedPnlUsd;
                     return (
-                      <tr key={pos.key} className="hover:bg-surface-raised/60 transition">
+                      <tr
+                        key={pos.key}
+                        onClick={() => setSelectedDetailPos(pos)}
+                        className="hover:bg-surface-raised/60 transition cursor-pointer"
+                        title="Click to view position details, legs, and PnL trend"
+                      >
                         <td className="py-2.5 px-3 whitespace-nowrap font-bold text-slate-900">
                           {pos.symbol}
                         </td>
@@ -654,6 +651,14 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
         <TradedOpportunityDetailModal
           opp={selectedTradedOpp}
           onClose={() => setSelectedTradedOpp(null)}
+        />
+      )}
+
+      {/* Modal: Position Detail */}
+      {selectedDetailPos && (
+        <PositionDetailModal
+          pos={selectedDetailPos}
+          onClose={() => setSelectedDetailPos(null)}
         />
       )}
     </div>

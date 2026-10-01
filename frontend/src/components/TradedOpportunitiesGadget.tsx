@@ -4,7 +4,7 @@ import { EmptyState } from "./EmptyState";
 import { DetailField, DetailSection } from "./DetailBits";
 import { AtomicTransactionsTable, fmtTime, statusChip, lotChip } from "./AtomicTransactionsTable";
 import { api } from "../services/api";
-import { formatStrategyName, STRATEGY_DISPLAY_NAMES } from "../types/tickers";
+import { formatStrategyName, STRATEGY_DISPLAY_NAMES, STRATEGY_TAB_ORDER } from "../types/tickers";
 import type { TradedOpportunityDto } from "../types";
 
 const usd = (v: number, digits = 2) => {
@@ -353,12 +353,13 @@ export const TradedOpportunitiesGadget: React.FC = () => {
   }, [opps]);
 
   // Filter choices derive from the data itself — a category only appears
-  // once it has at least one row to show.
-  const strategyCategories = useMemo(
-    () =>
-      [...new Set((opps ?? []).map((o) => strategyCategory(o.strategyId)))].sort(),
-    [opps],
-  );
+  // once it has at least one row to show. Order follows top tabs switchers.
+  const strategyCategories = useMemo(() => {
+    const fromData = new Set((opps ?? []).map((o) => strategyCategory(o.strategyId)));
+    const ordered = STRATEGY_TAB_ORDER.filter((c) => fromData.has(c));
+    const extras = [...fromData].filter((c) => !STRATEGY_TAB_ORDER.includes(c)).sort();
+    return [...ordered, ...extras];
+  }, [opps]);
   const filtered =
     opps == null ? null : filterTradedOpps(opps, strategyFilter, statusFilter);
   const filtersActive = strategyFilter !== "all" || statusFilter !== "all";

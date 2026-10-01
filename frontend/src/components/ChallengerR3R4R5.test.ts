@@ -469,7 +469,7 @@ async function runInteractiveChild() {
   // Check buttons for dock tabs
   const tabButtons = Array.from(container.querySelectorAll("button")).filter(
     (b) =>
-      b.textContent?.includes("Current Positions") ||
+      b.textContent?.includes("Open Positions") ||
       b.textContent?.includes("Execution History") ||
       b.textContent?.includes("Opportunity History") ||
       b.textContent?.includes("Log Monitor")
@@ -507,15 +507,15 @@ async function runInteractiveChild() {
   assert.ok(dockContainer, "Dock container must maintain h-96 overflow-y-auto on Log Monitor tab");
   assert.equal(dockContainer.querySelectorAll(".max-h-96").length, 0, "No inner max-h-96 on Log Monitor tab");
 
-  // Tab 0: Back to Current Positions
-  const posBtn = tabButtons.find((b) => b.textContent?.includes("Current Positions"));
+  // Tab 0: Back to Open Positions
+  const posBtn = tabButtons.find((b) => b.textContent?.includes("Open Positions"));
   assert.ok(posBtn);
   await act(async () => {
     posBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true, cancelable: true }));
   });
   dockContainer = container.querySelector(".h-96.overflow-y-auto");
-  assert.ok(dockContainer, "Dock container must maintain h-96 overflow-y-auto on Current Positions tab");
-  assert.equal(dockContainer.querySelectorAll(".max-h-96").length, 0, "No inner max-h-96 on Current Positions tab");
+  assert.ok(dockContainer, "Dock container must maintain h-96 overflow-y-auto on Open Positions tab");
+  assert.equal(dockContainer.querySelectorAll(".max-h-96").length, 0, "No inner max-h-96 on Open Positions tab");
 
   // 2. Test FundingRadar interactive tab switching
   await act(async () => {
@@ -534,7 +534,7 @@ async function runInteractiveChild() {
 
   const fundingTabButtons = Array.from(container.querySelectorAll("button")).filter(
     (b) =>
-      b.textContent?.includes("Current Position") ||
+      b.textContent?.includes("Open Positions") ||
       b.textContent?.includes("Execution History") ||
       b.textContent?.includes("Opportunity History") ||
       b.textContent?.includes("Log Monitor")

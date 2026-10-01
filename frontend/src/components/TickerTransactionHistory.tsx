@@ -49,7 +49,7 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
 
   // Filter logs specifically relevant to this ticker
   const tickerLogs = useMemo(() => {
-    return logs.filter((log) => {
+    const filtered = logs.filter((log) => {
       // Direct match on symbol (e.g. "BTC-USDC") or pair format (e.g. "BTC-USDC/ETH-USDC")
       if (!matchAllSymbols) {
         const matchesSymbol =
@@ -79,6 +79,12 @@ export const TickerTransactionHistory: React.FC<TickerTransactionHistoryProps> =
       }
 
       return true;
+    });
+
+    return [...filtered].sort((a, b) => {
+      const ta = a.timestamp ? Date.parse(a.timestamp) : 0;
+      const tb = b.timestamp ? Date.parse(b.timestamp) : 0;
+      return tb - ta;
     });
   }, [logs, symbol, matchAllSymbols, filterStatus, filterDirection, searchQuery]);
 

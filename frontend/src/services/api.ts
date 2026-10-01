@@ -842,6 +842,10 @@ export const api = {
     return invokeDesktop<string>("reset_circuit_breaker");
   },
 
+  async startEngine(): Promise<boolean> {
+    return invokeDesktop<boolean>("start_engine");
+  },
+
   async triggerKillswitch(): Promise<string> {
     return invokeDesktop<string>("trigger_emergency_killswitch");
   },

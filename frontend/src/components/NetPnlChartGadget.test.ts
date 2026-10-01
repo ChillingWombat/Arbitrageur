@@ -9,6 +9,7 @@ import {
   SeriesChart,
   cumulativeSeries,
   externalSeries,
+  filterByHorizon,
   realizedSeries,
 } from "./NetPnlChartGadget.tsx";
 import type { TradedOpportunityDto } from "../types/index.ts";
@@ -120,6 +121,19 @@ nodeTest("KNOWN_PNL_CATEGORIES unifies options under 'Options' without substrate
   assert.ok(!KNOWN_PNL_CATEGORIES.includes("Convexity"));
 });
 
+nodeTest("KNOWN_PNL_CATEGORIES follows the order of top tab switchers", () => {
+  assert.deepEqual(KNOWN_PNL_CATEGORIES, [
+    "Simple Spread",
+    "Spread Radar",
+    "Funding Rate",
+    "Spatial",
+    "Triangle",
+    "Options",
+    "Prediction Market",
+    "Statistical",
+  ]);
+});
+
 nodeTest("gadget renders the strategy filter in the top bar header next to title and unifies options", () => {
   const html = renderToStaticMarkup(React.createElement(NetPnlChartGadget));
   assert.match(html, /Net P&amp;L/);
@@ -159,5 +173,40 @@ nodeTest("realizedSeries matches all options substrategies under 'Options'", () 
   const pts = realizedSeries(rows, "Options");
   assert.equal(pts.length, 4);
   assert.deepEqual(pts.map((p) => p.valueUsd), [10, 15, 18, 20]);
+});
+
+nodeTest("filterByHorizon filters points to window and prepends anchor value", () => {
+  const now = 1_000_000_000_000;
+  const day = 86_400_000;
+  const pts = [
+    { tsMs: now - 40 * day, valueUsd: 10 },
+    { tsMs: now - 20 * day, valueUsd: 20 },
+    { tsMs: now - 3 * day, valueUsd: 30 },
+  ];
+  // 1W: only now - 3*day is in window; prepends anchor value 20 from previous point
+  const w1 = filterByHorizon(pts, "1W", now);
+  assert.equal(w1.length, 2);
+  assert.equal(w1[0].valueUsd, 20);
+  assert.equal(w1[1].valueUsd, 30);
+
+  // 1M: 30 days window covers now - 20*day and now - 3*day; prepends anchor 10
+  const m1 = filterByHorizon(pts, "1M", now);
+  assert.equal(m1.length, 3);
+  assert.equal(m1[0].valueUsd, 10);
+  assert.equal(m1[1].valueUsd, 20);
+  assert.equal(m1[2].valueUsd, 30);
+
+  // ALL: returns all points unchanged
+  const all = filterByHorizon(pts, "ALL", now);
+  assert.deepEqual(all, pts);
+});
+
+nodeTest("gadget renders Performance History title and horizon buttons", () => {
+  const html = renderToStaticMarkup(React.createElement(NetPnlChartGadget));
+  assert.match(html, /Performance History/);
+  assert.match(html, />1W<\/button>/);
+  assert.match(html, />1M<\/button>/);
+  assert.match(html, />1Y<\/button>/);
+  assert.match(html, />ALL<\/button>/);
 });
 

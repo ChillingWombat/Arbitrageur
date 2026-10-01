@@ -100,6 +100,9 @@ pub struct OptionsParityOpportunityDto {
     pub est_fees_usd: f64,
     pub net_edge_usd: f64,
     pub edge_bps: f64,
+    /// Annualized expected yield (APR, percent) on notional capital to expiry.
+    #[serde(default)]
+    pub expected_yield_pct: f64,
     pub index_price_usd: f64,
     pub qty_base_suggested: f64,
     /// One-liner when the pair is shown but not executable.
@@ -123,6 +126,9 @@ pub struct OptionsParityScanParams {
     pub max_days_to_expiry: Option<f64>,
     #[serde(default)]
     pub min_edge_bps: Option<f64>,
+    /// Minimum annualized expected yield percentage hurdle (e.g. 10.0 for 10% APR).
+    #[serde(default)]
+    pub min_expected_yield_pct: Option<f64>,
     /// Result cap — a display concern. Execution re-scans pass usize::MAX so
     /// a candidate cannot fall out of the top-N cut between scans.
     #[serde(default)]
@@ -139,6 +145,8 @@ pub struct OptionsParityExecutionParams {
     pub qty_base: f64,
     #[serde(default)]
     pub min_edge_bps: Option<f64>,
+    #[serde(default)]
+    pub min_expected_yield_pct: Option<f64>,
     #[serde(default)]
     pub auto: bool,
 }
@@ -414,6 +422,16 @@ pub async fn scan_options_parity_impl(
         if edge_bps_f < min_edge_bps {
             continue;
         }
+        let expected_yield_pct = if hours > 0.0 {
+            (edge_bps_f / 100.0) * (8760.0 / hours)
+        } else {
+            0.0
+        };
+        if let Some(min_yield) = params.min_expected_yield_pct {
+            if expected_yield_pct < min_yield {
+                continue;
+            }
+        }
         let expiry_iso = Utc
             .timestamp_millis_opt(expiry_ms)
             .single()
@@ -476,6 +494,7 @@ pub async fn scan_options_parity_impl(
             est_fees_usd: eval.est_fees_usd.to_string().parse().unwrap_or(0.0),
             net_edge_usd: eval.net_edge_usd.to_string().parse().unwrap_or(0.0),
             edge_bps: edge_bps_f,
+            expected_yield_pct,
             index_price_usd: index.to_string().parse().unwrap_or(0.0),
             qty_base_suggested: qty_base,
             is_executable: executable,
@@ -549,6 +568,7 @@ pub async fn execute_options_parity_impl(
             min_hours_to_expiry: Some(0.0),
             max_days_to_expiry: Some(365.0),
             min_edge_bps: params.min_edge_bps,
+            min_expected_yield_pct: params.min_expected_yield_pct,
             // Re-verify must see the whole board: the display cap could drop
             // a live edge when borderline candidates reshuffle between scans.
             limit: Some(usize::MAX),
@@ -574,6 +594,14 @@ pub async fn execute_options_parity_impl(
             return Err(format!(
                 "options parity edge {:.1} BPS is below the {:.1} BPS hurdle — not executed",
                 opp.edge_bps, hurdle
+            ));
+        }
+    }
+    if let Some(yield_hurdle) = params.min_expected_yield_pct {
+        if opp.expected_yield_pct < yield_hurdle {
+            return Err(format!(
+                "options parity expected yield {:.2}% is below the {:.2}% hurdle — not executed",
+                opp.expected_yield_pct, yield_hurdle
             ));
         }
     }
@@ -1699,7 +1727,7 @@ mod tests {
                 min_hours_to_expiry: Some(0.0),
                 max_days_to_expiry: Some(60.0),
                 min_edge_bps: Some(0.0),
-
+                min_expected_yield_pct: None,
                 limit: None,
             },
             &state,
@@ -1710,10 +1738,55 @@ mod tests {
         let o = &opps[0];
         assert_eq!(o.direction, ParityDirection::Conversion);
         assert!(o.net_edge_usd > 0.0);
+        assert!(o.expected_yield_pct > 0.0);
         assert_eq!(o.call_leg.action, "sell");
         assert_eq!(o.put_leg.action, "buy");
         assert_eq!(o.perp_leg.action, "buy");
         assert!(o.is_executable);
+
+        let yield_pct = o.expected_yield_pct;
+
+        // When min_expected_yield_pct is higher than the yield, the opp is filtered out
+        let filtered_out = scan_options_parity_impl(
+            &OptionsParityScanParams {
+                currency: "BTC".into(),
+                qty_base: Some(0.1),
+                min_hours_to_expiry: Some(0.0),
+                max_days_to_expiry: Some(60.0),
+                min_edge_bps: Some(0.0),
+                min_expected_yield_pct: Some(yield_pct + 10.0),
+                limit: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            filtered_out.len(),
+            0,
+            "opportunity below expected yield hurdle must be ignored"
+        );
+
+        // When min_expected_yield_pct is lower than or equal to the yield, the opp is accepted
+        let accepted = scan_options_parity_impl(
+            &OptionsParityScanParams {
+                currency: "BTC".into(),
+                qty_base: Some(0.1),
+                min_hours_to_expiry: Some(0.0),
+                max_days_to_expiry: Some(60.0),
+                min_edge_bps: Some(0.0),
+                min_expected_yield_pct: Some(yield_pct - 1.0),
+                limit: None,
+            },
+            &state,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            accepted.len(),
+            1,
+            "opportunity meeting expected yield hurdle must be included"
+        );
     }
 
     #[tokio::test]
@@ -1729,7 +1802,7 @@ mod tests {
                 min_hours_to_expiry: None,
                 max_days_to_expiry: None,
                 min_edge_bps: None,
-
+                min_expected_yield_pct: None,
                 limit: None,
             },
             &state,
@@ -1750,7 +1823,7 @@ mod tests {
                 min_hours_to_expiry: Some(0.0),
                 max_days_to_expiry: Some(60.0),
                 min_edge_bps: Some(0.0),
-
+                min_expected_yield_pct: None,
                 limit: None,
             },
             &state,
@@ -1764,6 +1837,7 @@ mod tests {
                 currency: "BTC".into(),
                 qty_base: 0.1,
                 min_edge_bps: Some(0.0),
+                min_expected_yield_pct: None,
                 auto: true,
             },
             &state,
@@ -1820,7 +1894,7 @@ mod tests {
                 min_hours_to_expiry: Some(0.0),
                 max_days_to_expiry: Some(60.0),
                 min_edge_bps: Some(0.0),
-
+                min_expected_yield_pct: None,
                 limit: None,
             },
             &state,
@@ -1834,6 +1908,7 @@ mod tests {
                 currency: "BTC".into(),
                 qty_base: 0.1,
                 min_edge_bps: Some(0.0),
+                min_expected_yield_pct: None,
                 auto: true,
             },
             &state,

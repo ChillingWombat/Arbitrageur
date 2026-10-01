@@ -39,6 +39,36 @@ const fmtQty4 = (q: number): string => {
   return `${q < 0 ? "-" : "+"}${trimmed === "" ? "0" : trimmed}`;
 };
 
+/** Expected time or condition when the trade's positions will be closed to take profit. */
+export const formatExpectedClose = (pos: OpenPositionDto): string => {
+  const strat = (pos.strategyId ?? "").toLowerCase();
+  if (strat.startsWith("options_") || strat === "options") {
+    const expiries = new Set<string>();
+    const allSymbols = [pos.symbol, ...(pos.legSymbols ?? [])];
+    for (const s of allSymbols) {
+      const match = s.match(/\b\d{1,2}[A-Z]{3}\d{2}\b/i);
+      if (match) expiries.add(match[0].toUpperCase());
+    }
+    if (expiries.size === 1) {
+      return `At Expiry (${[...expiries][0]})`;
+    } else if (expiries.size > 1) {
+      const sorted = [...expiries];
+      return `Front: ${sorted[0]} · Back: ${sorted[1] ?? sorted[sorted.length - 1]}`;
+    }
+    return "At Contract Expiration";
+  }
+  if (strat.includes("funding")) {
+    return "Next Funding Settlement (~8h)";
+  }
+  if (strat.includes("radar") || strat.includes("futures") || strat.includes("spread") || strat.includes("stat_arb")) {
+    return "Mean Reversion Target (~1h - 4h)";
+  }
+  if (strat.includes("triangle")) {
+    return "Instant / Sub-second";
+  }
+  return "Target Profit Reversion";
+};
+
 /** Backend `signal_trade_id` mirror: `-legN` siblings share the cycle
  *  prefix; the tail must be numeric so a coincidental `-leg` can't forge a
  *  shared prefix. */
@@ -128,6 +158,16 @@ export const PositionDetailModal: React.FC<PositionDetailModalProps> = React.mem
   const entryPnl = -fees;
   const expectedNet = familyExpected ?? pos.expectedNetUsd;
   const hasProjection = expectedNet != null && Number.isFinite(expectedNet);
+  // Forward projected target at settlement/expiry is the expected terminal net profit (not nowPnl + expectedNet)
+  const targetPnl = expectedNet as number;
+  const yEnd = hasProjection ? targetPnl : nowPnl;
+  const capital = pos.notionalUsd && pos.notionalUsd > 0 ? pos.notionalUsd : null;
+  const currentExpectedNet = expectedNet;
+  const currentYieldPct =
+    currentExpectedNet != null && capital != null && capital > 0
+      ? (currentExpectedNet / capital) * 100
+      : null;
+
   // Chart geometry: x in [t0, t1, t2], y auto-scaled with safe padding.
   const W = 800, H = 200;
   const PAD_LEFT = 75, PAD_RIGHT = 45, PAD_TOP = 26, PAD_BOTTOM = 30;
@@ -137,7 +177,6 @@ export const PositionDetailModal: React.FC<PositionDetailModalProps> = React.mem
   const t1 = Date.now();
   const t2 = t1 + 24 * 3600 * 1000;
   const t0safe = Number.isFinite(t0) ? t0 : t1 - 3600 * 1000;
-  const yEnd = hasProjection ? nowPnl + (expectedNet as number) : nowPnl;
 
   const rawLo = Math.min(entryPnl, nowPnl, yEnd);
   const rawHi = Math.max(entryPnl, nowPnl, yEnd);
@@ -222,50 +261,61 @@ export const PositionDetailModal: React.FC<PositionDetailModalProps> = React.mem
               tip="Time since the first fill in this trade family."
             />
             <DetailField
-              label="Signals"
-              value={String(pos.signalCount)}
-              tip="Signal executions still counted as open in this position."
+              label="Expected Close"
+              value={formatExpectedClose(pos)}
+              tip="Estimated time or condition when positions in this trade will be closed to take profit."
             />
             <DetailField
-              label="Instruments"
-              value={String(pos.legSymbols.length)}
-              tip="Distinct leg instruments in this trade."
-            />
-            <DetailField
-              label="Notional"
-              value={pos.notionalUsd != null ? `$${pos.notionalUsd.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : "—"}
-              tip="USD notional at entry."
+              label="Legs"
+              value={`${pos.signalCount} legs`}
+              tip="Execution legs in this trade package (e.g. 8 option contracts across 2 expiry cycles)."
             />
           </DetailSection>
 
-          <DetailSection title="PnL & Costs">
+          <DetailSection title="Performance">
             <DetailField
               label="Unrealized PnL"
               value={<span className={pnlTone(nowPnl)}>{usd(nowPnl)}</span>}
               tip="Marked-to-market net PnL including fees paid; falls back to −fees when no mark is available."
             />
             <DetailField
-              label="Fees Paid"
-              value={`-$${Math.abs(fees).toFixed(2)}`}
-              tip={`Cumulative fees on fills so far${family ? ` — ledger total across the family: $${familyFees.toFixed(2)}` : ""}.`}
-            />
-            <DetailField
-              label="Expected Net"
+              label="Initial Expected Net Profit"
               value={expectedNet != null ? usd(expectedNet) : "—"}
-              tip="Entry-time expected net edge in USD (summed across entry signals when the family ledger is loaded)."
+              tip="Entry-time locked or targeted net profit upon settlement/reversion."
             />
             <DetailField
-              label="Vs Expected"
+              label="Current Expected Net Profit"
               value={
-                expectedNet != null && pos.unrealizedPnlUsd != null ? (
-                  <span className={pnlTone(pos.unrealizedPnlUsd - expectedNet)}>
-                    {usd(pos.unrealizedPnlUsd - expectedNet)}
+                currentExpectedNet != null ? (
+                  <span className={pnlTone(currentExpectedNet)}>{usd(currentExpectedNet)}</span>
+                ) : (
+                  "—"
+                )
+              }
+              tip="Current expected net profit taking into account updated information, settlement payout, and current market conditions."
+            />
+            <DetailField
+              label="Entry Notional"
+              value={pos.notionalUsd != null ? `$${pos.notionalUsd.toLocaleString(undefined, { maximumFractionDigits: 0 })}` : "—"}
+              tip="Total USD capital / notional put into entering these positions."
+            />
+            <DetailField
+              label="Current Expected Yield"
+              value={
+                currentYieldPct != null ? (
+                  <span className={currentYieldPct >= 0 ? "text-profit font-semibold" : "text-loss font-semibold"}>
+                    {currentYieldPct >= 0 ? "+" : ""}{currentYieldPct.toFixed(2)}%
                   </span>
                 ) : (
                   "—"
                 )
               }
-              tip="Unrealized PnL minus the entry-time expectation — negative while edge hasn't matured."
+              tip="Expected return on capital put into entering these positions (Current Expected Net Profit ÷ Entry Notional)."
+            />
+            <DetailField
+              label="Fees Paid"
+              value={`-$${Math.abs(fees).toFixed(2)}`}
+              tip={`Cumulative fees on fills so far${family ? ` — ledger total across the family: $${familyFees.toFixed(2)}` : ""}.`}
             />
           </DetailSection>
 

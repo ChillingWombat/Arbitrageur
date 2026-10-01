@@ -64,6 +64,26 @@ test("Header pause/resume button displays Resume tooltip and Resume text when en
   assert.doesNotMatch(html, /disabled=""/, "button must not be disabled when engine is paused and breaker is clean");
 });
 
+test("Header displays Start Engine when engine is stopped after emergency exit (Stop All)", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(Header, {
+      status: mockStatus({ circuit_breaker_tripped: false, is_paused: true, is_stopped: true }),
+      isPaused: true,
+      onTogglePause: () => {},
+      onEmergencyKillswitch: () => {},
+      refreshing: false,
+      activeTab: "radar",
+      onSelectTab: () => {},
+    })
+  );
+
+  const startTooltip = "Start Engine: Start execution coordination. Automated bots remain stopped and must be started individually on each strategy page.";
+  assert.ok(html.includes(startTooltip), "wrapper must contain start tooltip message");
+  assert.match(html, /Start Engine/, "button text must be Start Engine rather than Resume Engine");
+  assert.doesNotMatch(html, /Resume Engine/, "button text must never be Resume Engine when stopped");
+  assert.doesNotMatch(html, /disabled=""/, "button must not be disabled when breaker is reset");
+});
+
 test("Header pause/resume button displays Pause tooltip and Pause text when engine is running", () => {
   const html = renderToStaticMarkup(
     React.createElement(Header, {

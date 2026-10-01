@@ -9,6 +9,7 @@ export function defaultOptionsBotConfig(substrategyId: string): OptionsBotConfig
     mode: "off",
     qtyBase: 0.1,
     minEdgeBps: 5,
+    minExpectedYieldPct: 10,
     minHoursToExpiry: 48,
     maxDaysToExpiry: 60,
     pollIntervalSecs: 30,
