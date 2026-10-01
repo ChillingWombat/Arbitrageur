@@ -264,6 +264,11 @@ pub trait ExchangeAdapter: Send + Sync {
         );
     }
 
+    /// Maximum allowed leverage for a specific symbol/instrument, if known by the adapter.
+    fn max_leverage(&self, _symbol: &str) -> Option<u32> {
+        None
+    }
+
     /// Whether this adapter has implemented live order placement and cancellation.
     fn supports_live_execution(&self) -> bool {
         false

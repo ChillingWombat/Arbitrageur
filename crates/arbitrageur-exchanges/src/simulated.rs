@@ -647,6 +647,10 @@ impl ExchangeAdapter for SimulatedExchange {
         Self::recompute_account_margins(&mut acc);
         Ok(())
     }
+
+    fn max_leverage(&self, _symbol: &str) -> Option<u32> {
+        self.max_leverage_cap()
+    }
 }
 
 #[cfg(test)]

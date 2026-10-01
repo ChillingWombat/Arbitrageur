@@ -767,12 +767,18 @@ pub async fn execute_triangle_arbitrage_impl(
     // never silently assumed at the desired value.
     let mut proven_lev = target_leverage.max(1);
     for sym in &plan.leg_symbols {
-        if let Err(e) = adapter.set_leverage(sym, target_leverage).await {
+        let eff_target = adapter
+            .max_leverage(sym)
+            .map(|m| target_leverage.min(m))
+            .unwrap_or(target_leverage);
+        if let Err(e) = adapter.set_leverage(sym, eff_target).await {
             tracing::warn!(
-                "triangle set_leverage {target_leverage}x on {} {sym} failed: {e} — sizing margin at the conservative 1x bound",
+                "triangle set_leverage {eff_target}x on {} {sym} failed: {e} — sizing margin at the conservative 1x bound",
                 params.venue
             );
             proven_lev = 1;
+        } else {
+            proven_lev = proven_lev.min(eff_target);
         }
     }
     let pre_acc = adapter
