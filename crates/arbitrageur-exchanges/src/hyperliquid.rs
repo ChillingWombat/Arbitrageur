@@ -204,6 +204,7 @@ pub struct HyperliquidAdapter {
     /// endpoint can only fail at the venue, not sign the wrong domain.
     is_mainnet: bool,
     rate_limiter: AccountRequestCoordinator,
+    asset_meta_cache: RwLock<HashMap<String, (u32, u32)>>,
 }
 
 impl HyperliquidAdapter {
@@ -225,6 +226,7 @@ impl HyperliquidAdapter {
             private_key: RwLock::new(private_key.map(Zeroizing::new)),
             verified_signer: RwLock::new(None),
             rate_limiter: AccountRequestCoordinator::new("hyperliquid", 100, 2000, 500, 10000),
+            asset_meta_cache: RwLock::new(HashMap::new()),
         }
     }
 
@@ -379,6 +381,13 @@ impl HyperliquidAdapter {
     /// Resolve coin name to (asset index, szDecimals) in the Hyperliquid
     /// perpetual universe — both needed to wire-format order fields.
     pub async fn resolve_asset_meta(&self, coin: &str) -> anyhow::Result<(u32, u32)> {
+        let coin_upper = coin.to_ascii_uppercase();
+        {
+            let guard = self.asset_meta_cache.read();
+            if let Some(&meta) = guard.get(&coin_upper) {
+                return Ok(meta);
+            }
+        }
         let res = self.post_info(json!({"type": "meta"})).await?;
         let universe = res
             .get("universe")
@@ -386,16 +395,22 @@ impl HyperliquidAdapter {
             .ok_or_else(|| {
                 anyhow::anyhow!("Missing universe array in Hyperliquid meta response")
             })?;
+        let mut map = HashMap::new();
         for (idx, item) in universe.iter().enumerate() {
             if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
-                if name.eq_ignore_ascii_case(coin) {
-                    let sz_decimals =
-                        item.get("szDecimals").and_then(|s| s.as_u64()).unwrap_or(3) as u32;
-                    return Ok((idx as u32, sz_decimals));
-                }
+                let sz_decimals =
+                    item.get("szDecimals").and_then(|s| s.as_u64()).unwrap_or(3) as u32;
+                map.insert(name.to_ascii_uppercase(), (idx as u32, sz_decimals));
             }
         }
-        anyhow::bail!("Asset '{coin}' not found in Hyperliquid perpetual universe");
+        let target = map.get(&coin_upper).copied();
+        {
+            let mut guard = self.asset_meta_cache.write();
+            guard.extend(map);
+        }
+        target.ok_or_else(|| {
+            anyhow::anyhow!("Asset '{coin}' not found in Hyperliquid perpetual universe")
+        })
     }
 
     pub async fn resolve_asset_index(&self, coin: &str) -> anyhow::Result<u32> {
@@ -712,11 +727,13 @@ impl ExchangeAdapter for HyperliquidAdapter {
                 anyhow::anyhow!("Missing universe array in Hyperliquid meta response")
             })?;
 
+        let mut map = HashMap::new();
         let mut markets = Vec::new();
-        for item in universe {
+        for (idx, item) in universe.iter().enumerate() {
             if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
                 let sz_decimals =
                     item.get("szDecimals").and_then(|s| s.as_u64()).unwrap_or(3) as u32;
+                map.insert(name.to_ascii_uppercase(), (idx as u32, sz_decimals));
                 let symbol = Symbol::perp(name, "USDC");
                 markets.push(MarketMetadata {
                     symbol,
@@ -732,6 +749,10 @@ impl ExchangeAdapter for HyperliquidAdapter {
                     is_active: true,
                 });
             }
+        }
+        {
+            let mut guard = self.asset_meta_cache.write();
+            guard.extend(map);
         }
         Ok(markets)
     }

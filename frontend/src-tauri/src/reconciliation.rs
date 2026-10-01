@@ -61,6 +61,17 @@ const RESIDUAL_RETRY_SECS: i64 = 30;
 /// must eventually hear about it instead of silence.
 const RESIDUAL_ORDER_GRACE_SECS: i64 = 1800;
 
+/// Match instrument symbol between venue wire response and persisted leg.
+///
+/// Compares case-insensitively, and falls back to comparing canonical base
+/// tokens (e.g. `BTC/USD` vs `BTC-USD` vs `BTC`) to absorb venue-specific
+/// punctuation and instrument-class packaging.
+fn symbols_match(wire_symbol: &str, leg_symbol: &str) -> bool {
+    wire_symbol.eq_ignore_ascii_case(leg_symbol)
+        || arbitrageur_core::symbol::canonical_base(wire_symbol)
+            == arbitrageur_core::symbol::canonical_base(leg_symbol)
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReconcileSummary {
@@ -286,7 +297,7 @@ async fn adopt_venue_order_id(
     let oid = resp.order_id.trim();
     if oid.is_empty()
         || !resp.venue.as_str().eq_ignore_ascii_case(&leg.venue)
-        || !resp.symbol.eq_ignore_ascii_case(&leg.symbol)
+        || !symbols_match(&resp.symbol, &leg.symbol)
         || (!resp.client_order_id.trim().is_empty()
             && resp.client_order_id.trim() != client_order_id)
     {
@@ -442,7 +453,7 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
                 // venue, symbol, and order id — before any field is trusted.
                 if resp.order_id != order_id
                     || !resp.venue.as_str().eq_ignore_ascii_case(&leg.venue)
-                    || !resp.symbol.eq_ignore_ascii_case(&leg.symbol)
+                    || !symbols_match(&resp.symbol, &leg.symbol)
                 {
                     tracing::error!(
                         "reconcile: {} fetch_order identity mismatch (id={} venue={} symbol={}) vs leg (order_id={} venue={} symbol={})",
@@ -777,7 +788,7 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
             };
             if resp.order_id != order_id
                 || !resp.venue.as_str().eq_ignore_ascii_case(&leg.venue)
-                || !resp.symbol.eq_ignore_ascii_case(&leg.symbol)
+                || !symbols_match(&resp.symbol, &leg.symbol)
             {
                 tracing::warn!(
                     "reconcile fee-enrich: {} order {} identity mismatch — skipping",
@@ -1144,7 +1155,7 @@ async fn dispatch_residual_flatten(state: &AppEngineState, signal_id: &str) {
                     if (order_id.is_none() && !resp.order_id.is_empty()
                         || order_id == Some(resp.order_id.as_str()))
                         && resp.venue.as_str().eq_ignore_ascii_case(&leg.venue)
-                        && resp.symbol.eq_ignore_ascii_case(&leg.symbol) =>
+                        && symbols_match(&resp.symbol, &leg.symbol) =>
                 {
                     if order_id.is_none() {
                         // Crash-window orphan: only the client id was ever
@@ -3609,5 +3620,16 @@ mod tests {
         assert_eq!(pos.quantity, dec!(0.1));
         // …but a bare base spanning both rows is ambiguous — fail closed.
         assert!(venue.account_position_for(&acc, "BTC").is_err());
+    }
+
+    #[test]
+    fn test_symbols_match_canonical_equivalence() {
+        assert!(symbols_match("BTC/USD", "BTC-USD"));
+        assert!(symbols_match("BTC/USD", "BTC"));
+        assert!(symbols_match("BTCUSD", "BTC/USD"));
+        assert!(symbols_match("PERP_ADA_USDC", "ADA"));
+        assert!(symbols_match("ETH-USDT", "ETH"));
+        assert!(!symbols_match("BTC", "ETH"));
+        assert!(!symbols_match("SOL/USD", "ADA/USD"));
     }
 }
