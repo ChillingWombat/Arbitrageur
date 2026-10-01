@@ -147,3 +147,21 @@ test("position card renders Reduce-Only badge when the DTO flag is set", () => {
   assert.match(html, /No new step increases; position closes on target profit/);
 });
 
+test("options position card renders expected profit alongside MtM", () => {
+  const optionsPos: OpenPositionDto = {
+    ...position,
+    key: "options_box_spread|box1",
+    strategyId: "options_box_spread",
+    expectedNetUsd: 375.84,
+    unrealizedPnlUsd: -673.07,
+  };
+  const html = renderToStaticMarkup(
+    React.createElement(PositionsPanel, {
+      ...baseProps,
+      positions: [optionsPos],
+    }),
+  );
+  assert.match(html, />BOX</);
+  assert.match(html, /Exp:\s*\+\$375\.84/);
+  assert.match(html, /\(MtM:\s*-\$673\.07\)/);
+});

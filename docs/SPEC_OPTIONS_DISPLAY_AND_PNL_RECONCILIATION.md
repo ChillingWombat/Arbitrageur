@@ -92,6 +92,17 @@ A comprehensive full-stack quantitative solution spanning frontend visualization
   - Re-anchors `pnl.total.testnet` and `pnl.total.live` to this true realized PnL.
   - Marks the migration complete via persistent key `pnl.premium_outlay.migrated_v2`.
 
+### 4. Positions Sidebar Card Dual PnL Architecture
+- Refactored `PositionsPanel.tsx` card footer metrics:
+  - For options strategies (`options_box_spread`, `options_jelly_roll`, `options_parity`), prominently displays the locked-in expected expiry profit (`Exp: +$375.84`) in bold emerald green, paired with current testnet mark-to-market (`(MtM: -$673.07)`) in muted slate.
+  - Contextual hover tooltips explain that mark-to-market fluctuations are driven by illiquid testnet bid-ask spreads, while the guaranteed expiry cashflow remains economically locked at entry.
+  - For linear perpetual and spot strategies, renders color-coded realized/unrealized marks (`text-emerald-600` for profits, `text-rose-600` for drawdowns).
+
+### 5. Deribit Venue Instrument State Filtering & Rejection Telemetry
+- Deribit testnet frequently undergoes partial engine lockdowns (`"locked": "partial"`) where underlying index trading is paused and all corresponding options instruments transition to `"state": "halted"`.
+- Enhanced `DeribitAdapter::fetch_markets` to parse instrument `"state"`, ensuring that instruments where `state != "open"` (e.g. `"halted"` or `"closed"`) are not registered as active tradable markets.
+- In `DeribitAdapter::place_order`, added specialized detection for Deribit error `10031` (`invalid_args_for_instrument`), providing operators with unambiguous telemetry indicating venue matching engine lockdowns rather than generic syntax failures.
+
 ---
 
 ## Testing Decisions
@@ -99,16 +110,18 @@ A comprehensive full-stack quantitative solution spanning frontend visualization
 ### What Makes a Good Test
 - **External Behavioral Verification**: Tests must verify observable outcomes (rendered DOM text, column headers, badge contents, SVG node attributes, and persisted database PnL values) rather than internal private variables.
 - **Seam Selection**:
-  1. *Frontend Presentation Seam*: Verify that rendered component HTML contains distinct `Action` and `Type` table headers, valid badge text, and properly scaled SVG geometry without text clipping.
-  2. *Backend Engine & State Store Seam*: Verify that execution log aggregations correctly separate capital financing from transaction fees, and verify that KV state persists accurate PnL totals upon startup.
+  1. *Frontend Presentation Seam*: Verify that rendered component HTML contains distinct `Action` and `Type` table headers, valid badge text, properly scaled SVG geometry without text clipping, and dual `Exp:` / `(MtM:)` metrics on options position cards.
+  2. *Backend Engine & State Store Seam*: Verify that execution log aggregations correctly separate capital financing from transaction fees, verify that KV state persists accurate PnL totals upon startup, and verify venue connector rate limiting and retry loops.
 
 ### Modules Tested
 - `AtomicTransactionsTable` and `PositionDetailModal` (`PositionDetailModal.test.ts` & `TradedOpportunitiesGadget.test.ts`).
-- `OptionsArbitrage` and `PositionsPanel` (Frontend options rendering test suites).
+- `PositionsPanel` (`PositionsPanel.test.ts` - includes dual options card PnL test).
+- `OptionsArbitrage` (Frontend options rendering test suites).
 - `state::tests` and `state_store::logs` (Backend Tauri engine and SQLite store suites).
 
 ### Prior Art
 - `frontend/src/components/AtomicTransactionsTable.tsx` & `PositionDetailModal.tsx`.
+- `frontend/src/components/PositionsPanel.tsx` & `PositionsPanel.test.ts`.
 - `frontend/src/components/PositionDetailModal.test.ts`.
 - `frontend/src/components/OptionsArbitrage.test.ts`.
 - `frontend/src-tauri/src/state.rs` test suite (`cargo test -p arbitrageur-desktop --bin arbitrageur-desktop state::tests`).
@@ -127,7 +140,8 @@ A comprehensive full-stack quantitative solution spanning frontend visualization
 ## Further Notes
 
 - Following release compilation with `--features custom-protocol` and service restart, the live testnet application immediately reflected the recalibrated metrics:
-  - `total_realized_pnl`: `-$258.45` (true closed trade PnL and exchange taker fees across 500+ trades).
+  - `total_realized_pnl`: `-$297.28` (true closed trade PnL and exchange taker fees across 600+ trades).
   - `total_premium_outlay_usd`: `-$56,413.15` (active capital deployed in synthetic zero-coupon bonds).
+  - Position cards clearly distinguish `Exp:` payout from `MtM:` testnet spread noise.
   - Both Radar Bot and Options Bot continue to operate autonomously with 0 audit errors.
 - The `ready-for-agent` triage label is hereby applied to this specification.

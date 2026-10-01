@@ -326,12 +326,31 @@ impl HyperliquidAdapter {
 
     async fn post_info(&self, body: serde_json::Value) -> anyhow::Result<serde_json::Value> {
         let url = format!("{}/info", self.base_url);
-        let resp = self.client.post(&url).json(&body).send().await?;
-        if !resp.status().is_success() {
-            anyhow::bail!("Hyperliquid /info error status: {}", resp.status());
+        let mut retries = 0;
+        loop {
+            let _ = self.rate_limiter.acquire_or_cache(false).await;
+            let resp = match self.client.post(&url).json(&body).send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    self.rate_limiter.record_failure(false);
+                    return Err(e.into());
+                }
+            };
+            let status = resp.status();
+            if status.is_success() {
+                let json_val = resp.json::<serde_json::Value>().await?;
+                return Ok(json_val);
+            }
+            let is_rate_limit = status == reqwest::StatusCode::TOO_MANY_REQUESTS;
+            self.rate_limiter.record_failure(is_rate_limit);
+            if is_rate_limit && retries < 3 {
+                retries += 1;
+                tokio::time::sleep(tokio::time::Duration::from_millis(500 * retries)).await;
+                continue;
+            }
+            let text = resp.text().await.unwrap_or_default();
+            anyhow::bail!("Hyperliquid /info error status: {status}; body: {text}");
         }
-        let json_val = resp.json::<serde_json::Value>().await?;
-        Ok(json_val)
     }
 
     async fn post_exchange(&self, body: serde_json::Value) -> anyhow::Result<serde_json::Value> {
