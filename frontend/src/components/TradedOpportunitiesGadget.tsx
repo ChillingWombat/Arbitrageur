@@ -309,6 +309,8 @@ export const TradedOpportunitiesGadget: React.FC = () => {
   const [selected, setSelected] = useState<TradedOpportunityDto | null>(null);
   const [strategyFilter, setStrategyFilter] = useState("all");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
 
   useEffect(() => {
     let alive = true;
@@ -360,6 +362,21 @@ export const TradedOpportunitiesGadget: React.FC = () => {
   const filtered =
     opps == null ? null : filterTradedOpps(opps, strategyFilter, statusFilter);
   const filtersActive = strategyFilter !== "all" || statusFilter !== "all";
+
+  // Reset to page 1 whenever filters change
+  useEffect(() => {
+    setPage(1);
+  }, [strategyFilter, statusFilter]);
+
+  const totalRows = filtered?.length ?? 0;
+  const totalPages = Math.max(1, Math.ceil(totalRows / pageSize));
+  const safePage = Math.min(page, totalPages);
+
+  const paginated = useMemo(() => {
+    if (!filtered) return null;
+    const start = (safePage - 1) * pageSize;
+    return filtered.slice(start, start + pageSize);
+  }, [filtered, safePage, pageSize]);
 
   return (
     <div className="bg-surface rounded-xl border border-surface-border p-4 shadow-card space-y-3">
@@ -431,7 +448,56 @@ export const TradedOpportunitiesGadget: React.FC = () => {
           No opportunities match the current filters.
         </div>
       ) : (
-        <TradedOpportunitiesTable opps={filtered} failed={failed} onSelect={setSelected} />
+        <TradedOpportunitiesTable opps={paginated} failed={failed} onSelect={setSelected} />
+      )}
+
+      {filtered != null && filtered.length > 0 && (
+        <div className="flex items-center justify-between pt-2 border-t border-surface-border text-xs font-mono text-slate-600 flex-wrap gap-2">
+          <div className="flex items-center gap-2">
+            <span>Rows per page:</span>
+            <select
+              value={pageSize}
+              onChange={(e) => {
+                setPageSize(Number(e.target.value));
+                setPage(1);
+              }}
+              className={selectClass}
+              aria-label="Rows per page"
+            >
+              <option value={10}>10</option>
+              <option value={25}>25</option>
+              <option value={50}>50</option>
+              <option value={100}>100</option>
+            </select>
+            <span className="text-slate-400 tabular-nums">
+              Showing {Math.min((safePage - 1) * pageSize + 1, totalRows)}–{Math.min(safePage * pageSize, totalRows)} of {totalRows}
+            </span>
+          </div>
+
+          <div className="flex items-center gap-1.5 ml-auto">
+            <button
+              type="button"
+              disabled={safePage <= 1}
+              onClick={() => setPage((p) => Math.max(1, p - 1))}
+              className="px-2.5 py-1 rounded border border-surface-border bg-surface text-slate-700 hover:bg-surface-raised disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition font-bold"
+              aria-label="Previous page"
+            >
+              Previous
+            </button>
+            <span className="px-2 text-slate-500 tabular-nums">
+              Page {safePage} of {totalPages}
+            </span>
+            <button
+              type="button"
+              disabled={safePage >= totalPages}
+              onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
+              className="px-2.5 py-1 rounded border border-surface-border bg-surface text-slate-700 hover:bg-surface-raised disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition font-bold"
+              aria-label="Next page"
+            >
+              Next
+            </button>
+          </div>
+        </div>
       )}
 
       {selectedFresh && (

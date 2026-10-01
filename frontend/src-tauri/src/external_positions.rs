@@ -794,6 +794,8 @@ pub async fn close_external_position_impl(
     let (order, expected_client_order_id, sid) = if mode == "auto" {
         (None, String::new(), mint_id())
     } else {
+        let is_deribit_option =
+            venue_lc == "deribit" && (live.symbol.ends_with("-C") || live.symbol.ends_with("-P"));
         let mut o = if mode == "limit" {
             let px = input
                 .limit_price
@@ -803,6 +805,39 @@ pub async fn close_external_position_impl(
                     "Limit close needs a positive limit_price (use the recommendation)".to_string()
                 })?;
             let mut o = OrderRequest::new_limit(
+                VenueId::from(venue_lc.clone()),
+                live.symbol.clone(),
+                close_side,
+                px,
+                qty_dec,
+            );
+            o.reduce_only = adapter.supports_reduce_only(&live.symbol);
+            o
+        } else if is_deribit_option {
+            // Deribit options do not accept market orders (HTTP 400 error 10031).
+            // Execute as an IOC order using provided limit price or the book recommendation.
+            let px = if let Some(p) = input
+                .limit_price
+                .filter(|p| p.is_finite() && *p > 0.0)
+                .and_then(f64_dec)
+            {
+                p
+            } else {
+                let rec = recommend_external_close_impl(&venue_lc, &live.symbol, state)
+                    .await
+                    .map_err(|e| {
+                        format!(
+                            "Deribit options do not accept bare market orders, and book pricing failed: {e} — specify a limit price"
+                        )
+                    })?;
+                rec.recommended_limit_price
+                    .and_then(f64_dec)
+                    .ok_or_else(|| {
+                        "Deribit option book is too thin for market close — specify a limit price"
+                            .to_string()
+                    })?
+            };
+            let mut o = OrderRequest::new_ioc(
                 VenueId::from(venue_lc.clone()),
                 live.symbol.clone(),
                 close_side,
@@ -902,6 +937,11 @@ pub async fn close_external_position_impl(
             .state_store
             .update_signal_status(&sid, SignalStatus::Unresolved, Some(note));
     };
+    let mark_failed = |note: &str| {
+        let _ = state
+            .state_store
+            .update_signal_status(&sid, SignalStatus::Failed, Some(note));
+    };
 
     let resp = if mode == "auto" {
         let cfg = state.settings.read().passive_unwind;
@@ -924,10 +964,8 @@ pub async fn close_external_position_impl(
         {
             Ok(report) => report.response,
             Err(e) => {
-                let note = format!(
-                    "External auto-close failed after dispatch; verify venue state before retrying: {e:#}"
-                );
-                mark_unresolved(&note);
+                let note = format!("External auto-close failed before dispatch: {e:#}");
+                mark_failed(&note);
                 return Err(format!("Auto close failed on {venue_lc}: {e:#}"));
             }
         }
@@ -938,10 +976,8 @@ pub async fn close_external_position_impl(
         {
             Ok(resp) => resp,
             Err(e) => {
-                let note = format!(
-                    "External close submission returned an error after dispatch; verify venue state before retrying: {e}"
-                );
-                mark_unresolved(&note);
+                let note = format!("External close submission rejected: {e}");
+                mark_failed(&note);
                 return Err(format!("Close order failed on {venue_lc}: {e}"));
             }
         }
