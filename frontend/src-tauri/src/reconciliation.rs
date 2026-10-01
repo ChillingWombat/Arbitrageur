@@ -72,6 +72,27 @@ fn symbols_match(wire_symbol: &str, leg_symbol: &str) -> bool {
             == arbitrageur_core::symbol::canonical_base(leg_symbol)
 }
 
+/// Match client order ID between venue wire response and persisted leg.
+///
+/// Compares case-insensitively, and falls back to comparing stripped hex characters
+/// to absorb formatting differences (e.g. UUID with hyphens vs Hyperliquid's `0x` + 32 hex chars).
+fn client_order_ids_match(wire_cid: &str, leg_cid: &str) -> bool {
+    let mut a = wire_cid.trim();
+    let mut b = leg_cid.trim();
+    if a.eq_ignore_ascii_case(b) {
+        return true;
+    }
+    if a.starts_with("0x") || a.starts_with("0X") {
+        a = &a[2..];
+    }
+    if b.starts_with("0x") || b.starts_with("0X") {
+        b = &b[2..];
+    }
+    let a_hex: String = a.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+    let b_hex: String = b.chars().filter(|c| c.is_ascii_hexdigit()).collect();
+    !a_hex.is_empty() && a_hex.eq_ignore_ascii_case(&b_hex)
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ReconcileSummary {
@@ -299,7 +320,7 @@ async fn adopt_venue_order_id(
         || !resp.venue.as_str().eq_ignore_ascii_case(&leg.venue)
         || !symbols_match(&resp.symbol, &leg.symbol)
         || (!resp.client_order_id.trim().is_empty()
-            && resp.client_order_id.trim() != client_order_id)
+            && !client_order_ids_match(&resp.client_order_id, client_order_id))
     {
         tracing::error!(
             "reconcile: {} client-id lookup returned mismatched order (id={} venue={} symbol={} cid={}) vs leg (venue={} symbol={} cid={})",
@@ -3639,5 +3660,25 @@ mod tests {
         assert!(symbols_match("ETH-USDT", "ETH"));
         assert!(!symbols_match("BTC", "ETH"));
         assert!(!symbols_match("SOL/USD", "ADA/USD"));
+    }
+
+    #[test]
+    fn test_client_order_ids_match_uuid_and_hex() {
+        assert!(client_order_ids_match(
+            "11ea533e-2294-4663-826c-e1ff992fed4d",
+            "11ea533e-2294-4663-826c-e1ff992fed4d"
+        ));
+        assert!(client_order_ids_match(
+            "0x11ea533e22944663826ce1ff992fed4d",
+            "11ea533e-2294-4663-826c-e1ff992fed4d"
+        ));
+        assert!(client_order_ids_match(
+            "11ea533e-2294-4663-826c-e1ff992fed4d",
+            "0x11EA533E22944663826CE1FF992FED4D"
+        ));
+        assert!(!client_order_ids_match(
+            "11ea533e-2294-4663-826c-e1ff992fed4d",
+            "22ea533e-2294-4663-826c-e1ff992fed4d"
+        ));
     }
 }

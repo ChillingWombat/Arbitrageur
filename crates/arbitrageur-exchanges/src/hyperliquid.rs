@@ -71,6 +71,28 @@ fn keccak256(data: &[u8]) -> [u8; 32] {
     hasher.finalize().into()
 }
 
+/// Format a client order id (e.g. UUID) into Hyperliquid's 128-bit hex `cloid` wire format.
+///
+/// Hyperliquid requires a 16-byte hex string prefixed with `0x` (34 characters total).
+pub fn to_hl_cloid(cid: &str) -> Option<String> {
+    let clean = cid.trim();
+    if clean.is_empty() {
+        return None;
+    }
+    if clean.starts_with("0x") || clean.starts_with("0X") {
+        let hex_part = &clean[2..];
+        if hex_part.len() == 32 && hex_part.chars().all(|c| c.is_ascii_hexdigit()) {
+            return Some(format!("0x{}", hex_part.to_ascii_lowercase()));
+        }
+    }
+    let stripped: String = clean.chars().filter(|c| *c != '-').collect();
+    if stripped.len() == 32 && stripped.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some(format!("0x{}", stripped.to_ascii_lowercase()))
+    } else {
+        None
+    }
+}
+
 /// The exact EIP-712 digest a Hyperliquid L1 action signs — extracted so
 /// tests can ecrecover our signatures and verify round-trip correctness.
 pub fn hyperliquid_l1_digest<T: Serialize>(
@@ -1164,7 +1186,7 @@ impl ExchangeAdapter for HyperliquidAdapter {
                     tif: tif.to_string(),
                 },
             },
-            c: None,
+            c: to_hl_cloid(&order.client_order_id),
         };
 
         let action = HlActionWire::Order {
@@ -1307,7 +1329,7 @@ impl ExchangeAdapter for HyperliquidAdapter {
         &self,
         symbol: &str,
         order_id: &str,
-        _client_order_id: Option<&str>,
+        client_order_id: Option<&str>,
     ) -> anyhow::Result<OrderResponse> {
         use arbitrageur_core::types::OrderStatus;
         let user = {
@@ -1319,19 +1341,37 @@ impl ExchangeAdapter for HyperliquidAdapter {
                 .map(ToString::to_string)
         }
         .ok_or_else(|| anyhow::anyhow!("Hyperliquid order fetch requires a wallet address"))?;
-        let oid = order_id.trim().parse::<u64>().map_err(|e| {
-            anyhow::anyhow!("Invalid Hyperliquid order_id '{order_id}': must be integer oid: {e}")
-        })?;
+        let clean_oid = order_id.trim();
+        let clean_cid = client_order_id.map(str::trim).filter(|c| !c.is_empty());
+        let oid_query_val = if !clean_oid.is_empty() {
+            let num_oid = clean_oid.parse::<u64>().map_err(|e| {
+                anyhow::anyhow!(
+                    "Invalid Hyperliquid order_id '{order_id}': must be integer oid: {e}"
+                )
+            })?;
+            serde_json::Value::Number(num_oid.into())
+        } else if let Some(cid) = clean_cid {
+            let cloid = to_hl_cloid(cid).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Hyperliquid fetch_order requires integer order_id or valid 128-bit hex client_order_id, got '{cid}'"
+                )
+            })?;
+            serde_json::Value::String(cloid)
+        } else {
+            anyhow::bail!(
+                "Hyperliquid fetch_order requires a non-empty order_id or client_order_id"
+            );
+        };
         let coin = perp_coin(symbol)?;
 
         let v = self
-            .post_info(json!({"type": "orderStatus", "user": user, "oid": oid}))
+            .post_info(json!({"type": "orderStatus", "user": user, "oid": oid_query_val}))
             .await?;
         match v.get("status").and_then(|s| s.as_str()) {
             Some("order") => {}
             Some("unknownOid") => {
                 anyhow::bail!(
-                    "Hyperliquid orderStatus reports unknown oid {oid}; order state unresolvable"
+                    "Hyperliquid orderStatus reports unknown oid {oid_query_val}; order state unresolvable"
                 )
             }
             _ => anyhow::bail!("Hyperliquid orderStatus malformed response: {v}"),
@@ -1344,10 +1384,29 @@ impl ExchangeAdapter for HyperliquidAdapter {
             .get("oid")
             .and_then(|o| o.as_u64())
             .ok_or_else(|| anyhow::anyhow!("Hyperliquid orderStatus missing oid: {v}"))?;
-        if returned_oid != oid {
-            anyhow::bail!(
-                "Hyperliquid orderStatus returned oid {returned_oid} != queried {oid}: {v}"
-            );
+        if !clean_oid.is_empty() {
+            if let Ok(expected_oid) = clean_oid.parse::<u64>() {
+                if returned_oid != expected_oid {
+                    anyhow::bail!(
+                        "Hyperliquid orderStatus returned oid {returned_oid} != queried {clean_oid}: {v}"
+                    );
+                }
+            }
+        }
+        let returned_cloid = inner
+            .get("cloid")
+            .and_then(|c| c.as_str())
+            .unwrap_or_default();
+        if let Some(cid) = clean_cid {
+            if let Some(expected_cloid) = to_hl_cloid(cid) {
+                if !returned_cloid.is_empty()
+                    && !returned_cloid.eq_ignore_ascii_case(&expected_cloid)
+                {
+                    anyhow::bail!(
+                        "Hyperliquid orderStatus returned cloid '{returned_cloid}' != expected '{expected_cloid}': {v}"
+                    );
+                }
+            }
         }
         let returned_coin = inner
             .get("coin")
@@ -1416,7 +1475,7 @@ impl ExchangeAdapter for HyperliquidAdapter {
         if let Some(rows) = fills_v.as_array() {
             for f in rows {
                 let fid = f.get("oid").and_then(|o| o.as_u64());
-                if fid != Some(oid) {
+                if fid != Some(returned_oid) {
                     continue;
                 }
                 if f.get("coin").and_then(|s| s.as_str()) != Some(returned_coin) {
@@ -1437,8 +1496,12 @@ impl ExchangeAdapter for HyperliquidAdapter {
             None
         };
         Ok(OrderResponse {
-            order_id: order_id.to_string(),
-            client_order_id: String::new(),
+            order_id: returned_oid.to_string(),
+            client_order_id: if !returned_cloid.is_empty() {
+                returned_cloid.to_string()
+            } else {
+                clean_cid.unwrap_or_default().to_string()
+            },
             venue: VenueId::new("hyperliquid"),
             symbol: symbol.to_string(),
             status,
@@ -2007,5 +2070,24 @@ mod tests {
         // Clearing credentials drops the signer entirely.
         adapter.update_credentials(None, None);
         assert_eq!(adapter.active_signer_address(), None);
+    }
+
+    #[test]
+    fn to_hl_cloid_formats_uuid_and_hex() {
+        assert_eq!(
+            to_hl_cloid("11ea533e-2294-4663-826c-e1ff992fed4d"),
+            Some("0x11ea533e22944663826ce1ff992fed4d".to_string())
+        );
+        assert_eq!(
+            to_hl_cloid("0x11ea533e22944663826ce1ff992fed4d"),
+            Some("0x11ea533e22944663826ce1ff992fed4d".to_string())
+        );
+        assert_eq!(
+            to_hl_cloid("0X11EA533E22944663826CE1FF992FED4D"),
+            Some("0x11ea533e22944663826ce1ff992fed4d".to_string())
+        );
+        assert_eq!(to_hl_cloid(""), None);
+        assert_eq!(to_hl_cloid("not-hex-id"), None);
+        assert_eq!(to_hl_cloid("1234"), None);
     }
 }

@@ -1128,14 +1128,19 @@ impl ExchangeAdapter for VantaAdapter {
         &self,
         symbol: &str,
         order_id: &str,
-        _client_order_id: Option<&str>,
+        client_order_id: Option<&str>,
     ) -> anyhow::Result<OrderResponse> {
         use arbitrageur_core::types::OrderStatus;
-        if order_id.trim().is_empty() {
-            anyhow::bail!("Vanta fetch_order requires a non-empty order_id");
-        }
+        let clean_oid = order_id.trim();
+        let clean_cid = client_order_id.map(str::trim).filter(|c| !c.is_empty());
+        let sign_path = if !clean_oid.is_empty() {
+            format!("/v1/order/{clean_oid}")
+        } else if let Some(cid) = clean_cid {
+            format!("/v1/client/order/{cid}")
+        } else {
+            anyhow::bail!("Vanta fetch_order requires a non-empty order_id or client_order_id");
+        };
         let venue_symbol = Self::to_vanta_symbol(symbol)?;
-        let sign_path = format!("/v1/order/{}", order_id.trim());
         let v = self.signed_orderly("GET", &sign_path, "").await?;
         let data = v
             .get("data")
@@ -1148,10 +1153,19 @@ impl ExchangeAdapter for VantaAdapter {
                     .or_else(|| o.as_str().map(str::to_string))
             })
             .ok_or_else(|| anyhow::anyhow!("Vanta fetch_order missing order_id: {v}"))?;
-        if returned_id != order_id.trim() {
+        if !clean_oid.is_empty() && returned_id != clean_oid {
             anyhow::bail!(
-                "Vanta fetch_order returned order_id {returned_id} != queried {order_id}: {v}"
+                "Vanta fetch_order returned order_id {returned_id} != queried {clean_oid}: {v}"
             );
+        }
+        if let Some(cid) = clean_cid {
+            if let Some(returned_client) = data.get("client_order_id").and_then(|s| s.as_str()) {
+                if returned_client != cid {
+                    anyhow::bail!(
+                        "Vanta fetch_order returned client_order_id '{returned_client}' != queried '{cid}': {v}"
+                    );
+                }
+            }
         }
         let returned_symbol = data
             .get("symbol")
@@ -1215,7 +1229,7 @@ impl ExchangeAdapter for VantaAdapter {
             client_order_id: data
                 .get("client_order_id")
                 .and_then(|s| s.as_str())
-                .unwrap_or_default()
+                .unwrap_or_else(|| clean_cid.unwrap_or_default())
                 .to_string(),
             venue: VenueId::new("vanta"),
             symbol: symbol.to_string(),
