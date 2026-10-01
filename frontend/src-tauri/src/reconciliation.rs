@@ -758,7 +758,9 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
     // taker fee. Poll each unpriced filled leg exactly once per process
     // (bounded by `fee_enrich_done`); a venue reporting 0 is truthful.
     if let Ok(unpriced) = state.state_store.list_fee_unaccounted_legs(7 * 24 * 3600) {
-        for (exec, leg) in unpriced {
+        // Pace fee enrichment across reconciliation cycles (max 5 legs per pass)
+        // so startup sweeps don't burst venue rate limiters.
+        for (exec, leg) in unpriced.into_iter().take(5) {
             let key = format!("{}:{}", exec.id, leg.side.as_str());
             {
                 let mut done = state.fee_enrich_done.lock();
@@ -766,6 +768,7 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
                     continue;
                 }
             }
+            tokio::time::sleep(tokio::time::Duration::from_millis(150)).await;
             let Some(order_id) = leg
                 .venue_order_id
                 .as_deref()

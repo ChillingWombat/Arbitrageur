@@ -340,7 +340,9 @@ impl HyperliquidAdapter {
             };
             let status = resp.status();
             if status.is_success() {
-                let json_val = resp.json::<serde_json::Value>().await?;
+                let text = resp.text().await?;
+                self.rate_limiter.record_success(text.clone());
+                let json_val = serde_json::from_str::<serde_json::Value>(&text)?;
                 return Ok(json_val);
             }
             let is_rate_limit = status == reqwest::StatusCode::TOO_MANY_REQUESTS;
@@ -372,6 +374,7 @@ impl HyperliquidAdapter {
                 .record_failure(status == reqwest::StatusCode::TOO_MANY_REQUESTS);
             anyhow::bail!("Hyperliquid /exchange error HTTP {status}: {text}");
         }
+        self.rate_limiter.record_success(text.clone());
         let json_val: serde_json::Value = serde_json::from_str(&text).map_err(|e| {
             anyhow::anyhow!("Failed to parse Hyperliquid exchange response: {e}; body: {text}")
         })?;
