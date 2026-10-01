@@ -126,6 +126,7 @@ pub struct OptQuote {
     pub is_call: bool,
     pub bid: Option<Decimal>,
     pub ask: Option<Decimal>,
+    pub is_open: bool,
 }
 
 /// One strike row: (call quote, put quote).
@@ -179,6 +180,7 @@ async fn fetch_chain_snapshot(ccy: &str, state: &AppEngineState) -> Result<Chain
             ),
             bid,
             ask,
+            is_open: inst.is_open,
         };
         let slot = grid
             .entry(inst.expiration_ms)
@@ -705,8 +707,15 @@ pub async fn scan_options_packages_impl(
                             edge_bps,
                             index_price_usd: index_usd,
                             qty_base_suggested: qty_base,
-                            is_executable: true,
-                            reason: None,
+                            is_executable: c1.is_open && c2.is_open && p1.is_open && p2.is_open,
+                            reason: if !(c1.is_open && c2.is_open && p1.is_open && p2.is_open) {
+                                Some(
+                                    "One or more option legs are halted on venue matching engine"
+                                        .to_string(),
+                                )
+                            } else {
+                                None
+                            },
                         });
                     }
                 }
@@ -825,8 +834,27 @@ pub async fn scan_options_packages_impl(
                                 edge_bps,
                                 index_price_usd: index_usd,
                                 qty_base_suggested: qty_base,
-                                is_executable: true,
-                                reason: None,
+                                is_executable: c1t.is_open
+                                    && c2t.is_open
+                                    && p1t.is_open
+                                    && p2t.is_open
+                                    && c1f.is_open
+                                    && c2f.is_open
+                                    && p1f.is_open
+                                    && p2f.is_open,
+                                reason: if !(c1t.is_open
+                                    && c2t.is_open
+                                    && p1t.is_open
+                                    && p2t.is_open
+                                    && c1f.is_open
+                                    && c2f.is_open
+                                    && p1f.is_open
+                                    && p2f.is_open)
+                                {
+                                    Some("One or more option legs are halted on venue matching engine".to_string())
+                                } else {
+                                    None
+                                },
                             });
                         }
                     }
@@ -909,8 +937,26 @@ pub async fn scan_options_packages_impl(
                         edge_bps,
                         index_price_usd: index_usd,
                         qty_base_suggested: qty_base,
-                        is_executable: true,
-                        reason: None,
+                        is_executable: if ev.is_call {
+                            c1.is_open && c2.is_open && c3.is_open
+                        } else {
+                            p1.is_open && p2.is_open && p3.is_open
+                        },
+                        reason: {
+                            let open = if ev.is_call {
+                                c1.is_open && c2.is_open && c3.is_open
+                            } else {
+                                p1.is_open && p2.is_open && p3.is_open
+                            };
+                            if !open {
+                                Some(
+                                    "One or more option legs are halted on venue matching engine"
+                                        .to_string(),
+                                )
+                            } else {
+                                None
+                            }
+                        },
                     });
                 }
             }
@@ -1601,6 +1647,7 @@ mod tests {
             is_call: name.ends_with("-C"),
             bid: Some(Decimal::from_f64_retain(bid).unwrap()),
             ask: Some(Decimal::from_f64_retain(ask).unwrap()),
+            is_open: true,
         }
     }
 
