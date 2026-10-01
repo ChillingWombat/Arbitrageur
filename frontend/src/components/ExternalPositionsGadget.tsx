@@ -231,8 +231,15 @@ export const ExternalPositionsGadget: React.FC = () => {
     }
   };
 
+  const isDeribitOption = (p: ExternalPositionDto) =>
+    p.venue.toLowerCase() === "deribit" && (p.symbol.endsWith("-C") || p.symbol.endsWith("-P"));
+
   const quickClose = async (p: ExternalPositionDto) => {
     if (quickBusy) return;
+    if (isDeribitOption(p)) {
+      openDetails(p);
+      return;
+    }
     if (quickArm !== p.key) {
       setQuickArm(p.key); // first click arms this row — second fires
       return;
@@ -361,37 +368,34 @@ export const ExternalPositionsGadget: React.FC = () => {
                 return (
                   <div
                     key={p.key}
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => openDetails(p)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" || e.key === " ") {
-                        e.preventDefault();
-                        openDetails(p);
-                      }
-                    }}
-                    className={`w-full flex items-center justify-between gap-2 px-3 py-2 text-xs font-mono border-t border-surface-border/60 transition cursor-pointer text-left ${
-                      on ? "bg-accent-dim/50" : "hover:bg-surface-raised/50"
+                    className={`w-full flex items-center justify-between gap-2 px-3 py-2 text-xs font-mono border-t border-surface-border/60 transition ${
+                      on ? "bg-accent-dim/50" : "hover:bg-surface-raised/40"
                     }`}
-                    title="Click for details — selection alone never closes"
                   >
-                    <span className="flex items-center gap-2 min-w-0">
-                      <span className={`px-1.5 py-0.5 rounded-md text-[10px] font-bold ${p.side === "long" ? "bg-profit-dim text-profit" : "bg-loss-dim text-loss"}`}>
-                        {p.side.toUpperCase()}
+                    <button
+                      type="button"
+                      onClick={() => openDetails(p)}
+                      className="flex-1 flex items-center justify-between gap-2 min-w-0 text-left cursor-pointer focus:outline-none focus-visible:ring-1 focus-visible:ring-accent rounded py-0.5"
+                      title="Click for details — selection alone never closes"
+                    >
+                      <span className="flex items-center gap-2 min-w-0">
+                        <span className={`px-1.5 py-0.5 rounded-md text-[10px] font-bold ${p.side === "long" ? "bg-profit-dim text-profit" : "bg-loss-dim text-loss"}`}>
+                          {p.side.toUpperCase()}
+                        </span>
+                        <span className="font-bold text-slate-900 truncate">{p.symbol}</span>
+                        <span className="flex items-center gap-1.5 min-w-0">
+                          <VenueLogo venueId={p.venue.toLowerCase()} name={p.venue} size={16} />
+                          <span className="text-muted truncate">{p.venue}</span>
+                        </span>
+                        {!p.closeSupported && <span className="text-warn-strong text-[10px] font-bold">NO BOT CLOSE</span>}
                       </span>
-                      <span className="font-bold text-slate-900 truncate">{p.symbol}</span>
-                      <span className="flex items-center gap-1.5 min-w-0">
-                        <VenueLogo venueId={p.venue.toLowerCase()} name={p.venue} size={16} />
-                        <span className="text-muted truncate">{p.venue}</span>
-                      </span>
-                      {!p.closeSupported && <span className="text-warn-strong text-[10px] font-bold">NO BOT CLOSE</span>}
-                    </span>
-                    <span className="flex items-center gap-2 shrink-0">
-                      <span className="tabular-nums text-slate-700">
+                      <span className="tabular-nums text-slate-700 mr-2">
                         {num(p.externalQty)} @ ${num(p.markPrice, 2)}
                         {" · "}
                         <span className={`font-bold ${p.unrealizedPnlUsd >= 0 ? "text-profit" : "text-loss"}`}>{usd(p.unrealizedPnlUsd)}</span>
                       </span>
+                    </button>
+                    <span className="flex items-center gap-2 shrink-0">
                       {quickNote?.key === p.key && (
                         <span className={`text-[10px] font-bold ${quickNote.ok ? "text-profit" : "text-loss"}`} title={quickNote.text}>
                           {quickNote.ok ? quickNote.text : "Failed"}
@@ -400,10 +404,7 @@ export const ExternalPositionsGadget: React.FC = () => {
                       <button
                         type="button"
                         disabled={!p.closeSupported || quickBusy === p.key}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          void quickClose(p);
-                        }}
+                        onClick={() => void quickClose(p)}
                         className={`px-2 py-1 w-28 text-center rounded-lg text-[11px] font-mono font-bold border transition cursor-pointer disabled:cursor-not-allowed disabled:opacity-50 ${
                           quickArm === p.key
                             ? "bg-loss text-white border-loss-border"
@@ -412,7 +413,9 @@ export const ExternalPositionsGadget: React.FC = () => {
                         title={
                           !p.closeSupported
                             ? `${p.venue} cannot place orders through the bot in this environment`
-                            : quickArm === p.key
+                            : isDeribitOption(p)
+                              ? "Deribit options require a limit price — click to configure in Advanced Close"
+                              : quickArm === p.key
                                 ? "Click again to fire a reduce-only MARKET close of the full residual"
                                 : `Quick Close ${p.symbol} on ${p.venue} — click once to arm, again to fire a market close of the full residual`
                         }
@@ -422,10 +425,7 @@ export const ExternalPositionsGadget: React.FC = () => {
                       <button
                         type="button"
                         disabled={!p.closeSupported}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          openDetails(p);
-                        }}
+                        onClick={() => openDetails(p)}
                         className="px-2 py-1 w-28 text-center rounded-lg text-[11px] font-mono font-bold border transition cursor-pointer bg-accent-dim text-accent-strong border-accent-line/60 hover:bg-accent-dim/80 disabled:cursor-not-allowed disabled:opacity-50"
                         title={p.closeSupported ? `Advanced Close ${p.symbol} on ${p.venue} — mode, portion, schedule in the popup; nothing closes until Confirm` : `${p.venue} cannot place live orders through the bot`}
                       >

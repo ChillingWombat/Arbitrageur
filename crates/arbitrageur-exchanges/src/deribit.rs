@@ -57,6 +57,8 @@ struct InstrumentMeta {
     strike: Option<Decimal>,
     option_type: Option<DeribitOptionType>,
     expiration_ms: Option<i64>,
+    is_active: bool,
+    is_open: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -405,11 +407,16 @@ impl DeribitAdapter {
             .ok_or_else(|| anyhow::anyhow!("Deribit instrument '{instrument}' has no currency"))?
             .to_ascii_uppercase();
         let meta = self.currency_instruments(&currency).await?;
-        meta.get(&instrument.to_ascii_uppercase())
+        let m = meta
+            .get(&instrument.to_ascii_uppercase())
             .cloned()
             .ok_or_else(|| {
                 anyhow::anyhow!("Deribit instrument '{instrument}' not listed or expired")
-            })
+            })?;
+        if !m.is_active || !m.is_open {
+            anyhow::bail!("Deribit instrument '{instrument}' is halted or inactive on venue");
+        }
+        Ok(m)
     }
 
     /// Active option chain for a currency — the parity scanner's pairing
@@ -426,7 +433,7 @@ impl DeribitAdapter {
         let mut out: Vec<DeribitOptionInstrument> = meta
             .iter()
             .filter_map(|(name, m)| {
-                if m.kind != DeribitKind::Option {
+                if m.kind != DeribitKind::Option || !m.is_active || !m.is_open {
                     return None;
                 }
                 Some(DeribitOptionInstrument {
@@ -462,7 +469,7 @@ impl DeribitAdapter {
         let mut out: Vec<(String, i64)> = meta
             .iter()
             .filter_map(|(name, m)| {
-                if m.kind != DeribitKind::Future {
+                if m.kind != DeribitKind::Future || !m.is_active || !m.is_open {
                     return None;
                 }
                 m.expiration_ms.map(|exp| (name.clone(), exp))
@@ -567,6 +574,15 @@ impl DeribitAdapter {
                     }
                 }
                 steps.sort_by_key(|a| a.0);
+                let is_active = item
+                    .get("is_active")
+                    .and_then(|a| a.as_bool())
+                    .unwrap_or(false);
+                let is_open = item
+                    .get("state")
+                    .and_then(|s| s.as_str())
+                    .map(|s| s == "open")
+                    .unwrap_or(true);
                 meta.insert(
                     name,
                     InstrumentMeta {
@@ -592,6 +608,8 @@ impl DeribitAdapter {
                             _ => None,
                         },
                         expiration_ms: item.get("expiration_timestamp").and_then(|t| t.as_i64()),
+                        is_active,
+                        is_open,
                     },
                 );
             }
@@ -1545,6 +1563,8 @@ mod tests {
             strike: Some(dec!(100000)),
             option_type: Some(DeribitOptionType::Call),
             expiration_ms: Some(1_790_323_200_000),
+            is_active: true,
+            is_open: true,
         }
     }
 

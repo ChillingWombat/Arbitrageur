@@ -401,6 +401,13 @@ async fn dispatch(line: &str, state: &Arc<AppEngineState>) -> Value {
         "external_positions" => crate::external_positions::get_external_positions_impl(st)
             .await
             .map(|v| json!(v)),
+        "recommend_external_close" => {
+            let venue = arg(&args, "venue").unwrap_or_default();
+            let symbol = arg(&args, "symbol").unwrap_or_default();
+            crate::external_positions::recommend_external_close_impl(venue, symbol, st)
+                .await
+                .map(|v| json!(v))
+        }
         "close_external" => {
             let input = crate::external_positions::CloseExternalPositionInput {
                 venue: arg(&args, "venue").unwrap_or_default().to_string(),
