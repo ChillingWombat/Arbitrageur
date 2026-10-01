@@ -55,6 +55,12 @@ pub enum HlActionWire {
     Cancel {
         cancels: Vec<HlCancelWire>,
     },
+    #[serde(rename_all = "camelCase")]
+    UpdateLeverage {
+        asset: u32,
+        is_cross: bool,
+        leverage: u32,
+    },
 }
 
 fn dec_from_json(v: Option<&serde_json::Value>) -> Option<Decimal> {
@@ -1516,11 +1522,50 @@ impl ExchangeAdapter for HyperliquidAdapter {
         })
     }
 
-    async fn set_leverage(&self, _symbol: &str, _leverage: u32) -> anyhow::Result<()> {
-        anyhow::bail!(
-            "Leverage updates are not implemented for venue {}",
-            self.name()
-        )
+    async fn set_leverage(&self, symbol: &str, leverage: u32) -> anyhow::Result<()> {
+        if leverage == 0 {
+            anyhow::bail!("Hyperliquid leverage must be >= 1");
+        }
+        let private_key = {
+            let guard = self.private_key.read();
+            guard
+                .as_deref()
+                .map(|k| k.trim())
+                .filter(|k| !k.is_empty())
+                .map(|k| Zeroizing::new(k.to_string()))
+        }
+        .ok_or_else(|| anyhow::anyhow!("Hyperliquid live set_leverage requires a private key"))?;
+
+        let coin = perp_coin(symbol)?;
+        let (asset_index, _sz_decimals) = self.resolve_asset_meta(&coin).await?;
+
+        let action = HlActionWire::UpdateLeverage {
+            asset: asset_index,
+            is_cross: true,
+            leverage,
+        };
+        let nonce = Utc::now().timestamp_millis() as u64;
+        let (r, s, v) =
+            sign_hyperliquid_l1_action(&action, nonce, None, self.is_mainnet, &private_key)?;
+
+        let body = json!({
+            "action": action,
+            "nonce": nonce,
+            "signature": {
+                "r": r,
+                "s": s,
+                "v": v,
+            },
+            "vaultAddress": null,
+        });
+        let resp_json = self.post_exchange(body).await?;
+        if resp_json.get("status").and_then(|s| s.as_str()) == Some("err") {
+            anyhow::bail!(
+                "Hyperliquid set_leverage error for {symbol} ({leverage}x): {}",
+                resp_json.get("response").unwrap_or(&resp_json)
+            );
+        }
+        Ok(())
     }
 
     fn supports_live_execution(&self) -> bool {
@@ -2089,5 +2134,19 @@ mod tests {
         assert_eq!(to_hl_cloid(""), None);
         assert_eq!(to_hl_cloid("not-hex-id"), None);
         assert_eq!(to_hl_cloid("1234"), None);
+    }
+
+    #[test]
+    fn test_update_leverage_serialization() {
+        let action = HlActionWire::UpdateLeverage {
+            asset: 1,
+            is_cross: true,
+            leverage: 10,
+        };
+        let v = serde_json::to_value(&action).unwrap();
+        assert_eq!(v["type"], "updateLeverage");
+        assert_eq!(v["asset"], 1);
+        assert_eq!(v["isCross"], true);
+        assert_eq!(v["leverage"], 10);
     }
 }
