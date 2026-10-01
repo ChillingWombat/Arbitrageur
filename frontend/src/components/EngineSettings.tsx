@@ -657,7 +657,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
     if (id === "evm_wallet") {
       const member = liveVenues.filter((v) => EVM_AMM_VENUE_IDS.has(v.id));
       if (member.length === 0) return null;
-      for (const s of ["READ_ONLY", "LOCKED", "UNSUPPORTED", "OFFLINE"]) {
+      for (const s of ["ONLINE", "READ_ONLY", "LOCKED", "UNSUPPORTED", "OFFLINE"]) {
         if (member.some((v) => v.status === s)) return s;
       }
       return member[0].status;
@@ -862,8 +862,8 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   }, [systemStatus]);
 
   // A venue only counts as "API connected" when enabled and backed by a
-  // working adapter (READ_ONLY). OFFLINE/UNSUPPORTED venues provide no data.
-  const hasApiConnectivity = liveVenues.some((v) => v.status === "READ_ONLY");
+  // working adapter (ONLINE or READ_ONLY). OFFLINE/UNSUPPORTED venues provide no data.
+  const hasApiConnectivity = liveVenues.some((v) => v.status === "ONLINE" || v.status === "READ_ONLY");
 
   useEffect(() => {
     api.getVenueExecutionCapabilities().then(setVenueCapabilities).catch(console.error);
@@ -1456,7 +1456,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                     // venue without an adapter shows an amber dot, not a
                     // green "connected" dot.
                     const vStatus = getVenueStatus(ex.id);
-                    const isStreaming = vStatus === "READ_ONLY";
+                    const isStreaming = vStatus === "ONLINE" || vStatus === "READ_ONLY";
                     const noAdapter = vStatus === "UNSUPPORTED";
                     const showLatency = isEnabled && latency != null;
                     const showBalance = bal != null;

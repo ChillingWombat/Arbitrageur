@@ -291,16 +291,16 @@ export interface VenueStatusLike {
 /**
  * Venue codes currently admitted by the engine, derived from the backend's
  * own system status — the same flag-OR-enabled-account rule `get_venues`
- * applies — instead of stale frontend flag state. Only READ_ONLY venues
- * count: OFFLINE means disabled, UNSUPPORTED means enabled without a real
- * market-data adapter.
+ * applies — instead of stale frontend flag state. Both ONLINE and READ_ONLY
+ * venues count: OFFLINE means disabled, UNSUPPORTED means enabled without a
+ * real market-data adapter.
  */
 export function getAdmittedVenueCodes(
   status?: { active_venues?: VenueStatusLike[] } | null
 ): Set<string> {
   const active = new Set<string>();
   for (const v of status?.active_venues ?? []) {
-    if (v.status === "READ_ONLY") {
+    if (v.status === "ONLINE" || v.status === "READ_ONLY") {
       const code = VENUE_ID_TO_CODE[v.id.toLowerCase()];
       if (code) active.add(code);
     }
