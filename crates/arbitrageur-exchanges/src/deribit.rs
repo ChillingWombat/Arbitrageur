@@ -58,7 +58,6 @@ struct InstrumentMeta {
     option_type: Option<DeribitOptionType>,
     expiration_ms: Option<i64>,
     is_active: bool,
-    is_open: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -413,8 +412,8 @@ impl DeribitAdapter {
             .ok_or_else(|| {
                 anyhow::anyhow!("Deribit instrument '{instrument}' not listed or expired")
             })?;
-        if !m.is_active || !m.is_open {
-            anyhow::bail!("Deribit instrument '{instrument}' is halted or inactive on venue");
+        if !m.is_active {
+            anyhow::bail!("Deribit instrument '{instrument}' is inactive on venue");
         }
         Ok(m)
     }
@@ -433,7 +432,7 @@ impl DeribitAdapter {
         let mut out: Vec<DeribitOptionInstrument> = meta
             .iter()
             .filter_map(|(name, m)| {
-                if m.kind != DeribitKind::Option || !m.is_active || !m.is_open {
+                if m.kind != DeribitKind::Option || !m.is_active {
                     return None;
                 }
                 Some(DeribitOptionInstrument {
@@ -469,7 +468,7 @@ impl DeribitAdapter {
         let mut out: Vec<(String, i64)> = meta
             .iter()
             .filter_map(|(name, m)| {
-                if m.kind != DeribitKind::Future || !m.is_active || !m.is_open {
+                if m.kind != DeribitKind::Future || !m.is_active {
                     return None;
                 }
                 m.expiration_ms.map(|exp| (name.clone(), exp))
@@ -578,11 +577,6 @@ impl DeribitAdapter {
                     .get("is_active")
                     .and_then(|a| a.as_bool())
                     .unwrap_or(false);
-                let is_open = item
-                    .get("state")
-                    .and_then(|s| s.as_str())
-                    .map(|s| s == "open")
-                    .unwrap_or(true);
                 meta.insert(
                     name,
                     InstrumentMeta {
@@ -609,7 +603,6 @@ impl DeribitAdapter {
                         },
                         expiration_ms: item.get("expiration_timestamp").and_then(|t| t.as_i64()),
                         is_active,
-                        is_open,
                     },
                 );
             }
@@ -869,17 +862,17 @@ impl ExchangeAdapter for DeribitAdapter {
                                 .get("instrument_name")
                                 .and_then(|s| s.as_str())
                                 .unwrap_or("");
-                            let is_open = item
+                            let is_closed = item
                                 .get("state")
                                 .and_then(|s| s.as_str())
-                                .map(|s| s == "open")
-                                .unwrap_or(true);
+                                .map(|s| s == "closed" || s == "cancelled")
+                                .unwrap_or(false);
                             if name.is_empty()
                                 || !item
                                     .get("is_active")
                                     .and_then(|a| a.as_bool())
                                     .unwrap_or(false)
-                                || !is_open
+                                || is_closed
                             {
                                 continue;
                             }
@@ -1564,7 +1557,6 @@ mod tests {
             option_type: Some(DeribitOptionType::Call),
             expiration_ms: Some(1_790_323_200_000),
             is_active: true,
-            is_open: true,
         }
     }
 
