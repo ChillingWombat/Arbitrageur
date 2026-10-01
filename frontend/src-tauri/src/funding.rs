@@ -2378,11 +2378,15 @@ pub async fn execute_funding_carry_impl(
             short_canon,
         ),
     ] {
-        match adapter.set_leverage(exact, want).await {
-            Ok(()) => *proven = want,
+        let effective_want = adapter
+            .max_leverage(exact)
+            .map(|m| want.min(m))
+            .unwrap_or(want);
+        match adapter.set_leverage(exact, effective_want).await {
+            Ok(()) => *proven = effective_want,
             Err(e) => {
                 tracing::warn!(
-                    "funding set_leverage {want}x on {canon} {exact} failed: {e} — sizing margin at the conservative 1x bound"
+                    "funding set_leverage {effective_want}x on {canon} {exact} failed: {e} — sizing margin at the conservative 1x bound"
                 );
             }
         }

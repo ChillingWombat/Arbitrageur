@@ -1641,11 +1641,15 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
             (0usize, buy_venue, &buy_adapter, buy_order_sym),
             (1usize, sell_venue, &sell_adapter, sell_order_sym),
         ] {
-            match adapter.set_leverage(leg_sym, target_leverage).await {
-                Ok(()) => leg_leverage[slot] = target_leverage,
+            let eff_target = adapter
+                .max_leverage(leg_sym)
+                .map(|m| target_leverage.min(m))
+                .unwrap_or(target_leverage);
+            match adapter.set_leverage(leg_sym, eff_target).await {
+                Ok(()) => leg_leverage[slot] = eff_target,
                 Err(e) => {
                     tracing::warn!(
-                        "set_leverage {target_leverage}x on {vname} {leg_sym} failed: {e} — sizing margin at the conservative 1x bound"
+                        "set_leverage {eff_target}x on {vname} {leg_sym} failed: {e} — sizing margin at the conservative 1x bound"
                     );
                 }
             }

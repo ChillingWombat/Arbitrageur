@@ -116,6 +116,10 @@ impl ExchangeAdapter for RobinhoodAdapter {
         self.inner.set_leverage(symbol, leverage).await
     }
 
+    fn max_leverage(&self, symbol: &str) -> Option<u32> {
+        self.inner.max_leverage(symbol)
+    }
+
     fn supports_live_execution(&self) -> bool {
         self.inner.supports_live_execution()
     }

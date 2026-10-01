@@ -232,7 +232,7 @@ pub struct HyperliquidAdapter {
     /// endpoint can only fail at the venue, not sign the wrong domain.
     is_mainnet: bool,
     rate_limiter: AccountRequestCoordinator,
-    asset_meta_cache: RwLock<HashMap<String, (u32, u32)>>,
+    asset_meta_cache: RwLock<HashMap<String, (u32, u32, u32)>>,
 }
 
 impl HyperliquidAdapter {
@@ -409,9 +409,9 @@ impl HyperliquidAdapter {
         Ok(json_val)
     }
 
-    /// Resolve coin name to (asset index, szDecimals) in the Hyperliquid
-    /// perpetual universe — both needed to wire-format order fields.
-    pub async fn resolve_asset_meta(&self, coin: &str) -> anyhow::Result<(u32, u32)> {
+    /// Resolve coin name to (asset index, szDecimals, maxLeverage) in the Hyperliquid
+    /// perpetual universe — needed to wire-format order fields and leverage bounds.
+    pub async fn resolve_asset_meta_full(&self, coin: &str) -> anyhow::Result<(u32, u32, u32)> {
         let coin_upper = coin.to_ascii_uppercase();
         {
             let guard = self.asset_meta_cache.read();
@@ -431,7 +431,14 @@ impl HyperliquidAdapter {
             if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
                 let sz_decimals =
                     item.get("szDecimals").and_then(|s| s.as_u64()).unwrap_or(3) as u32;
-                map.insert(name.to_ascii_uppercase(), (idx as u32, sz_decimals));
+                let max_leverage = item
+                    .get("maxLeverage")
+                    .and_then(|s| s.as_u64())
+                    .unwrap_or(50) as u32;
+                map.insert(
+                    name.to_ascii_uppercase(),
+                    (idx as u32, sz_decimals, max_leverage),
+                );
             }
         }
         let target = map.get(&coin_upper).copied();
@@ -442,6 +449,13 @@ impl HyperliquidAdapter {
         target.ok_or_else(|| {
             anyhow::anyhow!("Asset '{coin}' not found in Hyperliquid perpetual universe")
         })
+    }
+
+    /// Resolve coin name to (asset index, szDecimals) in the Hyperliquid
+    /// perpetual universe — both needed to wire-format order fields.
+    pub async fn resolve_asset_meta(&self, coin: &str) -> anyhow::Result<(u32, u32)> {
+        let (idx, sz, _) = self.resolve_asset_meta_full(coin).await?;
+        Ok((idx, sz))
     }
 
     pub async fn resolve_asset_index(&self, coin: &str) -> anyhow::Result<u32> {
@@ -764,7 +778,14 @@ impl ExchangeAdapter for HyperliquidAdapter {
             if let Some(name) = item.get("name").and_then(|n| n.as_str()) {
                 let sz_decimals =
                     item.get("szDecimals").and_then(|s| s.as_u64()).unwrap_or(3) as u32;
-                map.insert(name.to_ascii_uppercase(), (idx as u32, sz_decimals));
+                let max_leverage = item
+                    .get("maxLeverage")
+                    .and_then(|s| s.as_u64())
+                    .unwrap_or(50) as u32;
+                map.insert(
+                    name.to_ascii_uppercase(),
+                    (idx as u32, sz_decimals, max_leverage),
+                );
                 let symbol = Symbol::perp(name, "USDC");
                 markets.push(MarketMetadata {
                     symbol,
@@ -1522,6 +1543,12 @@ impl ExchangeAdapter for HyperliquidAdapter {
         })
     }
 
+    fn max_leverage(&self, symbol: &str) -> Option<u32> {
+        let coin = perp_coin(symbol).ok()?;
+        let guard = self.asset_meta_cache.read();
+        guard.get(&coin.to_ascii_uppercase()).map(|m| m.2)
+    }
+
     async fn set_leverage(&self, symbol: &str, leverage: u32) -> anyhow::Result<()> {
         if leverage == 0 {
             anyhow::bail!("Hyperliquid leverage must be >= 1");
@@ -1537,12 +1564,13 @@ impl ExchangeAdapter for HyperliquidAdapter {
         .ok_or_else(|| anyhow::anyhow!("Hyperliquid live set_leverage requires a private key"))?;
 
         let coin = perp_coin(symbol)?;
-        let (asset_index, _sz_decimals) = self.resolve_asset_meta(&coin).await?;
+        let (asset_index, _sz_decimals, max_leverage) = self.resolve_asset_meta_full(&coin).await?;
+        let effective_leverage = leverage.min(max_leverage);
 
         let action = HlActionWire::UpdateLeverage {
             asset: asset_index,
             is_cross: true,
-            leverage,
+            leverage: effective_leverage,
         };
         let nonce = Utc::now().timestamp_millis() as u64;
         let (r, s, v) =
@@ -1561,7 +1589,7 @@ impl ExchangeAdapter for HyperliquidAdapter {
         let resp_json = self.post_exchange(body).await?;
         if resp_json.get("status").and_then(|s| s.as_str()) == Some("err") {
             anyhow::bail!(
-                "Hyperliquid set_leverage error for {symbol} ({leverage}x): {}",
+                "Hyperliquid set_leverage error for {symbol} ({effective_leverage}x): {}",
                 resp_json.get("response").unwrap_or(&resp_json)
             );
         }
