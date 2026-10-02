@@ -2236,7 +2236,7 @@ impl AppEngineState {
         let virtual_ledger =
             RwLock::new(arbitrageur_execution::virtual_ledger::VirtualStrategyLedger::new());
         if let Ok(lots) = state_store.load_cycle_lots() {
-            virtual_ledger.write().lots = lots;
+            virtual_ledger.write().set_lots(lots);
         }
         // Boot reconcile between the durable signal ledger and durable lots.
         // Two drift classes:

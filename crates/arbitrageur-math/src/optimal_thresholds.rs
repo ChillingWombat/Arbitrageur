@@ -37,7 +37,20 @@ fn phi(x: f64) -> f64 {
 /// Returns `(E[T], std(T))`. Replaces the former 2-term asymptotic
 /// `πd²/2θ + d⁴/12θ`, which overstated passage time by up to ~20× at 4σ —
 /// Monte-Carlo references: 0.90/1.43/2.05 θ⁻¹ at 1σ/2σ/4σ distances.
-fn ou_passage_moments(theta: f64, stationary_std: f64, d: f64) -> Option<(f64, f64)> {
+pub fn ou_passage_moments(theta: f64, stationary_std: f64, d: f64) -> Option<(f64, f64)> {
+    const M: usize = 2048;
+    let mut phi_v = vec![0.0; M + 1];
+    let mut cum_j = vec![0.0; M + 1];
+    ou_passage_moments_with_buf(theta, stationary_std, d, &mut phi_v, &mut cum_j)
+}
+
+fn ou_passage_moments_with_buf(
+    theta: f64,
+    stationary_std: f64,
+    d: f64,
+    phi_v: &mut [f64],
+    cum_j: &mut [f64],
+) -> Option<(f64, f64)> {
     if !theta.is_finite()
         || theta <= 0.0
         || !stationary_std.is_finite()
@@ -47,12 +60,15 @@ fn ou_passage_moments(theta: f64, stationary_std: f64, d: f64) -> Option<(f64, f
     {
         return None;
     }
+    const M: usize = 2048;
+    if phi_v.len() < M + 1 || cum_j.len() < M + 1 {
+        return None;
+    }
     // Integration bound a = |x|·√θ/σ = z/√2 for z = d/σ_stationary.
     let a = d / (stationary_std * std::f64::consts::SQRT_2);
     // Grid over [-lo, 0]: lo must cover the e^{-v²} tail of the inner
     // integral; beyond -10 the kernel is < 1e-43.
     let lo = -(a + 8.0).max(10.0);
-    const M: usize = 2048;
     let step = -lo / M as f64;
 
     // h(w) = e^{w²}(1+erf w) = 2·e^{w²}·Φ(w√2)
@@ -60,19 +76,24 @@ fn ou_passage_moments(theta: f64, stationary_std: f64, d: f64) -> Option<(f64, f
     let node = |j: usize| lo + step * j as f64;
 
     // φ(v_j) = √π·∫_{v_j}^{0} h — backward cumulative trapezoid.
-    let mut phi_v = vec![0.0; M + 1];
+    phi_v[M] = 0.0;
     for j in (0..M).rev() {
         let (wj, wj1) = (node(j), node(j + 1));
         phi_v[j] = phi_v[j + 1] + 0.5 * (h(wj) + h(wj1)) * step;
     }
-    for v in phi_v.iter_mut() {
-        *v *= std::f64::consts::PI.sqrt();
+    let sqrt_pi = std::f64::consts::PI.sqrt();
+    for v in phi_v[..=M].iter_mut() {
+        *v *= sqrt_pi;
     }
-    // Index of the lower bound -a on the grid.
-    let ia = ((-a - lo) / step).round() as usize;
+    // Continuous linear interpolation for the lower bound -a on the grid
+    let u = ((-a - lo) / step).clamp(0.0, M as f64);
+    let i0 = (u.floor() as usize).min(M);
+    let i1 = (i0 + 1).min(M);
+    let frac = u - i0 as f64;
+    let theta_et = phi_v[i0] * (1.0 - frac) + phi_v[i1] * frac;
 
     // J(u_j) = ∫_{lo}^{u_j} φ(v)e^{-v²} dv — forward cumulative trapezoid.
-    let mut cum_j = vec![0.0; M + 1];
+    cum_j[0] = 0.0;
     for j in 0..M {
         let (vj, vj1) = (node(j), node(j + 1));
         let f_j = phi_v[j] * (-vj * vj).exp();
@@ -80,11 +101,16 @@ fn ou_passage_moments(theta: f64, stationary_std: f64, d: f64) -> Option<(f64, f
         cum_j[j + 1] = cum_j[j] + 0.5 * (f_j + f_j1) * step;
     }
 
-    // θ·E[T] = φ(-a) — the cumulative integral already evaluated at -a.
-    let theta_et = phi_v[ia];
-    // θ²·E[T²] = 4·∫_{-a}^{0} e^{u²}·J(u) du — trapezoid over [ia, M].
+    // θ²·E[T²] = 4·∫_{-a}^{0} e^{u²}·J(u) du — trapezoid over [i0, M].
     let mut i2 = 0.0;
-    for j in ia..M {
+    if i0 < M && frac < 1.0 {
+        let (uj, uj1) = (node(i0), node(i0 + 1));
+        let g_j = (uj * uj).exp() * cum_j[i0];
+        let g_j1 = (uj1 * uj1).exp() * cum_j[i0 + 1];
+        let g_mid = g_j * (1.0 - frac) + g_j1 * frac;
+        i2 += 0.5 * (g_mid + g_j1) * (step * (1.0 - frac));
+    }
+    for j in (i0 + 1)..M {
         let (uj, uj1) = (node(j), node(j + 1));
         let g_j = (uj * uj).exp() * cum_j[j];
         let g_j1 = (uj1 * uj1).exp() * cum_j[j + 1];
@@ -113,38 +139,63 @@ pub fn compute_bertram_thresholds(
         return None;
     }
 
-    // Grid search / Newton-Raphson approximation for optimal distance d > c
-    // that maximizes trade rate * expected return per cycle:
-    // f(d) = (d - c) / E[T(d)]
     let std = ou.stationary_std;
     let min_d = transaction_cost_c * 1.05;
     let max_d = (std * 4.0).max(transaction_cost_c * 5.0);
-    let steps = 200;
-    let step_size = (max_d - min_d) / steps as f64;
+    if min_d >= max_d {
+        return None;
+    }
 
-    const YEAR_SECS: f64 = 365.25 * 86400.0;
-    let mut best_d = min_d + step_size;
-    let mut best_metric = -1e9;
-    let mut best_moments = (0.0, 0.0);
+    const M: usize = 2048;
+    let mut phi_v = vec![0.0; M + 1];
+    let mut cum_j = vec![0.0; M + 1];
 
-    for i in 1..=steps {
-        let d = min_d + (i as f64) * step_size;
-        let net_return = d - transaction_cost_c;
-        if net_return <= 0.0 {
-            continue;
+    let mut eval_metric = |d: f64| -> (f64, (f64, f64)) {
+        let net = d - transaction_cost_c;
+        if net <= 0.0 {
+            return (-1e9, (0.0, 0.0));
         }
-        let Some((e_t, std_t)) = ou_passage_moments(ou.theta, std, d) else {
-            continue;
-        };
-        // Bertram's objective: expected return per unit time — the renewal
-        // rate of profitable cycles, not a squared-time pseudo-Sharpe.
-        let metric = net_return / e_t;
-        if metric > best_metric {
-            best_metric = metric;
-            best_d = d;
-            best_moments = (e_t, std_t);
+        match ou_passage_moments_with_buf(ou.theta, std, d, &mut phi_v, &mut cum_j) {
+            Some((e_t, std_t)) if e_t > 0.0 => (net / e_t, (e_t, std_t)),
+            _ => (-1e9, (0.0, 0.0)),
+        }
+    };
+
+    // Golden-Section Search on unimodal Bertram objective: f(d) = (d - c) / E[T(d)]
+    // Evaluates optimal threshold in O(log(1/ε)) iterations with single buffer allocation.
+    const INV_PHI: f64 = 0.6180339887498949; // (sqrt(5) - 1) / 2
+    let mut a = min_d;
+    let mut b = max_d;
+    let mut x1 = b - INV_PHI * (b - a);
+    let mut x2 = a + INV_PHI * (b - a);
+
+    let (mut f1, mut m1) = eval_metric(x1);
+    let (mut f2, mut m2) = eval_metric(x2);
+
+    for _ in 0..25 {
+        if f1 < f2 {
+            a = x1;
+            x1 = x2;
+            f1 = f2;
+            m1 = m2;
+            x2 = a + INV_PHI * (b - a);
+            let (nf, nm) = eval_metric(x2);
+            f2 = nf;
+            m2 = nm;
+        } else {
+            b = x2;
+            x2 = x1;
+            f2 = f1;
+            m2 = m1;
+            x1 = b - INV_PHI * (b - a);
+            let (nf, nm) = eval_metric(x1);
+            f1 = nf;
+            m1 = nm;
         }
     }
+
+    let (best_d, best_metric, best_moments) = if f1 > f2 { (x1, f1, m1) } else { (x2, f2, m2) };
+
     if best_metric <= 0.0 {
         return None;
     }
@@ -152,6 +203,7 @@ pub fn compute_bertram_thresholds(
     let optimal_distance = best_d;
     let net_return = optimal_distance - transaction_cost_c;
     let (e_t, std_t) = best_moments;
+    const YEAR_SECS: f64 = 365.25 * 86400.0;
     let trades_per_year = (YEAR_SECS / e_t).min(10000.0);
     // Annualized Sharpe under the renewal-reward model: mean return rate
     // r/E[T] over its asymptotic std r·√(Var(T)/E[T]³), which reduces to

@@ -294,6 +294,29 @@ impl OrderBook {
 
         Some((vwap, unfilled, slippage))
     }
+
+    /// Calculate cumulative volume available up to `max_qty`, breaking early as soon as reached.
+    /// Operates in O(k) where k <= N is the number of levels needed to fulfill `max_qty`.
+    pub fn cumulative_depth_up_to(&self, side: Side, max_qty: Decimal) -> Decimal {
+        if max_qty <= dec!(0) {
+            return dec!(0);
+        }
+        let levels = match side {
+            Side::Buy => &self.asks,
+            Side::Sell => &self.bids,
+        };
+        let mut depth = dec!(0);
+        for l in levels {
+            if l.size <= dec!(0) {
+                continue;
+            }
+            depth += l.size;
+            if depth >= max_qty {
+                return max_qty;
+            }
+        }
+        depth
+    }
 }
 
 /// Instantaneous price ticker.

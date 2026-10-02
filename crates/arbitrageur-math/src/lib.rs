@@ -1,5 +1,6 @@
 pub mod autotune;
 pub mod binomial;
+pub mod black_scholes;
 pub mod book_gradient;
 pub mod calibration;
 pub mod cointegration;
@@ -21,6 +22,7 @@ pub mod triangular;
 
 pub use autotune::*;
 pub use binomial::*;
+pub use black_scholes::*;
 pub use calibration::*;
 pub use cointegration::*;
 pub use dislocation::*;

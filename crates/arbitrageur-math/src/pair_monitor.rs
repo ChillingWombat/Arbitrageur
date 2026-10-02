@@ -605,9 +605,13 @@ pub fn entry_outcome_stats(
         p_net_pos,
         expected_net_bps: crate::binomial::weighted_mean(&nets),
         deciles_bps: Some(
-            (0..=10)
-                .filter_map(|k| crate::binomial::weighted_quantile(&nets, k as f64 / 10.0))
-                .collect(),
+            crate::binomial::weighted_quantiles(
+                &nets,
+                &[0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0],
+            )
+            .into_iter()
+            .flatten()
+            .collect(),
         ),
         median_hold_secs: crate::binomial::weighted_quantile(&holds, 0.5),
         median_win_secs: crate::binomial::weighted_quantile(&win_holds, 0.5),

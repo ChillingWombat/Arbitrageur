@@ -3071,8 +3071,7 @@ pub async fn reset_transaction_history_impl(
     state
         .virtual_ledger
         .write()
-        .lots
-        .retain(|_, l| l.environment != env_str && l.environment != "unknown");
+        .retain_lots(|_, l| l.environment != env_str && l.environment != "unknown");
 
     Ok(TransactionHistoryResetDto {
         environment: env_str.into(),

@@ -163,6 +163,54 @@ pub fn weighted_quantile(pairs: &[(f64, f64)], q: f64) -> Option<f64> {
     pts.last().map(|(v, _)| *v)
 }
 
+/// Batch-evaluates multiple weighted quantiles over `(value, weight)` pairs.
+///
+/// Filters and sorts the underlying data ONCE and uses binary search across
+/// precomputed cumulative weights, reducing complexity from O(K · N log N)
+/// with K allocations to O(N log N + K log N) with a single allocation.
+pub fn weighted_quantiles(pairs: &[(f64, f64)], quantiles: &[f64]) -> Vec<Option<f64>> {
+    if pairs.is_empty() || quantiles.is_empty() {
+        return vec![None; quantiles.len()];
+    }
+    let mut pts: Vec<(f64, f64)> = pairs
+        .iter()
+        .filter(|(v, w)| v.is_finite() && w.is_finite() && *w > 0.0)
+        .copied()
+        .collect();
+    if pts.is_empty() {
+        return vec![None; quantiles.len()];
+    }
+    pts.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let total: f64 = pts.iter().map(|(_, w)| w).sum();
+    if total <= 0.0 {
+        return vec![None; quantiles.len()];
+    }
+
+    let mut cum_weights = Vec::with_capacity(pts.len());
+    let mut acc = 0.0;
+    for &(_, w) in &pts {
+        acc += w;
+        cum_weights.push(acc);
+    }
+
+    quantiles
+        .iter()
+        .map(|&q| {
+            if !(0.0..=1.0).contains(&q) {
+                return None;
+            }
+            let target = q * total;
+            let idx = match cum_weights
+                .binary_search_by(|w| w.partial_cmp(&target).unwrap_or(std::cmp::Ordering::Equal))
+            {
+                Ok(i) => i,
+                Err(i) => i.min(pts.len() - 1),
+            };
+            Some(pts[idx].0)
+        })
+        .collect()
+}
+
 /// Weighted mean of `(value, weight)` pairs. `None` on empty/unusable.
 pub fn weighted_mean(pairs: &[(f64, f64)]) -> Option<f64> {
     let mut sw = 0.0;
@@ -245,5 +293,29 @@ mod tests {
         assert_eq!(weighted_quantile(&pairs, 0.5), Some(1.0));
         let p95 = weighted_quantile(&pairs, 0.95).unwrap();
         assert!(p95 > 50.0);
+    }
+
+    #[test]
+    fn weighted_quantiles_batch_matches_single() {
+        let pairs = vec![
+            (10.0, 1.5),
+            (25.0, 0.5),
+            (5.0, 2.0),
+            (50.0, 1.0),
+            (15.0, 3.0),
+            (80.0, 0.2),
+        ];
+        let targets: Vec<f64> = (0..=10).map(|k| k as f64 / 10.0).collect();
+        let batch = weighted_quantiles(&pairs, &targets);
+        assert_eq!(batch.len(), targets.len());
+
+        for (i, &q) in targets.iter().enumerate() {
+            let single = weighted_quantile(&pairs, q);
+            assert_eq!(
+                batch[i], single,
+                "Batch and single quantile mismatch at q={q}: batch={:?}, single={:?}",
+                batch[i], single
+            );
+        }
     }
 }
