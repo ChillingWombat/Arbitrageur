@@ -152,8 +152,11 @@ const TickerRow: React.FC<TickerRowProps> = React.memo(
               {base}
               {/* Distinct stablecoin quotes are distinct instruments (XRP-USDC
                   vs XRP-USDT trade different venue sets) — the quote suffix is
-                  what keeps their rows visually distinguishable. */}
-              <span className="text-muted font-semibold">-{quote}</span>
+                  what keeps their rows visually distinguishable. Universal
+                  USD quotes omit the suffix, showing only the base symbol. */}
+              {quote && quote.toUpperCase() !== "USD" && (
+                <span className="text-muted font-semibold">-{quote}</span>
+              )}
             </span>
             <span className="text-[9px] font-mono px-1.5 py-px rounded bg-slate-100 text-slate-600 font-bold border border-slate-200/60">
               Perp

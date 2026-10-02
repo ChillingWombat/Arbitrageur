@@ -122,3 +122,45 @@ test("OpportunityRadar renders PositionDetailModal when a position detail is sel
   assert.match(html, />BTC-USDC<\/span>/);
 });
 
+test("OpportunityRadar: strategy ribbon omits Execution Single-Way badge", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(OpportunityRadar, {
+      executionLogs: [],
+      isPaused: false,
+    })
+  );
+  assert.doesNotMatch(html, /title="Execution mode — edit via Configurator"/);
+  assert.doesNotMatch(html, />Execution<\/span>/);
+  assert.doesNotMatch(html, />Single-Way<\/span>/);
+  assert.doesNotMatch(html, />Two-Way<\/span>/);
+});
+
+test("OpportunityRadar: renders Opportunity Scanner header on left and right-aligned filter controls", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(OpportunityRadar, {
+      executionLogs: [],
+      isPaused: false,
+    })
+  );
+  assert.match(
+    html,
+    /<h3 class="text-\[13px\] font-bold font-sans tracking-wider text-slate-900">Opportunity Scanner<\/h3>/
+  );
+  assert.match(
+    html,
+    /class="flex items-center justify-between gap-3 px-4 py-2\.5 border-b border-surface-border text-xs font-sans shrink-0 bg-surface-raised\/40"/
+  );
+  assert.match(
+    html,
+    /<div class="flex items-center gap-2 text-xs font-sans">[\s\S]*?Symbol[\s\S]*?Venue[\s\S]*?Min Exp[\s\S]*?Min Win/
+  );
+});
+
+test("OpportunityRadar: venue dropdown is anchored to right edge (right-0)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { resolve } = await import("node:path");
+  const filePath = resolve(process.cwd(), "src/components/OpportunityRadar.tsx");
+  const source = readFileSync(filePath, "utf8");
+  assert.match(source, /absolute right-0 top-full mt-1\.5 w-52 bg-surface/);
+});
+

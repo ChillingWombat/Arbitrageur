@@ -5,9 +5,9 @@ use std::sync::Arc;
 use tracing::{error, info};
 
 /// Emergency unwind must be fast, but async-ack venues need a bounded
-/// window to reach terminal state: ~3s of `fetch_order` polling covers
+/// window to reach terminal state: ~7.5s of `fetch_order` polling covers
 /// normal fill propagation without stalling the unwind path.
-const UNWIND_POLL_ATTEMPTS: u32 = 10;
+const UNWIND_POLL_ATTEMPTS: u32 = 25;
 const UNWIND_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(300);
 /// Consecutive poll failures tolerated before giving up — a venue that
 /// cannot report order state at all fails closed rather than guessing.
@@ -92,18 +92,32 @@ impl EmergencyUnwindHandler {
                         }
                     }
                 }
+                let residual_qty = if unhedged_qty > cur.filled_qty {
+                    unhedged_qty - cur.filled_qty
+                } else {
+                    Decimal::ZERO
+                };
+                let avg_px = cur.avg_fill_price.unwrap_or(Decimal::ZERO);
+                let residual_notional_usd = residual_qty * avg_px;
+                // An unwind order satisfies the exposure if:
+                // 1) cur.filled_qty == unhedged_qty (exact match), OR
+                // 2) cur.filled_qty == cur.original_qty (venue filled 100% of the wire order)
+                //    AND the unfilled remainder is sub-lot/wire dust (< $5.00 notional or < 1.0 unit)
+                //    caused by the venue's step-size wire quantization.
+                let qty_satisfied = cur.filled_qty == unhedged_qty
+                    || (cur.filled_qty == cur.original_qty
+                        && cur.remaining_qty == Decimal::ZERO
+                        && (residual_notional_usd < rust_decimal_macros::dec!(5.0)
+                            || residual_qty < rust_decimal_macros::dec!(1.0)));
+
                 let valid = cur.status == OrderStatus::Filled
-                    && cur.filled_qty == unhedged_qty
+                    && qty_satisfied
                     && cur.remaining_qty == Decimal::ZERO
                     && cur.venue == exchange.venue_id()
                     && cur.symbol.as_str() == symbol
-                    && cur.original_qty == unhedged_qty
                     && cur.client_order_id == unwind_client_id
                     && !cur.order_id.is_empty()
-                    && cur
-                        .avg_fill_price
-                        .map(|p| p > Decimal::ZERO)
-                        .unwrap_or(false)
+                    && avg_px > Decimal::ZERO
                     && cur.fee.map(|f| f >= Decimal::ZERO).unwrap_or(true);
                 if valid {
                     info!(
@@ -380,5 +394,93 @@ mod tests {
         assert_eq!(order.side, Side::Sell);
         assert_eq!(order.quantity, arbitrageur_core::types::dec!(1.0));
         assert_eq!(order.symbol, "BTC-USDC");
+    }
+
+    #[tokio::test]
+    async fn test_unwind_leg_accepts_wire_quantization_dust() {
+        struct QuantizedExchange;
+        #[async_trait]
+        impl ExchangeAdapter for QuantizedExchange {
+            fn venue_id(&self) -> arbitrageur_core::types::VenueId {
+                "vanta".into()
+            }
+            fn name(&self) -> &str {
+                "Vanta.exchange"
+            }
+            async fn fetch_markets(
+                &self,
+            ) -> anyhow::Result<Vec<arbitrageur_core::market::MarketMetadata>> {
+                anyhow::bail!("not used")
+            }
+            async fn fetch_orderbook(
+                &self,
+                _symbol: &str,
+            ) -> anyhow::Result<arbitrageur_core::quote::OrderBook> {
+                anyhow::bail!("not used")
+            }
+            async fn fetch_ticker(
+                &self,
+                _symbol: &str,
+            ) -> anyhow::Result<arbitrageur_core::quote::Ticker> {
+                anyhow::bail!("not used")
+            }
+            async fn fetch_funding_rate(
+                &self,
+                _symbol: &str,
+            ) -> anyhow::Result<arbitrageur_core::quote::FundingRate> {
+                anyhow::bail!("not used")
+            }
+            async fn fetch_account(
+                &self,
+            ) -> anyhow::Result<arbitrageur_core::position::AccountSnapshot> {
+                anyhow::bail!("not used")
+            }
+            async fn cancel_order(
+                &self,
+                _req: arbitrageur_core::order::CancelRequest,
+            ) -> anyhow::Result<()> {
+                anyhow::bail!("not used")
+            }
+            async fn place_order(&self, req: OrderRequest) -> anyhow::Result<OrderResponse> {
+                // Venue truncates 50.4 to 50.0 due to integer base lot sizing
+                let wire_qty = req.quantity.floor();
+                Ok(OrderResponse {
+                    order_id: "unw-123".into(),
+                    client_order_id: req.client_order_id,
+                    venue: req.venue,
+                    symbol: req.symbol,
+                    status: OrderStatus::Filled,
+                    original_qty: wire_qty,
+                    filled_qty: wire_qty,
+                    remaining_qty: Decimal::ZERO,
+                    avg_fill_price: Some(arbitrageur_core::types::dec!(1.18)),
+                    fee: Some(arbitrageur_core::types::dec!(0.05)),
+                    fee_currency: "USDC".into(),
+                    raw_response: None,
+                    timestamp: chrono::Utc::now(),
+                })
+            }
+            async fn fetch_order(
+                &self,
+                _symbol: &str,
+                _id: &str,
+                _cid: Option<&str>,
+            ) -> anyhow::Result<OrderResponse> {
+                anyhow::bail!("not used")
+            }
+        }
+        let exchange: Arc<dyn ExchangeAdapter> = Arc::new(QuantizedExchange);
+        let resp = EmergencyUnwindHandler::unwind_leg(
+            &exchange,
+            "PERP_SUI_USDC",
+            Side::Buy,
+            arbitrageur_core::types::dec!(50.4),
+        )
+        .await
+        .expect(
+            "unwind must succeed when venue fills 100% of wire-quantized order with sub-unit dust",
+        );
+        assert_eq!(resp.status, OrderStatus::Filled);
+        assert_eq!(resp.filled_qty, arbitrageur_core::types::dec!(50.0));
     }
 }

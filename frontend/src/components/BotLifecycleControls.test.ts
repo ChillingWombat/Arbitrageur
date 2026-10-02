@@ -124,3 +124,19 @@ test("StrategyStatusBadge is an alias of BotPhaseBadge", () => {
   assert.doesNotMatch(html, /Engine/i);
 });
 
+test("BotLifecycleControls wrapper has symmetric padding p-1", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(BotLifecycleControls, {
+      phase: "idle",
+      hasOpenPositions: false,
+      onStart: noop,
+      onPause: noop,
+      onReduceOnly: noop,
+      onStop: noop,
+    })
+  );
+  assert.match(html, /\bp-1\b/);
+  assert.doesNotMatch(html, /px-2 py-1/);
+});
+
+

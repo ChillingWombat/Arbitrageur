@@ -112,6 +112,12 @@ async fn dispatch(line: &str, state: &Arc<AppEngineState>) -> Value {
         }
         "start_engine" => crate::commands::start_engine_impl(st).map(|v| json!(v)),
         "engine_settings" => crate::commands::get_engine_settings_impl(st).map(|v| json!(v)),
+        "set_engine_settings" => serde_json::from_value::<crate::state::EngineSettingsDto>(
+            args.get("settings").cloned().unwrap_or_else(|| json!({})),
+        )
+        .map_err(|e| format!("bad settings: {e}"))
+        .and_then(|s| crate::commands::save_engine_settings_impl(s, st))
+        .map(|v| json!(v)),
         "acknowledge_signal" => crate::commands::acknowledge_signal_impl(
             arg(&args, "signal_id").unwrap_or_default(),
             arg(&args, "resolution").unwrap_or_default(),

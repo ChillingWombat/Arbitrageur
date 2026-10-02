@@ -185,7 +185,7 @@ export const BotLifecycleControls: React.FC<BotLifecycleControlsProps> = ({
   ];
 
   return (
-    <div className="flex items-center space-x-1.5 px-2 py-1 bg-surface border border-surface-border rounded-lg shadow-xs">
+    <div className="flex items-center space-x-1.5 p-1 bg-surface border border-surface-border rounded-lg shadow-xs">
       <div className="flex items-center gap-1">
         {buttons.map((b) => (
           <button

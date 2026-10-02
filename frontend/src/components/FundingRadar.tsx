@@ -9,7 +9,8 @@ import { formatQty } from "./PositionsPanel";
 import { BotLifecycleControls, BotPhaseBadge } from "./BotLifecycleControls";
 import { TickerTransactionHistory } from "./TickerTransactionHistory";
 import { TickerLogMonitor } from "./TickerLogMonitor";
-import { TradedOpportunitiesTable, TradedOpportunityDetailModal } from "./TradedOpportunitiesGadget";
+import { OpportunityHistoryGadget } from "./OpportunityHistoryGadget";
+import { TradedOpportunityDetailModal } from "./TradedOpportunitiesGadget";
 import { EmptyState } from "./EmptyState";
 import { VenueLogo } from "./VenueLogo";
 import { ExecuteButton } from "./ExecuteButton";
@@ -1123,7 +1124,6 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
   // funding-family dispatch (carry, basis, fixed-yield) with its atomic
   // transaction trail, polled like the other gadgets.
   const [tradedOpps, setTradedOpps] = useState<TradedOpportunityDto[] | null>(null);
-  const [tradedFailed, setTradedFailed] = useState(false);
   const [selectedOpp, setSelectedOpp] = useState<TradedOpportunityDto | null>(null);
   const [detailPosKey, setDetailPosKey] = useState<string | null>(null);
   // Display-only scanner filters (mirror the spread monitor strip): venue
@@ -1200,10 +1200,8 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
         const rows = await api.listTradedOpportunities();
         if (!alive) return;
         setTradedOpps(Array.isArray(rows) ? rows : []);
-        setTradedFailed(false);
       } catch {
         if (!alive) return;
-        setTradedFailed(true);
       }
     };
     void load();
@@ -1351,13 +1349,45 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
     };
   }, [firstTradeTs, tradeSize, totalFundingNotional, totalNetProfit, closedFundingCount]);
 
-  // 3. Average Net APR across positive carry opportunities
-  const avgNetApr = useMemo(() => {
-    const positiveOpps = opportunities.filter((o) => (o.net_apr_pct ?? 0) > 0);
-    if (positiveOpps.length === 0) return null;
-    const sum = positiveOpps.reduce((acc, o) => acc + (o.net_apr_pct ?? 0), 0);
-    return sum / positiveOpps.length;
-  }, [opportunities]);
+  // 3. Average Realized Return per completed carry cycle
+  const avgCycleReturn = useMemo(() => {
+    if (closedFundingCount === 0) {
+      return {
+        valStr: "—",
+        toneCls: "text-muted",
+        subtext: "no closed cycles",
+        tooltip: "Average realized profit will be computed once completed carry cycles close.",
+      };
+    }
+    const avgUsd = totalNetProfit / closedFundingCount;
+    const capitalBase =
+      tradeSize > 0
+        ? tradeSize
+        : totalFundingNotional > 0
+        ? totalFundingNotional
+        : 500;
+    const avgBps = (avgUsd / capitalBase) * 10000;
+    const winningCycles = fundingLogs.filter(
+      (l) => (l.net_pnl ?? l.net_profit ?? 0) > 0
+    ).length;
+    const winRate = (winningCycles / closedFundingCount) * 100;
+
+    const valStr =
+      avgUsd === 0
+        ? "$0.00"
+        : avgUsd > 0
+        ? `+$${avgUsd.toFixed(2)}`
+        : `-$${Math.abs(avgUsd).toFixed(2)}`;
+
+    const toneCls =
+      avgUsd > 0 ? "text-profit" : avgUsd < 0 ? "text-loss" : "text-slate-900";
+
+    const subtext = `${avgBps >= 0 ? "+" : ""}${avgBps.toFixed(1)} bps avg (${winRate.toFixed(0)}% win)`;
+
+    const tooltip = `Average realized return per completed carry cycle: ${valStr} (${avgBps >= 0 ? "+" : ""}${avgBps.toFixed(2)} bps on $${capitalBase.toLocaleString()} base) with ${winRate.toFixed(1)}% win rate (${winningCycles}/${closedFundingCount} profitable cycles)`;
+
+    return { valStr, toneCls, subtext, tooltip };
+  }, [totalNetProfit, closedFundingCount, tradeSize, totalFundingNotional, fundingLogs]);
 
   // 5. Est. 24h Yield
   const { estDailyYield, yieldSubtext } = useMemo(() => {
@@ -1585,22 +1615,21 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
           </div>
         </div>
 
-        {/* 3. Average Net APR */}
+        {/* 3. Avg Realized Return */}
         <div className="bg-surface p-3.5 rounded-xl border border-surface-border shadow-card space-y-1 hover:border-slate-300 transition-all">
-          <span className="text-[11px] font-sans tracking-wider uppercase text-slate-500 font-semibold">
-            Average Net APR
+          <span
+            className="text-[11px] font-sans tracking-wider uppercase text-slate-500 font-semibold"
+            title="Average realized net profit per completed carry cycle"
+          >
+            Avg Realized Return
           </span>
           <div
-            className={`text-xl font-bold font-mono tracking-tight tabular-nums ${
-              avgNetApr != null && avgNetApr > 0 ? "text-profit" : "text-muted"
-            }`}
+            className={`text-xl font-bold font-mono tracking-tight tabular-nums ${avgCycleReturn.toneCls}`}
           >
-            {avgNetApr != null && Number.isFinite(avgNetApr)
-              ? `+${avgNetApr.toFixed(1)}% APR`
-              : "—"}
+            {avgCycleReturn.valStr}
           </div>
-          <div className="text-xs text-slate-500 font-mono truncate">
-            across {opportunities.length} pairs
+          <div className="text-xs text-slate-500 font-mono truncate" title={avgCycleReturn.tooltip}>
+            {avgCycleReturn.subtext}
           </div>
         </div>
 
@@ -1639,8 +1668,8 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
         </div>
       </div>
 
-      {/* Opportunity Scanner — fixed window, 5x3 compact cards, click for details */}
-      <div className="bg-surface rounded-xl border border-surface-border p-4 shadow-card h-[640px] flex flex-col">
+      {/* Opportunity Scanner — fixed window, 5x2 compact cards, click for details */}
+      <div className="bg-surface rounded-xl border border-surface-border p-4 shadow-card h-[600px] flex flex-col">
         <div className="flex items-center justify-between gap-3 mb-3 pb-3 border-b border-surface-border shrink-0">
           <h3 className="text-[13px] font-bold font-sans tracking-wider text-slate-900">
             Opportunity Scanner
@@ -1766,7 +1795,7 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
                 <div
                   key={opp.id}
                   onClick={() => setDetailOppId(opp.id)}
-                  className="bg-surface border border-surface-border hover:border-accent-line rounded-xl p-2.5 flex flex-col justify-between gap-2 transition cursor-pointer shadow-card"
+                  className="bg-surface border border-surface-border hover:border-accent-line rounded-xl p-2.5 flex flex-col justify-between gap-2 transition cursor-pointer shadow-card h-[250px] overflow-hidden"
                   title="Click for opportunity details"
                 >
                   <div className="space-y-2">
@@ -2021,10 +2050,11 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
           ) : dockTab === "history" ? (
             <TickerTransactionHistory symbol="" logs={fundingLogs} matchAllSymbols />
           ) : dockTab === "opps" ? (
-            <TradedOpportunitiesTable
-              opps={tradedOpps == null ? null : fundingOpps}
-              failed={tradedFailed}
-              onSelect={setSelectedOpp}
+            <OpportunityHistoryGadget
+              strategy="funding"
+              fundingOpps={opportunities}
+              executionLogs={fundingLogs}
+              tradedOpps={fundingOpps}
             />
           ) : (
             <TickerLogMonitor

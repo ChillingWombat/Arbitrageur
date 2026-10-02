@@ -1,7 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback } from "react";
 import {
-  TrendingUp,
-  TrendingDown,
   Zap,
   History,
   Terminal,
@@ -134,11 +132,6 @@ const MatrixCellView: React.FC<MatrixCellViewProps> = React.memo(({ cell, isSele
           <div
             className={`flex items-center space-x-0.5 px-1 py-px rounded-lg text-[10px] font-mono whitespace-nowrap truncate max-w-full ${visuals.deltaBadgeBg}`}
           >
-            {cell.deltaBps > 0 ? (
-              <TrendingUp className="w-2 h-2 inline" />
-            ) : cell.deltaBps < 0 ? (
-              <TrendingDown className="w-2 h-2 inline" />
-            ) : null}
             <span>
               Δ {cell.deltaBps > 0 ? "+" : ""}
               {cell.deltaBps.toFixed(1)}

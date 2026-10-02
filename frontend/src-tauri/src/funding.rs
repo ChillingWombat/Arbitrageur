@@ -2331,15 +2331,30 @@ pub async fn execute_funding_carry_impl(
             short_canon,
         ),
     ] {
-        if adapter
+        if let Some(pos) = adapter
             .account_position_for(acc, exact)
             .ok()
             .flatten()
-            .is_some_and(|pos| pos.quantity > dust)
+            .filter(|p| p.quantity > dust)
         {
-            return Err(format!(
-                "An open position already exists for {exact} on {canon}; flatten it before carrying"
-            ));
+            let wire_qty = adapter
+                .wire_base_qty(&pos.symbol, pos.quantity)
+                .await
+                .unwrap_or(pos.quantity);
+            let notional_usd =
+                dec_to_f64(pos.notional(), "funding position notional").unwrap_or(0.0);
+            let is_dust = pos.quantity <= Decimal::ZERO
+                || wire_qty <= Decimal::ZERO
+                || (pos.mark_price > Decimal::ZERO && notional_usd < 10.0);
+            if !is_dust {
+                return Err(format!(
+                    "An open position already exists for {exact} on {canon}; flatten it before carrying"
+                ));
+            }
+            tracing::warn!(
+                "funding {canon}: {exact} carries sub-minimum/dust position (qty {}, ${:.2}); ignoring dust for carry entry",
+                pos.quantity, notional_usd
+            );
         }
     }
 

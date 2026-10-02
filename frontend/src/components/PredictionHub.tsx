@@ -7,7 +7,7 @@ import { ExecuteButton } from "./ExecuteButton";
 import { CapacityChart } from "./CapacityChart";
 import { DetailField, DetailSection } from "./DetailBits";
 import { useBotLifecycle } from "../hooks/useBotLifecycle";
-import { describeCommandError } from "../services/api";
+import { api, describeCommandError } from "../services/api";
 
 interface PredictionDetailModalProps {
   opp: PredictionOpportunityDto;
@@ -132,6 +132,7 @@ interface PredictionHubProps {
   /** Backend capability descriptor — prediction scan/execute are scaffolds
    *  today, so every armed control is hidden when this says not-ready. */
   capability?: StrategyCapabilityDto;
+  minEventVolumeUsd?: number | null;
 }
 
 export const PredictionHub: React.FC<PredictionHubProps> = ({
@@ -142,6 +143,7 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
   hasApiConnectivity = false,
   onOpenConfig,
   capability,
+  minEventVolumeUsd,
 }) => {
   const [searchTerm, setSearchTerm] = useState("");
   const [detailOpp, setDetailOpp] = useState<PredictionOpportunityDto | null>(null);
@@ -153,6 +155,27 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
   // is strategy-wide (markets are not perp symbols).
   const bot = useBotLifecycle({ strategyId: "prediction" });
   const lastAutoPredExecRef = useRef<number>(0);
+  const [loadedMinVol, setLoadedMinVol] = useState<number | null>(null);
+
+  useEffect(() => {
+    if (minEventVolumeUsd !== undefined && minEventVolumeUsd !== null) return;
+    let active = true;
+    api
+      .getStrategyParams("prediction")
+      .then((p) => {
+        if (active && p?.autoMinEventVolumeUsd != null) {
+          setLoadedMinVol(p.autoMinEventVolumeUsd);
+        }
+      })
+      .catch(() => {
+        // Fallback silently if prediction params are unconfigured
+      });
+    return () => {
+      active = false;
+    };
+  }, [minEventVolumeUsd]);
+
+  const displayMinVol = minEventVolumeUsd ?? loadedMinVol ?? 10_000;
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
@@ -217,18 +240,12 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
             <span className="text-muted">¢</span>
           </div>
           <div
-            className="ribbon-pill opacity-60"
-            title="Min event volume filter (auto_min_event_volume_usd) is defined but disabled: no venue volume data — prediction adapters are scaffolds"
+            className="ribbon-pill"
+            title="Minimum event volume threshold for prediction markets"
           >
             <span className="text-muted">Min Vol</span>
-            <span className="font-bold text-slate-500">no venue volume data</span>
-          </div>
-          <div
-            className="ribbon-pill opacity-60"
-            title="Max slippage gate (prediction_max_slippage_bps) is defined but disabled: no execution path — prediction adapters are scaffolds"
-          >
-            <span className="text-muted">Max Slip</span>
-            <span className="font-bold text-slate-500">no execution path</span>
+            <span className="font-bold text-slate-900 tabular-nums">{displayMinVol.toLocaleString()}</span>
+            <span className="text-muted">USD</span>
           </div>
         </div>
 
@@ -247,7 +264,7 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
             <div className="relative">
               <input
                 type="text"
-                placeholder="Search contract (e.g. FED, BTC)..."
+                placeholder="Search contract..."
                 value={searchTerm}
                 onChange={(e) => setSearchTerm(e.target.value)}
                 className="input-field !w-56 !pl-8 !pr-3 !py-1.5 !text-xs font-mono"
@@ -272,14 +289,6 @@ export const PredictionHub: React.FC<PredictionHubProps> = ({
             onReduceOnly={bot.reduceOnly}
             onStop={() => void bot.stop()}
           />
-          {!executeReady && (
-            <span
-              className="text-xs font-mono text-muted max-w-72 truncate"
-              title={capability?.reason ?? "Execution path unavailable"}
-            >
-              {capability?.reason ?? "execution path unavailable"}
-            </span>
-          )}
           {bot.lastError && (
             <span className="text-xs font-mono text-loss max-w-56 truncate" title={bot.lastError}>
               {bot.lastError}

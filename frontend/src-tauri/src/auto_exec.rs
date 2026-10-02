@@ -100,6 +100,12 @@ pub struct RadarBotConfigDto {
     pub hold_timeout_mult: f64,
     pub stop_mult: f64,
     pub stale_unwind_secs: u64,
+    #[serde(default = "default_invalidation_p_win")]
+    pub invalidation_p_win: f64,
+}
+
+fn default_invalidation_p_win() -> f64 {
+    0.50
 }
 
 impl Default for RadarBotConfigDto {
@@ -124,6 +130,7 @@ impl RadarBotConfigDto {
             hold_timeout_mult: cfg.hold_timeout_mult,
             stop_mult: cfg.stop_mult,
             stale_unwind_secs: cfg.stale_unwind_secs,
+            invalidation_p_win: cfg.invalidation_p_win,
         }
     }
 
@@ -146,6 +153,7 @@ impl RadarBotConfigDto {
             hold_timeout_mult: self.hold_timeout_mult,
             stop_mult: self.stop_mult,
             stale_unwind_secs: self.stale_unwind_secs,
+            invalidation_p_win: self.invalidation_p_win,
         };
         cfg.validate()?;
         Ok((cfg, mode))
@@ -931,6 +939,7 @@ impl OpportunityExecutor {
                 let live = rows.get(&key).map(|r| LiveSpreadView {
                     status: r.status.clone(),
                     deviation_bps: r.deviation_bps,
+                    p_win: r.win_probability.or(r.reversion_probability).or(r.p_win),
                 });
                 let watched = live.as_ref().is_some_and(|l| {
                     l.status != "no-data" && l.deviation_bps.is_some_and(|d| d.is_finite())
@@ -1089,6 +1098,7 @@ impl OpportunityExecutor {
                         );
                     }
                     Err(e) => {
+                        self.cooldowns.lock().insert(key.clone(), now_ms);
                         self.audit_skip(
                             state,
                             &key,
@@ -1695,6 +1705,14 @@ mod tests {
             .as_deref()
             .unwrap_or("")
             .contains("entry rejected")));
+        assert!(bot
+            .cooldowns
+            .lock()
+            .contains_key(&PairKey::new("BTC", "hyperliquid", "lighter")));
+
+        // Subsequent tick immediately after is blocked by cooldown, not re-dispatched.
+        bot.tick_once(&state, &dispatch).await;
+        assert_eq!(dispatch.enter_calls(), 1);
     }
 
     #[tokio::test]

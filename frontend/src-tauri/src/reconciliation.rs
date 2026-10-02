@@ -39,6 +39,11 @@ use std::sync::Arc;
 /// genuinely working order past 15 minutes indicates a venue anomaly.
 const NON_FINAL_DEADLINE_SECS: i64 = 15 * 60;
 
+/// Maximum seconds an in-flight signal with unsubmitted legs (e.g. multi-leg
+/// coordinator sequential dispatch or passive unwind limit pegging in progress)
+/// is given before an unrecorded order identity is assumed abandoned/rejected.
+const IN_FLIGHT_ORDER_SUBMIT_GRACE_SECS: i64 = 180;
+
 /// Supervisor cadence.
 const POLL_INTERVAL_SECS: u64 = 5;
 
@@ -404,6 +409,7 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
 
     for (exec, leg) in &pending {
         let age = signal_age_secs(&exec.created_at);
+        let updated_age = signal_age_secs(&exec.updated_at);
         signal_meta
             .entry(exec.id.clone())
             .or_insert_with(|| (exec.strategy_id.clone(), exec.legs.len(), age));
@@ -437,14 +443,20 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
                 },
                 None => {
                     // Order identity is persisted at submission. On
-                    // post-submission signals (imbalanced/unresolved — the
-                    // only states whose no-id legs the query returns) a
+                    // post-submission signals (imbalanced/unresolved), a
                     // missing id means the venue rejected the order
                     // outright: terminally empty, not merely unverifiable.
-                    // Counting it as terminal-empty lets a filled sibling
-                    // surface as Imbalanced so residual auto-flatten covers
-                    // the naked leg.
-                    legs_out.push(LegPoll::CancelledEmpty);
+                    // For an in-flight signal within its execution grace period
+                    // (e.g. multi-leg dispatch or passive unwind limit pegging
+                    // in progress), the unsubmitted leg is still Working.
+                    if exec.status == SignalStatus::InFlight
+                        && (age < IN_FLIGHT_ORDER_SUBMIT_GRACE_SECS
+                            || updated_age < IN_FLIGHT_ORDER_SUBMIT_GRACE_SECS)
+                    {
+                        legs_out.push(LegPoll::Working);
+                    } else {
+                        legs_out.push(LegPoll::CancelledEmpty);
+                    }
                     continue;
                 }
             },
@@ -608,6 +620,10 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
                 if poll != LegPoll::Working {
                     let key = format!("recon_cancel:{}:{order_id}", leg.venue);
                     let _ = state.state_store.kv_delete(&key);
+                    if matches!(exec.status, SignalStatus::Closed | SignalStatus::Failed) {
+                        let settled_key = format!("recon_settled:{}", leg.id);
+                        let _ = state.state_store.kv_set(&settled_key, "1");
+                    }
                 }
                 // A still-working order past the deadline is anomalous —
                 // try a bounded cancel so the next poll sees a terminal
@@ -759,6 +775,18 @@ pub async fn reconcile_pending_orders(state: &AppEngineState) -> ReconcileSummar
                     .and_then(|s| s.rsplit_once('-').map(|(p, _)| p.to_string()))
                 {
                     resolve_flattened_parent(state, &parent_id);
+                }
+            }
+            if is_flatten_child && matches!(status, SignalStatus::Closed | SignalStatus::Failed) {
+                if let Ok(Some(child_sig)) = state.state_store.get_signal(signal_id) {
+                    for l in &child_sig.legs {
+                        if l.filled_qty >= l.intended_qty
+                            || polls.iter().all(|p| *p != LegPoll::Working)
+                        {
+                            let settled_key = format!("recon_settled:{}", l.id);
+                            let _ = state.state_store.kv_set(&settled_key, "1");
+                        }
+                    }
                 }
             }
         }
@@ -3069,6 +3097,138 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn e2e_in_flight_leg_without_order_id_within_grace_stays_in_flight() {
+        // When an in-flight multi-leg signal or passive unwind is actively
+        // pegging (under IN_FLIGHT_ORDER_SUBMIT_GRACE_SECS), a leg that hasn't
+        // yet recorded an order ID must stay Working (InFlight) — never
+        // prematurely failed as CancelledEmpty.
+        let state = test_state();
+        let sid = format!("sig-{}", rand::random::<u32>());
+        state
+            .state_store
+            .record_signal_execution(
+                &crate::state_store::NewSignalExecution {
+                    id: sid.clone(),
+                    strategy_id: "futures".into(),
+                    symbol: "BTC-USD".into(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: vec![
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "kraken".into(),
+                            side: LegSide::Long,
+                            symbol: Some("BTC-USD".into()),
+                            intended_qty: 1.0,
+                            intended_price: None,
+                            unit_scale: None,
+                        },
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "aster".into(),
+                            side: LegSide::Short,
+                            symbol: Some("BTC-USD".into()),
+                            intended_qty: 1.0,
+                            intended_price: None,
+                            unit_scale: None,
+                        },
+                    ],
+                },
+                "testnet",
+            )
+            .unwrap();
+        state
+            .state_store
+            .record_leg_order_id(&sid, LegSide::Long, "oid-kraken", None)
+            .unwrap();
+        state.test_adapters.write().unwrap().insert(
+            "kraken".into(),
+            Arc::new(MockVenue::new(
+                "kraken",
+                vec![Ok(resp(OrderStatus::New, dec!(0), dec!(1)))],
+            )),
+        );
+
+        // Age is 35 seconds: past list_pending_order_legs 30s threshold, but well under 90s grace.
+        state.state_store.force_signal_age_for_test(
+            &sid,
+            &(Utc::now() - chrono::Duration::seconds(35)).to_rfc3339(),
+        );
+
+        let sum = reconcile_pending_orders(&state).await;
+        assert_eq!(sum.resolved, 0);
+        let sig = state.state_store.get_signal(&sid).unwrap().unwrap();
+        assert_eq!(sig.status, SignalStatus::InFlight);
+    }
+
+    #[tokio::test]
+    async fn e2e_in_flight_leg_past_initial_grace_with_recent_progress_stays_in_flight() {
+        // When a multi-leg sequential unwind or passive peg has an overall age past
+        // IN_FLIGHT_ORDER_SUBMIT_GRACE_SECS, but its last leg update (updated_at) was recent,
+        // an unsubmitted leg must still stay Working (InFlight) — never prematurely failed.
+        let state = test_state();
+        let sid = format!("sig-{}", rand::random::<u32>());
+        state
+            .state_store
+            .record_signal_execution(
+                &crate::state_store::NewSignalExecution {
+                    id: sid.clone(),
+                    strategy_id: "futures".into(),
+                    symbol: "BTC-USD".into(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: vec![
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "kraken".into(),
+                            side: LegSide::Long,
+                            symbol: Some("BTC-USD".into()),
+                            intended_qty: 1.0,
+                            intended_price: None,
+                            unit_scale: None,
+                        },
+                        crate::state_store::NewSignalLeg {
+                            account_id: None,
+                            venue: "aster".into(),
+                            side: LegSide::Short,
+                            symbol: Some("BTC-USD".into()),
+                            intended_qty: 1.0,
+                            intended_price: None,
+                            unit_scale: None,
+                        },
+                    ],
+                },
+                "testnet",
+            )
+            .unwrap();
+        state
+            .state_store
+            .record_leg_order_id(&sid, LegSide::Long, "oid-kraken", None)
+            .unwrap();
+        state.test_adapters.write().unwrap().insert(
+            "kraken".into(),
+            Arc::new(MockVenue::new(
+                "kraken",
+                vec![Ok(resp(OrderStatus::New, dec!(0), dec!(1)))],
+            )),
+        );
+
+        // Created 250s ago (past 180s grace), but updated 20s ago (within 180s grace).
+        state.state_store.force_signal_timestamps_for_test(
+            &sid,
+            &(Utc::now() - chrono::Duration::seconds(250)).to_rfc3339(),
+            &(Utc::now() - chrono::Duration::seconds(20)).to_rfc3339(),
+        );
+
+        let sum = reconcile_pending_orders(&state).await;
+        assert_eq!(sum.resolved, 0);
+        let sig = state.state_store.get_signal(&sid).unwrap().unwrap();
+        assert_eq!(sig.status, SignalStatus::InFlight);
+    }
+
+    #[tokio::test]
     async fn e2e_overfill_records_venue_truth_verbatim() {
         // Regression (#30): a venue reporting filled 1.2 against intended
         // 1.0 must land in the ledger as 1.2 — the +0.2 surplus is real
@@ -3680,5 +3840,84 @@ mod tests {
             "11ea533e-2294-4663-826c-e1ff992fed4d",
             "22ea533e-2294-4663-826c-e1ff992fed4d"
         ));
+    }
+
+    #[tokio::test]
+    async fn e2e_settle_gap_terminal_leg_marks_settled_and_stops_polling() {
+        let state = test_state();
+        let child_id = "flat-sig-parent-test-1234";
+        state
+            .state_store
+            .record_signal_execution(
+                &crate::state_store::NewSignalExecution {
+                    id: child_id.into(),
+                    strategy_id: "futures".into(),
+                    symbol: "BTC-USD".into(),
+                    route_id: None,
+                    expected_net_usd: None,
+                    note: None,
+                    legs: vec![crate::state_store::NewSignalLeg {
+                        account_id: None,
+                        venue: "kraken".into(),
+                        side: LegSide::Long,
+                        symbol: Some("BTC-USD".into()),
+                        intended_qty: 1.0,
+                        intended_price: None,
+                        unit_scale: None,
+                    }],
+                },
+                "testnet",
+            )
+            .unwrap();
+        state
+            .state_store
+            .record_leg_order_id(child_id, LegSide::Long, "oid-kraken", None)
+            .unwrap();
+        state
+            .state_store
+            .apply_leg_order_state(child_id, LegSide::Long, 0.5, None, 0.0)
+            .unwrap();
+        state
+            .state_store
+            .update_signal_status(child_id, SignalStatus::Closed, Some("closed attempt"))
+            .unwrap();
+
+        let kraken = Arc::new(MockVenue::new(
+            "kraken",
+            vec![Ok(resp(OrderStatus::Cancelled, dec!(0.5), dec!(0)))],
+        ));
+        state
+            .test_adapters
+            .write()
+            .unwrap()
+            .insert("kraken".into(), kraken.clone());
+
+        // Verify it is initially returned by list_pending_order_legs
+        let pending = state
+            .state_store
+            .list_pending_order_legs(Some("testnet"))
+            .unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].0.id, child_id);
+
+        // Run reconciliation: polls venue, sees terminal Cancelled, marks settled in kv
+        reconcile_pending_orders(&state).await;
+
+        let leg_id = format!("{child_id}-long");
+        assert_eq!(
+            state
+                .state_store
+                .kv_get(&format!("recon_settled:{leg_id}"))
+                .unwrap()
+                .as_deref(),
+            Some("1")
+        );
+
+        // Subsequent list_pending_order_legs excludes the settled leg!
+        let pending_after = state
+            .state_store
+            .list_pending_order_legs(Some("testnet"))
+            .unwrap();
+        assert_eq!(pending_after.len(), 0);
     }
 }

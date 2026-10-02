@@ -867,10 +867,6 @@ export interface EngineSettingsDto {
    * `*PassiveMode = "inherit"` use this; the popup's Auto Limit mode runs
    * it too. Serialized camelCase like PassiveUnwindDto. */
   passive_unwind?: PassiveUnwindDto;
-  /** Hold deadline (seconds) before the auto-exit supervisor unwinds a
-   * still-open futures pair position, regardless of the live edge.
-   * Backend-validated 60–604800; default 86400 (24h). */
-  auto_exit_max_hold_secs?: number;
   /** Opt-in autonomous fixed-yield entries (Boros YU locks, live-only).
    * Default off — gates additionally on approval validity, gas treasury,
    * margin, lock term, and post-cost return. */
@@ -2116,6 +2112,7 @@ export interface RadarBotConfigDto {
   holdTimeoutMult: number;
   stopMult: number;
   staleUnwindSecs: number;
+  invalidationPWin?: number;
 }
 
 export interface BotOpenPositionDto {

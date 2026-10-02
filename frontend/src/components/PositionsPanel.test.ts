@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { PositionsPanel } from "./PositionsPanel.tsx";
-import type { OpenPositionDto } from "../types/index.ts";
+import type { OpenPositionDto, SystemStatusDto } from "../types/index.ts";
 
 const position: OpenPositionDto = {
   key: "futures|s1",

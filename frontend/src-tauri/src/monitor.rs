@@ -2940,10 +2940,24 @@ impl SpreadMonitorEngine {
         // real position (observed: a live carry churned out chasing a
         // funding gap whose short venue had an empty book).
         let valid_alt_spans: Vec<(&String, f64, &String, &String)> = if rotation_bps.is_some() {
+            let allowed_bases: HashSet<String> = self
+                .watchlist
+                .lock()
+                .iter()
+                .map(|w| arbitrageur_core::symbol::canonical_base(w).to_ascii_uppercase())
+                .collect();
             let mut span: HashMap<&String, (f64, &String, f64, &String)> = HashMap::new();
             for ((venue, base), (rate, ts)) in ema.iter() {
                 if now.duration_since(*ts) >= Duration::from_secs(300) {
                     continue;
+                }
+                // Only consider symbols in the active watchlist (unless empty, e.g. in tests)
+                if !allowed_bases.is_empty() {
+                    let canon_base =
+                        arbitrageur_core::symbol::canonical_base(base).to_ascii_uppercase();
+                    if !allowed_bases.contains(&canon_base) {
+                        continue;
+                    }
                 }
                 let e = span.entry(base).or_insert((*rate, venue, *rate, venue));
                 if *rate > e.0 {
@@ -3056,11 +3070,9 @@ impl SpreadMonitorEngine {
                 continue;
             };
             let net_apr_pct = (sr - lr) * 8760.0 * 100.0;
-            // Yield rotation: a DIFFERENT symbol/venue pairing exceeds this
-            // carry by more than the configured bps (plus minimum hurdle) — exit so the scanner
-            // re-deploys the capital. The threshold is the churn allowance.
-            // Skip rotation if signal is too fresh (< 1800s / 30m) to prevent immediate churn.
-            let min_hold_s = if cfg!(test) { 0 } else { 1800 };
+            // Carry trades collect yield over funding intervals (8h = 28,800s).
+            // Skip rotation until the position has held across at least one funding settlement.
+            let min_hold_s = if cfg!(test) { 0 } else { 28_800 };
             let sig_age_secs = chrono::DateTime::parse_from_rfc3339(&sig.created_at)
                 .map(|t| {
                     (chrono::Utc::now() - t.with_timezone(&chrono::Utc))

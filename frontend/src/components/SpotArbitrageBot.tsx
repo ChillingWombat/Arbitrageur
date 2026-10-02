@@ -366,8 +366,11 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
       {/* Main Content Workspace: Full-Width Opportunity Scanner */}
       <div className="flex-1 min-h-0 flex flex-col bg-surface rounded-xl border border-surface-border shadow-card overflow-hidden">
         {/* Filter Bar */}
-        <div className="p-3.5 border-b border-surface-border flex flex-wrap items-center justify-between gap-3 bg-surface">
-          <div className="flex items-center space-x-3">
+        <div className="p-3.5 border-b border-surface-border flex items-center justify-between gap-3 bg-surface">
+          <h3 className="text-[13px] font-bold font-sans tracking-wider text-slate-900">
+            Opportunity Scanner
+          </h3>
+          <div className="flex items-center gap-3 text-xs font-sans">
             <div className="flex items-center gap-1.5 bg-surface border border-surface-border rounded-lg px-2.5 py-1.5 shadow-2xs hover:border-slate-300 focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/15 transition-all">
               <Search size={13} className="text-muted shrink-0" />
               <span className="text-muted font-medium text-xs">Search</span>
@@ -396,7 +399,7 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
                   />
                 </button>
                 {showAssetMenu && (
-                  <div className="dropdown-menu left-0 top-full mt-1.5 w-48 z-30">
+                  <div className="dropdown-menu right-0 top-full mt-1.5 w-48 z-30">
                     <button
                       type="button"
                       onClick={() => setAssetFilters([])}
@@ -428,9 +431,9 @@ export const SpotArbitrageBot: React.FC<SpotArbitrageBotProps> = ({
                 )}
               </div>
             </div>
-          </div>
-          <div className="text-xs font-mono text-slate-500">
-            {filteredOpportunities.length} opportunities detected
+            <div className="text-xs font-mono text-slate-500">
+              {filteredOpportunities.length} opportunities detected
+            </div>
           </div>
         </div>
 
