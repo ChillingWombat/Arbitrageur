@@ -312,16 +312,6 @@ function SignalTrendGadgetInner({
     return map;
   }, [hoverIdx, series]);
 
-  const historyLabel = useMemo(() => {
-    if (!series?.earliest_ts_ms) return null;
-    const hrs = (Date.now() - series.earliest_ts_ms) / 3_600_000;
-    return hrs >= 48
-      ? `${(hrs / 24).toFixed(1)}d history`
-      : hrs >= 1
-        ? `${hrs.toFixed(1)}h history`
-        : `${Math.max(1, Math.round(hrs * 60))}m history`;
-  }, [series?.earliest_ts_ms]);
-
   const hasSeries = pointCount >= 2;
 
   // Session overlay: UTC regime bands behind the series, derived from wall
@@ -625,22 +615,6 @@ function SignalTrendGadgetInner({
         )}
       </div>
 
-      {/* Footer: honesty indicators — how much real history backs this view */}
-      {series && (
-        <div className="flex items-center justify-between text-xs text-muted px-0.5">
-          <span>
-            {series.sample_count.toLocaleString()} venue samples in window
-            {historyLabel ? ` · ${historyLabel} recorded` : ""}
-          </span>
-          <span>
-            {series.venues.length === 1
-              ? "1 venue — pairwise spread needs ≥2 venues"
-              : series.mode === "leader"
-                ? "baseline = most-liquid venue"
-                : "baseline = volume-weighted consensus"}
-          </span>
-        </div>
-      )}
       {analytics && analytics.band.sample_count > 0 && (
         <div className="flex items-center justify-between text-xs text-muted px-0.5 mt-0.5">
           <span title="Distribution of the per-poll max–min venue spread over this window">

@@ -48,6 +48,7 @@ struct DeribitToken {
 /// base) priced in the base coin; futures/perps trade in USD.
 #[derive(Clone, Debug)]
 struct InstrumentMeta {
+    name: String,
     kind: DeribitKind,
     tick_size: Decimal,
     tick_size_steps: Vec<(Decimal, Decimal)>, // (above_price, tick_size)
@@ -172,6 +173,20 @@ fn is_supported_currency(name: &str) -> bool {
                     .any(|s| c.eq_ignore_ascii_case(s))
             })
             .unwrap_or(false)
+}
+
+/// Resolve bare currency into its active perpetual instrument name ("BTC" -> "BTC-PERPETUAL").
+pub fn resolve_deribit_instrument(name: &str) -> String {
+    let s = name.trim().to_ascii_uppercase();
+    if !s.contains('-')
+        && SUPPORTED_CURRENCIES
+            .iter()
+            .any(|c| c.eq_ignore_ascii_case(&s))
+    {
+        format!("{s}-PERPETUAL")
+    } else {
+        s
+    }
 }
 
 impl DeribitAdapter {
@@ -427,14 +442,17 @@ impl DeribitAdapter {
             .ok_or_else(|| anyhow::anyhow!("Deribit instrument '{instrument}' has no currency"))?
             .to_ascii_uppercase();
         let meta = self.currency_instruments(&currency).await?;
-        let m = meta
-            .get(&instrument.to_ascii_uppercase())
-            .cloned()
-            .ok_or_else(|| {
+        let upper = instrument.to_ascii_uppercase();
+        let m = if let Some(m) = meta.get(&upper).cloned() {
+            m
+        } else {
+            let perp = format!("{currency}-PERPETUAL");
+            meta.get(&perp).cloned().ok_or_else(|| {
                 anyhow::anyhow!("Deribit instrument '{instrument}' not listed or expired")
-            })?;
+            })?
+        };
         if !m.is_active {
-            anyhow::bail!("Deribit instrument '{instrument}' is inactive on venue");
+            anyhow::bail!("Deribit instrument '{}' is inactive on venue", m.name);
         }
         Ok(m)
     }
@@ -611,8 +629,9 @@ impl DeribitAdapter {
                         .unwrap_or(false)
                 };
                 meta.insert(
-                    name,
+                    name.clone(),
                     InstrumentMeta {
+                        name,
                         kind: if item.get("kind").and_then(|k| k.as_str()) == Some("option") {
                             DeribitKind::Option
                         } else {
@@ -1004,7 +1023,7 @@ impl ExchangeAdapter for DeribitAdapter {
     }
 
     async fn fetch_orderbook(&self, symbol: &str) -> anyhow::Result<OrderBook> {
-        let instrument = symbol.trim().to_ascii_uppercase();
+        let instrument = resolve_deribit_instrument(symbol);
         if !is_supported_currency(&instrument) {
             anyhow::bail!("Deribit orderbook unsupported instrument '{symbol}'");
         }
@@ -1047,7 +1066,7 @@ impl ExchangeAdapter for DeribitAdapter {
     }
 
     async fn fetch_ticker(&self, symbol: &str) -> anyhow::Result<Ticker> {
-        let instrument = symbol.trim().to_ascii_uppercase();
+        let instrument = resolve_deribit_instrument(symbol);
         let v = self
             .public_get(&format!("/public/ticker?instrument_name={instrument}"))
             .await?;
@@ -1067,7 +1086,7 @@ impl ExchangeAdapter for DeribitAdapter {
     }
 
     async fn fetch_funding_rate(&self, symbol: &str) -> anyhow::Result<FundingRate> {
-        let instrument = symbol.trim().to_ascii_uppercase();
+        let instrument = resolve_deribit_instrument(symbol);
         if !instrument.ends_with("-PERPETUAL") {
             anyhow::bail!("Deribit funding rate only exists for perpetuals, not '{symbol}'");
         }
@@ -1281,7 +1300,7 @@ impl ExchangeAdapter for DeribitAdapter {
         } else {
             let ratio = amount / lot;
             let nearest = ratio.round();
-            if (ratio - nearest).abs() <= dec!(0.005) {
+            if (ratio - nearest).abs() <= dec!(0.05) {
                 amount = nearest * lot;
             } else {
                 amount = ratio.floor() * lot;
@@ -1544,17 +1563,19 @@ impl ExchangeAdapter for DeribitAdapter {
         let meta = self.instrument_meta(&instrument).await?;
         let ref_px = match meta.kind {
             DeribitKind::Option => None,
-            DeribitKind::Future => Some(self.mark_price(&instrument).await?),
+            DeribitKind::Future => Some(self.mark_price(&meta.name).await?),
         };
         let amount = self.to_venue_amount(&meta, qty, ref_px).await?;
         let lot = meta.min_amount.max(dec!(0.00000001));
         let ratio = amount / lot;
         let nearest = ratio.round();
-        let snapped = if (ratio - nearest).abs() <= dec!(0.0001) {
-            nearest * lot
-        } else {
-            ratio.floor() * lot
-        };
+        if nearest > dec!(0) && (ratio - nearest).abs() <= dec!(0.05) {
+            // qty already maps to `nearest * lot` contracts within venue tolerance;
+            // retain the caller's exact base quantity so it aligns with linear orderbook grids
+            // rather than dividing `snapped / ref_px` into an irrational float residual.
+            return Ok(qty);
+        }
+        let snapped = ratio.floor() * lot;
         if snapped <= dec!(0) {
             return Ok(dec!(0));
         }
@@ -1630,6 +1651,7 @@ mod tests {
 
     fn option_meta() -> InstrumentMeta {
         InstrumentMeta {
+            name: "BTC-25SEP26-100000-C".into(),
             kind: DeribitKind::Option,
             tick_size: dec!(0.0001),
             tick_size_steps: vec![(dec!(0.005), dec!(0.0005))],
@@ -1784,6 +1806,29 @@ mod tests {
 
         let err_none = "Deribit /private/buy error 10004: not_found";
         assert_eq!(DeribitAdapter::parse_collar_price(err_none), None);
+    }
+
+    #[test]
+    fn test_resolve_deribit_instrument() {
+        assert_eq!(resolve_deribit_instrument("BTC"), "BTC-PERPETUAL");
+        assert_eq!(resolve_deribit_instrument("btc"), "BTC-PERPETUAL");
+        assert_eq!(resolve_deribit_instrument("ETH"), "ETH-PERPETUAL");
+        assert_eq!(resolve_deribit_instrument("eth"), "ETH-PERPETUAL");
+        assert_eq!(resolve_deribit_instrument("BTC-PERPETUAL"), "BTC-PERPETUAL");
+        assert_eq!(
+            resolve_deribit_instrument("BTC-25DEC26-100000-C"),
+            "BTC-25DEC26-100000-C"
+        );
+        assert_eq!(resolve_deribit_instrument("SOL"), "SOL");
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn deribit_bare_currency_resolves_perpetual() {
+        let a = DeribitAdapter::for_testnet(None, None);
+        let m = a.instrument_meta("BTC").await.unwrap();
+        assert_eq!(m.name, "BTC-PERPETUAL");
+        assert_eq!(m.kind, DeribitKind::Future);
     }
 
     /// Live testnet smoke test — validates real wire shapes against

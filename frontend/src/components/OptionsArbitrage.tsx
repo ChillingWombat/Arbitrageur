@@ -201,6 +201,7 @@ interface OptionsArbitrageProps {
    *  so it surfaces here rather than on the system-wide panels. */
   premiumOutlayUsd?: number | null;
   openPositions?: OpenPositionDto[];
+  initialSelected?: string;
 }
 
 const fmtUsd = (v: number): string =>
@@ -571,8 +572,9 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
   optionsVenueAvailable = false,
   premiumOutlayUsd = null,
   openPositions: propOpenPositions = [],
+  initialSelected = "all",
 }) => {
-  const [selected, setSelected] = useState<string>("all");
+  const [selected, setSelected] = useState<string>(initialSelected);
   const [dirFilter, setDirFilter] = useState<"all" | "conversion" | "reversal">("all");
   const [opps, setOpps] = useState<OptionsScannedOpp[]>([]);
   const [scanning, setScanning] = useState(false);
@@ -912,81 +914,83 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
             read-only params + phase badge left, configurator, scan and the
             substrategy bot's lifecycle buttons right. The "All" view stays
             monitor-only — per-substrategy controls need a selection. */}
-        <div className="shrink-0 px-4 py-3 flex items-center justify-between gap-3 bg-surface rounded-xl border border-surface-border shadow-2xs select-none">
-          <div className="flex items-center gap-2 text-xs font-mono min-w-0">
-            <span className="text-[13px] font-mono font-bold tracking-wider text-slate-900 pr-1 shrink-0">
-              {selDef ? selDef.name : "Options Strategies"}
-            </span>
-            <BotPhaseBadge phase={botPhase} isPaused={isPaused} />
-            {liveVisible && (
-              <>
-                <div className="ribbon-pill shrink-0" title="Net-edge hurdle for reported setups">
-                  <span className="text-muted">Min Edge</span>
-                  <span className="font-bold text-slate-900 tabular-nums">{scanEdge}</span>
-                  <span className="text-muted">BPS</span>
-                </div>
-                <div className="ribbon-pill shrink-0" title="Scan/entry size in base units">
-                  <span className="text-muted">Qty</span>
-                  <span className="font-bold text-slate-900 tabular-nums">{scanQty}</span>
-                </div>
-              </>
-            )}
-            {isLive && (
-              <span className="text-xs text-amber-400 border border-amber-500/40 rounded px-1.5 py-0.5 font-sans shrink-0">
-                Manual only
+        {selected !== "all" && (
+          <div className="shrink-0 px-4 py-3 flex items-center justify-between gap-3 bg-surface rounded-xl border border-surface-border shadow-2xs select-none">
+            <div className="flex items-center gap-2 text-xs font-mono min-w-0">
+              <span className="text-[13px] font-mono font-bold tracking-wider text-slate-900 pr-1 shrink-0">
+                {selDef ? selDef.name : "Options Strategies"}
               </span>
-            )}
+              <BotPhaseBadge phase={botPhase} isPaused={isPaused} />
+              {liveVisible && (
+                <>
+                  <div className="ribbon-pill shrink-0" title="Net-edge hurdle for reported setups">
+                    <span className="text-muted">Min Edge</span>
+                    <span className="font-bold text-slate-900 tabular-nums">{scanEdge}</span>
+                    <span className="text-muted">BPS</span>
+                  </div>
+                  <div className="ribbon-pill shrink-0" title="Scan/entry size in base units">
+                    <span className="text-muted">Qty</span>
+                    <span className="font-bold text-slate-900 tabular-nums">{scanQty}</span>
+                  </div>
+                </>
+              )}
+              {isLive && (
+                <span className="text-xs text-amber-400 border border-amber-500/40 rounded px-1.5 py-0.5 font-sans shrink-0">
+                  Manual only
+                </span>
+              )}
+            </div>
+            <div className="flex items-center space-x-2 shrink-0">
+              {(botError || flattenError) && (
+                <span
+                  className="text-xs font-mono text-loss max-w-48 truncate"
+                  title={botError ?? flattenError ?? ""}
+                >
+                  {botError ?? flattenError}
+                </span>
+              )}
+              {botSubstrategy && (
+                <button
+                  type="button"
+                  onClick={() => setShowBotConfig(true)}
+                  className="btn-secondary !text-xs !py-1.5 !px-2.5 font-sans cursor-pointer gap-1.5 shrink-0"
+                  title={`Configure the ${botSubstrategy.name} bot`}
+                >
+                  <SlidersHorizontal className="w-3.5 h-3.5 text-accent-strong" />
+                  <span>Configurator</span>
+                </button>
+              )}
+              {liveVisible && (
+                <button
+                  type="button"
+                  onClick={() => void scan()}
+                  disabled={scanning || isPaused || !optionsVenueAvailable}
+                  title={
+                    !optionsVenueAvailable
+                      ? "No options-capable venue is enabled in this environment"
+                      : undefined
+                  }
+                  className="btn-primary inline-flex items-center gap-1.5 !text-xs !py-1.5 !px-2.5 font-sans shrink-0"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${scanning ? "animate-spin" : ""}`} />
+                  {scanning ? "Scanning…" : "Scan"}
+                </button>
+              )}
+              {botSubstrategy && (
+                <BotLifecycleControls
+                  phase={botPhase}
+                  hasOpenPositions={openCyclesCount > 0}
+                  disabled={botCfg == null}
+                  allowStartWithOpenPositions
+                  onStart={() => void handleBotMode("auto")}
+                  onPause={() => void handleBotMode("paused")}
+                  onReduceOnly={() => void handleBotMode("reduce_only")}
+                  onStop={() => void handleFlatten()}
+                />
+              )}
+            </div>
           </div>
-          <div className="flex items-center space-x-2 shrink-0">
-            {(botError || flattenError) && (
-              <span
-                className="text-xs font-mono text-loss max-w-48 truncate"
-                title={botError ?? flattenError ?? ""}
-              >
-                {botError ?? flattenError}
-              </span>
-            )}
-            {botSubstrategy && (
-              <button
-                type="button"
-                onClick={() => setShowBotConfig(true)}
-                className="btn-secondary !text-xs !py-1.5 !px-2.5 font-sans cursor-pointer gap-1.5 shrink-0"
-                title={`Configure the ${botSubstrategy.name} bot`}
-              >
-                <SlidersHorizontal className="w-3.5 h-3.5 text-accent-strong" />
-                <span>Configurator</span>
-              </button>
-            )}
-            {liveVisible && (
-              <button
-                type="button"
-                onClick={() => void scan()}
-                disabled={scanning || isPaused || !optionsVenueAvailable}
-                title={
-                  !optionsVenueAvailable
-                    ? "No options-capable venue is enabled in this environment"
-                    : undefined
-                }
-                className="btn-primary inline-flex items-center gap-1.5 !text-xs !py-1.5 !px-2.5 font-sans shrink-0"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${scanning ? "animate-spin" : ""}`} />
-                {scanning ? "Scanning…" : "Scan"}
-              </button>
-            )}
-            {botSubstrategy && (
-              <BotLifecycleControls
-                phase={botPhase}
-                hasOpenPositions={openCyclesCount > 0}
-                disabled={botCfg == null}
-                allowStartWithOpenPositions
-                onStart={() => void handleBotMode("auto")}
-                onPause={() => void handleBotMode("paused")}
-                onReduceOnly={() => void handleBotMode("reduce_only")}
-                onStop={() => void handleFlatten()}
-              />
-            )}
-          </div>
-        </div>
+        )}
 
         {/* Per-substrategy summary cards — filtered view of the monitor. */}
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">

@@ -9,6 +9,7 @@ import {
   filterSidebarExchanges,
   groupExchangesBySection,
   TransactionHistoryCard,
+  EngineSettings,
 } from "./EngineSettings.tsx";
 import type { ConfirmActionSpec } from "./ConfirmActionModal.tsx";
 
@@ -128,8 +129,86 @@ test("reset button hands the parent an explicit confirm spec (interactive DOM)",
   });
 });
 
+test("security tab renders neutral Security Model box and omits MFA unlock explanation and app examples", async (t) => {
+  await t.test("security tab layout & copy (interactive DOM)", () => {
+    const out = execFileSync(
+      process.execPath,
+      [__filename, "--interactive-child", "--security-tab"],
+      { encoding: "utf8", timeout: 30000 },
+    );
+    assert.match(out, /SECURITY-TAB-OK/);
+  });
+});
+
 // ── child-process harness (not executed under node:test) ────────────────────
 declare const __filename: string;
+
+async function runSecurityTabChild() {
+  const { Window } = await import("happy-dom");
+  const { createRoot } = await import("react-dom/client");
+  const { act } = await import("react");
+
+  const window = new Window();
+  for (const key of [
+    "document", "window", "HTMLElement", "HTMLButtonElement",
+    "Element", "Node", "MouseEvent", "CustomEvent", "Event",
+    "SVGElement", "DocumentFragment", "MutationObserver", "getComputedStyle",
+    "requestAnimationFrame", "cancelAnimationFrame",
+  ]) {
+    (globalThis as Record<string, unknown>)[key] =
+      (window as unknown as Record<string, unknown>)[key] ??
+      (globalThis as Record<string, unknown>)[key];
+  }
+  (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
+
+  const container = window.document.createElement("div");
+  window.document.body.appendChild(container);
+  const reactContainer = container as unknown as HTMLElement;
+
+  const root = createRoot(reactContainer);
+  await act(async () => {
+    root.render(
+      React.createElement(EngineSettings, {
+        onClose: () => {},
+      }),
+    );
+  });
+
+  const allButtons = Array.from(container.querySelectorAll("button"));
+  const securityTabBtn = allButtons.find((b) => b.textContent?.includes("Security"));
+  if (!securityTabBtn) throw new Error("no Security tab button found");
+
+  await act(async () => {
+    securityTabBtn.dispatchEvent(new window.MouseEvent("click", { bubbles: true, cancelable: true }));
+  });
+
+  const secHtml = container.innerHTML;
+  if (!secHtml.includes("Security Model")) {
+    throw new Error("Security tab did not render Security Model");
+  }
+  if (!secHtml.includes("bg-slate-50 border border-surface-border rounded-lg p-3.5 shadow-2xs space-y-2")) {
+    throw new Error("Security Model box missing bg-slate-50 styling");
+  }
+  if (!secHtml.includes("text-slate-500")) {
+    throw new Error("Security Model icon missing text-slate-500 styling");
+  }
+  if (secHtml.includes("text-emerald-600")) {
+    throw new Error("Security Model icon still contains text-emerald-600");
+  }
+  if (!secHtml.includes("Optionally require a 6-digit TOTP code at vault unlock")) {
+    throw new Error("TOTP description missing clean label");
+  }
+  if (secHtml.includes("(Google Authenticator, 1Password, Authy)")) {
+    throw new Error("TOTP description still contains authenticator app examples");
+  }
+  if (secHtml.includes("MFA gates the unlock path in this app")) {
+    throw new Error("MFA unlock explanation paragraph is still present");
+  }
+
+  await act(async () => root.unmount());
+  process.stdout.write("SECURITY-TAB-OK\n");
+  process.exit(0);
+}
 
 async function runInteractiveChild() {
   const { Window } = await import("happy-dom");
@@ -187,8 +266,16 @@ async function runInteractiveChild() {
 }
 
 if (INTERACTIVE_CHILD) {
-  runInteractiveChild().catch((err) => {
-    console.error(err);
-    process.exit(1);
-  });
+  if (process.argv.includes("--security-tab")) {
+    runSecurityTabChild().catch((err) => {
+      console.error(err);
+      process.exit(1);
+    });
+  } else {
+    runInteractiveChild().catch((err) => {
+      console.error(err);
+      process.exit(1);
+    });
+  }
 }
+

@@ -648,7 +648,7 @@ impl PopDexAdapter {
         anyhow::bail!("PopDEX lists USDT-quoted futures only; no market for '{symbol}'")
     }
 
-    /// Venue pair code for an engine symbol (`BTC-USDT` → `BTCUSDT`).
+    /// Venue pair code for an engine symbol (`BTC-USDT` → `BTCUSDT`, `BTCUSDT` → `BTCUSDT`).
     fn venue_symbol(symbol: &str) -> String {
         let base = symbol
             .split(['-', '/', ':', '_'])
@@ -656,6 +656,11 @@ impl PopDexAdapter {
             .unwrap_or(symbol)
             .trim()
             .to_uppercase();
+        let base = if base.len() > 4 && base.ends_with("USDT") {
+            &base[..base.len() - 4]
+        } else {
+            &base
+        };
         format!("{base}USDT")
     }
 
@@ -2049,6 +2054,8 @@ mod tests {
         assert_eq!(PopDexAdapter::venue_symbol("BTC-USDT"), "BTCUSDT");
         assert_eq!(PopDexAdapter::venue_symbol("eth"), "ETHUSDT");
         assert_eq!(PopDexAdapter::venue_symbol("QQQ"), "QQQUSDT");
+        assert_eq!(PopDexAdapter::venue_symbol("BTCUSDT"), "BTCUSDT");
+        assert_eq!(PopDexAdapter::venue_symbol("APTUSDT"), "APTUSDT");
     }
 
     #[test]

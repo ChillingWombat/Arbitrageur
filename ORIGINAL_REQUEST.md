@@ -122,3 +122,63 @@ Exact M5 Gate Status from disk (.agents/teamwork/orchestrator_2/):
   - challenger_2: progress.md exists, handoff.md was in-flight at restart (ChallengerR3R4R5.test.ts already created and passing 100%)
   - auditor_1: progress.md exists, handoff.md was in-flight at restart
 Please re-schedule your monitoring crons and instruct orchestrator_2 to revive challenger_2 and auditor_1 to finish their handoff.md files, synthesize the M5 gate, and complete the Victory Audit.
+
+## Follow-up — 2026-10-01T16:09:57Z
+
+Requested team: Full multi-agent team (parallel implementers across requirement blocks)
+
+Standardize and polish strategy monitor components, ribbon tags, button set borders, and security widgets across the Arbitrageur desktop application.
+
+Working directory: /mnt/Data/Projects/Arbitrageur
+Integrity mode: development
+
+## Requirements
+
+### R1. Prediction Market Ribbon & Input Cleanups
+- In `frontend/src/components/PredictionHub.tsx`, remove the execution unavailable warning text (`Prediction venues are scaffolds: no market data or order execution path`).
+- Remove the `Max Slip` ribbon tag.
+- In the filter search input, remove the example text `(e.g. FED, BTC)` from the placeholder, leaving `Search contract...`.
+- Make the `Min Vol` parameter value visible as an active parameter badge (`10,000` or `$500,000` USD from configured strategy parameters), replacing the disabled text `no venue volume data`.
+
+### R2. Strategy Monitor Header Alignment (Spread Radar & Spatial)
+- In `frontend/src/components/OpportunityRadar.tsx`, remove the `Execution Single-Way` badge from the strategy status ribbon.
+- In `frontend/src/components/OpportunityRadar.tsx`, add an `Opportunity Scanner` header to the table gadget and align the filter controls (`Symbol`, `Venue`, `Min Exp`, `Min Win`, hidden count) to the right end of the bar, matching the Funding Rate layout.
+- In `frontend/src/components/SpotArbitrageBot.tsx` (Spatial strategy), align the opportunity monitor header to match the Funding Rate layout: an `Opportunity Scanner` header on the left and filter controls right-aligned.
+
+### R3. Button Set Outer Border Symmetric Padding
+- In `frontend/src/components/BotLifecycleControls.tsx`, update the outer border wrapper padding so that horizontal and vertical spacing between the border and the inner buttons are equal (e.g. `p-1`). Ensure uniform symmetric padding across all strategy lifecycle button groups in the system.
+
+### R4. Dislocation Matrix & Signal Trend Gadget Cleanups
+- In `frontend/src/components/LiveMatrix.tsx`, remove the up and down trend arrow icons (`↗` / `↘`) from the delta badges in matrix cells.
+- In `frontend/src/components/SignalTrendGadget.tsx`, remove the footer text line displaying venue samples and baseline description (`... venue samples in window · ... recorded ... baseline = ...`).
+
+### R5. Funding Rate Opportunity Scanner Dimensions
+- In `frontend/src/components/FundingRadar.tsx`, reduce the height of the Opportunity Scanner gadget so it accommodates exactly 2 rows of opportunity cards, with vertical scrolling for additional cards.
+- Fix the height of individual opportunity cards to maintain consistent card sizing.
+
+### R6. Options Section Header Ribbon
+- In `frontend/src/components/OptionsArbitrage.tsx`, hide the strategy status ribbon bar (`Options Strategies ... Scan`) when "All Strategies" is selected, rendering it only when a specific substrategy is selected.
+
+### R7. Security Page Explanations & MFA Wording
+- In `frontend/src/components/EngineSettings.tsx`, refine the Security Model explanatory box: remove the green icon in favor of a neutral slate icon, and change its background to grey (`bg-slate-50`), matching the legal disclaimer box on the About page.
+- Remove the MFA unlock explanation paragraph (`MFA gates the unlock path in this app...`).
+- Remove the authenticator app examples `(Google Authenticator, 1Password, Authy)` from the TOTP description label.
+
+### R8. Ticker Explorer Symbol Quote Display
+- In `frontend/src/components/TickerExplorer.tsx`, hide the `-USD` quote label when the quote is the universal USD, displaying only the base symbol (e.g. `APT` instead of `APT-USD`). Keep non-USD quote suffixes visible.
+
+## Acceptance Criteria
+
+### UI Appearance & Consistency
+- [ ] Spread Radar and Spatial opportunity monitors display an `Opportunity Scanner` title on the left with search/filters positioned on the right.
+- [ ] Funding Rate Opportunity Scanner gadget is sized for 2 rows of cards with fixed card height.
+- [ ] Prediction Market ribbon shows the active `Min Vol` parameter value, omits `Max Slip` and scaffold warning text, and shows `Search contract...` placeholder.
+- [ ] Dislocation Matrix cell delta badges show numerical delta without trend arrows.
+- [ ] BotLifecycleControls outer border padding is symmetric on all four sides.
+- [ ] Options section displays no top status ribbon when "All Strategies" is viewed.
+- [ ] Security Model gadget uses neutral grey styling and icon; MFA explanation text and app examples in parentheses are removed.
+- [ ] TickerExplorer omits `-USD` quote text for USD tickers while preserving base symbols.
+
+### Verification & Test Suite
+- [ ] All frontend tests pass via `npm test` inside `frontend/`.
+- [ ] TypeScript compilation succeeds with zero errors (`npx tsc --noEmit` or equivalent).

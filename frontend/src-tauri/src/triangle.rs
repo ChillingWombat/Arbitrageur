@@ -787,15 +787,30 @@ pub async fn execute_triangle_arbitrage_impl(
         .map_err(|e| format!("account read on {} failed: {e}", params.venue))?;
     let dust = triangle_dust_qty();
     for sym in &plan.leg_symbols {
-        if adapter
+        if let Some(p) = adapter
             .account_position_for(&pre_acc, sym)
             .ok()
             .flatten()
-            .is_some_and(|p| p.quantity > dust)
+            .filter(|p| p.quantity > dust)
         {
-            return Err(format!(
-                "An open position already exists for {sym}; flatten it before cycling"
-            ));
+            let wire_qty = adapter
+                .wire_base_qty(&p.symbol, p.quantity)
+                .await
+                .unwrap_or(p.quantity);
+            let notional_usd =
+                dec_to_f64(p.notional(), "triangle position notional").unwrap_or(0.0);
+            let is_dust = p.quantity <= Decimal::ZERO
+                || wire_qty <= Decimal::ZERO
+                || (p.mark_price > Decimal::ZERO && notional_usd < 10.0);
+            if !is_dust {
+                return Err(format!(
+                    "An open position already exists for {sym}; flatten it before cycling"
+                ));
+            }
+            tracing::warn!(
+                "triangle {}: {sym} carries sub-minimum/dust position (qty {}, ${:.2}); ignoring dust for cycle entry",
+                params.venue, p.quantity, notional_usd
+            );
         }
     }
 

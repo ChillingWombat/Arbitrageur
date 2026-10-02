@@ -555,9 +555,6 @@ fn default_balance_stale_warn_secs() -> u64 {
 fn default_max_leverage() -> u32 {
     10
 }
-fn default_auto_exit_max_hold_secs() -> u64 {
-    86_400
-}
 fn default_auto_fixed_yield_min_lock_days() -> u32 {
     7
 }
@@ -718,13 +715,6 @@ pub struct EngineSettingsDto {
     /// what decide limit vs market per attempt, not the toggle.
     #[serde(default = "default_passive_unwind_policy")]
     pub passive_unwind: PassiveUnwindConfig,
-    /// Global auto-exit hold deadline for strategy-managed pair positions
-    /// (System Settings → Auto Position Exit): the futures convergence
-    /// supervisor unwinds a still-open pair once it has been held this long,
-    /// regardless of the live edge. Seconds; SpatialExitConfig requires
-    /// >= 60. Radar-bot positions keep their own per-bot `holdTimeoutMult`.
-    #[serde(default = "default_auto_exit_max_hold_secs")]
-    pub auto_exit_max_hold_secs: u64,
     /// Opt-in: allow AUTONOMOUS fixed-yield entries (Boros YU locks on
     /// Arbitrum mainnet). Default OFF — a live four-leg entry that locks
     /// collateral to maturity must never fire from an implicit default.
@@ -930,7 +920,6 @@ impl Default for EngineSettingsDto {
             balance_stale_warn_secs: default_balance_stale_warn_secs(),
             max_leverage: default_max_leverage(),
             passive_unwind: default_passive_unwind_policy(),
-            auto_exit_max_hold_secs: default_auto_exit_max_hold_secs(),
             auto_fixed_yield_enabled: false,
             auto_fixed_yield_min_lock_days: default_auto_fixed_yield_min_lock_days(),
             auto_fixed_yield_min_gas_usd: default_auto_fixed_yield_min_gas_usd(),
@@ -1932,11 +1921,6 @@ impl AppEngineState {
             if let Some(v) = get_u("risk.max_leverage") {
                 if (1..=100).contains(&v) {
                     initial_settings.max_leverage = v;
-                }
-            }
-            if let Some(v) = get_u("engine.auto_exit_max_hold_secs") {
-                if (60..=604_800).contains(&v) {
-                    initial_settings.auto_exit_max_hold_secs = v as u64;
                 }
             }
             // Autonomous fixed-yield opt-in + its safety bounds.

@@ -142,11 +142,12 @@ test("R4: All 6 strategy headers render standardized status badge immediately ri
       onRefreshAll: asyncNoop,
       optionsVenueAvailable: true,
       isPaused: false,
+      initialSelected: "parity",
     })
   );
   assert.match(
     htmlOpt,
-    /<span[^>]*>Options Strategies<\/span>\s*<span[^>]*title="Strategy bot status: (Active|Paused|Reducing|Stopped)"[^>]*>[\s\S]*?<\/span>/
+    /<span[^>]*>(?:Options Strategies|Put–Call Parity)<\/span>\s*<span[^>]*title="Strategy bot status: (Active|Paused|Reducing|Stopped)"[^>]*>[\s\S]*?<\/span>/
   );
   assert.doesNotMatch(htmlOpt, /Engine Paused/);
 });
@@ -289,6 +290,20 @@ test("R3: LiveMatrix dock container has locked h-96", () => {
 // Requirement R5: Options Arbitrage Ribbon & 5th Metric Card
 // ============================================================================
 
+test("R5: OptionsArbitrage ribbon is omitted when All Strategies is selected", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(OptionsArbitrage, {
+      executionLogs: [],
+      onRefreshAll: asyncNoop,
+      optionsVenueAvailable: true,
+      isPaused: false,
+      initialSelected: "all",
+    })
+  );
+  assert.doesNotMatch(html, /Options Strategies/);
+  assert.doesNotMatch(html, /<button[^>]*>\s*<svg[\s\S]*?Scan\s*<\/button>/);
+});
+
 test("R5: OptionsArbitrage header row is single row without flex-wrap", () => {
   const html = renderToStaticMarkup(
     React.createElement(OptionsArbitrage, {
@@ -296,6 +311,7 @@ test("R5: OptionsArbitrage header row is single row without flex-wrap", () => {
       onRefreshAll: asyncNoop,
       optionsVenueAvailable: true,
       isPaused: false,
+      initialSelected: "parity",
     })
   );
 
@@ -329,6 +345,7 @@ test("R5: OptionsArbitrage ribbon completely omits 'Premium Outlay' pill", () =>
       onRefreshAll: asyncNoop,
       optionsVenueAvailable: true,
       isPaused: false,
+      initialSelected: "parity",
     })
   );
 

@@ -102,9 +102,12 @@ This bounds the absolute execution-price gap between legs. It protects against e
 - Reverse basis requires verified borrow/short-spot support and is not implemented.
 - Keep the basis floor disabled unless its sign and units are understood: positive means the perpetual is above spot.
 
-### Holding horizon
+### Holding horizon and Probability Invalidation ($P_{\text{win}}$)
 
-Break-even time assumes the current gap persists. The decay-aware expected hold is preferable but remains a model. Exit when the strategy's validated condition fires; do not hold solely to recover sunk fees.
+Positions are not exited based on arbitrary wall-clock timers or blind holding limits (such as a rigid 30-minute or 24-hour limit), which prematurely terminate winning trades close to convergence and incur unnecessary friction fees. Instead, the engine employs the **Probability-Driven Statistical Invalidation Exit Architecture**:
+- Positions remain open as long as their underlying statistical edge and mean-reversion dynamics remain favorable.
+- The convergence supervisor continuously tracks live Ornstein-Uhlenbeck mean-reversion probability $P_{\text{win}}$ computed by the `OpportunityEngine`.
+- If the live probability of profitable convergence drops below the configured invalidation threshold (`invalidation_p_win`, default 0.50 / 50%), the supervisor dispatches `ExitTrigger::ProbabilityDecayed`, unwinding the position dynamically when the statistical thesis has invalidated rather than forcing premature exits on a clock timer.
 
 ## Triangle
 

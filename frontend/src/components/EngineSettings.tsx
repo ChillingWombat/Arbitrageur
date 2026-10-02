@@ -376,8 +376,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
   // Global Auto Position Exit policy — strategies on "inherit" use this;
   // the Portfolio Monitor's Auto Limit exit runs it too.
   const [passiveUnwind, setPassiveUnwind] = useState<PassiveUnwindDto>({ ...DEFAULT_PASSIVE_UNWIND });
-  // Auto-exit hold deadline (minutes in the UI; seconds on the wire).
-  const [autoExitMaxHoldMin, setAutoExitMaxHoldMin] = useState(1440);
   // Autonomous fixed-yield opt-in + safety bounds (Boros YU, live-only).
   const [autoFixedYield, setAutoFixedYield] = useState(false);
   const [autoFixedYieldMinLockDays, setAutoFixedYieldMinLockDays] = useState(7);
@@ -710,7 +708,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
           maxSpreadBps: s.passive_unwind?.maxSpreadBps ?? DEFAULT_PASSIVE_UNWIND.maxSpreadBps,
           maxFastVolBps: s.passive_unwind?.maxFastVolBps ?? DEFAULT_PASSIVE_UNWIND.maxFastVolBps,
         });
-        setAutoExitMaxHoldMin(Math.round((s.auto_exit_max_hold_secs ?? 86400) / 60));
         setAutoFixedYield(s.auto_fixed_yield_enabled === true);
         setAutoFixedYieldMinLockDays(s.auto_fixed_yield_min_lock_days ?? 7);
         setAutoFixedYieldMinGas(s.auto_fixed_yield_min_gas_usd ?? 25);
@@ -920,7 +917,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
             maxSpreadBps: Number(passiveUnwind.maxSpreadBps) || 0,
             maxFastVolBps: Number(passiveUnwind.maxFastVolBps) || 0,
           },
-          auto_exit_max_hold_secs: Math.trunc(Number(autoExitMaxHoldMin) * 60) || 0,
           auto_fixed_yield_enabled: autoFixedYield,
           auto_fixed_yield_min_lock_days: Math.trunc(Number(autoFixedYieldMinLockDays)) || 0,
           auto_fixed_yield_min_gas_usd: Number(autoFixedYieldMinGas) || 0,
@@ -1884,14 +1880,6 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   onChange={(checked) => setPassiveUnwind({ ...passiveUnwind, enabled: checked })}
                 />
               </div>
-              <div className="flex items-center justify-between gap-3 border-t border-surface-border/60 pt-3">
-                <label className="text-slate-600 block text-xs" title="How long a still-open pair position is held before the auto-exit supervisor unwinds it on timeout — convergence and stop exits can close it sooner. Applies to futures-strategy pairs; radar-bot positions use their own Hold timeout ×">
-                  Max hold before auto-exit (min)
-                </label>
-                <input type="number" min="1" max="10080" step="1" disabled={loading} value={autoExitMaxHoldMin}
-                  onChange={(e) => setAutoExitMaxHoldMin(parseInt(e.target.value, 10) || 0)}
-                  className="w-24 shrink-0 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent" />
-              </div>
               <div className="border-t border-surface-border/60 pt-3">
                 <div className="flex items-center justify-between gap-3">
                   <label className="text-slate-600 block text-xs" title="Allow AUTONOMOUS entries into Boros fixed-yield locks (4-leg: perp pair + two YU legs on Arbitrum mainnet). Live-only, and additionally gated on agent-approval validity, gas treasury, Boros margin, lock term, and positive post-cost return. Manual Execute is unaffected.">
@@ -2280,7 +2268,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                     <p className="text-[11px] font-mono text-slate-500">
                       {vaultStatus?.mfa_enabled
                         ? "A 6-digit authenticator code is required to unlock the vault and rotate the password"
-                        : "Optionally require a 6-digit TOTP code (Google Authenticator, 1Password, Authy) at vault unlock"}
+                        : "Optionally require a 6-digit TOTP code at vault unlock"}
                     </p>
                   </div>
                 </div>
@@ -2393,16 +2381,12 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   </button>
                 </div>
               )}
-
-              <p className="text-[10px] font-sans text-slate-500 leading-relaxed border-t border-surface-border pt-2">
-                MFA gates the unlock path in this app — an operator needs the code, not just the password. The TOTP secret is stored inside the encrypted vault; it does not add encryption strength against theft of the vault file itself.
-              </p>
             </div>
 
             {/* Security declaration */}
-            <div className="bg-surface border border-surface-border rounded-lg p-3.5 shadow-2xs space-y-2">
+            <div className="bg-slate-50 border border-surface-border rounded-lg p-3.5 shadow-2xs space-y-2">
               <div className="flex items-center space-x-1.5 font-bold text-slate-800 text-xs font-mono">
-                <ShieldCheck className="w-3.5 h-3.5 text-emerald-600" />
+                <ShieldCheck className="w-3.5 h-3.5 text-slate-500" />
                 <span>Security Model</span>
               </div>
               <p className="text-xs font-mono text-slate-600 leading-relaxed">

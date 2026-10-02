@@ -6,11 +6,9 @@ import {
   EyeOff,
   ShieldCheck,
   TrendingUp,
-  Coins,
   Layers,
   ArrowLeftRight,
   Activity,
-  Scale,
   Wind,
   Repeat,
   Target,
@@ -85,26 +83,27 @@ interface SectionDef {
 }
 
 /** Settings sections per strategy — the left panel navigates these, not strategies. */
-const STRATEGY_SECTIONS: Record<"futures" | "funding" | "spot" | "triangle" | "prediction", SectionDef[]> = {
+export const STRATEGY_SECTIONS: Record<"futures" | "funding" | "spot" | "triangle" | "prediction", SectionDef[]> = {
   futures: [
-    { id: "hurdle", label: "Signal Trigger", tooltip: "Configure target profit, historical baseline window, percentile trigger, and execution behavior.", icon: TrendingUp },
-    { id: "sizing", label: "Execution & Sizing", tooltip: "Configure notional per leg, grid capacity, accumulated units, and cross-venue lot compatibility.", icon: Layers },
+    { id: "hurdle", label: "Signal & Triggers", tooltip: "Configure target profit, historical baseline window, percentile trigger, and execution behavior.", icon: TrendingUp },
+    { id: "sizing", label: "Sizing & Capital", tooltip: "Configure notional per leg, grid capacity, accumulated units, and cross-venue lot compatibility.", icon: Layers },
     { id: "leverage", label: "Leverage & Margin", tooltip: "Review target leverage, effective safe leverage, margin requirements, and liquidation buffer.", icon: ShieldCheck },
     { id: "unwind", label: "Auto Position Exit", tooltip: "Configure reduce-only limit unwinds pegged inside the spread with timeout and market fallback.", icon: Wind },
     { id: "visibility", label: "Ticker Visibility", tooltip: "Automatic per-strategy hide filters (MIN across venues, fail-closed) plus manual hide list.", icon: EyeOff },
     { id: "routing", label: "Account Routing", tooltip: "Map which exchange accounts to route this strategy's orders to.", icon: ArrowLeftRight },
   ],
   funding: [
-    { id: "carry", label: "Carry Parameters", tooltip: "Configure funding-carry trade size and minimum net APR.", icon: Coins },
+    { id: "signal", label: "Signal & Triggers", tooltip: "Configure minimum net APR return hurdle, expected holding horizon, and basis trade filters.", icon: TrendingUp },
+    { id: "sizing", label: "Sizing & Capital", tooltip: "Configure notional carry trade size, leg caps, and portfolio equity limits.", icon: Layers },
     { id: "execution", label: "Execution & Slippage", tooltip: "Configure orderbook slippage tolerance, maximum entry spread, and auto-exit threshold.", icon: Activity },
-    { id: "risk", label: "Risk & Rebalance", tooltip: "Configure liquidation-distance trim, drift auto-rebalance, and rotation hurdle threshold.", icon: Scale },
+    { id: "risk", label: "Risk Guardrails", tooltip: "Configure liquidation-distance trim, drift auto-rebalance, and rotation hurdle threshold.", icon: ShieldCheck },
     { id: "unwind", label: "Auto Position Exit", tooltip: "Configure reduce-only limit unwinds pegged inside the spread with timeout and market fallback.", icon: Wind },
     { id: "visibility", label: "Ticker Visibility", tooltip: "Automatic per-strategy hide filters (MIN across venues, fail-closed) plus manual hide list.", icon: EyeOff },
     { id: "routing", label: "Account Routing", tooltip: "Map which exchange accounts to route this strategy's orders to.", icon: ArrowLeftRight },
   ],
   spot: [
     { id: "spatial", label: "Spatial Parameters", tooltip: "Configure spot trade size, minimum net spread, and orderbook slippage tolerance limit.", icon: Layers },
-    { id: "risk", label: "Risk & Safety", tooltip: "Configure liquidation-distance trim protection.", icon: ShieldCheck },
+    { id: "risk", label: "Risk Guardrails", tooltip: "Configure liquidation-distance trim protection.", icon: ShieldCheck },
     { id: "unwind", label: "Auto Position Exit", tooltip: "Configure reduce-only limit unwinds pegged inside the spread with timeout and market fallback.", icon: Wind },
     { id: "visibility", label: "Ticker Visibility", tooltip: "Automatic per-strategy hide filters (MIN across venues, fail-closed) plus manual hide list.", icon: EyeOff },
     { id: "routing", label: "Account Routing", tooltip: "Map which exchange accounts to route this strategy's orders to.", icon: ArrowLeftRight },
@@ -649,6 +648,8 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
     setFundingMaxEntrySpreadBps(50.0);
     setFundingAutoExitSpreadPct("");
     setFundingRotationThresholdBps("");
+    setFundingEnableBasis(true);
+    setFundingMinBasisBps("");
     setFundingLiqTrimPct("");
     setFuturesMaxSlippageBps(15.0);
     setFuturesLiqTrimPct("");
@@ -972,8 +973,8 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
     <div className="space-y-3">
       <div className="flex items-center justify-between pb-1 border-b border-surface-border/60">
         <div>
-          <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Signal Trigger & Timing</h3>
-          <p className="text-[11px] font-sans text-muted mt-0.5">Thresholds and historical baseline models</p>
+          <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Signal &amp; Triggers</h3>
+          <p className="text-[11px] font-sans text-muted mt-0.5">Thresholds, timing, and historical baseline models</p>
         </div>
         <div className="flex items-center gap-1.5">
           <button
@@ -1143,7 +1144,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
   const renderFuturesSizingSection = () => (
     <div className="space-y-3">
       <div className="pb-1 border-b border-surface-border/60">
-        <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Execution & Sizing</h3>
+        <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Sizing &amp; Capital</h3>
         <p className="text-[11px] font-sans text-muted mt-0.5">Step size, lot bounds, and capital allocation</p>
       </div>
 
@@ -1239,39 +1240,40 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
     </div>
   );
 
-  /** Funding Carry Parameters Section */
-  const renderFundingCarrySection = () => (
+  /** Funding Signal & Triggers Section */
+  const renderFundingSignalSection = () => (
     <div className="space-y-3">
       <div className="pb-1 border-b border-surface-border/60">
-        <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Carry Parameters</h3>
-        <p className="text-[11px] font-sans text-muted mt-0.5">Position sizing and target return hurdle</p>
+        <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Signal &amp; Triggers</h3>
+        <p className="text-[11px] font-sans text-muted mt-0.5">Yield threshold, holding horizon, and basis scanner triggers</p>
       </div>
 
       <SettingRow
-        label="Trade Size"
-        description="Notional capital deployed per carry position leg"
-        tooltip="Target dollar value for each leg of the delta-neutral funding rate position."
-      >
-        <NumberInput
-          value={fundingTradeSizeUsd}
-          onChange={(v) => setFundingTradeSizeUsd(Math.max(100, parseFloat(v) || 1000))}
-          unit="USD"
-          step="1000"
-          min="1000"
-        />
-      </SettingRow>
-
-      <SettingRow
-        label="Min APR Hurdle"
-        description="Ignore funding rate opportunities below this net annualized yield"
+        label="Min Net APR"
+        description="Ignore funding rate opportunities below this net annualized yield (% p.a.)"
         tooltip="Minimum net APR after deducting continuous borrow interest, taker fees, and amortized execution friction."
       >
         <NumberInput
           value={fundingMinAprPct}
           onChange={(v) => setFundingMinAprPct(Math.max(0.1, parseFloat(v) || 1))}
-          unit="%"
+          unit="% p.a."
           step="0.5"
+          min="0.1"
+        />
+      </SettingRow>
+
+      <SettingRow
+        label="Expected Holding Horizon"
+        description="Assumed carry trade duration in days used to amortize entry/exit execution friction"
+        tooltip="Duration (in days) over which taker fees, slippage, and spread crossing costs are amortized against cumulative funding yield. Must be at least 1 day."
+      >
+        <NumberInput
+          value={fundingHoldingDays}
+          onChange={(v) => setFundingHoldingDays(Math.max(1, parseInt(v, 10) || 14))}
+          unit="days"
+          step="1"
           min="1"
+          max="365"
         />
       </SettingRow>
 
@@ -1289,7 +1291,7 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
       </SettingRow>
 
       <SettingRow
-        label="Min Basis"
+        label="Min Basis Spread"
         description="Skip basis opps below this signed spot/perp divergence · empty = off"
         tooltip="Floor on (perp - spot) / spot in bps. Positive = contango only; empty disables the floor (funding APR still gates)."
       >
@@ -1301,7 +1303,59 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
           placeholder="OFF"
         />
       </SettingRow>
+    </div>
+  );
 
+  /** Funding Sizing & Capital Section */
+  const renderFundingSizingSection = () => (
+    <div className="space-y-3">
+      <div className="pb-1 border-b border-surface-border/60">
+        <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Sizing &amp; Capital</h3>
+        <p className="text-[11px] font-sans text-muted mt-0.5">Position trade size, leg notional caps, and portfolio equity limits</p>
+      </div>
+
+      <SettingRow
+        label="Carry Trade Size"
+        description="Notional capital deployed per carry position leg"
+        tooltip="Target dollar value for each leg of the delta-neutral funding rate position."
+      >
+        <NumberInput
+          value={fundingTradeSizeUsd}
+          onChange={(v) => setFundingTradeSizeUsd(Math.max(100, parseFloat(v) || 1000))}
+          unit="USD"
+          step="100"
+          min="100"
+        />
+      </SettingRow>
+
+      <SettingRow
+        label="Max Leg Notional Cap"
+        description="Hard upper bound on dollar notional per single order leg"
+        tooltip="Absolute ceiling for notional allocation on any individual carry or basis leg."
+      >
+        <NumberInput
+          value={maxStepUsd}
+          onChange={(v) => setMaxStepUsd(Math.max(10, parseFloat(v) || 2500))}
+          unit="USD"
+          step="100"
+          min="10"
+        />
+      </SettingRow>
+
+      <SettingRow
+        label="Max Ticker Equity"
+        description="Maximum total portfolio exposure percentage committed to this ticker"
+        tooltip="Caps total accumulated position sizing across all legs of this ticker to a fraction of total portfolio equity."
+      >
+        <NumberInput
+          value={maxTickerEquityPct}
+          onChange={(v) => setMaxTickerEquityPct(Math.max(0.1, Math.min(100, parseFloat(v) || 20)))}
+          unit="%"
+          step="0.5"
+          min="0.1"
+          max="100"
+        />
+      </SettingRow>
     </div>
   );
 
@@ -1309,12 +1363,12 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
   const renderFundingExecutionSection = () => (
     <div className="space-y-3">
       <div className="pb-1 border-b border-surface-border/60">
-        <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Execution & Slippage</h3>
+        <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Execution &amp; Slippage</h3>
         <p className="text-[11px] font-sans text-muted mt-0.5">Orderbook tolerance limits and convergence exit triggers</p>
       </div>
 
       <SettingRow
-        label="Max Slippage"
+        label="Max Slippage Tolerance"
         description="Per-strategy slippage gate for funding entries"
         tooltip="Individual leg VWAP slippage ceiling. Entries exceeding this tolerance are aborted."
       >
@@ -1359,18 +1413,33 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
     </div>
   );
 
-  /** Funding Risk & Rebalance Section */
+  /** Funding Risk Guardrails Section */
   const renderFundingRiskSection = () => (
     <div className="space-y-3">
       <div className="pb-1 border-b border-surface-border/60">
-        <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Risk &amp; Rotation</h3>
-        <p className="text-[11px] font-sans text-muted mt-0.5">Liquidation trim, rotation thresholds, and margin protection</p>
+        <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Risk Guardrails</h3>
+        <p className="text-[11px] font-sans text-muted mt-0.5">Liquidation trim, drift auto-rebalance, and rotation hurdle threshold</p>
       </div>
 
       {renderTrimBlock(fundingLiqTrimPct, setFundingLiqTrimPct, true)}
 
       <SettingRow
-        label="Rotation Threshold"
+        label="Drift Auto-Rebalance"
+        description="Supervised delta-neutrality drift tolerance before automated leg balancing · planned"
+        tooltip="Threshold for automated delta rebalancing when price movement causes spot vs perp notional drift. Currently planned; passive unwinds govern limit convergence."
+      >
+        <NumberInput
+          value=""
+          onChange={() => {}}
+          unit="%"
+          step="0.5"
+          placeholder="OFF"
+          disabled
+        />
+      </SettingRow>
+
+      <SettingRow
+        label="Rotation Hurdle"
         description="Exit when another symbol/venue pair's net carry exceeds this position's by more than this hurdle · empty = off"
         tooltip="Supervised every ~60s against live funding-rate samples: flattens the position when a strictly better pairing clears the hurdle, so the scanner can re-deploy the capital. The threshold is the churn allowance for exit+re-entry friction."
       >
@@ -1443,11 +1512,11 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
     </div>
   );
 
-  /** Spot Risk & Safety Section */
+  /** Spot Risk Guardrails Section */
   const renderSpotRiskSection = () => (
     <div className="space-y-3">
       <div className="pb-1 border-b border-surface-border/60">
-        <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Risk & Safety</h3>
+        <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Risk Guardrails</h3>
         <p className="text-[11px] font-sans text-muted mt-0.5">Liquidation-distance trim protection</p>
       </div>
 
@@ -1865,16 +1934,17 @@ export const TickerConfigModal: React.FC<TickerConfigModalProps> = ({
                 {/* Simple Spread (Futures) */}
                 {activeStrategyTab === "futures" && (
                   <>
-                    {activeSection === "hurdle" && renderFuturesHurdleSection()}
+                    {(activeSection === "hurdle" || activeSection === "signal") && renderFuturesHurdleSection()}
                     {activeSection === "sizing" && renderFuturesSizingSection()}
                     {activeSection === "leverage" && renderFuturesLeverageSection()}
                   </>
                 )}
 
-                {/* Funding Carry */}
+                {/* Funding Rate */}
                 {activeStrategyTab === "funding" && (
                   <>
-                    {activeSection === "carry" && renderFundingCarrySection()}
+                    {(activeSection === "signal" || activeSection === "carry") && renderFundingSignalSection()}
+                    {activeSection === "sizing" && renderFundingSizingSection()}
                     {activeSection === "execution" && renderFundingExecutionSection()}
                     {activeSection === "risk" && renderFundingRiskSection()}
                   </>

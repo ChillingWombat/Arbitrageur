@@ -333,6 +333,21 @@ impl StateStore {
         .expect("age signal for test");
     }
 
+    #[cfg(test)]
+    pub fn force_signal_timestamps_for_test(
+        &self,
+        signal_id: &str,
+        created_at: &str,
+        updated_at: &str,
+    ) {
+        let conn = self.conn.lock();
+        conn.execute(
+            "UPDATE signal_executions SET created_at = ?1, updated_at = ?2 WHERE id = ?3",
+            params![created_at, updated_at, signal_id],
+        )
+        .expect("timestamp signal for test");
+    }
+
     /// Record an actual fill on one leg of a signal (matched by side).
     pub fn apply_leg_fill(
         &self,
@@ -612,6 +627,7 @@ impl StateStore {
                      OR (l.client_order_id IS NOT NULL AND l.client_order_id != '')
                    )
                    AND datetime(e.created_at) > datetime('now', '-30 minutes')
+                   AND NOT EXISTS (SELECT 1 FROM kv WHERE k = 'recon_settled:' || l.id)
                  )
                )",
         );

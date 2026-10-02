@@ -37,6 +37,26 @@ test("quote-variant instruments render distinct rows labelled by quote", () => {
   assert.match(html, /XRP<span[^>]*>-USDT</, "USDT variant shows its quote");
 });
 
+test("symbol quote display: hides -USD quote suffix for USD tickers while preserving non-USD quotes", () => {
+  const html = renderToStaticMarkup(
+    React.createElement(TickerExplorer, {
+      ...baseProps,
+      availableTickers: [
+        ticker("APT-USD", "APT", "USD", ["HL", "LGT"]),
+        ticker("APT-USDC", "APT", "USDC", ["HL", "LGT"]),
+        ticker("APT-USDT", "APT", "USDT", ["AST", "BNB"]),
+      ],
+    }),
+  );
+  // Universal USD ticker displays only base symbol, omitting -USD quote
+  assert.match(html, /<span[^>]*>APT<\/span>/);
+  assert.doesNotMatch(html, />-USD</);
+
+  // Non-USD stablecoin tickers retain their quote suffixes
+  assert.match(html, /APT<span[^>]*>-USDC</);
+  assert.match(html, /APT<span[^>]*>-USDT</);
+});
+
 test("duplicate symbols from the ticker list render exactly once", () => {
   const html = renderToStaticMarkup(
     React.createElement(TickerExplorer, {

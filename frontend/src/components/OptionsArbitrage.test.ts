@@ -76,9 +76,10 @@ test("gate: unadmitted options venue renders the page with a disabled scan + ban
       executionLogs: [],
       onRefreshAll: noop,
       optionsVenueAvailable: false,
+      initialSelected: "parity",
     })
   );
-  assert.match(html, /Options Strategies/);
+  assert.match(html, /Put–Call Parity/);
   assert.match(html, /No options-capable venue is enabled/);
   assert.match(html, /test\.deribit\.com/);
   const scanBtn = html.match(/<button[^>]*>\s*<svg[\s\S]*?Scan\s*<\/button>/);
@@ -327,12 +328,38 @@ test("metrics: 5th card renders Premium Outlay and ribbon omits outlay pill", ()
   assert.match(htmlNullOutlay, /Premium Outlay<\/div>[\s\S]*?>—<\/div>/);
 });
 
+test("ribbon: omitted when All Strategies is selected (default and explicit)", () => {
+  // When 'all' is selected explicitly
+  const htmlExplicitAll = renderToStaticMarkup(
+    React.createElement(OptionsArbitrage, {
+      executionLogs: [],
+      onRefreshAll: noop,
+      optionsVenueAvailable: true,
+      initialSelected: "all",
+    })
+  );
+  assert.doesNotMatch(htmlExplicitAll, /<span[^>]*>Options Strategies<\/span>/);
+  assert.doesNotMatch(htmlExplicitAll, /<button[^>]*>\s*<svg[\s\S]*?Scan\s*<\/button>/);
+
+  // When initialSelected is omitted (defaults to 'all')
+  const htmlDefault = renderToStaticMarkup(
+    React.createElement(OptionsArbitrage, {
+      executionLogs: [],
+      onRefreshAll: noop,
+      optionsVenueAvailable: true,
+    })
+  );
+  assert.doesNotMatch(htmlDefault, /<span[^>]*>Options Strategies<\/span>/);
+  assert.doesNotMatch(htmlDefault, /<button[^>]*>\s*<svg[\s\S]*?Scan\s*<\/button>/);
+});
+
 test("ribbon: header houses title, status, scan, and controls on a single line without wrapping", () => {
   const html = renderToStaticMarkup(
     React.createElement(OptionsArbitrage, {
       executionLogs: [],
       onRefreshAll: noop,
       optionsVenueAvailable: true,
+      initialSelected: "parity",
     })
   );
   const headerContainer = html.match(/<div class="[^"]*justify-between[^"]*rounded-xl[^"]*">/);
@@ -349,11 +376,12 @@ test("status badge: OptionsArbitrage renders standardized status badge and never
       onRefreshAll: noop,
       optionsVenueAvailable: true,
       isPaused: false,
+      initialSelected: "parity",
     })
   );
   assert.match(
     html,
-    /Options Strategies<\/span>[\s\S]*?title="Strategy bot status: Stopped"[\s\S]*?>Stopped<\/span>/
+    /Put–Call Parity<\/span>[\s\S]*?title="Strategy bot status: Stopped"[\s\S]*?>Stopped<\/span>/
   );
   assert.doesNotMatch(html, /Engine/i);
 
@@ -363,6 +391,7 @@ test("status badge: OptionsArbitrage renders standardized status badge and never
       onRefreshAll: noop,
       optionsVenueAvailable: true,
       isPaused: true,
+      initialSelected: "parity",
     })
   );
   assert.match(htmlPaused, /title="Strategy bot status: Stopped"/);

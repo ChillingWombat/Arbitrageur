@@ -358,7 +358,11 @@ impl ExchangeAdapter for LighterAdapter {
     }
 
     fn name(&self) -> &str {
-        "Lighter"
+        if self.venue_id.as_str() == "robinhood" {
+            "Robinhood Lighter"
+        } else {
+            "Lighter"
+        }
     }
 
     fn rest_base_url(&self) -> Option<String> {

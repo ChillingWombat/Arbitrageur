@@ -100,3 +100,32 @@ test("SpotArbitrageBot renders standardized status badge and passes isPaused", (
   assert.match(htmlPaused, /title="Strategy bot status: Stopped"/);
   assert.doesNotMatch(htmlPaused, /Engine Paused/);
 });
+
+test("SpotArbitrageBot renders Opportunity Scanner header on left and right-aligned filter controls", () => {
+  const html = render({
+    strategyId: "spot",
+    scanReady: true,
+    executeReady: true,
+    reason: null,
+  });
+  assert.match(
+    html,
+    /<h3 class="text-\[13px\] font-bold font-sans tracking-wider text-slate-900">Opportunity Scanner<\/h3>/
+  );
+  assert.match(
+    html,
+    /class="p-3\.5 border-b border-surface-border flex items-center justify-between gap-3 bg-surface"/
+  );
+  assert.match(
+    html,
+    /<div class="flex items-center gap-3 text-xs font-sans">[\s\S]*?Search[\s\S]*?Filter Asset:[\s\S]*?opportunities detected/
+  );
+});
+
+test("SpotArbitrageBot: asset dropdown is anchored to right edge (right-0)", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { resolve } = await import("node:path");
+  const filePath = resolve(process.cwd(), "src/components/SpotArbitrageBot.tsx");
+  const source = readFileSync(filePath, "utf8");
+  assert.match(source, /dropdown-menu right-0 top-full mt-1\.5 w-48 z-30/);
+});

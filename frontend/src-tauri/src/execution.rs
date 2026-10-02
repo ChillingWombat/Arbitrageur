@@ -908,11 +908,28 @@ pub(crate) async fn common_wire_qty(
         .wire_base_qty(symbol, requested)
         .await
         .map_err(|e| format!("{sell_vid} cannot size {symbol} on its wire grid: {e}"))?;
-    let common = buy_wire.min(sell_wire);
+    let mut common = buy_wire.min(sell_wire);
     if common <= dec!(0) {
         return Err(format!(
             "{symbol} order quantity {requested} snaps to zero on {buy_vid}/{sell_vid} wire grids"
         ));
+    }
+    // Cross-grid iterative snap (up to 2 passes): if one venue sizes via an inverse contract
+    // conversion (generating fractional base units), the other venue's discrete grid snaps it down.
+    for _ in 0..2 {
+        let b = buy_adapter
+            .wire_base_qty(symbol, common)
+            .await
+            .map_err(|e| format!("{buy_vid} cannot size snapped quantity {common}: {e}"))?;
+        let s = sell_adapter
+            .wire_base_qty(symbol, common)
+            .await
+            .map_err(|e| format!("{sell_vid} cannot size snapped quantity {common}: {e}"))?;
+        let next = b.min(s);
+        if next <= dec!(0) || next == common {
+            break;
+        }
+        common = next;
     }
     let buy_check = buy_adapter
         .wire_base_qty(symbol, common)
@@ -1740,11 +1757,25 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
             (sell_venue, &sell_adapter, &acc_sell, sell_order_sym),
         ] {
             match adapter.account_position_for(acc, leg_sym) {
-                Ok(Some(_)) => {
-                    return Err(format!(
-                        "An open position already exists for {} on {}; closing lifecycle is not implemented",
-                        leg_sym, vname
-                    ));
+                Ok(Some(p)) => {
+                    let wire_qty = adapter
+                        .wire_base_qty(&p.symbol, p.quantity)
+                        .await
+                        .unwrap_or(p.quantity);
+                    let notional_usd = dec_to_f64(p.notional(), "residual notional").unwrap_or(0.0);
+                    let is_dust = p.quantity <= Decimal::ZERO
+                        || wire_qty <= Decimal::ZERO
+                        || (p.mark_price > Decimal::ZERO && notional_usd < 10.0);
+                    if !is_dust {
+                        return Err(format!(
+                            "An open position already exists for {} on {}; closing lifecycle is not implemented",
+                            leg_sym, vname
+                        ));
+                    }
+                    tracing::warn!(
+                        "execution {vname}: {leg_sym} carries sub-minimum/dust position (qty {}, ${:.2}); ignoring dust for entry",
+                        p.quantity, notional_usd
+                    );
                 }
                 Ok(None) => {}
                 Err(e) => {
@@ -5695,7 +5726,7 @@ async fn flatten_positions_inner(
             continue;
         }
 
-        let close_family = |note: &str| -> Result<(), String> {
+        let close_family = |note: &str, current_close_id: Option<&str>| -> Result<(), String> {
             state
                 .state_store
                 .update_signal_status(&sig.id, SignalStatus::Closed, Some(note))
@@ -5706,6 +5737,7 @@ async fn flatten_positions_inner(
                         let has_fills = s.legs.iter().any(|l| l.filled_qty > 0.0);
                         if s.status.counts_as_open()
                             || (s.status == SignalStatus::Failed && has_fills)
+                            || current_close_id == Some(s.id.as_str())
                         {
                             let _ = state.state_store.update_signal_status(
                                 &s.id,
@@ -5747,7 +5779,10 @@ async fn flatten_positions_inner(
                 ));
                 continue;
             }
-            close_family(&format!("flatten {}: no residual venue position", sig.id))?;
+            close_family(
+                &format!("flatten {}: no residual venue position", sig.id),
+                None,
+            )?;
             out.signals_closed += 1;
             if let Some((usd, _, fee_basis)) =
                 close_flattened_spatial_lot(state, &sig, &family, close_status)
@@ -6003,7 +6038,7 @@ async fn flatten_positions_inner(
             sig.legs.get(1).map(|l| l.venue.clone()).unwrap_or_default(),
         );
         if fully_flat {
-            close_family(&note)?;
+            close_family(&note, Some(&close_id))?;
             out.signals_closed += 1;
             flatten_realized = close_flattened_spatial_lot(state, &sig, &family_now, close_status);
             if let Some((usd, _, fee_basis)) = flatten_realized {
@@ -6750,7 +6785,7 @@ pub async fn check_spatial_convergence_impl(
     state: &AppEngineState,
 ) -> Result<Vec<ConvergenceCheckDto>, String> {
     use arbitrageur_strategy::spatial_exit::{
-        evaluate_spatial_exit, SpatialExitConfig, SpatialExitTrigger, SpatialExitVerdict,
+        evaluate_spatial_exit_with_prob, SpatialExitConfig, SpatialExitTrigger, SpatialExitVerdict,
     };
     let sid = crate::state_store::normalize_strategy_id(strategy_id).map_err(|e| e.to_string())?;
     if sid != "futures" {
@@ -6759,11 +6794,7 @@ pub async fn check_spatial_convergence_impl(
                 .into(),
         );
     }
-    let cfg = SpatialExitConfig {
-        max_hold_secs: i64::try_from(state.settings.read().auto_exit_max_hold_secs)
-            .unwrap_or(i64::MAX),
-        ..SpatialExitConfig::default()
-    };
+    let cfg = SpatialExitConfig::default();
     cfg.validate().map_err(|e| e.to_string())?;
     if let Some(s) = symbol {
         validate_market_symbol(s)?;
@@ -6840,7 +6871,19 @@ pub async fn check_spatial_convergence_impl(
                     continue;
                 }
             };
-        match evaluate_spatial_exit(entry_net, live, entry_ts, now_ms, &cfg) {
+        let live_p_win = state.monitor.lock().as_ref().and_then(|m| {
+            m.snapshot().and_then(|snap| {
+                snap.rows
+                    .iter()
+                    .find(|r| {
+                        r.symbol.eq_ignore_ascii_case(&sig.symbol)
+                            && r.buy_venue.eq_ignore_ascii_case(&buy.venue)
+                            && r.sell_venue.eq_ignore_ascii_case(&sell.venue)
+                    })
+                    .and_then(|r| r.win_probability.or(r.reversion_probability).or(r.p_win))
+            })
+        });
+        match evaluate_spatial_exit_with_prob(entry_net, live, live_p_win, entry_ts, now_ms, &cfg) {
             SpatialExitVerdict::Hold => {
                 // Liquidation-distance trim rides the same 5s supervisor:
                 // while the edge is inside the band, still protect the
@@ -6878,6 +6921,7 @@ pub async fn check_spatial_convergence_impl(
                 let close_status = match trigger {
                     SpatialExitTrigger::Converged => CycleStatus::Closed,
                     SpatialExitTrigger::Stopped => CycleStatus::StoppedOut,
+                    SpatialExitTrigger::ProbabilityDecayed => CycleStatus::StoppedOut,
                     SpatialExitTrigger::TimedOut => CycleStatus::TimedOut,
                 };
                 match flatten_ticker_positions_impl(Some(&sig.symbol), &sid, close_status, state)
@@ -7520,6 +7564,72 @@ mod account_read_tests {
             .await
             .expect("coarse floor is representable on both");
         assert_eq!(snapped, dec!(0.01));
+    }
+
+    #[tokio::test]
+    async fn common_wire_qty_iterative_snap_handles_fractional_lot() {
+        struct FractionalAdapter;
+        #[async_trait::async_trait]
+        impl ExchangeAdapter for FractionalAdapter {
+            fn venue_id(&self) -> VenueId {
+                VenueId::new("inverse")
+            }
+            fn name(&self) -> &str {
+                "inverse"
+            }
+            async fn wire_base_qty(&self, _symbol: &str, qty: Decimal) -> anyhow::Result<Decimal> {
+                if qty == dec!(0.00082) {
+                    return Ok(dec!(0.00082));
+                }
+                Ok(dec!(0.000823376))
+            }
+            async fn fetch_orderbook(
+                &self,
+                _s: &str,
+            ) -> anyhow::Result<arbitrageur_core::quote::OrderBook> {
+                unimplemented!()
+            }
+            async fn fetch_ticker(
+                &self,
+                _s: &str,
+            ) -> anyhow::Result<arbitrageur_core::quote::Ticker> {
+                unimplemented!()
+            }
+            async fn fetch_funding_rate(
+                &self,
+                _s: &str,
+            ) -> anyhow::Result<arbitrageur_core::quote::FundingRate> {
+                unimplemented!()
+            }
+            async fn fetch_markets(
+                &self,
+            ) -> anyhow::Result<Vec<arbitrageur_core::market::MarketMetadata>> {
+                unimplemented!()
+            }
+            async fn fetch_account(
+                &self,
+            ) -> anyhow::Result<arbitrageur_core::position::AccountSnapshot> {
+                unimplemented!()
+            }
+            async fn place_order(
+                &self,
+                _r: arbitrageur_core::order::OrderRequest,
+            ) -> anyhow::Result<arbitrageur_core::order::OrderResponse> {
+                unimplemented!()
+            }
+            async fn cancel_order(
+                &self,
+                _r: arbitrageur_core::order::CancelRequest,
+            ) -> anyhow::Result<()> {
+                unimplemented!()
+            }
+        }
+        let linear = grid_adapter("linear", dec!(0.00001));
+        let inverse: Arc<dyn ExchangeAdapter> = Arc::new(FractionalAdapter);
+        let snapped = common_wire_qty("BTC-USDC", dec!(0.00094), &linear, &inverse)
+            .await
+            .expect("iterative snap reconciles fractional inverse wire");
+        assert_eq!(snapped, dec!(0.00082));
     }
 
     /// Venue fixture for the liq-trim CloseBoth path: one seeded account

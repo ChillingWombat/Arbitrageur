@@ -184,10 +184,10 @@ test("FundingRadar renders 5-card top telemetry metric strip with correct values
   assert.match(html, /Total APR/);
   assert.match(html, /% APR/);
   assert.match(html, /since first trade/);
-  // Average Net APR
-  assert.match(html, /Average Net APR/);
-  assert.match(html, /\+25\.3% APR/);
-  assert.match(html, /across 2 pairs/);
+  // Avg Realized Return
+  assert.match(html, /Avg Realized Return/);
+  assert.match(html, /\+\$23\.50/);
+  assert.match(html, /\+235\.0 bps avg/);
   // Open Positions
   assert.match(html, /Open Positions/);
   assert.match(html, />1<\/div>/);
@@ -247,6 +247,40 @@ test("FundingRadar: Total APR card handles empty trade history honestly", () => 
   );
   assert.match(html, /Total APR/);
   assert.match(html, /No trades yet/);
+});
+
+test("FundingRadar: Opportunity Scanner container is h-[600px] and cards have h-[250px] overflow-hidden", () => {
+  const opp = baseOpp({
+    symbol: "ETH-USDC",
+    net_apr_pct: 18.5,
+  });
+  const html = renderToStaticMarkup(
+    React.createElement(FundingRadar, {
+      opportunities: [opp],
+      tradeSize: 1000,
+      loading: false,
+    })
+  );
+  assert.match(
+    html,
+    /<div class="bg-surface rounded-xl border border-surface-border p-4 shadow-card h-\[600px\] flex flex-col">/
+  );
+  assert.match(
+    html,
+    /<h3 class="text-\[13px\] font-bold font-sans tracking-wider text-slate-900">Opportunity Scanner<\/h3>/
+  );
+  assert.match(
+    html,
+    /class="[^"]*h-\[250px\] overflow-hidden[^"]*"/
+  );
+});
+
+test("FundingRadar: scanner comment documents 5x2 compact cards", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { resolve } = await import("node:path");
+  const filePath = resolve(process.cwd(), "src/components/FundingRadar.tsx");
+  const source = readFileSync(filePath, "utf8");
+  assert.match(source, /Opportunity Scanner — fixed window, 5x2 compact cards, click for details/);
 });
 
 

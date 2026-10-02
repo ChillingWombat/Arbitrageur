@@ -20,6 +20,9 @@ pub struct SpatialExitConfig {
     pub stop_drop_bps: f64,
     /// Exit as timed out this long after entry (seconds).
     pub max_hold_secs: i64,
+    /// Minimum live reversion probability (default 0.50). If live P_win drops below this,
+    /// the trade is exited as ProbabilityDecayed.
+    pub invalidation_p_win: f64,
 }
 
 impl Default for SpatialExitConfig {
@@ -28,6 +31,7 @@ impl Default for SpatialExitConfig {
             converge_exit_bps: 0.0,
             stop_drop_bps: 5.0,
             max_hold_secs: 86_400,
+            invalidation_p_win: 0.50,
         }
     }
 }
@@ -50,6 +54,13 @@ impl SpatialExitConfig {
             return Err(format!(
                 "max_hold_secs {} must be at least 60",
                 self.max_hold_secs
+            ));
+        }
+        if !self.invalidation_p_win.is_finite() || !(0.05..=0.90).contains(&self.invalidation_p_win)
+        {
+            return Err(format!(
+                "invalidation_p_win {:.3} out of range 0.05..=0.90",
+                self.invalidation_p_win
             ));
         }
         Ok(())
@@ -77,6 +88,7 @@ pub enum SpatialExitTrigger {
     Converged,
     Stopped,
     TimedOut,
+    ProbabilityDecayed,
 }
 
 impl SpatialExitTrigger {
@@ -85,6 +97,7 @@ impl SpatialExitTrigger {
             Self::Converged => "converged",
             Self::Stopped => "stopped",
             Self::TimedOut => "timed_out",
+            Self::ProbabilityDecayed => "probability_decayed",
         }
     }
 }
@@ -92,6 +105,17 @@ impl SpatialExitTrigger {
 pub fn evaluate_spatial_exit(
     entry_net_bps: Option<f64>,
     live_net_bps: Option<f64>,
+    entry_ts_ms: i64,
+    now_ms: i64,
+    cfg: &SpatialExitConfig,
+) -> SpatialExitVerdict {
+    evaluate_spatial_exit_with_prob(entry_net_bps, live_net_bps, None, entry_ts_ms, now_ms, cfg)
+}
+
+pub fn evaluate_spatial_exit_with_prob(
+    entry_net_bps: Option<f64>,
+    live_net_bps: Option<f64>,
+    live_p_win: Option<f64>,
     entry_ts_ms: i64,
     now_ms: i64,
     cfg: &SpatialExitConfig,
@@ -130,6 +154,20 @@ pub fn evaluate_spatial_exit(
                 d = live.abs() - entry.abs()
             ),
         };
+    }
+    // Statistical Invalidation Gate: if the live estimated win probability
+    // falls below the invalidation threshold, unwind instead of waiting for timeout.
+    if let Some(p) = live_p_win.filter(|v| v.is_finite()) {
+        if p < cfg.invalidation_p_win {
+            return SpatialExitVerdict::Exit {
+                trigger: SpatialExitTrigger::ProbabilityDecayed,
+                reason: format!(
+                    "win probability decayed to {:.1}% (below {:.1}% floor)",
+                    p * 100.0,
+                    cfg.invalidation_p_win * 100.0
+                ),
+            };
+        }
     }
     if now_ms.saturating_sub(entry_ts_ms) >= cfg.max_hold_secs.saturating_mul(1000) {
         return SpatialExitVerdict::Exit {
@@ -281,5 +319,31 @@ mod tests {
         let a = evaluate_spatial_exit(Some(8.0), Some(5.0), 0, 1000, &cfg());
         let b = evaluate_spatial_exit(Some(8.0), Some(5.0), 0, 1000, &cfg());
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn exit_on_probability_decay_below_floor() {
+        let c = cfg(); // invalidation_p_win: 0.50
+                       // Probability collapsed to 0.35 -> ProbabilityDecayed exit
+        assert!(matches!(
+            evaluate_spatial_exit_with_prob(Some(8.0), Some(5.0), Some(0.35), 0, 1000, &c),
+            SpatialExitVerdict::Exit {
+                trigger: SpatialExitTrigger::ProbabilityDecayed,
+                ..
+            }
+        ));
+        // Probability healthy (0.75) -> Hold
+        assert_eq!(
+            evaluate_spatial_exit_with_prob(Some(8.0), Some(5.0), Some(0.75), 0, 1000, &c),
+            SpatialExitVerdict::Hold
+        );
+        // Converged edge (0.0) wins over low probability
+        assert!(matches!(
+            evaluate_spatial_exit_with_prob(Some(8.0), Some(0.0), Some(0.20), 0, 1000, &c),
+            SpatialExitVerdict::Exit {
+                trigger: SpatialExitTrigger::Converged,
+                ..
+            }
+        ));
     }
 }

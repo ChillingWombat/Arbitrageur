@@ -106,6 +106,14 @@ pub struct AutoExecConfig {
     pub stop_mult: f64,
     /// Unwatched (stale/missing row) grace before reduce-only unwind, seconds.
     pub stale_unwind_secs: u64,
+    /// Live win probability floor (default 0.50). If P_win decays below this,
+    /// the statistical hypothesis is considered invalidated and the position is unwound.
+    #[serde(default = "default_invalidation_p_win")]
+    pub invalidation_p_win: f64,
+}
+
+fn default_invalidation_p_win() -> f64 {
+    0.50
 }
 
 impl Default for AutoExecConfig {
@@ -123,6 +131,7 @@ impl Default for AutoExecConfig {
             hold_timeout_mult: 3.0,
             stop_mult: 1.5,
             stale_unwind_secs: 600,
+            invalidation_p_win: 0.50,
         }
     }
 }
@@ -202,6 +211,13 @@ impl AutoExecConfig {
             return Err(format!(
                 "stale_unwind_secs {} out of range 60..=86400",
                 self.stale_unwind_secs
+            ));
+        }
+        if !self.invalidation_p_win.is_finite() || !(0.05..=0.90).contains(&self.invalidation_p_win)
+        {
+            return Err(format!(
+                "invalidation_p_win {:.3} out of range 0.05..=0.90",
+                self.invalidation_p_win
             ));
         }
         Ok(())
@@ -514,6 +530,8 @@ pub struct LiveSpreadView {
     /// Monitor lifecycle status of the pair ("ready", "no-data", …).
     pub status: String,
     pub deviation_bps: Option<f64>,
+    /// Live estimated win or reversion probability (0..1).
+    pub p_win: Option<f64>,
 }
 
 /// Exit verdict for one open position on one tick.
@@ -540,6 +558,8 @@ pub enum ExitTrigger {
     Stopped,
     /// Max-hold deadline elapsed with neither convergence nor stop.
     TimedOut,
+    /// Live reversion probability decayed below the invalidation threshold (hypothesis broken).
+    ProbabilityDecayed,
     /// Row stale/missing past the grace window: reduce-only unwind.
     StaleUnwind,
 }
@@ -550,6 +570,7 @@ impl ExitTrigger {
             Self::Converged => "converged",
             Self::Stopped => "stopped",
             Self::TimedOut => "timed_out",
+            Self::ProbabilityDecayed => "probability_decayed",
             Self::StaleUnwind => "stale_unwind",
         }
     }
@@ -610,6 +631,21 @@ pub fn evaluate_exit(
                 "deviation widened past stop band (dev {dev:.1} on entry side, |dev| >= {stop_at:.1} bps)"
             ),
         };
+    }
+    // Statistical Invalidation Gate: if the live estimated win/reversion probability
+    // drops below the invalidation threshold (hypothesis broken, no statistical edge),
+    // unwind the position rather than holding dead risk.
+    if let Some(p) = row.p_win.filter(|p| p.is_finite()) {
+        if p < cfg.invalidation_p_win {
+            return ExitEval::Exit {
+                trigger: ExitTrigger::ProbabilityDecayed,
+                reason: format!(
+                    "win probability decayed to {:.1}% (below {:.1}% floor)",
+                    p * 100.0,
+                    cfg.invalidation_p_win * 100.0
+                ),
+            };
+        }
     }
     if now_ms >= deadline_ms {
         return ExitEval::Exit {
@@ -945,7 +981,74 @@ mod tests {
         LiveSpreadView {
             status: status.into(),
             deviation_bps: dev,
+            p_win: None,
         }
+    }
+
+    fn live_with_prob(status: &str, dev: Option<f64>, p_win: Option<f64>) -> LiveSpreadView {
+        LiveSpreadView {
+            status: status.into(),
+            deviation_bps: dev,
+            p_win,
+        }
+    }
+
+    #[test]
+    fn exit_on_probability_decay_below_floor() {
+        let cfg = exit_cfg(); // invalidation_p_win: 0.50
+                              // Outside friction band, not stopped, but win probability collapsed to 30% -> exit
+        let e = evaluate_exit(
+            10.0,
+            4.0,
+            999_999,
+            None,
+            Some(&live_with_prob("ready", Some(8.0), Some(0.30))),
+            0,
+            &cfg,
+        );
+        assert!(
+            matches!(
+                e,
+                ExitEval::Exit {
+                    trigger: ExitTrigger::ProbabilityDecayed,
+                    ..
+                }
+            ),
+            "got {e:?}"
+        );
+
+        // Win probability above floor (65%) holds
+        let e = evaluate_exit(
+            10.0,
+            4.0,
+            999_999,
+            None,
+            Some(&live_with_prob("ready", Some(8.0), Some(0.65))),
+            0,
+            &cfg,
+        );
+        assert_eq!(e, ExitEval::Hold);
+
+        // Convergence into friction band takes profit even if probability is degraded
+        let e = evaluate_exit(
+            10.0,
+            4.0,
+            999_999,
+            None,
+            Some(&live_with_prob("ready", Some(2.0), Some(0.20))),
+            0,
+            &cfg,
+        );
+        assert!(
+            matches!(
+                e,
+                ExitEval::Exit {
+                    trigger: ExitTrigger::Converged,
+                    ..
+                }
+            ),
+            "got {e:?}"
+        );
     }
 
     #[test]

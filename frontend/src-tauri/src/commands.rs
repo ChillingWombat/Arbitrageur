@@ -3360,9 +3360,6 @@ pub fn save_engine_settings_impl(
     if settings.max_leverage < 1 || settings.max_leverage > 100 {
         return Err("Max leverage must be within 1–100x".into());
     }
-    if !(60..=604_800).contains(&settings.auto_exit_max_hold_secs) {
-        return Err("Auto-exit max hold must be within 60 seconds–7 days".into());
-    }
     if !(1..=365).contains(&settings.auto_fixed_yield_min_lock_days) {
         return Err("Auto fixed-yield min lock must be within 1–365 days".into());
     }
@@ -3658,10 +3655,6 @@ pub fn save_engine_settings_impl(
     let _ = state
         .state_store
         .kv_set("risk.max_leverage", &sanitized.max_leverage.to_string());
-    let _ = state.state_store.kv_set(
-        "engine.auto_exit_max_hold_secs",
-        &sanitized.auto_exit_max_hold_secs.to_string(),
-    );
     let _ = state.state_store.kv_set(
         "engine.auto_fixed_yield_enabled",
         if sanitized.auto_fixed_yield_enabled {
@@ -5519,17 +5512,28 @@ pub(crate) async fn maybe_record_margin_snapshots(state: &AppEngineState, now_ms
 
 /// Pre-trade per-venue equity snapshot keyed `{env}-{venue}` — the baseline
 /// `refresh_equity_expectations_after_fills` measures own-fill deltas
-/// against. Reads the active environment's admitted adapters.
+/// against. Reads the active environment's admitted adapters in parallel.
 pub(crate) async fn snapshot_venue_equity(state: &AppEngineState) -> HashMap<String, f64> {
-    let mut map = HashMap::new();
     let env_str = state.env().as_str();
-    for (vid, _name, adapter) in state.get_venues() {
-        if let Ok(mut acc) = adapter.fetch_account().await {
-            state.normalize_account_usd(vid, &mut acc);
-            if let Ok(f) = acc.equity.to_string().parse::<f64>() {
-                if f.is_finite() {
-                    map.insert(format!("{env_str}-{vid}"), f);
-                }
+    let venues = state.get_venues();
+    let mut tasks = Vec::with_capacity(venues.len());
+    for (vid, _name, adapter) in venues {
+        tasks.push(async move {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), adapter.fetch_account())
+                .await
+            {
+                Ok(Ok(acc)) => Some((vid, acc)),
+                _ => None,
+            }
+        });
+    }
+    let results = futures::future::join_all(tasks).await;
+    let mut map = HashMap::new();
+    for (vid, mut acc) in results.into_iter().flatten() {
+        state.normalize_account_usd(vid, &mut acc);
+        if let Ok(f) = acc.equity.to_string().parse::<f64>() {
+            if f.is_finite() {
+                map.insert(format!("{env_str}-{vid}"), f);
             }
         }
     }
@@ -14792,33 +14796,6 @@ mod tests {
             ..base.clone()
         };
         assert!(save_engine_settings_impl(bad, &state).is_err());
-        // Auto-exit hold deadline: below the 60s floor and above the 7d cap
-        // are refused; a sane value saves and round-trips through kv.
-        let bad = EngineSettingsDto {
-            auto_exit_max_hold_secs: 30,
-            ..base.clone()
-        };
-        assert!(save_engine_settings_impl(bad, &state).is_err());
-        let bad = EngineSettingsDto {
-            auto_exit_max_hold_secs: 604_801,
-            ..base.clone()
-        };
-        assert!(save_engine_settings_impl(bad, &state).is_err());
-        let good = EngineSettingsDto {
-            auto_exit_max_hold_secs: 3600,
-            ..base.clone()
-        };
-        assert!(save_engine_settings_impl(good, &state).is_ok());
-        assert_eq!(
-            state
-                .state_store
-                .kv_get("engine.auto_exit_max_hold_secs")
-                .unwrap()
-                .as_deref(),
-            Some("3600")
-        );
-        assert_eq!(state.settings.read().auto_exit_max_hold_secs, 3600);
-
         // USD-quote policy: unknown modes, non-finite/inverted/absurd
         // depeg thresholds are refused; valid values persist + reload.
         let bad = EngineSettingsDto {

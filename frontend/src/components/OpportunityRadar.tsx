@@ -60,7 +60,7 @@ import { flattenResidualMessage } from "../services/flatten";
 import { EmptyState } from "./EmptyState";
 import { ConfirmActionModal } from "./ConfirmActionModal";
 import { TickerTransactionHistory } from "./TickerTransactionHistory";
-import { TickerOpportunityHistory } from "./TickerOpportunityHistory";
+import { OpportunityHistoryGadget } from "./OpportunityHistoryGadget";
 import { TickerLogMonitor } from "./TickerLogMonitor";
 import { VenueLogo } from "./VenueLogo";
 import { ExecuteButton } from "./ExecuteButton";
@@ -222,25 +222,16 @@ const isLiveCapableRoute = (v1: string, v2: string, venueCaps?: VenueCaps): bool
 
 type SectionIcon = React.ComponentType<{ className?: string }>;
 
-/** Settings sections — the left panel navigates these. */
+/** Settings sections — unified canonical layout across strategies */
 const MONITOR_SECTIONS: { id: string; label: string; tooltip: string; icon: SectionIcon }[] = [
-  { id: "monitor", label: "Monitor", tooltip: "Master enable switch plus background refresh cadences for the watchlist and history.", icon: Activity },
-  { id: "qualification", label: "Qualification window", tooltip: "Configure how much spread history qualifies a pair: auto from mean-reversion half-life or an explicit manual window.", icon: Clock },
-  { id: "signal", label: "Signal thresholds", tooltip: "Engine gates for qualification (edge, capacity, win-probability, persistence, coverage) plus bot entry hurdles. Table display filters live on the gadget strip, not here.", icon: TrendingUp },
-  { id: "execution", label: "Execution", tooltip: "Configure Single-Way versus Two-Way execution, auto-entry arming, and the transaction reserve haircut.", icon: Layers },
-  { id: "risk", label: "Risk & Limits", tooltip: "Position caps, per-venue and per-symbol notional limits, cooldowns, and stop/unwind guardrails shared by auto and manual entries.", icon: ShieldCheck },
-];
-
-const RISK_NUM_FIELDS: { key: keyof RadarBotConfigDto; label: string; tooltip: string; step?: string }[] = [
-  { key: "maxConcurrentPositions", label: "Max concurrent positions", tooltip: "Cap on simultaneously managed convergence positions.", step: "1" },
-  { key: "maxNotionalPerPositionUsd", label: "Max $ per position", tooltip: "Per-entry notional cap in USD." },
-  { key: "maxNotionalPerVenueUsd", label: "Max $ per venue", tooltip: "Open bot notional cap summed per venue leg in USD." },
-  { key: "maxNotionalPerSymbolUsd", label: "Max $ per symbol", tooltip: "Open bot notional cap per ticker in USD." },
-  { key: "pairCooldownSecs", label: "Pair cooldown (s)", tooltip: "Re-entry blackout per pair after an exit or stop.", step: "1" },
-  { key: "holdTimeoutMult", label: "Hold timeout ×", tooltip: "Max-hold deadline as a multiple of the signal's expected convergence time." },
-  { key: "stopMult", label: "Stop × entry dev", tooltip: "Stop band as a multiple of entry |deviation|, floored at the friction band." },
-  { key: "staleUnwindSecs", label: "Stale unwind (s)", tooltip: "Grace while a pair is unwatched before reduce-only unwind.", step: "1" },
-  { key: "pollIntervalSecs", label: "Poll interval (s)", tooltip: "Executor tick cadence.", step: "1" },
+  { id: "signal", label: "Signal & Triggers", tooltip: "Qualification window, mean-reversion half-life, empirical win probability, and entry profit hurdles.", icon: TrendingUp },
+  { id: "sizing", label: "Sizing & Capital", tooltip: "Notional trade caps per position, venue, and symbol, plus capital transaction reserve.", icon: Layers },
+  { id: "execution", label: "Execution & Slippage", tooltip: "Execution mode, auto-entry arming switch, and orderbook slippage tolerance.", icon: Activity },
+  { id: "risk", label: "Risk Guardrails", tooltip: "Liquidation buffer trim, concurrent position caps, stop-loss multiple, and cooldown timers.", icon: ShieldCheck },
+  { id: "unwind", label: "Auto Position Exit", tooltip: "Reduce-only limit unwinds pegged inside the spread with timeout and market fallback.", icon: Wind },
+  { id: "visibility", label: "Ticker Visibility", tooltip: "Automatic per-strategy hide filters (MIN across venues, fail-closed) plus manual hide list.", icon: EyeOff },
+  { id: "routing", label: "Account Routing", tooltip: "Map which exchange accounts to route Spread Radar's orders to.", icon: ArrowLeftRight },
+  { id: "monitor", label: "Monitor Cadence", tooltip: "Background refresh timers for watchlist derivation, baseline history, and executor tick.", icon: Clock },
 ];
 
 /** Factory defaults for Reset Defaults — untouched backend fields are preserved from the opened config. */
@@ -286,6 +277,26 @@ const ConfigPanel: React.FC<{
   const saveBtn = useSaveButton();
   const [error, setError] = useState<string | null>(null);
   const [activeSection, setActiveSection] = useState<string>(MONITOR_SECTIONS[0].id);
+
+  // Shared strategy parameters
+  const [strategyParams, setStrategyParams] = useState<StrategyParamsDto | null>(null);
+  const [autoMinVolumeUsd, setAutoMinVolumeUsd] = useState<string>("");
+  const [autoMinPriceUsd, setAutoMinPriceUsd] = useState<string>("");
+  const [maxSlippageBps, setMaxSlippageBps] = useState<number>(15.0);
+  const [liqTrimPct, setLiqTrimPct] = useState<string>("");
+  const [passiveUnwind, setPassiveUnwind] = useState<PassiveUnwindDto>({ ...DEFAULT_PASSIVE_UNWIND });
+  const [passiveMode, setPassiveMode] = useState<"inherit" | "custom" | "off">("inherit");
+
+  // Ticker Visibility exemption manager
+  const [exemptList, setExemptList] = useState<string[] | null>(null);
+  const [newExemptTicker, setNewExemptTicker] = useState<string>("");
+  const [revealBusy, setRevealBusy] = useState(false);
+
+  // Strategy Account Routing
+  const [routes, setRoutes] = useState<StrategyAccountRouteDto[]>([]);
+  const [routeAccounts, setRouteAccounts] = useState<AccountDto[]>([]);
+  const [routingError, setRoutingError] = useState<string | null>(null);
+
   const set = <K extends keyof MonitorConfigDto>(k: K, v: MonitorConfigDto[K]) => {
     setError(null);
     setDraft((d) => ({ ...d, [k]: v }));
@@ -301,12 +312,92 @@ const ConfigPanel: React.FC<{
   };
 
   useEffect(() => {
+    let unmounted = false;
+    api
+      .getExemptedTickers()
+      .then((list) => {
+        if (!unmounted) setExemptList(list);
+      })
+      .catch(() => {
+        if (!unmounted) setExemptList([]);
+      });
+
+    api
+      .getStrategyParams("futures")
+      .then((p) => {
+        if (unmounted) return;
+        setStrategyParams(p);
+        setAutoMinVolumeUsd(p.autoMinVolumeUsd ? String(p.autoMinVolumeUsd) : "");
+        setAutoMinPriceUsd(p.autoMinPriceUsd ? String(p.autoMinPriceUsd) : "");
+        setMaxSlippageBps(p.futuresMaxSlippageBps ?? 15.0);
+        setLiqTrimPct(p.futuresLiqTrimPct ? String(p.futuresLiqTrimPct) : "");
+        setPassiveUnwind(p.futuresPassiveUnwind ?? { ...DEFAULT_PASSIVE_UNWIND });
+        setPassiveMode((p.futuresPassiveMode as "inherit" | "custom" | "off") || "inherit");
+      })
+      .catch(() => {});
+
+    return () => {
+      unmounted = true;
+    };
+  }, []);
+
+  const reloadRoutes = useCallback(async () => {
+    try {
+      const [r, a] = await Promise.all([api.listStrategyRoutes(), api.listAccounts()]);
+      setRoutes(r);
+      setRouteAccounts(a);
+      setRoutingError(null);
+    } catch (e) {
+      setRoutingError(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
+  useEffect(() => {
+    if (activeSection === "routing") {
+      void reloadRoutes();
+    }
+  }, [activeSection, reloadRoutes]);
+
+  useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [onClose]);
+
+  const handleRevealAll = async () => {
+    setRevealBusy(true);
+    try {
+      await api.revealAllTickers();
+      setExemptList([]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRevealBusy(false);
+    }
+  };
+
+  const handleUnexempt = async (base: string) => {
+    try {
+      await api.setTickerExempted(base, false);
+      setExemptList((l) => (l == null ? l : l.filter((b) => b !== base)));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const handleExempt = async () => {
+    const sym = newExemptTicker.trim().toUpperCase();
+    if (!sym) return;
+    try {
+      await api.setTickerExempted(sym, true);
+      setExemptList((l) => (l == null ? [sym] : [...l.filter((b) => b !== sym), sym]));
+      setNewExemptTicker("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
 
   const handleResetDefaults = () => {
     setDraft((d) => ({
@@ -316,9 +407,13 @@ const ConfigPanel: React.FC<{
       maxSymbolIntervalSecs: d.maxSymbolIntervalSecs,
       minSymbolIntervalSecs: d.minSymbolIntervalSecs,
     }));
-    // Bot mode is driven from the main-page lifecycle buttons — Reset Defaults
-    // must not silently flip it.
     setBotDraft((d) => ({ ...defaultRadarBotConfig(), mode: d.mode }));
+    setAutoMinVolumeUsd("");
+    setAutoMinPriceUsd("");
+    setMaxSlippageBps(15.0);
+    setLiqTrimPct("");
+    setPassiveUnwind({ ...DEFAULT_PASSIVE_UNWIND });
+    setPassiveMode("inherit");
   };
 
   const handleSave = async () => {
@@ -326,9 +421,24 @@ const ConfigPanel: React.FC<{
     const ok = await saveBtn.run(async () => {
       try {
         await onSave({ ...draft, enabled: true }, botDraft);
+        if (strategyParams) {
+          const v = parseFloat(autoMinVolumeUsd);
+          const p = parseFloat(autoMinPriceUsd);
+          const trim = parseFloat(liqTrimPct);
+          const updated: StrategyParamsDto = {
+            ...strategyParams,
+            autoMinVolumeUsd: Number.isFinite(v) && v > 0 ? v : null,
+            autoMinPriceUsd: Number.isFinite(p) && p > 0 ? p : null,
+            futuresMaxSlippageBps: maxSlippageBps,
+            futuresLiqTrimPct: Number.isFinite(trim) && trim > 0 ? trim : null,
+            futuresPassiveUnwind: passiveUnwind,
+            futuresPassiveMode: passiveMode,
+          };
+          await api.saveStrategyParams(updated);
+        }
       } catch (e) {
         setError(e instanceof Error ? e.message : String(e));
-        throw e; // rethrow so the save button lands on "Failed!"
+        throw e;
       }
     });
     if (ok) setTimeout(onClose, 400);
@@ -352,7 +462,7 @@ const ConfigPanel: React.FC<{
               <h2 className="text-sm font-bold font-sans tracking-tight text-slate-900 leading-tight">
                 Spread Radar Configurator
               </h2>
-              <p className="text-[11px] font-sans text-slate-500">Monitor thresholds, probability gates, execution and risk limits</p>
+              <p className="text-[11px] font-sans text-slate-500">Monitor thresholds, probability gates, sizing, risk and execution limits</p>
             </div>
           </div>
           <div className="flex items-center space-x-3">
@@ -408,47 +518,18 @@ const ConfigPanel: React.FC<{
 
           {/* Right Main Content Area */}
           <div className="flex-1 overflow-y-auto p-4 pr-5 space-y-4 bg-surface">
-            {activeSection === "monitor" && (
+            {/* Section 1: Signal & Triggers */}
+            {activeSection === "signal" && (
               <div className="space-y-3">
-                <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
-                  <label className={`${LABEL_CLS} flex-1`}>
-                    <span className="flex items-center">
-                      Watchlist refresh (h)
-                      <InfoTooltip text="How often the eligible watchlist is rebuilt from venue market coverage, in hours." />
-                    </span>
-                  </label>
-                  <input
-                    className={INPUT_INLINE_CLS}
-                    type="number"
-                    min={1}
-                    value={draft.watchlistRefreshSecs / 3600}
-                    onChange={(e) => set("watchlistRefreshSecs", num(e.target.value, 1) * 3600)}
-                  />
+                <div className="pb-1 border-b border-surface-border/60">
+                  <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Signal Timing &amp; Windows</h3>
+                  <p className="text-[11px] font-sans text-muted mt-0.5">Historical spread observation windows and half-life qualification</p>
                 </div>
-                <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
-                  <label className={`${LABEL_CLS} flex-1`}>
-                    <span className="flex items-center">
-                      History window (h)
-                      <InfoTooltip text="Trailing duration of persisted spread history retained for baselines, in hours." />
-                    </span>
-                  </label>
-                  <input
-                    className={INPUT_INLINE_CLS}
-                    type="number"
-                    min={1}
-                    value={draft.historyWindowSecs / 3600}
-                    onChange={(e) => set("historyWindowSecs", num(e.target.value, 24) * 3600)}
-                  />
-                </div>
-              </div>
-            )}
 
-            {activeSection === "qualification" && (
-              <div className="space-y-3">
                 <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
                   <label className={`${LABEL_CLS} flex-1`}>
                     <span className="flex items-center">
-                      Qualification
+                      Qualification mode
                       <InfoTooltip text="Auto derives the qualification window per pair from mean-reversion half-life; manual uses the explicit window below." />
                     </span>
                   </label>
@@ -461,6 +542,7 @@ const ConfigPanel: React.FC<{
                     <option value="manual">Manual</option>
                   </select>
                 </div>
+
                 <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
                   <label className={`${LABEL_CLS} flex-1`}>
                     <span className="flex items-center">
@@ -476,6 +558,7 @@ const ConfigPanel: React.FC<{
                     onChange={(e) => set("manualWindowSecs", num(e.target.value, 24) * 3600)}
                   />
                 </div>
+
                 <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
                   <label className={`${LABEL_CLS} flex-1`}>
                     <span className="flex items-center">
@@ -492,6 +575,7 @@ const ConfigPanel: React.FC<{
                     onChange={(e) => set("halfLifeMultiplier", num(e.target.value, 2))}
                   />
                 </div>
+
                 <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
                   <label className={`${LABEL_CLS} flex-1`}>
                     <span className="flex items-center">
@@ -507,11 +591,12 @@ const ConfigPanel: React.FC<{
                     onChange={(e) => set("minWindowSecs", num(e.target.value, 30) * 60)}
                   />
                 </div>
-              </div>
-            )}
 
-            {activeSection === "signal" && (
-              <div className="space-y-3">
+                <div className="pb-1 border-b border-surface-border/60 pt-2">
+                  <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Signal Hurdle Gates</h3>
+                  <p className="text-[11px] font-sans text-muted mt-0.5">Empirical probability, Wilson confidence floor, and profit hurdle gates</p>
+                </div>
+
                 <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
                   <label className={`${LABEL_CLS} flex-1`}>
                     <span className="flex items-center">
@@ -528,11 +613,12 @@ const ConfigPanel: React.FC<{
                     onChange={(e) => set("frictionCoverMult", num(e.target.value, 1))}
                   />
                 </div>
+
                 <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
                   <label className={`${LABEL_CLS} flex-1`}>
                     <span className="flex items-center">
                       Min win probability
-                      <InfoTooltip text="Engine gate — backend marks pairs Qualified only above this and sizes capacity off it. To only change what the table shows, use the gadget's Min Win display filter instead." />
+                      <InfoTooltip text="Engine gate — backend marks pairs Qualified only above this and sizes capacity off it." />
                     </span>
                   </label>
                   <input
@@ -545,11 +631,12 @@ const ConfigPanel: React.FC<{
                     onChange={(e) => set("minWinProbability", num(e.target.value, 0.9))}
                   />
                 </div>
+
                 <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
                   <label className={`${LABEL_CLS} flex-1`}>
                     <span className="flex items-center">
                       Min win lower bound
-                      <InfoTooltip text="Confidence floor on the Wilson 90% lower bound of the win estimate — a shrunken point estimate can clear Min Win on thin evidence; this floor refuses it. 0 disables." />
+                      <InfoTooltip text="Confidence floor on the Wilson 90% lower bound of the win estimate — refuses trades on thin evidence." />
                     </span>
                   </label>
                   <input
@@ -562,11 +649,12 @@ const ConfigPanel: React.FC<{
                     onChange={(e) => set("minWinLowerBound", num(e.target.value, 0.5))}
                   />
                 </div>
+
                 <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
                   <label className={`${LABEL_CLS} flex-1`}>
                     <span className="flex items-center">
                       Episode half-life (s)
-                      <InfoTooltip text="Recency half-life for episode statistics — older excursions weigh exponentially less in win/outcome estimates. 0 disables weighting (all history counts equally)." />
+                      <InfoTooltip text="Recency half-life for episode statistics — older excursions weigh exponentially less. 0 disables weighting." />
                     </span>
                   </label>
                   <input
@@ -578,11 +666,12 @@ const ConfigPanel: React.FC<{
                     onChange={(e) => set("episodeHalfLifeSecs", num(e.target.value, 259200))}
                   />
                 </div>
+
                 <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
                   <label className={`${LABEL_CLS} flex-1`}>
                     <span className="flex items-center">
                       Min persistence ratio
-                      <InfoTooltip text="Fraction of in-window buckets at/above entry that a pair must hold to qualify (0–1; 0 disables the gate)." />
+                      <InfoTooltip text="Fraction of in-window buckets at/above entry that a pair must hold to qualify (0–1)." />
                     </span>
                   </label>
                   <input
@@ -595,11 +684,12 @@ const ConfigPanel: React.FC<{
                     onChange={(e) => set("minThresholdRatio", Math.min(1, Math.max(0, num(e.target.value, 0.2))))}
                   />
                 </div>
+
                 <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
                   <label className={`${LABEL_CLS} flex-1`}>
                     <span className="flex items-center">
                       Min coverage
-                      <InfoTooltip text="Fraction of expected window buckets with both venues observed required to qualify (0–1; 0 disables the gate)." />
+                      <InfoTooltip text="Fraction of expected window buckets with both venues observed required to qualify (0–1)." />
                     </span>
                   </label>
                   <input
@@ -612,11 +702,12 @@ const ConfigPanel: React.FC<{
                     onChange={(e) => set("minCoverage", Math.min(1, Math.max(0, num(e.target.value, 0.5))))}
                   />
                 </div>
+
                 <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
                   <label className={`${LABEL_CLS} flex-1`}>
                     <span className="flex items-center">
                       Entry min expected profit (bps)
-                      <InfoTooltip text="Bot entry hurdle on probability-weighted expected profit after friction — stricter than the monitor display floor above." />
+                      <InfoTooltip text="Bot entry hurdle on probability-weighted expected profit after friction." />
                     </span>
                   </label>
                   <input
@@ -630,37 +721,69 @@ const ConfigPanel: React.FC<{
               </div>
             )}
 
-            {activeSection === "execution" && (
+            {/* Section 2: Sizing & Capital */}
+            {activeSection === "sizing" && (
               <div className="space-y-3">
+                <div className="pb-1 border-b border-surface-border/60">
+                  <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Capital Allocation &amp; Exposure Limits</h3>
+                  <p className="text-[11px] font-sans text-muted mt-0.5">Maximum notional caps per position, venue, and ticker symbol</p>
+                </div>
+
                 <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
                   <label className={`${LABEL_CLS} flex-1`}>
                     <span className="flex items-center">
-                      Execution
-                      <InfoTooltip text="Single-Way opens the spread only; Two-Way also prices the closing leg into expected profit." />
+                      Max notional per position ($)
+                      <InfoTooltip text="Per-entry notional cap in USD." />
                     </span>
                   </label>
-                  <select
-                    className={SELECT_INLINE_CLS}
-                    value={draft.executionMode}
-                    onChange={(e) => set("executionMode", e.target.value as "one_way" | "two_way")}
-                  >
-                    <option value="one_way">Single-Way (entry only)</option>
-                    <option value="two_way">Two-Way (+ close)</option>
-                  </select>
+                  <input
+                    className={INPUT_INLINE_CLS}
+                    type="number"
+                    min={100}
+                    step={100}
+                    value={Number(botDraft.maxNotionalPerPositionUsd)}
+                    onChange={(e) => setBot("maxNotionalPerPositionUsd", num(e.target.value, 5000))}
+                  />
                 </div>
+
                 <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
                   <label className={`${LABEL_CLS} flex-1`}>
                     <span className="flex items-center">
-                      Arm auto entries
-                      <InfoTooltip text="Master opt-in for automatic entries on filtered signals — auto entries fire only when armed AND the main-page bot is Started. Manual monitor-table entries always place through the bot with automatic exits. Ships off." />
+                      Max notional per venue ($)
+                      <InfoTooltip text="Open bot notional cap summed per venue leg in USD." />
                     </span>
                   </label>
-                  <SwitchToggle size="sm" checked={botDraft.enabled} onChange={(v) => setBot("enabled", v)} />
+                  <input
+                    className={INPUT_INLINE_CLS}
+                    type="number"
+                    min={500}
+                    step={500}
+                    value={Number(botDraft.maxNotionalPerVenueUsd)}
+                    onChange={(e) => setBot("maxNotionalPerVenueUsd", num(e.target.value, 20000))}
+                  />
                 </div>
+
                 <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
                   <label className={`${LABEL_CLS} flex-1`}>
                     <span className="flex items-center">
-                      Tx reserve
+                      Max notional per symbol ($)
+                      <InfoTooltip text="Open bot notional cap per ticker symbol in USD." />
+                    </span>
+                  </label>
+                  <input
+                    className={INPUT_INLINE_CLS}
+                    type="number"
+                    min={500}
+                    step={500}
+                    value={Number(botDraft.maxNotionalPerSymbolUsd)}
+                    onChange={(e) => setBot("maxNotionalPerSymbolUsd", num(e.target.value, 10000))}
+                  />
+                </div>
+
+                <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
+                  <label className={`${LABEL_CLS} flex-1`}>
+                    <span className="flex items-center">
+                      Transaction reserve haircut
                       <InfoTooltip text="Fraction of notional reserved for transaction costs, from 0 to 0.9." />
                     </span>
                   </label>
@@ -674,31 +797,565 @@ const ConfigPanel: React.FC<{
                     onChange={(e) => set("txReservePct", num(e.target.value, 0.25))}
                   />
                 </div>
+
+                <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
+                  <label className={`${LABEL_CLS} flex-1`}>
+                    <span className="flex items-center">
+                      Participation cap
+                      <InfoTooltip text="Fraction of the smaller venue's 24h volume allowed per entry (0.01 = 1%)." />
+                    </span>
+                  </label>
+                  <input
+                    className={INPUT_INLINE_CLS}
+                    type="number"
+                    step={0.005}
+                    min={0.001}
+                    max={0.5}
+                    value={draft.participationCap}
+                    onChange={(e) => set("participationCap", num(e.target.value, 0.01))}
+                  />
+                </div>
               </div>
             )}
 
+            {/* Section 3: Execution & Slippage */}
+            {activeSection === "execution" && (
+              <div className="space-y-3">
+                <div className="pb-1 border-b border-surface-border/60">
+                  <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Order Execution &amp; Slippage</h3>
+                  <p className="text-[11px] font-sans text-muted mt-0.5">Execution order routing, autonomous arming, and orderbook slippage tolerance</p>
+                </div>
+
+                <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
+                  <label className={`${LABEL_CLS} flex-1`}>
+                    <span className="flex items-center">
+                      Execution mode
+                      <InfoTooltip text="Single-Way opens the spread only; Two-Way also prices the closing leg into expected profit." />
+                    </span>
+                  </label>
+                  <select
+                    className={SELECT_INLINE_CLS}
+                    value={draft.executionMode}
+                    onChange={(e) => set("executionMode", e.target.value as "one_way" | "two_way")}
+                  >
+                    <option value="one_way">Single-Way (entry only)</option>
+                    <option value="two_way">Two-Way (+ close)</option>
+                  </select>
+                </div>
+
+                <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
+                  <label className={`${LABEL_CLS} flex-1`}>
+                    <span className="flex items-center">
+                      Arm auto entries
+                      <InfoTooltip text="Master opt-in for automatic entries on filtered signals — auto entries fire only when armed AND the bot is Started." />
+                    </span>
+                  </label>
+                  <SwitchToggle size="sm" checked={botDraft.enabled} onChange={(v) => setBot("enabled", v)} />
+                </div>
+
+                <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
+                  <label className={`${LABEL_CLS} flex-1`}>
+                    <span className="flex items-center">
+                      Max slippage tolerance (bps)
+                      <InfoTooltip text="Per-strategy slippage gate for entry execution: orders abort if orderbook VWAP slips beyond this limit." />
+                    </span>
+                  </label>
+                  <input
+                    className={INPUT_INLINE_CLS}
+                    type="number"
+                    step={0.5}
+                    min={0.1}
+                    value={maxSlippageBps}
+                    onChange={(e) => setMaxSlippageBps(Math.max(0.1, parseFloat(e.target.value) || 15))}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Section 4: Risk Guardrails */}
             {activeSection === "risk" && (
               <div className="space-y-3">
-                {RISK_NUM_FIELDS.map((f) => (
-                  <div className={`${CARD_CLS} flex items-center justify-between gap-3`} key={f.key}>
-                    <label className={`${LABEL_CLS} flex-1`}>
-                      <span className="flex items-center">
-                        {f.label}
-                        <InfoTooltip text={f.tooltip} />
-                      </span>
-                    </label>
-                    <input
-                      className={INPUT_INLINE_CLS}
-                      type="number"
-                      min={0}
-                      step={f.step ?? "any"}
-                      value={Number(botDraft[f.key])}
-                      onChange={(e) =>
-                        setBot(f.key, num(e.target.value, Number(botDraft[f.key])) as never)
-                      }
-                    />
+                <div className="pb-1 border-b border-surface-border/60">
+                  <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Risk Guardrails &amp; Safety</h3>
+                  <p className="text-[11px] font-sans text-muted mt-0.5">Liquidation protection, position caps, and exit timeouts</p>
+                </div>
+
+                <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
+                  <label className={`${LABEL_CLS} flex-1`}>
+                    <span className="flex items-center">
+                      Liquidation-distance trim (%)
+                      <InfoTooltip text="When either leg comes within this percent of liquidation, both legs trim equally to stay delta-neutral. Empty = off." />
+                    </span>
+                  </label>
+                  <input
+                    className={INPUT_INLINE_CLS}
+                    type="number"
+                    step={0.5}
+                    min={0}
+                    max={100}
+                    placeholder="OFF"
+                    value={liqTrimPct}
+                    onChange={(e) => setLiqTrimPct(e.target.value)}
+                  />
+                </div>
+
+                <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
+                  <label className={`${LABEL_CLS} flex-1`}>
+                    <span className="flex items-center">
+                      Max concurrent positions
+                      <InfoTooltip text="Cap on simultaneously managed convergence positions." />
+                    </span>
+                  </label>
+                  <input
+                    className={INPUT_INLINE_CLS}
+                    type="number"
+                    min={1}
+                    step={1}
+                    value={botDraft.maxConcurrentPositions}
+                    onChange={(e) => setBot("maxConcurrentPositions", Math.max(1, Math.round(num(e.target.value, 5))))}
+                  />
+                </div>
+
+                <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
+                  <label className={`${LABEL_CLS} flex-1`}>
+                    <span className="flex items-center">
+                      Stop × entry dev
+                      <InfoTooltip text="Stop band as a multiple of entry |deviation|, floored at the friction band." />
+                    </span>
+                  </label>
+                  <input
+                    className={INPUT_INLINE_CLS}
+                    type="number"
+                    step={0.1}
+                    min={1}
+                    value={botDraft.stopMult}
+                    onChange={(e) => setBot("stopMult", num(e.target.value, 2.5))}
+                  />
+                </div>
+
+                <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
+                  <label className={`${LABEL_CLS} flex-1`}>
+                    <span className="flex items-center">
+                      Pair cooldown (s)
+                      <InfoTooltip text="Re-entry blackout per pair after an exit or stop." />
+                    </span>
+                  </label>
+                  <input
+                    className={INPUT_INLINE_CLS}
+                    type="number"
+                    min={0}
+                    step={1}
+                    value={botDraft.pairCooldownSecs}
+                    onChange={(e) => setBot("pairCooldownSecs", Math.max(0, Math.round(num(e.target.value, 300))))}
+                  />
+                </div>
+
+                <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
+                  <label className={`${LABEL_CLS} flex-1`}>
+                    <span className="flex items-center">
+                      Hold timeout ×
+                      <InfoTooltip text="Max-hold deadline as a multiple of the signal's expected convergence time." />
+                    </span>
+                  </label>
+                  <input
+                    className={INPUT_INLINE_CLS}
+                    type="number"
+                    step={0.5}
+                    min={1}
+                    value={botDraft.holdTimeoutMult}
+                    onChange={(e) => setBot("holdTimeoutMult", num(e.target.value, 3))}
+                  />
+                </div>
+
+                <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
+                  <label className={`${LABEL_CLS} flex-1`}>
+                    <span className="flex items-center">
+                      Exit invalidation P(win)
+                      <InfoTooltip text="Exit the position immediately if live reversion probability decays below this floor (statistical edge collapsed)." />
+                    </span>
+                  </label>
+                  <input
+                    className={INPUT_INLINE_CLS}
+                    type="number"
+                    step={0.05}
+                    min={0.1}
+                    max={0.9}
+                    value={botDraft.invalidationPWin ?? 0.5}
+                    onChange={(e) => setBot("invalidationPWin", num(e.target.value, 0.5))}
+                  />
+                </div>
+
+                <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
+                  <label className={`${LABEL_CLS} flex-1`}>
+                    <span className="flex items-center">
+                      Stale unwind (s)
+                      <InfoTooltip text="Grace period while a pair is unwatched before initiating reduce-only unwind." />
+                    </span>
+                  </label>
+                  <input
+                    className={INPUT_INLINE_CLS}
+                    type="number"
+                    min={10}
+                    step={1}
+                    value={botDraft.staleUnwindSecs}
+                    onChange={(e) => setBot("staleUnwindSecs", Math.max(10, Math.round(num(e.target.value, 60))))}
+                  />
+                </div>
+              </div>
+            )}
+
+            {/* Section 5: Auto Position Exit */}
+            {activeSection === "unwind" && (
+              <div className="space-y-3">
+                <div className="pb-1 border-b border-surface-border/60">
+                  <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Auto Position Exit</h3>
+                  <p className="text-[11px] font-sans text-muted mt-0.5">Pegged limit order execution with market fallbacks</p>
+                </div>
+
+                <div className="bg-surface p-4 rounded-xl border border-surface-border shadow-2xs space-y-3 transition hover:border-slate-300">
+                  <div className="flex items-center justify-between gap-3 pb-2 border-b border-surface-border/60">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-1.5">
+                        <span className="text-xs font-semibold font-sans text-slate-800">Auto Position Exit</span>
+                        <InfoTooltip text="Close reduces with reduce-only LIMITs pegged inside the spread (0 = aggressive touch, 50 = mid, 100 = passive edge). Unfilled attempts wait timeoutSecs, re-price to a fresh book, and retry up to maxTries, then fall back to market. Skipped when spread or fast vol exceeds its cap." />
+                      </div>
+                      <p className="text-[11px] font-sans text-muted font-normal mt-0.5 leading-normal">
+                        timeout-bound · market fallback · emergency exits always market
+                      </p>
+                    </div>
+                    <div
+                      role="group"
+                      aria-label="Limit exit source"
+                      className="h-7 flex items-stretch rounded-lg border border-surface-border bg-surface overflow-hidden shrink-0"
+                    >
+                      {(["inherit", "custom", "off"] as const).map((m, i) => (
+                        <button
+                          key={m}
+                          type="button"
+                          aria-pressed={passiveMode === m}
+                          onClick={() => setPassiveMode(m)}
+                          className={`px-2.5 text-[11px] font-mono font-bold transition cursor-pointer ${i > 0 ? "border-l border-surface-border" : ""} ${
+                            passiveMode === m ? "bg-accent text-white" : "text-slate-500 hover:text-slate-800 hover:bg-slate-100/70"
+                          }`}
+                        >
+                          {m === "inherit" ? "Global" : m === "custom" ? "Custom" : "Off"}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                ))}
+
+                  {passiveMode === "inherit" && (
+                    <p className="text-[11px] font-sans text-muted leading-normal">
+                      Follows the global policy in Engine Settings → Execution → Auto Position Exit.
+                    </p>
+                  )}
+                  {passiveMode === "off" && (
+                    <p className="text-[11px] font-sans text-muted leading-normal">
+                      Spread Radar always exits at market — the passive limit-exit method is never used for it.
+                    </p>
+                  )}
+
+                  {passiveMode === "custom" && (
+                    <>
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="text-xs font-medium font-sans text-slate-700">Enable custom limit exits</span>
+                        <SwitchToggle
+                          size="sm"
+                          checked={passiveUnwind.enabled}
+                          ariaLabel="Auto position exit enabled"
+                          onChange={(on) => setPassiveUnwind((p) => ({ ...p, enabled: on }))}
+                        />
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1">
+                        <div className="flex items-center justify-between gap-2 p-2.5 rounded-lg bg-surface-raised/60 border border-surface-border/60">
+                          <div className="min-w-0 flex-1">
+                            <span className="text-xs font-medium font-sans text-slate-700 block">Spread Percentile</span>
+                            <span className="text-[10px] font-sans text-muted">0 aggressive · 50 mid · 100 edge</span>
+                          </div>
+                          <input
+                            type="number"
+                            min={0}
+                            max={100}
+                            step={5}
+                            disabled={!passiveUnwind.enabled}
+                            value={passiveUnwind.spreadPercentile}
+                            onChange={(e) => {
+                              const n = parseFloat(e.target.value);
+                              if (Number.isFinite(n)) setPassiveUnwind((p) => ({ ...p, spreadPercentile: Math.max(0, Math.min(100, n)) }));
+                            }}
+                            className={INPUT_INLINE_CLS}
+                          />
+                        </div>
+
+                        <div className="flex items-center justify-between gap-2 p-2.5 rounded-lg bg-surface-raised/60 border border-surface-border/60">
+                          <div className="min-w-0 flex-1">
+                            <span className="text-xs font-medium font-sans text-slate-700 block">Limit Timeout (s)</span>
+                            <span className="text-[10px] font-sans text-muted">Wait per unfilled try</span>
+                          </div>
+                          <input
+                            type="number"
+                            min={0}
+                            max={300}
+                            step={1}
+                            disabled={!passiveUnwind.enabled}
+                            value={passiveUnwind.timeoutSecs}
+                            onChange={(e) => {
+                              const n = parseFloat(e.target.value);
+                              if (Number.isFinite(n)) setPassiveUnwind((p) => ({ ...p, timeoutSecs: Math.max(0, Math.min(300, Math.round(n))) }));
+                            }}
+                            className={INPUT_INLINE_CLS}
+                          />
+                        </div>
+
+                        <div className="flex items-center justify-between gap-2 p-2.5 rounded-lg bg-surface-raised/60 border border-surface-border/60">
+                          <div className="min-w-0 flex-1">
+                            <span className="text-xs font-medium font-sans text-slate-700 block">Max Limit Tries</span>
+                            <span className="text-[10px] font-sans text-muted">Fallback to market after tries</span>
+                          </div>
+                          <input
+                            type="number"
+                            min={1}
+                            max={10}
+                            step={1}
+                            disabled={!passiveUnwind.enabled}
+                            value={passiveUnwind.maxTries}
+                            onChange={(e) => {
+                              const n = parseFloat(e.target.value);
+                              if (Number.isFinite(n)) setPassiveUnwind((p) => ({ ...p, maxTries: Math.max(1, Math.min(10, Math.round(n))) }));
+                            }}
+                            className={INPUT_INLINE_CLS}
+                          />
+                        </div>
+
+                        <div className="flex items-center justify-between gap-2 p-2.5 rounded-lg bg-surface-raised/60 border border-surface-border/60">
+                          <div className="min-w-0 flex-1">
+                            <span className="text-xs font-medium font-sans text-slate-700 block">Max Spread Cap (bps)</span>
+                            <span className="text-[10px] font-sans text-muted">Skip passive above live spread</span>
+                          </div>
+                          <input
+                            type="number"
+                            min={0.1}
+                            step={1}
+                            disabled={!passiveUnwind.enabled}
+                            value={passiveUnwind.maxSpreadBps}
+                            onChange={(e) => {
+                              const n = parseFloat(e.target.value);
+                              if (Number.isFinite(n)) setPassiveUnwind((p) => ({ ...p, maxSpreadBps: Math.max(0.1, n) }));
+                            }}
+                            className={INPUT_INLINE_CLS}
+                          />
+                        </div>
+                      </div>
+                    </>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Section 6: Ticker Visibility */}
+            {activeSection === "visibility" && (
+              <div className="space-y-3">
+                <div className="pb-1 border-b border-surface-border/60">
+                  <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Ticker Visibility &amp; Filters</h3>
+                  <p className="text-[11px] font-sans text-muted mt-0.5">Automatic volume/price floors (MIN across venues) plus manual hide exemptions</p>
+                </div>
+
+                <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
+                  <label className={`${LABEL_CLS} flex-1`}>
+                    <span className="flex items-center">
+                      Auto Min 24h Volume ($)
+                      <InfoTooltip text="Hide tickers whose MINIMUM 24h volume across in-scope venues falls below this floor. Empty = off." />
+                    </span>
+                  </label>
+                  <input
+                    className={INPUT_INLINE_CLS}
+                    type="number"
+                    min={0}
+                    step={1000}
+                    placeholder="OFF"
+                    value={autoMinVolumeUsd}
+                    onChange={(e) => setAutoMinVolumeUsd(e.target.value)}
+                  />
+                </div>
+
+                <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
+                  <label className={`${LABEL_CLS} flex-1`}>
+                    <span className="flex items-center">
+                      Auto Min Mid Price ($)
+                      <InfoTooltip text="Hide tickers whose minimum mid price across in-scope venues falls below this floor. Empty = off." />
+                    </span>
+                  </label>
+                  <input
+                    className={INPUT_INLINE_CLS}
+                    type="number"
+                    min={0}
+                    step={0.01}
+                    placeholder="OFF"
+                    value={autoMinPriceUsd}
+                    onChange={(e) => setAutoMinPriceUsd(e.target.value)}
+                  />
+                </div>
+
+                <div className="bg-surface p-4 rounded-xl border border-surface-border space-y-3 shadow-2xs">
+                  <div className="flex items-center justify-between gap-4">
+                    <div className="space-y-0.5 min-w-0">
+                      <span className="text-xs font-semibold font-sans text-slate-800 block">Hidden Tickers</span>
+                      <p className="text-[11px] font-sans text-slate-500">
+                        {exemptList === null
+                          ? "Hidden tickers are excluded from opportunity scanners and radar views."
+                          : exemptList.length === 0
+                            ? "No tickers are currently hidden."
+                            : `${exemptList.length} ticker${exemptList.length === 1 ? "" : "s"} hidden.`}
+                      </p>
+                      <p className="text-[10px] font-sans text-muted">Shared list · applies to all strategies after auto-filtering</p>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={revealBusy || !exemptList?.length}
+                      onClick={() => void handleRevealAll()}
+                      className="h-8 px-2.5 rounded-lg border border-surface-border text-xs font-mono font-semibold text-slate-600 hover:text-accent-strong hover:border-accent/40 bg-surface-raised transition cursor-pointer disabled:opacity-40 shrink-0"
+                    >
+                      {revealBusy ? "…" : "Reveal All"}
+                    </button>
+                  </div>
+
+                  {/* Manual Hide Input */}
+                  <div className="flex items-center gap-2 pt-1 border-t border-surface-border/60">
+                    <input
+                      type="text"
+                      list="radar-ticker-list"
+                      placeholder="Hide symbol (e.g. BTC, DOGE)..."
+                      value={newExemptTicker}
+                      onChange={(e) => setNewExemptTicker(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") {
+                          e.preventDefault();
+                          void handleExempt();
+                        }
+                      }}
+                      className="flex-1 h-8 px-2.5 bg-surface-raised border border-surface-border rounded-lg text-xs font-mono text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent uppercase"
+                    />
+                    <datalist id="radar-ticker-list">
+                      {PERP_TICKERS.map((t) => (
+                        <option key={t.base} value={t.base}>
+                          {t.name}
+                        </option>
+                      ))}
+                    </datalist>
+                    <button
+                      type="button"
+                      disabled={!newExemptTicker.trim()}
+                      onClick={() => void handleExempt()}
+                      className="h-8 px-3 rounded-lg border border-surface-border text-xs font-mono font-semibold text-slate-700 hover:bg-slate-100 transition cursor-pointer disabled:opacity-40 shrink-0 flex items-center gap-1"
+                    >
+                      <Plus className="w-3.5 h-3.5" />
+                      <span>Hide</span>
+                    </button>
+                  </div>
+
+                  {exemptList && exemptList.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5 pt-1">
+                      {exemptList.map((base) => (
+                        <button
+                          key={base}
+                          type="button"
+                          onClick={() => void handleUnexempt(base)}
+                          title={`Un-hide ${base}`}
+                          className="flex items-center gap-1.5 px-2 py-1 rounded-lg border border-surface-border bg-surface-raised text-xs font-mono font-semibold text-slate-700 hover:text-accent-strong hover:border-accent/40 transition cursor-pointer"
+                        >
+                          <span>{base}</span>
+                          <span className="text-muted hover:text-loss text-xs font-bold">×</span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Section 7: Account Routing */}
+            {activeSection === "routing" && (
+              <div className="space-y-3">
+                <div className="pb-1 border-b border-surface-border/60">
+                  <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Account Routing</h3>
+                  <p className="text-[11px] font-sans text-muted mt-0.5">Map which exchange accounts to route Spread Radar's orders to</p>
+                </div>
+                {routingError && (
+                  <div className="p-3 bg-loss-dim border border-loss-border rounded-lg text-xs font-mono text-loss">
+                    {routingError}
+                  </div>
+                )}
+                <StrategyRouteCard
+                  strategy={
+                    STRATEGIES.find((s) => s.id === "radar") ?? {
+                      id: "radar",
+                      name: "Spread Radar",
+                      desc: "Radar-dispatched spatial executions — shares futures venues, tracked separately",
+                    }
+                  }
+                  routes={routes.filter((r) => r.strategyId === "radar")}
+                  accounts={routeAccounts}
+                  onChanged={() => void reloadRoutes()}
+                />
+              </div>
+            )}
+
+            {/* Section 8: Monitor Cadence */}
+            {activeSection === "monitor" && (
+              <div className="space-y-3">
+                <div className="pb-1 border-b border-surface-border/60">
+                  <h3 className="text-xs font-bold font-sans text-slate-800 tracking-tight">Monitor Cadence &amp; Background Timers</h3>
+                  <p className="text-[11px] font-sans text-muted mt-0.5">Watchlist derivation, history window, and polling loops</p>
+                </div>
+
+                <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
+                  <label className={`${LABEL_CLS} flex-1`}>
+                    <span className="flex items-center">
+                      Watchlist refresh (h)
+                      <InfoTooltip text="How often the eligible watchlist is rebuilt from venue market coverage, in hours." />
+                    </span>
+                  </label>
+                  <input
+                    className={INPUT_INLINE_CLS}
+                    type="number"
+                    min={1}
+                    value={draft.watchlistRefreshSecs / 3600}
+                    onChange={(e) => set("watchlistRefreshSecs", num(e.target.value, 1) * 3600)}
+                  />
+                </div>
+
+                <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
+                  <label className={`${LABEL_CLS} flex-1`}>
+                    <span className="flex items-center">
+                      History window (h)
+                      <InfoTooltip text="Trailing duration of persisted spread history retained for baselines, in hours." />
+                    </span>
+                  </label>
+                  <input
+                    className={INPUT_INLINE_CLS}
+                    type="number"
+                    min={1}
+                    value={draft.historyWindowSecs / 3600}
+                    onChange={(e) => set("historyWindowSecs", num(e.target.value, 24) * 3600)}
+                  />
+                </div>
+
+                <div className={`${CARD_CLS} flex items-center justify-between gap-3`}>
+                  <label className={`${LABEL_CLS} flex-1`}>
+                    <span className="flex items-center">
+                      Poll interval (s)
+                      <InfoTooltip text="Opportunity executor background tick cadence in seconds." />
+                    </span>
+                  </label>
+                  <input
+                    className={INPUT_INLINE_CLS}
+                    type="number"
+                    min={1}
+                    value={Number(botDraft.pollIntervalSecs)}
+                    onChange={(e) => setBot("pollIntervalSecs", Math.max(1, Math.round(num(e.target.value, 1))))}
+                  />
+                </div>
               </div>
             )}
           </div>
@@ -1527,15 +2184,6 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({
             </span>
             <span className="text-muted">bps</span>
           </div>
-          <div
-            className="flex items-center space-x-1.5 px-2.5 py-1.5 bg-surface-raised border border-surface-border rounded-lg"
-            title="Execution mode — edit via Configurator"
-          >
-            <span className="text-muted">Execution</span>
-            <span className="font-bold text-slate-900">
-              {cfg ? (cfg.executionMode === "two_way" ? "Two-Way" : "Single-Way") : "—"}
-            </span>
-          </div>
         </div>
 
         <div className="flex items-center space-x-3 shrink-0">
@@ -1669,120 +2317,123 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({
       {/* Radar gadget — filter strip + table in a single card.
           Filters are display-only; none of these affect the monitor or strategy. */}
       <div className="flex-1 min-h-0 flex flex-col bg-surface rounded-xl border border-surface-border shadow-card overflow-hidden">
-        <div className="flex items-center gap-2.5 px-4 py-2.5 border-b border-surface-border text-xs font-sans shrink-0 bg-surface-raised/40">
-          <div
-            className="flex items-center gap-1.5 bg-surface border border-surface-border rounded-lg px-2.5 py-1.5 shadow-2xs hover:border-slate-300 focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/15 transition-all"
-            title="Display filter — symbol contains"
-          >
-            <Search size={13} className="text-muted shrink-0" />
-            <span className="text-muted font-medium">Symbol</span>
-            <input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="ALL"
-              className="bg-transparent w-24 outline-none font-bold text-slate-900 uppercase font-mono text-xs placeholder:text-slate-300"
-            />
-          </div>
-          <div className="relative" ref={venueMenuRef}>
-            <button
-              type="button"
-              onClick={() => setShowVenueMenu((v) => !v)}
-              className="flex items-center gap-1.5 bg-surface border border-surface-border rounded-lg px-2 py-2 font-sans text-xs transition-all cursor-pointer shadow-2xs hover:border-slate-300 hover:bg-slate-50/80"
-              title="Display filter — shows only rows with a selected venue on either leg. Does not affect the monitor or strategy"
+        <div className="flex items-center justify-between gap-3 px-4 py-2.5 border-b border-surface-border text-xs font-sans shrink-0 bg-surface-raised/40">
+          <h3 className="text-[13px] font-bold font-sans tracking-wider text-slate-900">
+            Opportunity Scanner
+          </h3>
+          <div className="flex items-center gap-2 text-xs font-sans">
+            <div
+              className="flex items-center gap-1.5 bg-surface border border-surface-border rounded-lg px-2.5 py-1.5 shadow-2xs hover:border-slate-300 focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/15 transition-all"
+              title="Display filter — symbol contains"
             >
-              <span className="text-muted font-medium">Venue</span>
-              {venueFilters.length > 0 && (
-                <span className="flex items-center -space-x-1">
-                  {venueFilters.slice(0, 4).map((v) => (
-                    <VenueLogo key={v} venueId={v} name={VENUE_NAME[v] ?? v} size={16} />
-                  ))}
-                </span>
-              )}
-              <span className="font-bold text-slate-900 font-mono text-xs">
-                {venueFilters.length === 0
-                  ? "ALL"
-                  : venueFilters.map((v) => VENUE_LABEL[v] ?? v).join("+")}
-              </span>
-              <ChevronDown
-                className={`w-3.5 h-3.5 text-muted transition-transform ${showVenueMenu ? "rotate-180" : ""}`}
+              <Search size={13} className="text-muted shrink-0" />
+              <span className="text-muted font-medium">Symbol</span>
+              <input
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="ALL"
+                className="bg-transparent w-24 outline-none font-bold text-slate-900 uppercase font-mono text-xs placeholder:text-slate-300"
               />
-            </button>
-            {showVenueMenu && (
-              <div className="absolute left-0 top-full mt-1.5 w-52 bg-surface border border-surface-border rounded-xl shadow-elevated p-1.5 z-30 font-sans text-xs animate-in fade-in zoom-in-95 duration-100">
-                <button
-                  type="button"
-                  onClick={() => setVenueFilters([])}
-                  className={`w-full flex items-center justify-between px-2 py-2 text-left transition rounded-lg cursor-pointer ${
-                    venueFilters.length === 0
-                      ? "bg-accent/10 text-accent-strong font-semibold"
-                      : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
-                  }`}
-                >
-                  <span>All</span>
-                  {venueFilters.length === 0 && <Check className="w-3.5 h-3.5" />}
-                </button>
-                <div className="border-t border-surface-border/60 my-1 -mx-1" />
-                {venues.map((v) => {
-                  const on = venueFilters.includes(v);
-                  return (
-                    <button
-                      key={v}
-                      type="button"
-                      onClick={() =>
-                        setVenueFilters((prev) =>
-                          prev.includes(v) ? prev.filter((x) => x !== v) : [...prev, v],
-                        )
-                      }
-                      className={`w-full flex items-center justify-between px-2 py-2 text-left transition rounded-lg cursor-pointer ${
-                        on
-                          ? "bg-accent/10 text-accent-strong font-semibold"
-                          : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
-                      }`}
-                    >
-                      <span className="flex items-center gap-2">
-                        <VenueLogo venueId={v} name={VENUE_NAME[v] ?? v} size={18} />
-                        <span className="font-mono text-xs">{VENUE_LABEL[v] ?? v}</span>
-                      </span>
-                      {on && <Check className="w-3.5 h-3.5" />}
-                    </button>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-          <div
-            className="flex items-center gap-1.5 bg-surface border border-surface-border rounded-lg px-2.5 py-1.5 shadow-2xs hover:border-slate-300 focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/15 transition-all"
-            title="Display filter — minimum expected profit"
-          >
-            <span className="text-muted font-medium">Min Exp</span>
-            <input
-              value={minExpBps}
-              onChange={(e) => {
-                minExpTouched.current = true;
-                setMinExpBps(e.target.value);
-              }}
-              placeholder={String(defaultRadarBotConfig().minExpectedProfitBps)}
-              className="bg-transparent w-14 outline-none text-right font-bold text-slate-900 font-mono text-xs"
-            />
-            <span className="text-muted text-[11px] font-medium">BPS</span>
-          </div>
-          <div
-            className="flex items-center gap-1.5 bg-surface border border-surface-border rounded-lg px-2.5 py-1.5 shadow-2xs hover:border-slate-300 focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/15 transition-all"
-            title="Display filter — minimum directional trade win probability (reversion-based, gated). Net % column shows the P&L-defined rate; both render '—' when history is thin."
-          >
-            <span className="text-muted font-medium">Min Win</span>
-            <input
-              value={minPWin}
-              onChange={(e) => {
-                minPWinTouched.current = true;
-                setMinPWin(e.target.value);
-              }}
-              placeholder="0"
-              className="bg-transparent w-14 outline-none text-right font-bold text-slate-900 font-mono text-xs"
-            />
-            <span className="text-muted text-[11px] font-medium">%</span>
-          </div>
-          <div className="ml-auto flex items-center gap-2">
+            </div>
+            <div className="relative" ref={venueMenuRef}>
+              <button
+                type="button"
+                onClick={() => setShowVenueMenu((v) => !v)}
+                className="flex items-center gap-1.5 bg-surface border border-surface-border rounded-lg px-2 py-2 font-sans text-xs transition-all cursor-pointer shadow-2xs hover:border-slate-300 hover:bg-slate-50/80"
+                title="Display filter — shows only rows with a selected venue on either leg. Does not affect the monitor or strategy"
+              >
+                <span className="text-muted font-medium">Venue</span>
+                {venueFilters.length > 0 && (
+                  <span className="flex items-center -space-x-1">
+                    {venueFilters.slice(0, 4).map((v) => (
+                      <VenueLogo key={v} venueId={v} name={VENUE_NAME[v] ?? v} size={16} />
+                    ))}
+                  </span>
+                )}
+                <span className="font-bold text-slate-900 font-mono text-xs">
+                  {venueFilters.length === 0
+                    ? "ALL"
+                    : venueFilters.map((v) => VENUE_LABEL[v] ?? v).join("+")}
+                </span>
+                <ChevronDown
+                  className={`w-3.5 h-3.5 text-muted transition-transform ${showVenueMenu ? "rotate-180" : ""}`}
+                />
+              </button>
+              {showVenueMenu && (
+                <div className="absolute right-0 top-full mt-1.5 w-52 bg-surface border border-surface-border rounded-xl shadow-elevated p-1.5 z-30 font-sans text-xs animate-in fade-in zoom-in-95 duration-100">
+                  <button
+                    type="button"
+                    onClick={() => setVenueFilters([])}
+                    className={`w-full flex items-center justify-between px-2 py-2 text-left transition rounded-lg cursor-pointer ${
+                      venueFilters.length === 0
+                        ? "bg-accent/10 text-accent-strong font-semibold"
+                        : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
+                    }`}
+                  >
+                    <span>All</span>
+                    {venueFilters.length === 0 && <Check className="w-3.5 h-3.5" />}
+                  </button>
+                  <div className="border-t border-surface-border/60 my-1 -mx-1" />
+                  {venues.map((v) => {
+                    const on = venueFilters.includes(v);
+                    return (
+                      <button
+                        key={v}
+                        type="button"
+                        onClick={() =>
+                          setVenueFilters((prev) =>
+                            prev.includes(v) ? prev.filter((x) => x !== v) : [...prev, v],
+                          )
+                        }
+                        className={`w-full flex items-center justify-between px-2 py-2 text-left transition rounded-lg cursor-pointer ${
+                          on
+                            ? "bg-accent/10 text-accent-strong font-semibold"
+                            : "text-slate-700 hover:bg-surface-raised hover:text-slate-900"
+                        }`}
+                      >
+                        <span className="flex items-center gap-2">
+                          <VenueLogo venueId={v} name={VENUE_NAME[v] ?? v} size={18} />
+                          <span className="font-mono text-xs">{VENUE_LABEL[v] ?? v}</span>
+                        </span>
+                        {on && <Check className="w-3.5 h-3.5" />}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            <div
+              className="flex items-center gap-1.5 bg-surface border border-surface-border rounded-lg px-2.5 py-1.5 shadow-2xs hover:border-slate-300 focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/15 transition-all"
+              title="Display filter — minimum expected profit"
+            >
+              <span className="text-muted font-medium">Min Exp</span>
+              <input
+                value={minExpBps}
+                onChange={(e) => {
+                  minExpTouched.current = true;
+                  setMinExpBps(e.target.value);
+                }}
+                placeholder={String(defaultRadarBotConfig().minExpectedProfitBps)}
+                className="bg-transparent w-14 outline-none text-right font-bold text-slate-900 font-mono text-xs"
+              />
+              <span className="text-muted text-[11px] font-medium">BPS</span>
+            </div>
+            <div
+              className="flex items-center gap-1.5 bg-surface border border-surface-border rounded-lg px-2.5 py-1.5 shadow-2xs hover:border-slate-300 focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/15 transition-all"
+              title="Display filter — minimum directional trade win probability (reversion-based, gated). Net % column shows the P&L-defined rate; both render '—' when history is thin."
+            >
+              <span className="text-muted font-medium">Min Win</span>
+              <input
+                value={minPWin}
+                onChange={(e) => {
+                  minPWinTouched.current = true;
+                  setMinPWin(e.target.value);
+                }}
+                placeholder="0"
+                className="bg-transparent w-14 outline-none text-right font-bold text-slate-900 font-mono text-xs"
+              />
+              <span className="text-muted text-[11px] font-medium">%</span>
+            </div>
             {(snap?.exempted.length ?? 0) > 0 && (
               <span className="text-slate-500 flex items-center gap-1 text-[11px] font-sans">
                 <EyeOff size={12} /> {snap?.exempted.length} hidden
@@ -2001,7 +2652,7 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({
           ) : dockTab === "history" ? (
             <TickerTransactionHistory symbol="" logs={radarLogs} matchAllSymbols />
           ) : dockTab === "opps" ? (
-            <TickerOpportunityHistory symbol="" />
+            <OpportunityHistoryGadget strategy="futures" radarLogs={radarLogs} />
           ) : (
             <TickerLogMonitor
               symbol=""

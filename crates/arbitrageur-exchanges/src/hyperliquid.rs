@@ -99,6 +99,60 @@ pub fn to_hl_cloid(cid: &str) -> Option<String> {
     }
 }
 
+/// Parse Hyperliquid raw order status string into our core `OrderStatus`.
+///
+/// Hyperliquid sets status="filled" for both fully filled orders and
+/// IOC orders that partially filled before the unfilled balance was killed.
+/// When remaining_sz > 0 and filled_qty > 0, the order is terminal on the venue
+/// with partial fills — we return `OrderStatus::Cancelled` so the reconciler
+/// treats it as `LegPoll::PartialTerminal` rather than failing closed or deadlocking.
+pub fn parse_hyperliquid_order_status(
+    raw_status: &str,
+    orig_sz: Decimal,
+    remaining_sz: Decimal,
+    v: &serde_json::Value,
+) -> anyhow::Result<arbitrageur_core::types::OrderStatus> {
+    use arbitrageur_core::types::OrderStatus;
+    let filled_qty = orig_sz - remaining_sz;
+    match raw_status {
+        "open" if filled_qty > dec!(0) => Ok(OrderStatus::PartiallyFilled),
+        "open" => Ok(OrderStatus::New),
+        "filled" if filled_qty == orig_sz => Ok(OrderStatus::Filled),
+        "filled" if filled_qty > dec!(0) => {
+            // Hyperliquid reports status="filled" on IOC/partial orders where
+            // the fillable portion executed and the remainder was killed.
+            // filled_qty/remaining_qty carry the true execution amounts;
+            // returning Cancelled flags it as terminal on the venue so the
+            // reconciler derives LegPoll::PartialTerminal rather than deadlocking.
+            Ok(OrderStatus::Cancelled)
+        }
+        "filled" => anyhow::bail!(
+            "Hyperliquid orderStatus 'filled' has zero filled quantity ({remaining_sz}/{orig_sz}): {v}"
+        ),
+        "canceled"
+        | "marginCanceled"
+        | "reduceOnlyCanceled"
+        | "vaultWithdrawalCanceled"
+        | "delistedCanceled"
+        | "liquidatedCanceled"
+        | "expired"
+        | "selfTradeCanceled"
+        | "siblingFilledCanceled"
+        | "triggered"
+        | "scheduledCancel" => {
+            // These are all terminal on the venue — a partial fill does
+            // not keep the order working. `filled_qty`/`remaining_qty`
+            // already carry the partial truth; `PartiallyFilled` here
+            // would classify as Working and deadlock resolution until
+            // the reconciler's deadline.
+            Ok(OrderStatus::Cancelled)
+        }
+        "rejected" if filled_qty == dec!(0) => Ok(OrderStatus::Rejected),
+        "rejected" => Ok(OrderStatus::Cancelled),
+        other => anyhow::bail!("Hyperliquid orderStatus unknown status '{other}': {v}"),
+    }
+}
+
 /// The exact EIP-712 digest a Hyperliquid L1 action signs — extracted so
 /// tests can ecrecover our signatures and verify round-trip correctness.
 pub fn hyperliquid_l1_digest<T: Serialize>(
@@ -355,10 +409,36 @@ impl HyperliquidAdapter {
     }
 
     async fn post_info(&self, body: serde_json::Value) -> anyhow::Result<serde_json::Value> {
+        let path_key = match body.get("type").and_then(|v| v.as_str()) {
+            Some("metaAndAssetCtxs") => "metaAndAssetCtxs".to_string(),
+            Some("clearinghouseState") => {
+                let user = body.get("user").and_then(|u| u.as_str()).unwrap_or("");
+                format!("clearinghouseState:{user}")
+            }
+            Some("l2Book") => {
+                let coin = body.get("coin").and_then(|c| c.as_str()).unwrap_or("");
+                format!("l2Book:{coin}")
+            }
+            Some("orderStatus") => {
+                let oid = body.get("oid").map(|o| o.to_string()).unwrap_or_default();
+                format!("orderStatus:{oid}")
+            }
+            Some(t) => t.to_string(),
+            None => "info".to_string(),
+        };
+        let allow_cache = matches!(path_key.as_str(), "metaAndAssetCtxs" | "meta");
         let url = format!("{}/info", self.base_url);
         let mut retries = 0;
         loop {
-            let _ = self.rate_limiter.acquire_or_cache(false).await;
+            if let Some(cached) = self
+                .rate_limiter
+                .acquire_or_cache_path(&path_key, allow_cache)
+                .await?
+            {
+                if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&cached) {
+                    return Ok(json_val);
+                }
+            }
             let resp = match self.client.post(&url).json(&body).send().await {
                 Ok(r) => r,
                 Err(e) => {
@@ -369,7 +449,8 @@ impl HyperliquidAdapter {
             let status = resp.status();
             if status.is_success() {
                 let text = resp.text().await?;
-                self.rate_limiter.record_success(text.clone());
+                self.rate_limiter
+                    .record_success_path(&path_key, text.clone());
                 let json_val = serde_json::from_str::<serde_json::Value>(&text)?;
                 return Ok(json_val);
             }
@@ -377,7 +458,7 @@ impl HyperliquidAdapter {
             self.rate_limiter.record_failure(is_rate_limit);
             if is_rate_limit && retries < 3 {
                 retries += 1;
-                tokio::time::sleep(tokio::time::Duration::from_millis(500 * retries)).await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(1000 * (1 << retries))).await;
                 continue;
             }
             let text = resp.text().await.unwrap_or_default();
@@ -1358,7 +1439,6 @@ impl ExchangeAdapter for HyperliquidAdapter {
         order_id: &str,
         client_order_id: Option<&str>,
     ) -> anyhow::Result<OrderResponse> {
-        use arbitrageur_core::types::OrderStatus;
         let user = {
             let guard = self.wallet_address.read();
             guard
@@ -1461,34 +1541,7 @@ impl ExchangeAdapter for HyperliquidAdapter {
             .and_then(|o| o.get("status"))
             .and_then(|s| s.as_str())
             .ok_or_else(|| anyhow::anyhow!("Hyperliquid orderStatus missing status: {v}"))?;
-        let status = match raw_status {
-            "open" if filled_qty > dec!(0) => OrderStatus::PartiallyFilled,
-            "open" => OrderStatus::New,
-            "filled" if filled_qty == orig_sz => OrderStatus::Filled,
-            "filled" => anyhow::bail!(
-                "Hyperliquid orderStatus 'filled' has inconsistent sz {remaining_sz}/{orig_sz}: {v}"
-            ),
-            "canceled"
-            | "marginCanceled"
-            | "reduceOnlyCanceled"
-            | "vaultWithdrawalCanceled"
-            | "delistedCanceled"
-            | "liquidatedCanceled"
-            | "expired"
-            | "selfTradeCanceled"
-            | "siblingFilledCanceled"
-            | "triggered"
-            | "scheduledCancel" => {
-                // These are all terminal on the venue — a partial fill does
-                // not keep the order working. `filled_qty`/`remaining_qty`
-                // already carry the partial truth; `PartiallyFilled` here
-                // would classify as Working and deadlock resolution until
-                // the reconciler's deadline.
-                OrderStatus::Cancelled
-            }
-            "rejected" if filled_qty == dec!(0) => OrderStatus::Rejected,
-            other => anyhow::bail!("Hyperliquid orderStatus unknown status '{other}': {v}"),
-        };
+        let status = parse_hyperliquid_order_status(raw_status, orig_sz, remaining_sz, &v)?;
 
         // Best-effort fill detail: aggregate userFills for this oid to get a
         // true vwap + fee. Rows are venue-validated on coin and oid.
@@ -2176,5 +2229,38 @@ mod tests {
         assert_eq!(v["asset"], 1);
         assert_eq!(v["isCross"], true);
         assert_eq!(v["leverage"], 10);
+    }
+
+    #[test]
+    fn parse_hyperliquid_order_status_ioc_partial_fill() {
+        use arbitrageur_core::types::OrderStatus;
+        let v = json!({
+            "status": "order",
+            "order": {
+                "order": {
+                    "coin": "SUI",
+                    "origSz": "84.0",
+                    "sz": "50.4",
+                    "tif": "Ioc"
+                },
+                "status": "filled"
+            }
+        });
+        // 84.0 orig, 50.4 remaining => 33.6 filled.
+        // Hyperliquid status="filled" must map to Cancelled (terminal partial fill).
+        let st = parse_hyperliquid_order_status("filled", dec!(84.0), dec!(50.4), &v).unwrap();
+        assert_eq!(st, OrderStatus::Cancelled);
+
+        // 84.0 orig, 0.0 remaining => 84.0 filled => Filled.
+        let st_full = parse_hyperliquid_order_status("filled", dec!(84.0), dec!(0.0), &v).unwrap();
+        assert_eq!(st_full, OrderStatus::Filled);
+
+        // 84.0 orig, 84.0 remaining => 0.0 filled => New.
+        let st_new = parse_hyperliquid_order_status("open", dec!(84.0), dec!(84.0), &v).unwrap();
+        assert_eq!(st_new, OrderStatus::New);
+
+        // 84.0 orig, 50.4 remaining with open => PartiallyFilled.
+        let st_part = parse_hyperliquid_order_status("open", dec!(84.0), dec!(50.4), &v).unwrap();
+        assert_eq!(st_part, OrderStatus::PartiallyFilled);
     }
 }

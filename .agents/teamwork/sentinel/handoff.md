@@ -1,69 +1,35 @@
-# Sentinel Handoff Report: Arbitrageur Desktop UI/UX, Bot Lifecycle, and Strategy Controls Overhaul
-
-**Sentinel**: sentinel (Conversation ID: `0de761ad-86b1-4ac2-b616-16b8f63c3375`)  
-**Parent Agent**: parent (Conversation ID: `4f9f9f4e-4c20-4c88-98e9-ef5559c5d390`)  
-**Working Directory**: `/mnt/Data/Projects/Arbitrageur/.agents/teamwork/sentinel/`  
-**Date**: 2026-09-29  
-**Status**: VICTORY CONFIRMED  
-
----
+# Sentinel Handoff Report — UI/UX Standardization & Polish (R1–R8)
 
 ## 1. Observation
-
-All 5 core requirements specified in `ORIGINAL_REQUEST.md` under `## Follow-up — 2026-09-29T15:51:57Z` and subsequent coordination instructions have been fully designed, executed, tested, challenged, and verified:
-1. **R1 (Bot Status on Halt / Emergency Reset & Individual Startup)**:
-   - Automated bots across all strategies (RadarBot, OptionsBots, FixedYieldBot, and frontend hooks) transition to stopped (`idle`/`off`, never paused) upon halt, killswitch, emergency reset, or circuit breaker reset.
-   - Header pause/resume button is disabled with an explanatory tooltip during tripped circuit breaker conditions; resuming the engine strictly unpauses coordination without starting any automated bots.
-   - Each strategy's bot must be started individually via its own strategy-level Start button.
-2. **R2 (Strategy Filter Relocation & Options Strategy Unification)**:
-   - Relocated the strategy filter dropdown in `NetPnlChartGadget.tsx` into the top bar directly right of `"P&L & Equity History"` and eliminated the redundant second row.
-   - Unified all options substrategies under a single `"Options"` entry in `NetPnlChartGadget.tsx` and `PortfolioMonitor.tsx`.
-3. **R3 (Fixed Window/Dock Height Across Tabs)**:
-   - Enforced fixed, uniform container height (`p-3.5 h-96 overflow-y-auto` = 384px) across all bottom dock tabs in `OpportunityRadar.tsx`, `FundingRadar.tsx`, `LiveMatrix.tsx`, and `SpotArbitrageBot.tsx`, eliminating layout jumping.
-4. **R4 (Standardized Status Tag Across All Strategies)**:
-   - Implemented standardized `StrategyStatusBadge` displaying exactly one of four statuses: `Active`, `Paused`, `Reducing`, or `Stopped`.
-   - Word `"Engine"` removed from all status badges and tooltips.
-   - Badge positioned immediately to the right of the strategy title header, before any parameter tags across all 7 strategy headers.
-5. **R5 (Options Arbitrage Ribbon & Metrics Gadget Reorganization)**:
-   - Removed `"Premium Outlay"` parameter tag from ribbon; added 5th metric card for Premium Outlay in a 5-column metrics grid.
-   - Consolidated configurator, scan, and lifecycle buttons onto a single non-wrapping header line with strategy title and status.
-
----
+- The user requested standardization and visual polish across Arbitrageur desktop strategy monitor components, ribbon tags, button set borders, and security widgets (R1–R8).
+- Full multi-agent orchestration team (`orchestrator_3`) was dispatched and partitioned the requirements across 3 parallel workers:
+  - Block A (`worker_p3_a`): R2 (OpportunityRadar and SpotArbitrageBot header alignment), R5 (FundingRadar opportunity scanner dimensions).
+  - Block B (`worker_p3_b`): R1 (PredictionHub ribbon & volume cleanups), R6 (OptionsArbitrage ribbon visibility), R8 (TickerExplorer USD quote display).
+  - Block C (`worker_p3_c`): R3 (BotLifecycleControls symmetric padding), R4 (LiveMatrix trend arrows & SignalTrend footer), R7 (EngineSettings security box & MFA text).
+- Independent Phase 2 adversarial reviews and challenges (`reviewer_p3_1`, `reviewer_p3_2`, `challenger_p3_1`, `challenger_p3_2`, `auditor_p3_1`) were completed with 100% test pass rates.
+- Independent post-victory auditor (`victory_auditor_2`) conducted an un-sandboxed 3-phase audit (Timeline, Integrity Checks, Independent Test Execution) and delivered an explicit **VICTORY CONFIRMED** verdict.
 
 ## 2. Logic Chain
-
-1. **Routing & Dispatch**:
-   - Sentinel evaluated incoming request against the Task Routing Table and selected the **General** execution path (`teamwork_preview_orchestrator`).
-   - Spawned `orchestrator_2` (`79ca425f-52b2-482b-b97b-9d8092a384bd`) and established liveness/reporting crons.
-2. **Execution & Succession Handling**:
-   - `orchestrator_2` executed 5 structured milestones (M1–M5) with parallel explorers, workers, reviewers, and adversarial challengers (`challenger_1`, `challenger_2`).
-   - Multiple Antigravity server restarts were cleanly recovered via state resumption and subagent revival protocols without lost progress.
-3. **Review & Remediation**:
-   - Reviewer feedback on partial-close duplicate child creation during emergency flatten and UI prop consistency on `SpotArbitrageBot` was fully remediated by `remediation_worker`.
-4. **Independent Victory Audit**:
-   - Upon orchestrator completion claim, Sentinel dispatched independent `victory_auditor_1` (`b8e20326-ab91-4298-88ba-024f5684fe9c`) with zero shared swarm context.
-   - The auditor ran timeline audits, forensic integrity checks, and direct test suite execution.
-   - Auditor issued a verdict of **VICTORY CONFIRMED**.
-
----
+- **R1 (`PredictionHub.tsx`)**: Removed scaffold execution warning text and `Max Slip` ribbon tag. Cleaned search placeholder to `Search contract...`. Replaced disabled volume text with dynamic active `Min Vol` parameter badge showing formatted USD value (e.g. `$500,000` or `10,000`).
+- **R2 (`OpportunityRadar.tsx`, `SpotArbitrageBot.tsx`)**: Removed `Execution Single-Way` badge from OpportunityRadar ribbon. Aligned both components to standard Funding Rate header layout: `Opportunity Scanner` title on left and filter controls right-aligned.
+- **R3 (`BotLifecycleControls.tsx`)**: Standardized outer border wrapper padding to uniform symmetric `p-1` (4px) with no per-strategy overriding margins.
+- **R4 (`LiveMatrix.tsx`, `SignalTrendGadget.tsx`)**: Removed trend arrow glyphs (`↗` / `↘`) from LiveMatrix cell delta badges. Removed venue samples and baseline description footer line from SignalTrendGadget while preserving quantitative distribution data.
+- **R5 (`FundingRadar.tsx`)**: Reduced Opportunity Scanner container height to `h-[600px]` (accommodating exactly 2 rows of 250px opportunity cards) with smooth vertical scrolling for additional cards. Individual cards locked to fixed height.
+- **R6 (`OptionsArbitrage.tsx`)**: Hidden strategy ribbon bar when "All Strategies" is viewed; displays only when a specific substrategy is selected.
+- **R7 (`EngineSettings.tsx`)**: Styled Security Model box with neutral `bg-slate-50` and slate icon matching About page legal disclaimer. Removed MFA unlock explanation paragraph and authenticator app examples from TOTP description.
+- **R8 (`TickerExplorer.tsx`)**: Omitted `-USD` quote label when the quote is universal USD, rendering base symbol directly (`APT` instead of `APT-USD`), while preserving non-USD quotes (`BTC-USDC`, `ETH-USDT`).
 
 ## 3. Caveats
-
-- **Testnet/Demo Mode Environment**: While backend integration tests and frontend component tests pass with 100% reliability, live trading against venues requires valid API keys in the vault. The circuit breaker fail-closed safety mechanics guarantee that bots cannot execute without explicit per-strategy user activation.
-- **Circuit Breaker Persistence**: While tripped, engine unpausing is rejected at both the backend command level (`commands.rs`) and frontend UI (`Header.tsx`). Users must reset the circuit breaker in Portfolio Monitor before attempting to resume the engine.
-
----
+- Non-USD quote variants in TickerExplorer legitimately retain their quote suffix to distinguish instruments with different venue sets (e.g. `XRP-USDC` vs `XRP-USDT`), which is required by test suite regression assertions.
+- Prediction Market venue adapters remain scaffolding in the Rust backend, but user-facing UI now accurately presents configured parameter values rather than misleading scaffold warning banners.
 
 ## 4. Conclusion
-
-The overhaul is fully implemented, verified, and certified compliant with all acceptance criteria. All background crons have been cancelled and subagents terminated per rollout protocol. The system is in a stable, verified state.
-
----
+- All 8 requirements (R1–R8) and all acceptance criteria are fully met.
+- Independent victory audit returned **VICTORY CONFIRMED**.
+- All crons and subagents have been terminated per protocol.
 
 ## 5. Verification Method
-
-- **Rust Backend Tests**: `cargo test -p arbitrageur-desktop` -> 600 passed; 0 failed; 0 ignored (270.14s)
-- **Frontend Test Suite**: `cd frontend && npm test` -> 23 test suites passed; 0 failed
-- **Code Linter**: `cargo clippy -p arbitrageur-desktop --all-targets` -> 0 warnings / 0 errors
-- **Formatting**: `cargo fmt --check` -> Clean (exit code 0)
-- **Forensic Integrity**: Verified clean by `victory_auditor_1` (no shortcuts, mocks, or hardcoded strings)
+- Independent Victory Auditor executed:
+  - `cd frontend && npx tsc --noEmit` -> Exited 0 with 0 errors.
+  - `cd frontend && npm test` -> Exited 0 with 400 passed checks across all 52 test suites.
+  - `cargo check -p arbitrageur-desktop` -> Exited 0.

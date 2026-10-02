@@ -36,8 +36,8 @@ Identifies conversions (long spot, long put, short call), reverse conversions (s
 ### Single-Venue Triangular Arbitrage
 Scans for cyclic price discrepancies across three trading pairs on a single exchange (for example, BTC/USDC, ETH/BTC, ETH/USDC). Orders execute sequentially with limit checks to verify profitability after accounting for fees.
 
-### Statistical Arbitrage
-Tracks cointegrated pairs using an online two-dimensional Kalman filter to estimate dynamic hedge ratios. It fits price spreads to an Ornstein-Uhlenbeck mean-reverting process using maximum likelihood estimation to estimate half-life and exit boundaries.
+### Statistical Arbitrage & Probability-Driven Invalidation
+Tracks cointegrated pairs using an online two-dimensional Kalman filter to estimate dynamic hedge ratios. It fits price spreads to an Ornstein-Uhlenbeck mean-reverting process using maximum likelihood estimation to estimate half-life and live mean-reversion probability ($P_{\text{win}}$). Positions exit dynamically when the statistical thesis invalidates ($P_{\text{win}} < 0.50$) or when spreads converge, completely eliminating rigid wall-clock timers and premature carry churn.
 
 ### Prediction Market Research
 Scans event contracts across Polymarket and Kalshi for binary pricing inconsistencies ($P(\text{YES}) + P(\text{NO}) < 1.00 - \text{fees}$). These adapters are currently research scaffolds without automated trade execution.
@@ -49,7 +49,7 @@ Scans event contracts across Polymarket and Kalshi for binary pricing inconsiste
 The codebase contains adapters for 33+ venues across different categories. Support levels vary depending on venue API stability and whether order status polling is available:
 
 - **Perpetual DEXs**: Hyperliquid, Lighter (with vendored signer), Robinhood Lighter, Vanta (Orderly Network), Aster, PopDEX.
-- **Centralized Exchanges**: Binance (USDT-M perps), OKX, Deribit (options and perps), Kraken, Coinbase (spot), Alpaca (equities and crypto spot).
+- **Centralized Exchanges & Brokerages**: Binance (USDT-M perps), OKX, Deribit (options and perps), Interactive Brokers (IBKR equity/index options), Kraken, Coinbase (spot), Alpaca (equities and crypto spot).
 - **Decentralized Perpetual Protocols**: dYdX Chain, Pacifica, StandX, Ondo Perps, GRVT, Derive, Aevo, Vest Markets, QFEX, Nado, EVEDEX, Paradex, edgeX, Extended, Helix/Injective.
 - **EVM Automated Market Makers**: Uniswap V2/V3, PancakeSwap V2/V3, SushiSwap, QuickSwap, Camelot, Aerodrome, Velodrome.
 - **Interest Rate Swaps**: Pendle Boros (Arbitrum YU rate markets).

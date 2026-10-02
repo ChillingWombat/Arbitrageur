@@ -73,6 +73,7 @@ export function defaultRadarBotConfig(): RadarBotConfigDto {
     holdTimeoutMult: 3.0,
     stopMult: 1.5,
     staleUnwindSecs: 600,
+    invalidationPWin: 0.50,
   };
 }
 

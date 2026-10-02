@@ -1,6 +1,6 @@
 use arbitrageur_core::position::{AccountSnapshot, Position};
 use arbitrageur_core::types::{dec, Decimal};
-use tracing::warn;
+use tracing::{debug, warn};
 
 /// Health status of an account or position margin.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,13 +62,13 @@ impl MarginMonitor {
 
         let usage = account.margin_usage_pct;
         if usage >= self.config.critical_margin_usage_pct {
-            warn!(
+            debug!(
                 "[{}] CRITICAL margin utilization: {}% (limit: {}%)",
                 account.venue, usage, self.config.critical_margin_usage_pct
             );
             MarginHealthStatus::Critical
         } else if usage >= self.config.warning_margin_usage_pct {
-            warn!(
+            debug!(
                 "[{}] High margin utilization: {}% (warning: {}%)",
                 account.venue, usage, self.config.warning_margin_usage_pct
             );
