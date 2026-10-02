@@ -40,20 +40,23 @@ impl HedgeRatioKalmanFilter {
         self.p[1][1] += self.q[1];
 
         // 2. Observation matrix H = [1.0, x]
-        let h = [1.0, x];
-
         // 3. Measurement prediction and residual:
         // y_hat = H * state = alpha + beta * x
-        let y_hat = self.state[0] * h[0] + self.state[1] * h[1];
+        let y_hat = self.state[0] + self.state[1] * x;
         let residual = y - y_hat;
         self.latest_residual = residual;
 
         // 4. Innovation variance:
         // S = H * P * H^T + R
-        // H * P = [h0*P00 + h1*P10, h0*P01 + h1*P11]
-        let hp0 = h[0] * self.p[0][0] + h[1] * self.p[1][0];
-        let hp1 = h[0] * self.p[0][1] + h[1] * self.p[1][1];
-        let s = hp0 * h[0] + hp1 * h[1] + self.r;
+        // S = P00 + 2*x*P01 + x²*P11 + R
+        // Note: P is symmetric: P10 = P01
+        let p00 = self.p[0][0];
+        let p01 = self.p[0][1];
+        let p11 = self.p[1][1];
+
+        let hp0 = p00 + x * p01;
+        let hp1 = p01 + x * p11;
+        let s = hp0 + hp1 * x + self.r;
         self.latest_variance = s;
 
         if s.abs() < 1e-15 {
@@ -61,12 +64,10 @@ impl HedgeRatioKalmanFilter {
         }
 
         // 5. Kalman gain:
-        // K = P * H^T / S
-        // P * H^T = [P00*h0 + P01*h1, P10*h0 + P11*h1]
-        let pht0 = self.p[0][0] * h[0] + self.p[0][1] * h[1];
-        let pht1 = self.p[1][0] * h[0] + self.p[1][1] * h[1];
-        let k0 = pht0 / s;
-        let k1 = pht1 / s;
+        // K = P * H^T / S = [hp0, hp1]^T / S (since P is symmetric, P * H^T = (H * P)^T)
+        let inv_s = 1.0 / s;
+        let k0 = hp0 * inv_s;
+        let k1 = hp1 * inv_s;
 
         // 6. State update:
         // state = state + K * residual
@@ -75,25 +76,21 @@ impl HedgeRatioKalmanFilter {
 
         // 7. Covariance update — Joseph stabilized form:
         //    P = (I - K·H)·P·(I - K·H)ᵀ + K·R·Kᵀ
-        // The plain (I - K·H)·P form can drift non-PSD under floating-point
-        // error; Joseph form is a sum of two PSD terms and stays
-        // positive-semidefinite regardless of K accuracy.
-        let m00 = 1.0 - k0 * h[0];
-        let m01 = -k0 * h[1];
-        let m10 = -k1 * h[0];
-        let m11 = 1.0 - k1 * h[1];
+        let m00 = 1.0 - k0;
+        let m01 = -k0 * x;
+        let m10 = -k1;
+        let m11 = 1.0 - k1 * x;
 
-        let mp00 = m00 * self.p[0][0] + m01 * self.p[1][0];
-        let mp01 = m00 * self.p[0][1] + m01 * self.p[1][1];
-        let mp10 = m10 * self.p[0][0] + m11 * self.p[1][0];
-        let mp11 = m10 * self.p[0][1] + m11 * self.p[1][1];
+        let mp00 = m00 * p00 + m01 * p01;
+        let mp01 = m00 * p01 + m01 * p11;
+        let mp10 = m10 * p00 + m11 * p01;
+        let mp11 = m10 * p01 + m11 * p11;
 
-        let new_p00 = mp00 * m00 + mp01 * m01 + self.r * k0 * k0;
-        let new_p01 = mp00 * m10 + mp01 * m11 + self.r * k0 * k1;
-        let new_p10 = mp10 * m00 + mp11 * m01 + self.r * k1 * k0;
+        let r_k0 = self.r * k0;
+        let new_p00 = mp00 * m00 + mp01 * m01 + r_k0 * k0;
         let new_p11 = mp10 * m10 + mp11 * m11 + self.r * k1 * k1;
+        let sym_p01 = 0.5 * (mp00 * m10 + mp01 * m11 + mp10 * m00 + mp11 * m01) + r_k0 * k1;
 
-        let sym_p01 = (new_p01 + new_p10) * 0.5;
         self.p = [[new_p00.max(1e-12), sym_p01], [sym_p01, new_p11.max(1e-12)]];
 
         (self.state[1], residual)

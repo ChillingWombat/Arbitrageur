@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CycleStatus {
@@ -58,6 +58,8 @@ pub struct StrategyMetrics {
 #[derive(Debug, Default)]
 pub struct VirtualStrategyLedger {
     pub lots: HashMap<String, ArbitrageCycleLot>,
+    /// Secondary index mapping environment -> symbol -> venue -> open lot IDs for O(1) zero-allocation lookups
+    open_lots_by_venue: HashMap<String, HashMap<String, HashMap<String, HashSet<String>>>>,
 }
 
 fn default_unknown_environment() -> String {
@@ -68,6 +70,78 @@ impl VirtualStrategyLedger {
     pub fn new() -> Self {
         Self {
             lots: HashMap::new(),
+            open_lots_by_venue: HashMap::new(),
+        }
+    }
+
+    /// Rebuilds the secondary open lots index across all currently open lots.
+    pub fn rebuild_open_index(&mut self) {
+        self.open_lots_by_venue.clear();
+        for lot in self.lots.values() {
+            if lot.status == CycleStatus::Open {
+                Self::insert_open_index(
+                    &mut self.open_lots_by_venue,
+                    &lot.environment,
+                    &lot.symbol,
+                    &lot.venue_long,
+                    &lot.id,
+                );
+                Self::insert_open_index(
+                    &mut self.open_lots_by_venue,
+                    &lot.environment,
+                    &lot.symbol,
+                    &lot.venue_short,
+                    &lot.id,
+                );
+            }
+        }
+    }
+
+    /// Sets the entire lots table (e.g. during state hydration on startup) and re-indexes open lots.
+    pub fn set_lots(&mut self, lots: HashMap<String, ArbitrageCycleLot>) {
+        self.lots = lots;
+        self.rebuild_open_index();
+    }
+
+    /// Retains lots matching the predicate and synchronizes the open lot index.
+    pub fn retain_lots<F>(&mut self, mut f: F)
+    where
+        F: FnMut(&str, &ArbitrageCycleLot) -> bool,
+    {
+        self.lots.retain(|k, v| f(k, v));
+        self.rebuild_open_index();
+    }
+
+    fn insert_open_index(
+        index: &mut HashMap<String, HashMap<String, HashMap<String, HashSet<String>>>>,
+        env: &str,
+        sym: &str,
+        venue: &str,
+        id: &str,
+    ) {
+        index
+            .entry(env.to_string())
+            .or_default()
+            .entry(sym.to_string())
+            .or_default()
+            .entry(venue.to_string())
+            .or_default()
+            .insert(id.to_string());
+    }
+
+    fn remove_open_index(
+        index: &mut HashMap<String, HashMap<String, HashMap<String, HashSet<String>>>>,
+        env: &str,
+        sym: &str,
+        venue: &str,
+        id: &str,
+    ) {
+        if let Some(set) = index
+            .get_mut(env)
+            .and_then(|s| s.get_mut(sym))
+            .and_then(|v| v.get_mut(venue))
+        {
+            set.remove(id);
         }
     }
 
@@ -91,10 +165,10 @@ impl VirtualStrategyLedger {
         let lot = ArbitrageCycleLot {
             id: id.clone(),
             strategy_id,
-            symbol,
-            environment,
-            venue_long,
-            venue_short,
+            symbol: symbol.clone(),
+            environment: environment.clone(),
+            venue_long: venue_long.clone(),
+            venue_short: venue_short.clone(),
             entry_time: Utc::now(),
             entry_spread_bps,
             long_qty,
@@ -108,6 +182,20 @@ impl VirtualStrategyLedger {
             realized_pnl_usd: None,
             realized_pnl_bps: None,
         };
+        Self::insert_open_index(
+            &mut self.open_lots_by_venue,
+            &environment,
+            &symbol,
+            &venue_long,
+            &id,
+        );
+        Self::insert_open_index(
+            &mut self.open_lots_by_venue,
+            &environment,
+            &symbol,
+            &venue_short,
+            &id,
+        );
         self.lots.insert(id, lot);
     }
 
@@ -121,6 +209,21 @@ impl VirtualStrategyLedger {
         status: CycleStatus,
     ) -> Option<&ArbitrageCycleLot> {
         let lot = self.lots.get_mut(id)?;
+
+        Self::remove_open_index(
+            &mut self.open_lots_by_venue,
+            &lot.environment,
+            &lot.symbol,
+            &lot.venue_long,
+            id,
+        );
+        Self::remove_open_index(
+            &mut self.open_lots_by_venue,
+            &lot.environment,
+            &lot.symbol,
+            &lot.venue_short,
+            id,
+        );
 
         // Long leg PnL: (exit - entry) * qty
         let long_pnl = (long_exit_price - lot.long_entry_price) * lot.long_qty;
@@ -163,6 +266,22 @@ impl VirtualStrategyLedger {
         status: CycleStatus,
     ) -> Option<&ArbitrageCycleLot> {
         let lot = self.lots.get_mut(id)?;
+
+        Self::remove_open_index(
+            &mut self.open_lots_by_venue,
+            &lot.environment,
+            &lot.symbol,
+            &lot.venue_long,
+            id,
+        );
+        Self::remove_open_index(
+            &mut self.open_lots_by_venue,
+            &lot.environment,
+            &lot.symbol,
+            &lot.venue_short,
+            id,
+        );
+
         lot.status = status;
         lot.close_time = Some(Utc::now());
         lot.realized_pnl_usd = Some(realized_pnl_usd);
@@ -171,23 +290,52 @@ impl VirtualStrategyLedger {
     }
 
     /// Computes the net physical orderbook exposure on a specific venue for a symbol.
-    /// Aggregates across all active/open strategy lots in `environment`:
+    /// Aggregates across active/open strategy lots in `environment` in O(k) indexed time without allocations:
     /// Long positions on this venue add positive exposure, Short positions subtract exposure.
     /// Returns net_qty: positive means net long, negative means net short.
-    /// Unknown-environment lots (pre-v33) count toward neither environment —
-    /// cross-env exposure must never block or net off.
     pub fn compute_venue_net_exposure(&self, venue: &str, symbol: &str, environment: &str) -> f64 {
-        let mut net_qty = 0.0;
-        for lot in self.lots.values() {
-            if lot.status == CycleStatus::Open
-                && lot.symbol == symbol
-                && lot.environment == environment
-            {
-                if lot.venue_long == venue {
-                    net_qty += lot.long_qty;
+        let lot_ids_opt = self
+            .open_lots_by_venue
+            .get(environment)
+            .and_then(|by_symbol| by_symbol.get(symbol))
+            .and_then(|by_venue| by_venue.get(venue));
+
+        let Some(lot_ids) = lot_ids_opt else {
+            // Fail-closed safety guard: if index was unpopulated (e.g. unindexed direct lots insertion in tests),
+            // fallback to direct scan so exposure is never falsely reported as 0.0.
+            if self.open_lots_by_venue.is_empty() && !self.lots.is_empty() {
+                let mut net_qty = 0.0;
+                for lot in self.lots.values() {
+                    if lot.status == CycleStatus::Open
+                        && lot.symbol == symbol
+                        && lot.environment == environment
+                    {
+                        if lot.venue_long == venue {
+                            net_qty += lot.long_qty;
+                        }
+                        if lot.venue_short == venue {
+                            net_qty -= lot.short_qty;
+                        }
+                    }
                 }
-                if lot.venue_short == venue {
-                    net_qty -= lot.short_qty;
+                return net_qty;
+            }
+            return 0.0;
+        };
+
+        let mut net_qty = 0.0;
+        for id in lot_ids {
+            if let Some(lot) = self.lots.get(id) {
+                if lot.status == CycleStatus::Open
+                    && lot.symbol == symbol
+                    && lot.environment == environment
+                {
+                    if lot.venue_long == venue {
+                        net_qty += lot.long_qty;
+                    }
+                    if lot.venue_short == venue {
+                        net_qty -= lot.short_qty;
+                    }
                 }
             }
         }
@@ -386,5 +534,48 @@ mod tests {
         assert_eq!(metrics.winning_cycles, 1);
         assert_eq!(metrics.win_rate_pct, 100.0);
         assert!((metrics.total_pnl_usd - 160.0).abs() < 1e-2);
+
+        // Test hydration via set_lots (rebuilding secondary index on app restart)
+        let mut rehydrated = VirtualStrategyLedger::new();
+        rehydrated.set_lots(ledger.lots.clone());
+        let hl_rehydrated =
+            rehydrated.compute_venue_net_exposure("Hyperliquid", "BTC-USDC", "live");
+        assert_eq!(hl_rehydrated, hl_net_after);
+
+        // Test retain_lots filtering
+        rehydrated.retain_lots(|_, l| l.environment != "live");
+        assert_eq!(
+            rehydrated.compute_venue_net_exposure("Hyperliquid", "BTC-USDC", "live"),
+            0.0
+        );
+
+        // Test unindexed fallback safety guard: direct insertion into .lots without index update
+        let mut raw_ledger = VirtualStrategyLedger::new();
+        raw_ledger.lots.insert(
+            "lot-raw".into(),
+            ArbitrageCycleLot {
+                id: "lot-raw".into(),
+                strategy_id: "test".into(),
+                symbol: "ETH-USDC".into(),
+                environment: "live".into(),
+                venue_long: "Binance".into(),
+                venue_short: "OKX".into(),
+                entry_time: Utc::now(),
+                entry_spread_bps: 10.0,
+                long_qty: 2.5,
+                long_entry_price: 3000.0,
+                short_qty: 2.5,
+                short_entry_price: 3010.0,
+                fees_paid_usd: 1.0,
+                status: CycleStatus::Open,
+                close_time: None,
+                close_spread_bps: None,
+                realized_pnl_usd: None,
+                realized_pnl_bps: None,
+            },
+        );
+        // Even without index, fallback must find exposure correctly
+        let binance_net = raw_ledger.compute_venue_net_exposure("Binance", "ETH-USDC", "live");
+        assert_eq!(binance_net, 2.5);
     }
 }

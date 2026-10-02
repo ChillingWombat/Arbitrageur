@@ -165,6 +165,269 @@ pub fn evaluate_triangular_cycle(
     })
 }
 
+use rust_decimal::prelude::ToPrimitive;
+use std::collections::{HashMap, HashSet};
+
+/// Directed edge in the currency conversion graph.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TriangularCycleEdge {
+    pub from: String,
+    pub to: String,
+    pub from_idx: usize,
+    pub to_idx: usize,
+    pub symbol: String,
+    pub side: TriLegSide,
+    /// Rate received per unit of `from` asset: amount_to = amount_from * rate
+    pub rate: f64,
+    /// Taker fee in basis points
+    pub fee_bps: f64,
+    /// Negative log return weight: -ln(rate * (1 - fee))
+    pub weight: f64,
+}
+
+/// Candidate triangular cycle discovered by graph search.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TriangularCycleCandidate {
+    pub path: [String; 3],
+    pub symbols: [String; 3],
+    pub sides: [TriLegSide; 3],
+    pub fee_bps: [f64; 3],
+    pub expected_gross_bps: f64,
+    pub expected_net_bps: f64,
+}
+
+/// Graph of currencies and exchange edges for cycle detection.
+#[derive(Debug, Default, Clone)]
+pub struct CurrencyGraph {
+    /// Currency node names
+    pub nodes: Vec<String>,
+    node_to_idx: HashMap<String, usize>,
+    /// Adjacency list: node_idx -> list of outgoing edges
+    pub edges: Vec<Vec<TriangularCycleEdge>>,
+}
+
+impl CurrencyGraph {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn get_or_insert_node(&mut self, currency: &str) -> usize {
+        if let Some(&idx) = self.node_to_idx.get(currency) {
+            idx
+        } else {
+            let idx = self.nodes.len();
+            self.nodes.push(currency.to_string());
+            self.node_to_idx.insert(currency.to_string(), idx);
+            self.edges.push(Vec::new());
+            idx
+        }
+    }
+
+    /// Adds a pair book's executable edges (both BuyBase and SellBase directions).
+    pub fn add_orderbook_edges(
+        &mut self,
+        base: &str,
+        quote: &str,
+        symbol: &str,
+        book: &OrderBook,
+        fee_bps: f64,
+    ) {
+        let (Some(ask), Some(bid)) = (book.best_ask_price(), book.best_bid_price()) else {
+            return;
+        };
+        let ask_f = ask.to_f64().unwrap_or(0.0);
+        let bid_f = bid.to_f64().unwrap_or(0.0);
+        if ask_f <= 0.0 || bid_f <= 0.0 || ask <= bid {
+            return;
+        }
+
+        let fee_rate = (fee_bps / 10000.0).clamp(0.0, 1.0);
+
+        // Direction 1: Spend Quote -> Receive Base (lift ask)
+        // receive = spend / ask
+        let rate_quote_to_base = 1.0 / ask_f;
+        let eff_rate_q2b = rate_quote_to_base * (1.0 - fee_rate);
+        if eff_rate_q2b > 0.0 {
+            let u = self.get_or_insert_node(quote);
+            let v = self.get_or_insert_node(base);
+            self.edges[u].push(TriangularCycleEdge {
+                from: quote.to_string(),
+                to: base.to_string(),
+                from_idx: u,
+                to_idx: v,
+                symbol: symbol.to_string(),
+                side: TriLegSide::BuyBase,
+                rate: rate_quote_to_base,
+                fee_bps,
+                weight: -eff_rate_q2b.ln(),
+            });
+        }
+
+        // Direction 2: Spend Base -> Receive Quote (hit bid)
+        // receive = spend * bid
+        let rate_base_to_quote = bid_f;
+        let eff_rate_b2q = rate_base_to_quote * (1.0 - fee_rate);
+        if eff_rate_b2q > 0.0 {
+            let u = self.get_or_insert_node(base);
+            let v = self.get_or_insert_node(quote);
+            self.edges[u].push(TriangularCycleEdge {
+                from: base.to_string(),
+                to: quote.to_string(),
+                from_idx: u,
+                to_idx: v,
+                symbol: symbol.to_string(),
+                side: TriLegSide::SellBase,
+                rate: rate_base_to_quote,
+                fee_bps,
+                weight: -eff_rate_b2q.ln(),
+            });
+        }
+    }
+
+    /// Finds 3-cycle arbitrage opportunities starting and ending at `start_currency`.
+    /// Operates via adjacency graph search in O(deg(start) * deg(neighbor)), avoiding O(V³) scans.
+    pub fn find_triangular_cycles(&self, start_currency: &str) -> Vec<TriangularCycleCandidate> {
+        let Some(&start_idx) = self.node_to_idx.get(start_currency) else {
+            return Vec::new();
+        };
+
+        let mut candidates = Vec::new();
+
+        // 1st hop: start -> A
+        for edge1 in &self.edges[start_idx] {
+            let a_idx = edge1.to_idx;
+            if a_idx == start_idx {
+                continue;
+            }
+
+            // 2nd hop: A -> B
+            for edge2 in &self.edges[a_idx] {
+                let b_idx = edge2.to_idx;
+                if b_idx == start_idx || b_idx == a_idx {
+                    continue;
+                }
+
+                // 3rd hop: B -> start
+                for edge3 in &self.edges[b_idx] {
+                    if edge3.to_idx != start_idx {
+                        continue;
+                    }
+
+                    let total_weight = edge1.weight + edge2.weight + edge3.weight;
+                    let gross_mult = edge1.rate * edge2.rate * edge3.rate;
+                    let gross_bps = (gross_mult - 1.0) * 10000.0;
+                    let net_bps = (-total_weight).exp_m1() * 10000.0;
+
+                    candidates.push(TriangularCycleCandidate {
+                        path: [edge1.from.clone(), edge2.from.clone(), edge3.from.clone()],
+                        symbols: [
+                            edge1.symbol.clone(),
+                            edge2.symbol.clone(),
+                            edge3.symbol.clone(),
+                        ],
+                        sides: [edge1.side, edge2.side, edge3.side],
+                        fee_bps: [edge1.fee_bps, edge2.fee_bps, edge3.fee_bps],
+                        expected_gross_bps: gross_bps,
+                        expected_net_bps: net_bps,
+                    });
+                }
+            }
+        }
+
+        candidates.sort_by(|a, b| b.expected_net_bps.total_cmp(&a.expected_net_bps));
+        candidates
+    }
+
+    /// Detects negative weight cycles using the Bellman-Ford algorithm in O(V · E).
+    /// Returns any profitable arbitrage cycle sequence of currencies.
+    pub fn find_negative_cycles_bellman_ford(&self) -> Vec<Vec<String>> {
+        let n = self.nodes.len();
+        if n < 3 {
+            return Vec::new();
+        }
+
+        let mut dist = vec![0.0; n];
+        let mut pred: Vec<Option<usize>> = vec![None; n];
+
+        // Relax edges n-1 times
+        for _ in 0..n - 1 {
+            let mut updated = false;
+            for u in 0..n {
+                for edge in &self.edges[u] {
+                    let v = edge.to_idx;
+                    if dist[u] + edge.weight < dist[v] - 1e-12 {
+                        dist[v] = dist[u] + edge.weight;
+                        pred[v] = Some(u);
+                        updated = true;
+                    }
+                }
+            }
+            if !updated {
+                return Vec::new();
+            }
+        }
+
+        // Look for negative cycle on the n-th pass
+        let mut cycles = Vec::new();
+        let mut seen_cycles = HashSet::new();
+
+        for u in 0..n {
+            for edge in &self.edges[u] {
+                let v = edge.to_idx;
+                if dist[u] + edge.weight < dist[v] - 1e-12 {
+                    let mut curr = v;
+                    for _ in 0..n {
+                        if let Some(p) = pred[curr] {
+                            curr = p;
+                        }
+                    }
+
+                    // Extract cycle with visited guard against infinite loops
+                    let mut visited = vec![false; n];
+                    let mut cycle_indices = Vec::new();
+                    let mut step = curr;
+                    while !visited[step] {
+                        visited[step] = true;
+                        cycle_indices.push(step);
+                        if let Some(p) = pred[step] {
+                            step = p;
+                        } else {
+                            break;
+                        }
+                    }
+
+                    // step is where the loop closed
+                    if let Some(start_pos) = cycle_indices.iter().position(|&x| x == step) {
+                        let mut cycle_nodes: Vec<String> = cycle_indices[start_pos..]
+                            .iter()
+                            .map(|&idx| self.nodes[idx].clone())
+                            .collect();
+                        cycle_nodes.reverse();
+
+                        if cycle_nodes.len() >= 3 {
+                            // Canonicalize cycle representation to deduplicate cyclic shifts
+                            let min_pos = cycle_nodes
+                                .iter()
+                                .enumerate()
+                                .min_by(|(_, a), (_, b)| a.cmp(b))
+                                .map(|(idx, _)| idx)
+                                .unwrap_or(0);
+                            cycle_nodes.rotate_left(min_pos);
+
+                            let key = cycle_nodes.join("->");
+                            if seen_cycles.insert(key) {
+                                cycles.push(cycle_nodes);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        cycles
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -328,5 +591,45 @@ mod tests {
         let (vwap, remaining, _) = leg.buy_execution_vwap(qty).expect("depth");
         assert_eq!(remaining, dec!(0));
         assert!(qty * vwap <= start, "overspend: {qty} * {vwap} > {start}");
+    }
+
+    #[test]
+    fn test_currency_graph_triangular_cycles() {
+        let books = profitable_books();
+        let mut graph = CurrencyGraph::new();
+        // BTC-USDC (base: BTC, quote: USDC)
+        graph.add_orderbook_edges("BTC", "USDC", "BTC-USDC", &books[0], 2.0);
+        // ETH-BTC (base: ETH, quote: BTC)
+        graph.add_orderbook_edges("ETH", "BTC", "ETH-BTC", &books[1], 2.0);
+        // ETH-USDC (base: ETH, quote: USDC)
+        graph.add_orderbook_edges("ETH", "USDC", "ETH-USDC", &books[2], 2.0);
+
+        let cycles = graph.find_triangular_cycles("USDC");
+        assert!(
+            !cycles.is_empty(),
+            "Triangular cycle must be found via graph"
+        );
+        let top = &cycles[0];
+        assert_eq!(top.path, ["USDC", "ETH", "BTC"]);
+        assert!(top.expected_net_bps > 0.0);
+    }
+
+    #[test]
+    fn test_currency_graph_bellman_ford() {
+        let books = profitable_books();
+        let mut graph = CurrencyGraph::new();
+        graph.add_orderbook_edges("BTC", "USDC", "BTC-USDC", &books[0], 2.0);
+        graph.add_orderbook_edges("ETH", "BTC", "ETH-BTC", &books[1], 2.0);
+        graph.add_orderbook_edges("ETH", "USDC", "ETH-USDC", &books[2], 2.0);
+
+        let neg_cycles = graph.find_negative_cycles_bellman_ford();
+        assert!(
+            !neg_cycles.is_empty(),
+            "Bellman-Ford must detect negative cycle"
+        );
+        let cycle = &neg_cycles[0];
+        assert!(cycle.contains(&"USDC".to_string()));
+        assert!(cycle.contains(&"BTC".to_string()));
+        assert!(cycle.contains(&"ETH".to_string()));
     }
 }

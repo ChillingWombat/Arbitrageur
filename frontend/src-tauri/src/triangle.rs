@@ -175,25 +175,23 @@ struct TriangleEval {
     leg_prices: [f64; 3],
 }
 
-fn evaluate_triangle_books(
-    books: &[OrderBook; 3],
+fn evaluate_triangle_books<B: std::borrow::Borrow<OrderBook>>(
+    books: &[B; 3],
     sides: [TriLegSide; 3],
     fee_bps: f64,
     notional_usd: f64,
 ) -> Option<TriangleEval> {
     let notional = Decimal::from_f64_retain(notional_usd).filter(|q| *q > dec!(0))?;
     let fee = Decimal::from_f64_retain(fee_bps).filter(|f| *f >= dec!(0))?;
-    let res = evaluate_triangular_cycle(
-        [&books[0], &books[1], &books[2]],
-        sides,
-        [fee, fee, fee],
-        notional,
-    )?;
+    let b0 = books[0].borrow();
+    let b1 = books[1].borrow();
+    let b2 = books[2].borrow();
+    let res = evaluate_triangular_cycle([b0, b1, b2], sides, [fee, fee, fee], notional)?;
     let num = |v: Decimal| v.to_string().parse::<f64>().ok().filter(|f| f.is_finite());
     let prices = [
-        num(books[0].best_ask_price()?)?,
-        num(books[1].best_bid_price()?)?,
-        num(books[2].best_bid_price()?)?,
+        num(b0.best_ask_price()?)?,
+        num(b1.best_bid_price()?)?,
+        num(b2.best_bid_price()?)?,
     ];
     if prices.iter().any(|p| *p <= 0.0) {
         return None;
@@ -262,8 +260,8 @@ pub(crate) async fn resolve_triangle_books(
 /// between consecutive rungs (first rung uses its own cumulative rate).
 /// Expected fields stay `None` — atomic cycles have no win-rate model.
 /// Stops at the first unfillable size (depth is monotonic).
-fn triangle_depth_curve(
-    books: &[OrderBook; 3],
+fn triangle_depth_curve<B: std::borrow::Borrow<OrderBook>>(
+    books: &[B; 3],
     sides: [TriLegSide; 3],
     fee_bps: f64,
     ref_size_usd: f64,
@@ -272,9 +270,12 @@ fn triangle_depth_curve(
     let Some(fee) = Decimal::from_f64_retain(fee_bps).filter(|f| *f >= dec!(0)) else {
         return Vec::new();
     };
+    let b0 = books[0].borrow();
+    let b1 = books[1].borrow();
+    let b2 = books[2].borrow();
     // Start-notional ceiling: leg-1 lifts asks, so the spend cannot exceed
     // that side's visible quote notional.
-    let depth_cap: f64 = books[0]
+    let depth_cap: f64 = b0
         .asks
         .iter()
         .filter_map(|l| {
@@ -301,9 +302,7 @@ fn triangle_depth_curve(
         let Some(n) = Decimal::from_f64_retain(s).filter(|v| *v > dec!(0)) else {
             continue;
         };
-        let Some(res) =
-            evaluate_triangular_cycle([&books[0], &books[1], &books[2]], sides, [fee, fee, fee], n)
-        else {
+        let Some(res) = evaluate_triangular_cycle([b0, b1, b2], sides, [fee, fee, fee], n) else {
             break; // depth exhausted — deeper sizes cannot fill either
         };
         let profit = res
@@ -390,6 +389,8 @@ pub async fn scan_triangular_opportunities_impl(
             continue;
         }
         let usdc_rate = state.fx_price_factor(Some(vid), TRIANGLE_QUOTE);
+        let mut venue_book_cache: HashMap<String, Option<Arc<OrderBook>>> =
+            HashMap::with_capacity(30);
         for base_a in TRIANGLE_BASES {
             for base_b in TRIANGLE_BASES {
                 if base_a == base_b {
@@ -399,18 +400,33 @@ pub async fn scan_triangular_opportunities_impl(
                     continue;
                 }
                 let plan = triangle_plan(base_a, base_b);
-                let books = match resolve_triangle_books(
-                    state,
-                    adapter,
-                    &venue_id,
-                    &plan.leg_symbols,
-                    false,
-                )
-                .await
-                {
-                    Some(b) => b,
-                    None => continue,
+                let mut get_venue_book = |sym: &str| -> Option<Arc<OrderBook>> {
+                    if let Some(cached) = venue_book_cache.get(sym) {
+                        return cached.clone();
+                    }
+                    let book = state
+                        .market_data_hub
+                        .get_valid_orderbook(
+                            &venue_id,
+                            sym,
+                            Some(std::time::Duration::from_secs(2)),
+                        )
+                        .filter(|b| validate_adapter_book(b, &venue_id, sym).is_ok())
+                        .map(Arc::new);
+                    venue_book_cache.insert(sym.to_string(), book.clone());
+                    book
                 };
+
+                let Some(b0) = get_venue_book(&plan.leg_symbols[0]) else {
+                    continue;
+                };
+                let Some(b2) = get_venue_book(&plan.leg_symbols[2]) else {
+                    continue;
+                };
+                let Some(b1) = get_venue_book(&plan.leg_symbols[1]) else {
+                    continue;
+                };
+                let books = [b0, b1, b2];
                 // The evaluator's notional is leg-1 quote (USDC): the USD
                 // trade size converts in at the venue rate, and the
                 // USDC-denominated profit converts back out.

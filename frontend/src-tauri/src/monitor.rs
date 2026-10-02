@@ -3248,13 +3248,26 @@ impl SpreadMonitorEngine {
             }
             depth_snapshots.insert(symbol.clone(), depth_snapshot);
 
+            let empty_depths: HashMap<String, (f64, f64)> = HashMap::new();
+            let depths = depth_snapshots.get(symbol).unwrap_or(&empty_depths);
+
+            // Pre-fetch live orderbooks once per venue for this symbol: reduces hub lookups from O(V²) to O(V)
+            let prefetched_books: Vec<Option<OrderBook>> = venues_here
+                .iter()
+                .map(|v| {
+                    let vid = arbitrageur_core::types::VenueId(v.clone());
+                    state
+                        .market_data_hub
+                        .get_valid_orderbook(&vid, symbol, Some(stale_ms))
+                })
+                .collect();
+
             for (i, buy_v) in venues_here.iter().enumerate() {
                 for (j, sell_v) in venues_here.iter().enumerate() {
                     if i == j {
                         continue;
                     }
-                    let empty_depths: HashMap<String, (f64, f64)> = HashMap::new();
-                    let depths = depth_snapshots.get(symbol).unwrap_or(&empty_depths);
+                    let prefetched = Some((&prefetched_books[i], &prefetched_books[j]));
                     if let Some(row) = self.evaluate_pair(
                         state,
                         &cfg,
@@ -3267,6 +3280,7 @@ impl SpreadMonitorEngine {
                         &volumes,
                         &fee_map,
                         depths,
+                        prefetched,
                     ) {
                         if let Some(p) = &row.1 {
                             persist_batch.push(p.clone());
@@ -3383,6 +3397,7 @@ impl SpreadMonitorEngine {
         volumes: &HashMap<String, HashMap<String, f64>>,
         fee_map: &HashMap<String, f64>,
         depths: &HashMap<String, (f64, f64)>,
+        prefetched_books: Option<(&Option<OrderBook>, &Option<OrderBook>)>,
     ) -> Option<(
         MonitorRowDto,
         Option<(
@@ -3419,17 +3434,24 @@ impl SpreadMonitorEngine {
             || self.leg_cash_session_bound(symbol, sell_v))
             && !us_cash_open(now_ms);
 
-        // --- live books ------------------------------------------------
-        let buy_book = state.market_data_hub.get_valid_orderbook(
-            &arbitrageur_core::types::VenueId(buy_v.to_string()),
-            symbol,
-            Some(stale_ms),
-        );
-        let sell_book = state.market_data_hub.get_valid_orderbook(
-            &arbitrageur_core::types::VenueId(sell_v.to_string()),
-            symbol,
-            Some(stale_ms),
-        );
+        // --- live books (pre-fetched or resolved) -----------------------
+        let (buy_fallback, sell_fallback);
+        let (buy_book, sell_book) = match prefetched_books {
+            Some((b, s)) => (b, s),
+            None => {
+                buy_fallback = state.market_data_hub.get_valid_orderbook(
+                    &arbitrageur_core::types::VenueId(buy_v.to_string()),
+                    symbol,
+                    Some(stale_ms),
+                );
+                sell_fallback = state.market_data_hub.get_valid_orderbook(
+                    &arbitrageur_core::types::VenueId(sell_v.to_string()),
+                    symbol,
+                    Some(stale_ms),
+                );
+                (&buy_fallback, &sell_fallback)
+            }
+        };
         let books_ok = buy_book.is_some() && sell_book.is_some();
 
         // Symbol-collision guard: venues quoting irreconcilably different
@@ -3458,11 +3480,14 @@ impl SpreadMonitorEngine {
             (Some(a), Some(b)) if !a.is_empty() && !b.is_empty() => build_pair_series(a, b, 30_000),
             _ => Vec::new(),
         };
-        let vals: Vec<f64> = series.iter().map(|o| o.spread_bps).collect();
-        let n = vals.len();
+        let n = series.len();
         let (mu, sigma) = if n >= 2 {
-            let m = vals.iter().sum::<f64>() / n as f64;
-            let v = vals.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (n - 1) as f64;
+            let m = series.iter().map(|o| o.spread_bps).sum::<f64>() / n as f64;
+            let v = series
+                .iter()
+                .map(|o| (o.spread_bps - m).powi(2))
+                .sum::<f64>()
+                / (n - 1) as f64;
             (Some(m), Some(v.sqrt()))
         } else {
             (None, None)
@@ -3470,6 +3495,7 @@ impl SpreadMonitorEngine {
 
         // --- qualification window --------------------------------------
         let half_life_secs = if n >= 10 {
+            let vals: Vec<f64> = series.iter().map(|o| o.spread_bps).collect();
             let dt = series_mean_dt_secs(&series);
             OuModelParams::fit(&vals, dt).map(|p| p.half_life)
         } else {
@@ -3538,8 +3564,8 @@ impl SpreadMonitorEngine {
             .map(|c| c.execution_mode.clone());
         let exit_est_opt = exit_estimate_for_mode(
             ticker_mode.as_deref().unwrap_or(&cfg.execution_mode),
-            &buy_book,
-            &sell_book,
+            buy_book,
+            sell_book,
             fee_bps,
         );
         let exit_uncostable = exit_est_opt.is_none();
@@ -3559,7 +3585,7 @@ impl SpreadMonitorEngine {
             fee_bps + carry.unwrap_or(0.0).max(0.0) + exit_est_opt.unwrap_or(0.0) + asset_carry;
 
         // --- current executable edge ------------------------------------
-        let (edge_bps, dev_bps) = match (&buy_book, &sell_book, mu) {
+        let (edge_bps, dev_bps) = match (buy_book, sell_book, mu) {
             (Some(bk), Some(sk), Some(m)) => {
                 let ask = bk
                     .asks
@@ -3616,7 +3642,7 @@ impl SpreadMonitorEngine {
         // Capacity ladder over both books — requires a real historical
         // baseline; mu=0.0 would fabricate a reference price, so no ladder.
         let (optimal, breakeven, exp_usd, exp_bps, exp_capacity, bps_ladder, depth_curve) =
-            match (&buy_book, &sell_book, mu) {
+            match (buy_book, sell_book, mu) {
                 (Some(bk), Some(sk), Some(m)) => {
                     let asks: Vec<(f64, f64)> = bk
                         .asks
@@ -6267,6 +6293,7 @@ mod tests {
                 &volumes,
                 &fees,
                 &depths,
+                None,
             )
             .expect("pair evaluates");
         row
