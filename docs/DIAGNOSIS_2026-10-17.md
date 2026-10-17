@@ -584,3 +584,16 @@ One KDF was removable: "a rejected rekey must not rewrite the file" is now
 asserted on the snapshot bytes instead of re-opening under the original key
 (231 s → 200 s). Optimising the KDF crate was tried and had no effect;
 optimising the whole test profile OOMs the build container.
+
+### 8.13 The options close collar was narrower than one tick (#103)
+
+Auditing the #103 spec against the tree found one real gap in an otherwise
+implemented area: the protective IOC collar was ±2%, but an option tick can
+be a tenth of the premium (Deribit quotes a 0.001 BTC option on a 0.0001
+grid). A 2% collar on such a leg rounds to a price inside the spread, so the
+close never fills and the position stays open — the exact opposite of a
+fail-closed exit. The collar is now 15% (the spec's number) in one helper
+shared by the manual flatten path and the reconciler's residual auto-flatten.
+The bound that matters is preserved: the limit is relative to a validated
+book/mark/ticker reference and the order is IOC, so unfilled quantity cancels
+instead of sweeping, and an empty or stale book still refuses the exit.
