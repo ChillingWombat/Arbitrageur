@@ -3412,10 +3412,17 @@ impl AppEngineState {
 
     /// Mark the breaker's equity universe as already anchored, so the next
     /// risk snapshot *measures* drawdown against the current baseline instead
-    /// of re-anchoring. Callers that set a baseline by hand (tests, operators
-    /// resetting after review) use this to opt out of the automatic re-anchor
-    /// that a paper<->live switch or an account-set change would otherwise
-    /// trigger.
+    /// of re-anchoring.
+    ///
+    /// Test-only: production never needs it. Every production path that
+    /// changes the equity universe (environment switch, account
+    /// enable/disable, environment reset) *wants* the re-anchor — it clears
+    /// the anchor instead (see `reset_transaction_history_impl`). The only
+    /// callers that hand-set a baseline and must therefore opt out of the
+    /// automatic re-anchor are tests seeding a known `day_start_equity`.
+    /// Gated with `#[cfg(test)]` rather than `#[allow(dead_code)]` so the
+    /// shipped binary does not carry a live-only helper.
+    #[cfg(test)]
     pub fn mark_risk_universe_anchored(&self) {
         *self.last_risk_live_universe.write() = Some(self.is_live());
         *self.last_risk_account_set.write() =

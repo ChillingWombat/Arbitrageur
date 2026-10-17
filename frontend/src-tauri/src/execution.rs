@@ -3392,6 +3392,11 @@ pub(crate) fn admitted_account_keys(state: &AppEngineState, env_prefix: &str) ->
 
 /// The admitted account keys for the breaker's current environment — the
 /// identity of the equity universe the drawdown baseline is anchored to.
+///
+/// Test-only: it exists to seed `last_risk_account_set` from
+/// `AppEngineState::mark_risk_universe_anchored`, which is itself `#[cfg(test)]`.
+/// Production observes the account set inline inside `feed_breaker_equity*`.
+#[cfg(test)]
 pub fn admitted_risk_account_keys(state: &AppEngineState) -> HashSet<String> {
     admitted_account_keys(state, &format!("{}-", state.env().as_str()))
 }
