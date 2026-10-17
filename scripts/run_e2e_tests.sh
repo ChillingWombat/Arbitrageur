@@ -41,8 +41,16 @@ case "$MODE" in
     echo "2/3. Running Frontend Component Tests..."
     (cd frontend && npm test)
 
-    echo "3/3. Running Backend Unit & Integration Tests..."
+    # `all` deliberately stops at the smoke subset: the complete desktop
+    # suite needs ~45 minutes (the stronghold rekey test alone is a full
+    # Argon2 pass per open — issue #117). Say so out loud rather than
+    # letting the run look complete: the smoke filter used to hide 596 of
+    # the 610 tests silently (finding F-06).
+    echo "3/3. Running Backend Unit & Integration Tests (SMOKE SUBSET ONLY: state::tests)..."
     cargo test -p arbitrageur-desktop --bin arbitrageur-desktop -- state::tests
+
+    echo "NOTE: this ran the backend smoke subset. For every desktop test:"
+    echo "      $0 backend-full"
 
     echo "======================================================================"
     echo "          ALL TEST SUITES EXECUTED AND VERIFIED SUCCESSFULLY          "
