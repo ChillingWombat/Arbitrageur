@@ -96,6 +96,29 @@ You will need:
   `node --experimental-strip-types`; CI pins v24)
 - Pixi (optional, recommended for managing dependencies and tasks)
 
+### Supported platforms
+
+The workspace compiles and the test suites run on **Linux, macOS and Windows**
+— CI enforces this with a `cross-platform` matrix that builds every crate and
+runs the 4-tier E2E suite on all three.
+
+Per-platform system dependencies (only needed to build the Tauri webview):
+
+| Platform | Requirements |
+|---|---|
+| Linux | `libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev libdbus-1-dev` (Debian/Ubuntu) |
+| macOS | Xcode command-line tools (no extra packages) |
+| Windows | MSVC build tools + WebView2 (the installer downloads it if missing) |
+
+Two components remain Linux-only:
+
+- **Lighter signer** — only `liblighter_signer.so` is vendored and
+  digest-pinned; Lighter is unavailable on other platforms until a
+  Windows/macOS signer is published.
+- **Headless daemon deployment** — `ops/deploy/` ships systemd units. The
+  headless CLI itself compiles everywhere; only the service templates are
+  Linux-specific.
+
 ### Building the Project
 
 Clone the repository:
@@ -138,6 +161,9 @@ cargo test -p arbitrageur-desktop
 # Run exchange adapter tests
 cargo test -p arbitrageur-exchanges
 
+# Run the 4-tier E2E suite (portable: Unix socket on POSIX, named pipe on Windows)
+node --experimental-strip-types tests/e2e/runner.mjs
+
 # Check code formatting and run clippy
 cargo fmt --check
 cargo clippy --workspace --all-targets
@@ -145,7 +171,26 @@ cargo clippy --workspace --all-targets
 
 ### Building for Release
 
-To produce an optimized desktop binary, build with the `custom-protocol` feature so that the webview loads compiled frontend assets directly:
+Installers are produced by `tauri build`, which runs the frontend build,
+compiles the desktop crate with `custom-protocol`, and packages every format
+the host OS supports:
+
+| Host | Output |
+|---|---|
+| Linux | `.AppImage`, `.deb`, `.rpm` |
+| macOS | `.dmg` |
+| Windows | NSIS `.exe` (`.msi` if enabled) |
+
+```bash
+cd frontend
+npm ci
+npm run tauri build
+# artifacts: frontend/src-tauri/target/release/bundle/
+```
+
+To produce only an optimized desktop binary without packaging, build with the
+`custom-protocol` feature so that the webview loads compiled frontend assets
+directly:
 
 ```bash
 cargo build --release --bin arbitrageur-desktop --features custom-protocol

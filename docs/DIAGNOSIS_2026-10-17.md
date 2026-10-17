@@ -15,11 +15,12 @@ untouched when this pass began (verified: no `crates/**` or
 | Formatting gate | unknown | `cargo fmt --all -- --check` → **clean** |
 | Rust tests | never run | see §3 |
 | Frontend tests | 175/175 units passed, component suite unrunnable (Linux `node_modules` on a Windows host) | **419/419 pass** (Linux container, node 24) |
-| E2E 4-tier suite | not in CI, red when run | **passes on Linux**; Unix-socket-bound → cannot run on Windows |
+| E2E 4-tier suite | not in CI, red when run | **52/52 pass on Linux *and* Windows** (macOS via CI) |
 | CRITICAL findings | 6 open | **6 fixed** |
 | GitHub tracking | ~190 findings untracked | **10 issues filed (#108–#117)** |
 | CI red job | `deployment` job references missing unit | **fixed** |
-| Cross-platform | never verified | static gating audit clean; CI matrix still missing |
+| Cross-platform | never verified, never compiled off Linux | **compiles + E2E green on Linux; Windows/macOS gated by a new CI matrix (§7)** |
+| Desktop packaging | `bundle.active = false`, no installer | **bundling on; per-OS release matrix (nsis / dmg / deb-rpm-appimage)** |
 
 ---
 
@@ -156,9 +157,124 @@ and #103 (Oct 2–3 specs). Filed:
    (issue #111 notes the fix path).
 4. **Phantom code** (#114) — ~35k unreachable lines plus 48 fabricated
    "verified green" reports; deletion is a repo-owner decision.
-5. **Cross-platform packaging** (#115) — `bundle.active = false`; no installer
-   for any platform; the Lighter signer is Linux-only.
-6. **Breaker baseline reset** (`H-3` in `.review/tauri-security.md`) — the
+5. **Breaker baseline reset** (`H-3` in `.review/tauri-security.md`) — the
    drawdown baseline is not reset when the supervised account set changes.
-7. **Full-suite runtime** — the desktop tests are slow enough that a workspace
+6. **Full-suite runtime** — the desktop tests are slow enough that a workspace
    run takes tens of minutes; CI should split or parallelise them.
+7. **Lighter signer is Linux-only** — only `liblighter_signer.so` is vendored
+   and digest-pinned. The loader now asks for the platform-native file name
+   (`lighter_signer.dll` / `liblighter_signer.dylib`), but no such artifact is
+   published, so Lighter stays unavailable off Linux. Building and pinning a
+   Windows/macOS signer is a separate, upstream work item.
+8. **Windows dev bridge is loopback TCP** — with no filesystem sockets there is
+   no `SO_PEERCRED` equivalent, so any local process can talk to the bridge
+   while `ARBITRAGEUR_DEV_SOCK` is set. Loopback-only by construction and
+   dev-gated; a named-pipe transport with an ACL would restore peer identity.
+   Tracked as part of #115.
+
+---
+
+## 7. Cross-platform pass (second pass, same day)
+
+Issue #115 said a native `windows-latest` job was the only real gate. It is now
+in place, and the audit it enabled found three genuine blockers the static
+gating review had missed:
+
+### 7.1 `dev_rpc.rs` — unconditional Unix socket import (hard Windows compile error)
+
+The module imported `tokio::net::{UnixListener, UnixStream}` at module scope
+with no `cfg` gate. That is not a runtime failure — it is a compile failure,
+and it takes `arbitrageur-desktop` (hence `cargo check --workspace`) down on
+any non-unix target. The static audit in §2 looked for `std::os::unix` and
+`#[cfg(unix)]` call sites, which were all correctly gated; it never looked for
+*ungated Unix-only types in imports*, which is where the break actually was.
+
+Fix: split the transport behind a `DevStream` type alias.
+
+- unix: unchanged behaviour — filesystem socket, `chmod 0600` right after
+  bind, Linux `SO_PEERCRED` owner-uid check.
+- non-unix: an ephemeral `127.0.0.1:0` listener; the chosen port is written to
+  `<ARBITRAGEUR_DEV_SOCK>.port` so a client can discover it. Every ambiguity
+  (bind fails, `local_addr` fails, port file unwritable) refuses to serve
+  rather than listening somewhere unknown.
+
+`handle_conn` became generic over the stream type; the line protocol, the
+dispatch table and the four `dev_rpc` unit tests are untouched.
+
+### 7.2 E2E suite hard-coded `/tmp` (whole suite red on Windows)
+
+Two forms: `/tmp/test-arb-*.sock` endpoints (→ `EACCES`) and
+`path.join("/tmp", …)` for a scratch audit file (→ `ENOENT`). Node's `net`
+already serves Unix sockets on POSIX and named pipes on Windows through the
+same `createServer`/`createConnection` API, so only the *address* had to
+change: `devRpcEndpoint(name)` returns `\\.\pipe\arb-e2e-<name>` on Windows and
+`os.tmpdir()/test-arb-<name>.sock` elsewhere, and only filesystem endpoints get
+the `unlink` bookkeeping.
+
+Result: **52/52 passing on a Windows host**, where the suite previously could
+not run at all.
+
+### 7.3 Packaging: no installer existed on any platform
+
+`bundle.active` was `false`, so `tauri build` emitted a bare binary. Enabled
+it with `targets: "all"` (each host emits every format it supports) plus
+icons, category and a `downloadBootstrapper` WebView2 mode for Windows. Note
+`webviewInstallMode` is an *internally tagged enum* — the first attempt as a
+bare string was rejected by the build script's config validation, which is the
+gate working as intended.
+
+`release.yml` was then rewritten from a single Linux job into:
+
+- `desktop` matrix — `ubuntu-latest` / `windows-latest` / `macos-latest`,
+  `npm run tauri build`, staging only the packaged installers (never the
+  exploded `macos/*.app` tree) and digest-checking the signer on Linux.
+- `headless` (Linux) — CLI + ops tree + signer tarball.
+- `sbom` — CycloneDX.
+- `publish` — flattens everything with a platform prefix, checksums, releases.
+
+### 7.4 CI gate
+
+New `cross-platform` job: `cargo check --workspace --locked --all-targets` plus
+the 4-tier E2E suite on all three OSes, `fail-fast: false` so one OS going red
+does not hide the other two.
+
+### 7.5 Verification
+
+| Check | Result |
+|---|---|
+| `cargo check --workspace --locked --all-targets` (Linux container) | 0 errors |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | 0 warnings |
+| `cargo fmt --all -- --check` | clean — this also caught a formatting regression left in `options_packages.rs` by the C-5 fix |
+| `cargo test -p arbitrageur-exchanges` | 348 passed, 0 failed |
+| `cargo test -p arbitrageur-desktop dev_rpc` | 4 passed, 0 failed |
+| 4-tier E2E on Windows host | 52 passed, 0 failed |
+| `tauri.conf.json` | accepted by the `tauri-build` config validator |
+| Windows/macOS compile | gated by the CI matrix — see the run for commit `f536b35` |
+
+### 7.6 `icon.ico` / `icon.icns` were PNGs with renamed extensions
+
+Turning bundling on (§7.3) made the icon files load-bearing, and the new
+Windows job failed immediately in `tauri-winres`:
+
+```
+resource.rc(27) : error RC2175 : resource file …\icons\icon.ico is not in 3.00 format
+tauri-winres-0.3.6/src/lib.rs:543 panicked: called `Result::unwrap()` on
+  an `Err` value: Failed("RC.EXE failed to compile specified resource file")
+```
+
+Byte comparison showed why: `icon.ico` was md5-identical to `32x32.png` and
+`icon.icns` to `128x128.png`. They had never been containers at all — just
+copies of a PNG given the expected extension, which nothing had ever parsed
+because bundling was disabled.
+
+Fix: regenerate both from the 512×512 RGBA `icon.png`.
+
+- `icon.ico` — 2 365 bytes, magic `00 00 01 00`, seven entries
+  (16/24/32/48/64/128/256). Windows `RC.EXE` requires 3.00-format ICO.
+- `icon.icns` — 10 898 bytes, magic `69636e73` ("icns"), members
+  `ic07`/`ic08`/`ic09`/`ic10`/`ic11`/`ic12` (128/256/512/1024/32/64).
+
+This is the second class of defect the static audit could not see: the files
+*existed* and were the right size to look plausible, so every existence-based
+check passed. Only a real Windows toolchain reading the bytes could catch it —
+which is precisely what the matrix job is for.
