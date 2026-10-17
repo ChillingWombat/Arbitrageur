@@ -1,0 +1,27 @@
+# cargo-audit configuration.
+#
+# Only one entry belongs here, and it is a build-time dependency that cannot
+# be upgraded without an upstream release. Anything added to this list must
+# carry the same level of evidence: what pulls the crate, why the advisory is
+# not reachable in a shipped artifact, and why the upgrade is blocked.
+
+[advisories]
+ignore = [
+  # `zip` 8.6.0 — RUSTSEC-2026-0367 / -0368 / -0369 (extraction applies Unix
+  # permissions through symlinks, preserves SUID/SGID bits, and writes
+  # symlinks with attacker-controlled targets outside the destination).
+  #
+  # Not reachable in any shipped artifact: `zip` is a *build-dependency* of
+  # `libsodium-sys-stable` (confirmed with `cargo tree -i zip --workspace`,
+  # which reports it under `[build-dependencies]`). It unpacks the upstream
+  # libsodium source archive while compiling the crypto sys crate; it is not
+  # linked into arbitrageur-desktop, arbitrageur, or any other binary.
+  #
+  # Upgrade blocked: the fix is 9.0.0, but `libsodium-sys-stable` (latest
+  # 1.24.3, pulled by stronghold-runtime -> stronghold_engine ->
+  # iota_stronghold) requires `zip = "^8.5"`. Bumping it needs an upstream
+  # release, tracked separately.
+  "RUSTSEC-2026-0367",
+  "RUSTSEC-2026-0368",
+  "RUSTSEC-2026-0369",
+]
