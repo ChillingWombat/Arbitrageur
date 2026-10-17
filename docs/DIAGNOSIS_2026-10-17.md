@@ -513,3 +513,37 @@ parsing that could silently admit a connection — non-string token, missing
 field, bad JSON — is asserted on Linux and macOS CI too, not only on the OS
 that needs it. Windows CI type-checks this path via
 `cargo check --workspace --all-targets` on `windows-latest`.
+
+### 8.9 Phantom modules: the real count was 30, not "~35k lines" (#114)
+
+Issue #114 claimed ~35k lines of unreferenced modules. A two-stage scan
+separated three classes:
+
+1. **Orphan files** (no `mod` declaration anywhere — never compiled):
+   exactly one, `conformal_spectral_risk_shield.rs` (341 lines,
+   untracked). Deleted after backup.
+2. **Declared but test-only modules** (`pub mod` + `pub use::*`, yet no
+   public item name appears in any non-test code in the workspace): 30
+   modules, ~7.3k lines — `susy_instanton`, `zk_intent_settlement`,
+   `deep_hedging_game`, `surface_tensor`, and 26 more. All are stubs from
+   the same fabricated "tranche" campaign as the junk-physics audit
+   reports found in `.agents/teamwork/tranche*` (48 directories of
+   invented verification results, also deleted after backup). Deleted in
+   c46662b together with 19 tranche integration tests that existed only
+   to exercise them.
+3. **Audit-named but real**: `options_dispersion` (drives
+   `LiveVolSurfaceCache` in `state.rs`) and `smart_routing` (used by the
+   app coordinator) were false positives in the original audit and stay.
+
+Verification after deletion: 890 tests pass across the three affected
+crates, `cargo check --workspace --all-targets` and
+`clippy -- -D warnings` are clean, rustfmt applied.
+
+### 8.10 The desktop CI job was killed by its own 45-minute timeout
+
+Run 39025442802: every job green except `Rust workspace tests
+(arbitrageur-desktop)`, which ran 46 min and was cancelled by the
+job-level `timeout-minutes: 45` — not by the concurrency rule this time
+(no newer push existed). The suite legitimately needs ~46 min on a cold
+runner (the stronghold KDF test alone is ~229 s, #117). Ceiling raised
+to 90 minutes in c46662b.
