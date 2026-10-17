@@ -79,6 +79,113 @@ impl OrderBook {
         }
     }
 
+    /// Calculate top-of-book Stoikov Micro-Price:
+    /// P_{micro} = (Q_b * P_a + Q_a * P_b) / (Q_b + Q_a)
+    /// Returns None if either side is empty or total top-of-book size is zero.
+    pub fn micro_price(&self) -> Option<Decimal> {
+        let best_bid = self.best_bid()?;
+        let best_ask = self.best_ask()?;
+        let total_size = best_bid.size + best_ask.size;
+        if total_size <= dec!(0) {
+            return None;
+        }
+        Some((best_bid.size * best_ask.price + best_ask.size * best_bid.price) / total_size)
+    }
+
+    /// Calculate multi-level order book imbalance across up to `max_levels` levels,
+    /// with exponential depth decay weight w_l = exp(-decay_eta * l):
+    /// I_K = \sum_l w_l (Q_b^l - Q_a^l) / \sum_l w_l (Q_b^l + Q_a^l) \in [-1.0, 1.0]
+    pub fn multi_level_imbalance(&self, max_levels: usize, decay_eta: f64) -> Option<f64> {
+        if self.bids.is_empty() || self.asks.is_empty() || max_levels == 0 {
+            return None;
+        }
+        let k = max_levels.min(self.bids.len()).min(self.asks.len());
+        let eta = decay_eta.max(0.0);
+        let mut weighted_diff = 0.0;
+        let mut weighted_total = 0.0;
+
+        for l in 0..k {
+            let w = (-eta * l as f64).exp();
+            let q_b = self.bids[l].size.to_string().parse::<f64>().unwrap_or(0.0);
+            let q_a = self.asks[l].size.to_string().parse::<f64>().unwrap_or(0.0);
+            weighted_diff += w * (q_b - q_a);
+            weighted_total += w * (q_b + q_a);
+        }
+
+        if weighted_total <= 1e-12 {
+            return None;
+        }
+        Some((weighted_diff / weighted_total).clamp(-1.0, 1.0))
+    }
+
+    /// Calculate multi-level Stoikov-Cartea micro-price using multi-level order book imbalance:
+    /// P_{micro}^{(K)} = P_{mid} + I_K * (Spread / 2)
+    pub fn multi_level_micro_price(&self, max_levels: usize, decay_eta: f64) -> Option<Decimal> {
+        let mid = self.mid_price()?;
+        let spread = self.spread()?;
+        let imb = self.multi_level_imbalance(max_levels, decay_eta)?;
+        let imb_dec = Decimal::from_str_exact(&format!("{:.6}", imb))
+            .ok()
+            .or_else(|| Decimal::from_f64_retain(imb))?;
+        Some(mid + imb_dec * (spread / dec!(2)))
+    }
+
+    /// Calculate dynamic multi-level Order Flow Imbalance (OFI) delta relative to a previous book state,
+    /// implementing Cont, Kukanov & Stoikov (2014) event-driven order flow across depth levels:
+    /// e_b^l = Q_b,t^l (if P_b,t > P_b,t-1) | Q_b,t^l - Q_b,t-1^l (if ==) | -Q_b,t-1^l (if <)
+    /// e_a^l = -Q_a,t^l (if P_a,t < P_a,t-1) | -(Q_a,t^l - Q_a,t-1^l) (if ==) | Q_a,t-1^l (if >)
+    /// OFI_multi = \sum_{l=0}^{k-1} exp(-decay_lambda * l) * (e_b^l + e_a^l)
+    pub fn compute_ofi_delta(&self, prev: &OrderBook, max_levels: usize, decay_lambda: f64) -> f64 {
+        if max_levels == 0 || self.bids.is_empty() || self.asks.is_empty() {
+            return 0.0;
+        }
+        let k = max_levels
+            .min(self.bids.len())
+            .min(self.asks.len())
+            .min(prev.bids.len())
+            .min(prev.asks.len());
+        if k == 0 {
+            return 0.0;
+        }
+
+        let lambda = decay_lambda.max(0.0);
+        let mut total_ofi = 0.0;
+
+        for l in 0..k {
+            let w = (-lambda * l as f64).exp();
+
+            let curr_b_px = self.bids[l].price.to_string().parse::<f64>().unwrap_or(0.0);
+            let prev_b_px = prev.bids[l].price.to_string().parse::<f64>().unwrap_or(0.0);
+            let curr_b_sz = self.bids[l].size.to_string().parse::<f64>().unwrap_or(0.0);
+            let prev_b_sz = prev.bids[l].size.to_string().parse::<f64>().unwrap_or(0.0);
+
+            let e_b = if curr_b_px > prev_b_px {
+                curr_b_sz
+            } else if (curr_b_px - prev_b_px).abs() < 1e-9 {
+                curr_b_sz - prev_b_sz
+            } else {
+                -prev_b_sz
+            };
+
+            let curr_a_px = self.asks[l].price.to_string().parse::<f64>().unwrap_or(0.0);
+            let prev_a_px = prev.asks[l].price.to_string().parse::<f64>().unwrap_or(0.0);
+            let curr_a_sz = self.asks[l].size.to_string().parse::<f64>().unwrap_or(0.0);
+            let prev_a_sz = prev.asks[l].size.to_string().parse::<f64>().unwrap_or(0.0);
+
+            let e_a = if curr_a_px < prev_a_px {
+                -curr_a_sz
+            } else if (curr_a_px - prev_a_px).abs() < 1e-9 {
+                -(curr_a_sz - prev_a_sz)
+            } else {
+                prev_a_sz
+            };
+
+            total_ofi += w * (e_b + e_a);
+        }
+
+        total_ofi
+    }
+
     /// Rejects books that cannot safely drive execution: empty symbol, missing
     /// bids/asks, nonpositive prices or sizes, unsorted levels, or a
     /// crossed/locked book (`best_bid >= best_ask`).
@@ -295,6 +402,58 @@ impl OrderBook {
         Some((vwap, unfilled, slippage))
     }
 
+    /// Calculate the marginal (worst) ask price required to execute `target_qty`.
+    pub fn buy_execution_marginal_price(&self, target_qty: Decimal) -> Option<Decimal> {
+        if self.asks.is_empty() || target_qty <= dec!(0) {
+            return None;
+        }
+        let mut filled_qty = dec!(0);
+        let mut marginal_price = self.asks[0].price;
+
+        for level in &self.asks {
+            let available = level.size;
+            let needed = target_qty - filled_qty;
+            let fill = needed.min(available);
+            filled_qty += fill;
+            marginal_price = level.price;
+
+            if filled_qty >= target_qty {
+                return Some(marginal_price);
+            }
+        }
+        if filled_qty > dec!(0) {
+            Some(marginal_price)
+        } else {
+            None
+        }
+    }
+
+    /// Calculate the marginal (worst) bid price required to execute `target_qty`.
+    pub fn sell_execution_marginal_price(&self, target_qty: Decimal) -> Option<Decimal> {
+        if self.bids.is_empty() || target_qty <= dec!(0) {
+            return None;
+        }
+        let mut filled_qty = dec!(0);
+        let mut marginal_price = self.bids[0].price;
+
+        for level in &self.bids {
+            let available = level.size;
+            let needed = target_qty - filled_qty;
+            let fill = needed.min(available);
+            filled_qty += fill;
+            marginal_price = level.price;
+
+            if filled_qty >= target_qty {
+                return Some(marginal_price);
+            }
+        }
+        if filled_qty > dec!(0) {
+            Some(marginal_price)
+        } else {
+            None
+        }
+    }
+
     /// Calculate cumulative volume available up to `max_qty`, breaking early as soon as reached.
     /// Operates in O(k) where k <= N is the number of levels needed to fulfill `max_qty`.
     pub fn cumulative_depth_up_to(&self, side: Side, max_qty: Decimal) -> Decimal {
@@ -478,5 +637,46 @@ mod tests {
         sell_only.bids.push(BookLevel::new(dec!(10.0), dec!(1.0)));
         assert!(sell_only.validate_for_side(Side::Sell).is_ok());
         assert!(sell_only.validate_for_side(Side::Buy).is_err());
+    }
+
+    #[test]
+    fn test_order_book_micro_price_and_multi_level_imbalance() {
+        let mut book = OrderBook::new(VenueId::new("hyperliquid"), "BTC-USDC".to_string());
+        // Bid: 100.0 (size 3.0), Ask: 102.0 (size 1.0)
+        // Mid: 101.0, Spread: 2.0
+        book.bids.push(BookLevel::new(dec!(100.0), dec!(3.0)));
+        book.bids.push(BookLevel::new(dec!(99.0), dec!(5.0)));
+        book.asks.push(BookLevel::new(dec!(102.0), dec!(1.0)));
+        book.asks.push(BookLevel::new(dec!(103.0), dec!(2.0)));
+
+        // Top of book micro-price:
+        // (3.0 * 102.0 + 1.0 * 100.0) / 4.0 = (306 + 100) / 4 = 406 / 4 = 101.5
+        let micro = book.micro_price().unwrap();
+        assert_eq!(micro, dec!(101.5));
+
+        // Top level imbalance: (3 - 1) / (3 + 1) = 0.5
+        let imb_l1 = book.multi_level_imbalance(1, 0.5).unwrap();
+        assert!((imb_l1 - 0.5).abs() < 1e-6);
+
+        // Multi-level micro price should shift toward the heavy bid side (higher price)
+        let multi_micro = book.multi_level_micro_price(2, 0.5).unwrap();
+        assert!(multi_micro > dec!(101.0));
+    }
+
+    #[test]
+    fn test_compute_ofi_delta() {
+        let mut prev = OrderBook::new(VenueId::new("hyperliquid"), "BTC-USDC".to_string());
+        prev.bids.push(BookLevel::new(dec!(100.0), dec!(2.0)));
+        prev.asks.push(BookLevel::new(dec!(102.0), dec!(2.0)));
+
+        let mut curr = OrderBook::new(VenueId::new("hyperliquid"), "BTC-USDC".to_string());
+        // Bid price improved to 100.5 with size 3.0 -> buying pressure (e_b = +3.0)
+        curr.bids.push(BookLevel::new(dec!(100.5), dec!(3.0)));
+        // Ask price unchanged at 102.0 but size reduced to 1.0 -> buying pressure (e_a = -(1.0 - 2.0) = +1.0)
+        curr.asks.push(BookLevel::new(dec!(102.0), dec!(1.0)));
+
+        let ofi = curr.compute_ofi_delta(&prev, 1, 0.5);
+        // Total ofi should be 3.0 + 1.0 = 4.0
+        assert!((ofi - 4.0).abs() < 1e-6);
     }
 }

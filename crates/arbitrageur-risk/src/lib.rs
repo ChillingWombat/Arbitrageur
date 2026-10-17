@@ -1,11 +1,15 @@
 pub mod circuit_breaker;
+pub mod collateral_rebalance;
 pub mod delta_guard;
 pub mod margin_monitor;
+pub mod risk_parity_allocator;
 pub mod safety_guards;
 
 pub use circuit_breaker::*;
+pub use collateral_rebalance::*;
 pub use delta_guard::*;
 pub use margin_monitor::*;
+pub use risk_parity_allocator::*;
 pub use safety_guards::*;
 
 #[cfg(test)]

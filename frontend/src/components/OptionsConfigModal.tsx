@@ -588,14 +588,14 @@ export const OptionsConfigModal: React.FC<OptionsConfigModalProps> = ({
                   tooltip="Annualized expected yield based on net edge and time to expiration. Filters out long-horizon opportunities where edge is eroded by carry cost."
                 >
                   <NumberInput
-                    value={currentDraft.minExpectedYieldPct ?? 10}
+                    value={currentDraft.minExpectedYieldPct ?? 30}
                     onChange={(v) => {
                       const n = parseFloat(v);
-                      if (Number.isFinite(n)) setField("minExpectedYieldPct", Math.max(0, Math.min(1000, n)));
+                      if (Number.isFinite(n)) setField("minExpectedYieldPct", Math.max(30, Math.min(1000, n)));
                     }}
                     unit="%"
                     step="0.5"
-                    min="0"
+                    min="30"
                     max="1000"
                   />
                 </SettingRow>

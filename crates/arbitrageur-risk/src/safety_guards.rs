@@ -205,6 +205,12 @@ pub fn evaluate_venue_rebalance_needs(
             let high_f = highest_bal.to_string().parse::<f64>().unwrap_or(0.0);
             let def_f = deficit.to_string().parse::<f64>().unwrap_or(0.0);
 
+            // Suppress uneconomic micro-rebalances where fixed cross-chain gas/bridge fees (> $15) exceed 5% of transfer
+            let estimated_bridge_friction_usd = 15.0;
+            if def_f < estimated_bridge_friction_usd * 20.0 {
+                continue; // Deficit < $300 is uneconomic to bridge across L1/L2
+            }
+
             recommendations.push(RebalanceRecommendation {
                 low_venue: venue.clone(),
                 current_balance_usd: bal_f,
@@ -341,5 +347,18 @@ mod tests {
         assert!(recs[0]
             .warning_message
             .contains("Asymmetric Margin Depletion"));
+    }
+
+    #[test]
+    fn test_asymmetric_venue_rebalance_suppresses_uneconomic_micro_transfers() {
+        let mut balances = HashMap::new();
+        // Total balance = $1000. Lighter has $100 (10% < 15%), target = $500, deficit = $400.
+        // If total balance is $400, Lighter has $30 (7.5% < 15%), target = $200, deficit = $170 (< $300 minimum economic transfer)
+        balances.insert("Hyperliquid".into(), dec!(370.0));
+        balances.insert("Lighter".into(), dec!(30.0));
+
+        let recs = evaluate_venue_rebalance_needs(&balances, dec!(15.0));
+        // Deficit is $170, which is less than $300 (15 * 20), so transfer is uneconomic and suppressed
+        assert_eq!(recs.len(), 0);
     }
 }

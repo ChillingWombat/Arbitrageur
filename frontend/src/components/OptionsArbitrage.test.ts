@@ -170,6 +170,18 @@ test("filter: substrategy 'all' passes every opp; each keeps its own rows", () =
   assert.equal(filterOptionsOpps(list, "jelly_roll").length, 0);
 });
 
+test("filter: filterOptionsOpps filters out opps below minYieldPct", () => {
+  const list = [
+    { kind: "parity" as const, p: opp({ expected_yield_pct: 35.0 }) },
+    { kind: "parity" as const, p: opp({ id: "opar-ETH-1-3000-reversal", expected_yield_pct: 15.0 }) },
+    { kind: "package" as const, p: pkgOpp({ expected_yield_pct: 31.5 }) },
+    { kind: "package" as const, p: pkgOpp({ id: "pkg-low", expected_yield_pct: 4.2 }) },
+  ];
+  assert.equal(filterOptionsOpps(list, "all", 30.0).length, 2);
+  assert.equal(filterOptionsOpps(list, "parity", 30.0).length, 1);
+  assert.equal(filterOptionsOpps(list, "box_spread", 30.0).length, 1);
+});
+
 const logRow = (over: Partial<ExecutionLogEntry> = {}): ExecutionLogEntry => ({
   id: "l1",
   timestamp: "2026-09-25T00:00:00Z",

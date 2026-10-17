@@ -125,4 +125,4 @@ A dual-tier enhancement establishing robust institutional TradFi paper trading c
 ## Further Notes
 
 - The Client Portal gateway runs locally as a system daemon or user process at `https://127.0.0.1:5000`. Credentials and 2FA are authenticated once per trading day via mobile push notification at `/sso/Dispatcher`.
-- The credential vault (`<redacted>`) persists encrypted keys in `~/.arbitrageur/vault.enc`, with credentials loaded into adapter memory upon unlock.
+- The credential vault (`<redacted — see SECURITY.md>`) persists encrypted keys in `~/.arbitrageur/vault.enc`, with credentials loaded into adapter memory upon unlock.

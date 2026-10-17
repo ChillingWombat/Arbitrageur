@@ -1,0 +1,24 @@
+# Canonical line endings: LF in the repository and in the working tree.
+# Without this, `core.autocrlf=true` (Windows default) turns every checkout
+# into CRLF churn: diffs dirty themselves, shell scripts executed inside the
+# Linux build container fail on `\r`, and `git diff --check` noise hides real
+# whitespace errors.
+* text=auto eol=lf
+
+# Native binaries and build artifacts are never normalized.
+*.so binary
+*.dll binary
+*.dylib binary
+*.rlib binary
+*.rmeta binary
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.icns binary
+*.woff binary
+*.woff2 binary
+
+# POSIX text executed directly by systemd / bash.
+*.sh text eol=lf
+*.service text eol=lf

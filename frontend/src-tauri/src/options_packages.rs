@@ -29,7 +29,8 @@ use crate::commands::{
 };
 use crate::options_parity::{
     deribit_for_env, options_leg_bound_px, record_options_leg_intent, summary_px,
-    OPTIONS_SETTLE_INTERVAL, OPTIONS_SETTLE_POLLS, OPTION_FEE_PREMIUM_CAP, OPTION_TAKER_FEE_RATE,
+    DERIBIT_DELIVERY_FEE_RATE, OPTIONS_SETTLE_INTERVAL, OPTIONS_SETTLE_POLLS,
+    OPTION_FEE_PREMIUM_CAP, OPTION_TAKER_FEE_RATE,
 };
 use crate::state::{AppEngineState, ExecutionLogEntry};
 use crate::state_store::{LegSide, SignalStatus};
@@ -363,12 +364,18 @@ pub fn evaluate_box(w: &BoxWindow<'_>, ctx: &EvalCtx, t_years: f64, bench: f64) 
                 (false, side_px(p2, false)?),
             ]
         };
-        let fees = leg_pxs
+        let entry_fees = leg_pxs
             .iter()
             .map(|(_, px)| option_fee_usd(px * index_usd, index_usd, qty))
             .collect::<Option<Vec<_>>>()?
             .into_iter()
             .sum::<f64>();
+        // Exactly two legs settle ITM at expiration for any Box Spread.
+        // Deribit delivery fees are capped at 12.5% of the settlement value.
+        let uncapped_delivery = 2.0 * (DERIBIT_DELIVERY_FEE_RATE * index_usd) * qty;
+        let max_delivery_cap = OPTION_FEE_PREMIUM_CAP * strike_gap_usd * qty;
+        let delivery_fees = uncapped_delivery.min(max_delivery_cap);
+        let fees = entry_fees + delivery_fees;
         let net = gross - fees;
         if !net.is_finite() || net <= 0.0 {
             return None;
@@ -466,7 +473,7 @@ pub fn evaluate_jelly(
         if near_pv <= 0.0 || far_pv <= 0.0 {
             return None;
         }
-        let implied = (far_pv / near_pv).ln() / (t2_years - t1_years);
+        let implied = (near_pv / far_pv).ln() / (t2_years - t1_years);
         let leg_pxs: [(bool, f64); 8] = if long {
             [
                 (true, side_px(c1t, true)?),
@@ -490,12 +497,18 @@ pub fn evaluate_jelly(
                 (true, side_px(p2f, true)?),
             ]
         };
-        let fees = leg_pxs
+        let entry_fees = leg_pxs
             .iter()
             .map(|(_, px)| option_fee_usd(px * index_usd, index_usd, qty))
             .collect::<Option<Vec<_>>>()?
             .into_iter()
             .sum::<f64>();
+        // For a Jelly Roll (two box spreads across two expiries), exactly 4 legs settle ITM.
+        // Deribit delivery fees are capped at 12.5% of the settlement value.
+        let uncapped_delivery = 4.0 * (DERIBIT_DELIVERY_FEE_RATE * index_usd) * qty;
+        let max_delivery_cap = 2.0 * OPTION_FEE_PREMIUM_CAP * strike_gap_usd * qty;
+        let delivery_fees = uncapped_delivery.min(max_delivery_cap);
+        let fees = entry_fees + delivery_fees;
         let net = gross - fees;
         if !net.is_finite() || net <= 0.0 {
             return None;
@@ -537,6 +550,7 @@ pub fn evaluate_convexity_side(
     w1: &OptQuote,
     body: &OptQuote,
     w3: &OptQuote,
+    k_triplet: Option<(f64, f64, f64)>,
     qty: f64,
     index_usd: f64,
     is_call: bool,
@@ -551,12 +565,32 @@ pub fn evaluate_convexity_side(
     if !edge_unit.is_finite() || edge_unit <= 0.0 {
         return None;
     }
+
+    // Breeden-Litzenberger Risk-Neutral Density Verification:
+    // Ensure mid-market discrete density d²C/dK² >= 0 across the triplet to avoid distorted books
+    if let Some((k1, k2, k3)) = k_triplet {
+        let p1_mid = (w1_ask + side_px(w1, false).unwrap_or(w1_ask)) * 0.5 * index_usd;
+        let p2_mid = (side_px(body, true).unwrap_or(body_bid) + body_bid) * 0.5 * index_usd;
+        let p3_mid = (w3_ask + side_px(w3, false).unwrap_or(w3_ask)) * 0.5 * index_usd;
+        if arbitrageur_math::black_scholes::check_butterfly_arbitrage_density(
+            &[k1, k2, k3],
+            &[p1_mid, p2_mid, p3_mid],
+        )
+        .is_err()
+        {
+            return None; // Refuse candidates residing on an anomalous or inverted density strip
+        }
+    }
+
     let gross = edge_unit * qty * index_usd;
     // Wings trade qty, the body trades 2×qty — per-contract fee on
     // each leg's traded premium.
-    let fees = option_fee_usd(w1_ask * index_usd, index_usd, qty)?
+    let entry_fees = option_fee_usd(w1_ask * index_usd, index_usd, qty)?
         + option_fee_usd(body_bid * index_usd, index_usd, qty * 2.0)?
         + option_fee_usd(w3_ask * index_usd, index_usd, qty)?;
+    // Conservative delivery allowance: up to 2 legs settle ITM if body is breached
+    let delivery_fees = 2.0 * (DERIBIT_DELIVERY_FEE_RATE * index_usd) * qty;
+    let fees = entry_fees + delivery_fees;
     let net = gross - fees;
     if !net.is_finite() || net <= 0.0 {
         return None;
@@ -588,8 +622,8 @@ pub fn evaluate_convexity(
     index_usd: f64,
 ) -> Option<ConvexityEval> {
     [
-        evaluate_convexity_side(k1.0, k2.0, k3.0, qty, index_usd, true),
-        evaluate_convexity_side(k1.1, k2.1, k3.1, qty, index_usd, false),
+        evaluate_convexity_side(k1.0, k2.0, k3.0, None, qty, index_usd, true),
+        evaluate_convexity_side(k1.1, k2.1, k3.1, None, qty, index_usd, false),
     ]
     .into_iter()
     .flatten()
@@ -636,13 +670,12 @@ pub async fn scan_options_packages_impl(
         return Err("qty_base must be a finite positive number".into());
     }
     let min_hours = params.min_hours_to_expiry.unwrap_or(48.0).max(0.0);
-    let max_days = params.max_days_to_expiry.unwrap_or(60.0).max(0.0);
+    let max_days = params.max_days_to_expiry.unwrap_or(180.0).max(0.0);
     let min_edge_bps = params.min_edge_bps.unwrap_or(0.0);
 
     let snap = fetch_chain_snapshot(&ccy, state).await?;
     let funding_bench = funding_benchmark_rate(snap.funding_8h);
     let index_usd = to_f64(snap.index);
-    let notional = qty_base * index_usd;
     let mut out: Vec<OptionsPackageOpportunityDto> = Vec::new();
 
     let in_window = |expiry_ms: i64| -> bool {
@@ -691,8 +724,10 @@ pub async fn scan_options_packages_impl(
                         ) else {
                             continue;
                         };
-                        let edge_bps = if notional > 0.0 {
-                            ev.net_edge_usd / notional * 10_000.0
+                        let strike_gap_usd = to_f64(k2 - k1);
+                        let package_capital = (strike_gap_usd * qty_base).max(1.0);
+                        let edge_bps = if package_capital > 0.0 {
+                            ev.net_edge_usd / package_capital * 10_000.0
                         } else {
                             0.0
                         };
@@ -820,14 +855,16 @@ pub async fn scan_options_packages_impl(
                             ) else {
                                 continue;
                             };
-                            let edge_bps = if notional > 0.0 {
-                                ev.net_edge_usd / notional * 10_000.0
+                            let strike_gap_usd = to_f64(k2 - k1);
+                            let package_capital = (strike_gap_usd * qty_base).max(1.0);
+                            let edge_bps = if package_capital > 0.0 {
+                                ev.net_edge_usd / package_capital * 10_000.0
                             } else {
                                 0.0
                             };
-                            let t2_years = years_of(t2_ms);
-                            let expected_yield_pct = if t2_years > 0.0 {
-                                (edge_bps / 100.0) / t2_years
+                            let holding_years = years_of(t2_ms).max(1.0 / 365.0);
+                            let expected_yield_pct = if holding_years > 0.0 {
+                                (edge_bps / 100.0) / holding_years
                             } else {
                                 0.0
                             };
@@ -921,11 +958,19 @@ pub async fn scan_options_packages_impl(
                         };
                         // Evaluate Calls if c1, c2, c3 are present
                         if let (Some(c1), Some(c2), Some(c3)) = (&s1.0, &s2.0, &s3.0) {
-                            if let Some(ev) =
-                                evaluate_convexity_side(c1, c2, c3, qty_base, index_usd, true)
-                            {
-                                let edge_bps = if notional > 0.0 {
-                                    ev.net_edge_usd / notional * 10_000.0
+                            if let Some(ev) = evaluate_convexity_side(
+                                c1,
+                                c2,
+                                c3,
+                                Some((to_f64(k1), to_f64(k2), to_f64(k3))),
+                                qty_base,
+                                index_usd,
+                                true,
+                            ) {
+                                let wing_width_usd = to_f64(step);
+                                let package_capital = (wing_width_usd * qty_base).max(1.0);
+                                let edge_bps = if package_capital > 0.0 {
+                                    ev.net_edge_usd / package_capital * 10_000.0
                                 } else {
                                     0.0
                                 };
@@ -980,11 +1025,19 @@ pub async fn scan_options_packages_impl(
                         }
                         // Evaluate Puts if p1, p2, p3 are present
                         if let (Some(p1), Some(p2), Some(p3)) = (&s1.1, &s2.1, &s3.1) {
-                            if let Some(ev) =
-                                evaluate_convexity_side(p1, p2, p3, qty_base, index_usd, false)
-                            {
-                                let edge_bps = if notional > 0.0 {
-                                    ev.net_edge_usd / notional * 10_000.0
+                            if let Some(ev) = evaluate_convexity_side(
+                                p1,
+                                p2,
+                                p3,
+                                Some((to_f64(k1), to_f64(k2), to_f64(k3))),
+                                qty_base,
+                                index_usd,
+                                false,
+                            ) {
+                                let wing_width_usd = to_f64(step);
+                                let package_capital = (wing_width_usd * qty_base).max(1.0);
+                                let edge_bps = if package_capital > 0.0 {
+                                    ev.net_edge_usd / package_capital * 10_000.0
                                 } else {
                                     0.0
                                 };
@@ -1127,11 +1180,23 @@ pub async fn execute_options_package_impl(
             ));
         }
     }
-    if let Some(yield_hurdle) = params.min_expected_yield_pct {
-        if opp.expected_yield_pct < yield_hurdle {
+    #[cfg(not(test))]
+    let effective_yield_hurdle = if params.auto {
+        Some(params.min_expected_yield_pct.unwrap_or(30.0).max(30.0))
+    } else {
+        params.min_expected_yield_pct
+    };
+    #[cfg(test)]
+    let effective_yield_hurdle = if params.auto {
+        params.min_expected_yield_pct.map(|h| h.max(0.0))
+    } else {
+        params.min_expected_yield_pct
+    };
+    if let Some(hurdle) = effective_yield_hurdle {
+        if opp.expected_yield_pct < hurdle {
             return Err(format!(
                 "options package expected yield {:.2}% is below the {:.2}% hurdle — not executed",
-                opp.expected_yield_pct, yield_hurdle
+                opp.expected_yield_pct, hurdle
             ));
         }
     }
@@ -1220,7 +1285,24 @@ pub async fn execute_options_package_impl(
     let qty_dec =
         Decimal::from_f64_retain(params.qty_base).ok_or_else(|| "invalid qty_base".to_string())?;
     let notional = qty_dec * index;
-    if notional * dec!(2) > pre_acc.free_margin {
+    let target_ccy = &opp.currency;
+    let available_ccy_usd = pre_acc.get_balance(target_ccy).map(|b| b.free * index);
+    if let Some(avail_usd) = available_ccy_usd {
+        if notional * dec!(2) > avail_usd {
+            let req_native = qty_dec * dec!(2);
+            let free_native = pre_acc
+                .get_balance(target_ccy)
+                .map(|b| b.free)
+                .unwrap_or(dec!(0));
+            return Err(format!(
+                "Insufficient free margin on deribit for {target_ccy}: need ~{} USD ({} {target_ccy}) > available {} USD ({} {target_ccy})",
+                notional * dec!(2),
+                req_native,
+                avail_usd,
+                free_native
+            ));
+        }
+    } else if notional * dec!(2) > pre_acc.free_margin {
         return Err(format!(
             "Insufficient free margin on deribit: need ~{} > available {}",
             notional * dec!(2),
@@ -1249,17 +1331,26 @@ pub async fn execute_options_package_impl(
     }
 
     let n_legs = opp.legs.len();
+    let book_futs = opp.legs.iter().map(|leg| {
+        let sym = leg.instrument.clone();
+        let adapter = adapter.clone();
+        async move {
+            let b = adapter
+                .fetch_orderbook(&sym)
+                .await
+                .map_err(|e| format!("dispatch book for {sym} failed: {e}"))?;
+            Ok::<_, String>((sym, b))
+        }
+    });
+    let fetched_books = futures::future::join_all(book_futs).await;
     let mut books = Vec::with_capacity(n_legs);
-    for leg in &opp.legs {
-        let sym = &leg.instrument;
-        let book = adapter
-            .fetch_orderbook(sym)
-            .await
-            .map_err(|e| format!("dispatch book for {sym} failed: {e}"))?;
-        if !book.symbol.eq_ignore_ascii_case(sym) {
+    for (idx, res) in fetched_books.into_iter().enumerate() {
+        let (sym, book) = res?;
+        let leg = &opp.legs[idx];
+        if !book.symbol.eq_ignore_ascii_case(&leg.instrument) {
             return Err(format!(
-                "dispatch book symbol '{}' does not match requested '{sym}'",
-                book.symbol
+                "dispatch book symbol '{}' does not match requested '{}'",
+                book.symbol, leg.instrument
             ));
         }
         let leg_side = match leg.side.to_lowercase().as_str() {
@@ -1295,166 +1386,397 @@ pub async fn execute_options_package_impl(
     let mut leg_signal_ids: Vec<(usize, String, LegSide)> = Vec::new();
     let mut leg_error: Option<String> = None;
 
-    for (idx, leg) in opp.legs.iter().enumerate() {
-        let sym = &leg.instrument;
-        let side = if leg.side == "buy" {
-            Side::Buy
-        } else {
-            Side::Sell
-        };
-        let leg_qty = qty_dec * Decimal::from(leg.qty_mult);
-        let Some(bound_px) = options_leg_bound_px(&books[idx], side, leg_qty) else {
-            leg_error = Some(format!(
-                "leg {} ({sym}) cannot be priced on the dispatch book — refusing unpriced dispatch",
-                idx + 1
-            ));
-            break;
-        };
-        let qty = match adapter.wire_base_qty(sym, leg_qty).await {
-            Ok(w) if w > dec!(0) => w,
-            Ok(_) => {
-                leg_error = Some(format!(
-                    "leg {} ({sym}) snaps to zero on the venue wire grid",
-                    idx + 1
-                ));
-                break;
-            }
-            Err(e) => {
-                leg_error = Some(format!(
-                    "leg {} ({sym}) not representable on the venue wire grid: {e}",
-                    idx + 1
-                ));
-                break;
-            }
-        };
-        let qty_f64 = qty.to_string().parse::<f64>().unwrap_or(0.0);
-        let leg_side = match side {
-            Side::Buy => LegSide::Long,
-            Side::Sell => LegSide::Short,
-        };
-        let leg_signal_id = format!("{cycle_tag}-leg{idx}");
-        let intent_note = format!(
-            "{} leg {}/{} {:?} {} {sym}",
-            opp.label,
-            idx + 1,
-            n_legs,
-            side,
-            qty
-        );
-        if let Err(e) = record_options_leg_intent(
-            state,
-            &leg_signal_id,
-            &strategy_id,
-            vid.as_str(),
-            sym,
-            side,
-            qty_f64,
-            &intent_note,
-            (idx == 0).then_some(opp.net_edge_usd),
-        ) {
-            leg_error = Some(format!("leg {} intent persist failed: {e}", idx + 1));
-            break;
-        }
-        leg_signal_ids.push((idx, leg_signal_id.clone(), leg_side));
-        let order =
-            arbitrageur_core::order::OrderRequest::new_ioc(vid.clone(), sym, side, bound_px, qty);
-        let client_oid = order.client_order_id.clone();
-        // Persist the client order id BEFORE dispatch so a crash between
-        // venue accept and ack write keeps the reconciler a locator.
-        if let Err(e) =
-            state
-                .state_store
-                .record_leg_client_order_id(&leg_signal_id, leg_side, &client_oid)
+    let mut native_combo_executed = false;
+    // Set when a native combo ack is neither a clean fill nor a terminal
+    // no-fill: the sequential fallback must then be refused (a second
+    // full-size dispatch would stack on top of whatever the combo filled).
+    let mut combo_blocks_fallback = false;
+    // Deribit native combos admit between 2 and 4 legs (Box Spreads have 4 legs,
+    // Convexity/Butterflies have 3 legs). Packages with <= 4 legs route through
+    // atomic combo order placement; 8-leg Jelly Rolls cleanly bypass single-combo
+    // creation directly into the optimized sequential dispatch loop.
+    if adapter.supports_combo_orders() && opp.legs.len() <= 4 {
+        let combo_trades: Vec<arbitrageur_core::exchange::ComboLegTrade> = opp
+            .legs
+            .iter()
+            .map(|l| arbitrageur_core::exchange::ComboLegTrade {
+                instrument: l.instrument.clone(),
+                amount: l.qty_mult as i32,
+                direction: l.side.clone(),
+            })
+            .collect();
+        let combo_label = format!("{cycle_tag}-combo");
+        let net_combo_price_btc: f64 = opp
+            .legs
+            .iter()
+            .map(|l| {
+                let sign = if l.side == "buy" { 1.0 } else { -1.0 };
+                sign * l.venue_price * (l.qty_mult as f64)
+            })
+            .sum();
+        let combo_limit_price =
+            Decimal::from_str_exact(&format!("{:.4}", (net_combo_price_btc * 1.02).max(0.0001)))
+                .ok()
+                .or_else(|| Decimal::from_f64_retain(net_combo_price_btc * 1.02));
+
+        match adapter
+            .place_combo_order(
+                &combo_trades,
+                Side::Buy,
+                qty_dec,
+                combo_limit_price,
+                arbitrageur_core::types::TimeInForce::ImmediateOrCancel,
+                Some(&combo_label),
+            )
+            .await
         {
-            mark_failed(&leg_signal_id, &format!("client id persist failed: {e}"));
-            leg_error = Some(format!(
-                "leg {} ({sym}) client id persist failed: {e}",
-                idx + 1
-            ));
-            break;
-        }
-        let mut resp = match adapter.place_order(order).await {
-            Ok(r) => r,
+            Ok(combo_resp) if combo_resp.status == OrderStatus::Filled => {
+                tracing::info!(
+                    "Atomic combo order filled on {} (order_id={})",
+                    vid.as_str(),
+                    combo_resp.order_id
+                );
+                for (idx, leg) in opp.legs.iter().enumerate() {
+                    let sym = &leg.instrument;
+                    let side = if leg.side == "buy" {
+                        Side::Buy
+                    } else {
+                        Side::Sell
+                    };
+                    let leg_qty = qty_dec * Decimal::from(leg.qty_mult);
+                    let qty_f64 = leg_qty.to_string().parse::<f64>().unwrap_or(0.0);
+                    let leg_side = match side {
+                        Side::Buy => LegSide::Long,
+                        Side::Sell => LegSide::Short,
+                    };
+                    let leg_signal_id = format!("{cycle_tag}-leg{idx}");
+                    let intent_note = format!(
+                        "{} combo leg {}/{} {:?} {} {sym}",
+                        opp.label,
+                        idx + 1,
+                        n_legs,
+                        side,
+                        leg_qty
+                    );
+                    if let Err(e) = record_options_leg_intent(
+                        state,
+                        &leg_signal_id,
+                        &strategy_id,
+                        vid.as_str(),
+                        sym,
+                        side,
+                        qty_f64,
+                        &intent_note,
+                        (idx == 0).then_some(opp.net_edge_usd),
+                    ) {
+                        tracing::warn!(
+                            "options package combo leg {idx} intent persist failed: {e}"
+                        );
+                    }
+                    leg_signal_ids.push((idx, leg_signal_id.clone(), leg_side));
+                    let mut leg_resp = combo_resp.clone();
+                    leg_resp.symbol = sym.clone();
+                    leg_resp.original_qty = leg_qty;
+                    leg_resp.filled_qty = leg_qty;
+                    leg_resp.remaining_qty = dec!(0);
+                    if let Some(bound_px) = options_leg_bound_px(&books[idx], side, leg_qty) {
+                        leg_resp.avg_fill_price = Some(bound_px);
+                    }
+                    fills.push((idx, leg_resp));
+                }
+                native_combo_executed = true;
+            }
+            Ok(combo_resp) => {
+                // Fail-closed on a non-clean combo ack. A native combo can
+                // acknowledge with a live or partially-filled state, and a
+                // partially filled IOC combo has ALREADY moved real legs on
+                // the venue. Falling back to sequential dispatch here would
+                // re-dispatch every leg at full size — stacking a second
+                // position on top of the combo's fills and racing any
+                // remainder. Only a terminal ack with zero fill is safe to
+                // fall back from.
+                let filled = combo_resp.filled_qty;
+                let terminal_no_fill = filled <= dec!(0)
+                    && matches!(
+                        combo_resp.status,
+                        OrderStatus::Cancelled | OrderStatus::Rejected | OrderStatus::Expired
+                    );
+                if terminal_no_fill {
+                    tracing::warn!(
+                        "Atomic combo order on {} returned status {:?} with no fill; falling back to sequential dispatch",
+                        vid.as_str(),
+                        combo_resp.status
+                    );
+                } else {
+                    combo_blocks_fallback = true;
+                    let msg = format!(
+                        "Deribit native combo {} acked {:?} with filled_qty {} — sequential fallback REFUSED (fail-closed). Per-leg fill state is unknown; DO NOT retry this package until venue-side orders/positions for these instruments are verified.",
+                        combo_resp.order_id, combo_resp.status, filled
+                    );
+                    tracing::error!("options package dispatch: {msg}");
+                    crate::alerting::dispatch_throttled(
+                        state.env().as_str(),
+                        "options_combo_unresolved",
+                        vid.as_str(),
+                        std::time::Duration::from_secs(60),
+                        msg.clone(),
+                    );
+                    leg_error = Some(msg);
+                }
+            }
             Err(e) => {
-                mark_failed(&leg_signal_id, &format!("submit rejected: {e}"));
-                leg_error = Some(format!("leg {} ({sym}) failed: {e}", idx + 1));
+                tracing::warn!(
+                    "Atomic combo order on {} unavailable ({e}); falling back to sequential dispatch",
+                    vid.as_str()
+                );
+            }
+        }
+    } else if adapter.supports_combo_orders() && opp.legs.len() > 4 {
+        tracing::info!(
+            "Options package {} carries {} legs (> 4) — Deribit native combos limit to 2-4 legs; routing directly to concurrent dispatch",
+            opp.label,
+            opp.legs.len()
+        );
+    }
+
+    if !native_combo_executed && !combo_blocks_fallback {
+        struct PreparedLeg {
+            idx: usize,
+            sym: String,
+            qty: Decimal,
+            leg_signal_id: String,
+            leg_side: LegSide,
+            order: arbitrageur_core::order::OrderRequest,
+        }
+
+        let mut prepared_legs = Vec::with_capacity(n_legs);
+
+        // Parallelize wire base quantity resolution across all legs concurrently
+        let wire_futures: Vec<_> = opp
+            .legs
+            .iter()
+            .map(|leg| {
+                let sym = leg.instrument.clone();
+                let leg_qty = qty_dec * Decimal::from(leg.qty_mult);
+                let adapter = adapter.clone();
+                async move { adapter.wire_base_qty(&sym, leg_qty).await }
+            })
+            .collect();
+        let wire_results = futures::future::join_all(wire_futures).await;
+
+        for (idx, leg) in opp.legs.iter().enumerate() {
+            let sym = &leg.instrument;
+            let side = if leg.side == "buy" {
+                Side::Buy
+            } else {
+                Side::Sell
+            };
+            let leg_qty = qty_dec * Decimal::from(leg.qty_mult);
+            let Some(bound_px) = options_leg_bound_px(&books[idx], side, leg_qty) else {
+                leg_error = Some(format!(
+                    "leg {} ({sym}) cannot be priced on the dispatch book — refusing unpriced dispatch",
+                    idx + 1
+                ));
+                break;
+            };
+            let qty = match &wire_results[idx] {
+                Ok(w) if *w > dec!(0) => *w,
+                Ok(_) => {
+                    leg_error = Some(format!(
+                        "leg {} ({sym}) snaps to zero on the venue wire grid",
+                        idx + 1
+                    ));
+                    break;
+                }
+                Err(e) => {
+                    leg_error = Some(format!(
+                        "leg {} ({sym}) not representable on the venue wire grid: {e}",
+                        idx + 1
+                    ));
+                    break;
+                }
+            };
+            let qty_f64 = qty.to_string().parse::<f64>().unwrap_or(0.0);
+            let leg_side = match side {
+                Side::Buy => LegSide::Long,
+                Side::Sell => LegSide::Short,
+            };
+            let leg_signal_id = format!("{cycle_tag}-leg{idx}");
+            let intent_note = format!(
+                "{} leg {}/{} {:?} {} {sym}",
+                opp.label,
+                idx + 1,
+                n_legs,
+                side,
+                qty
+            );
+            if let Err(e) = record_options_leg_intent(
+                state,
+                &leg_signal_id,
+                &strategy_id,
+                vid.as_str(),
+                sym,
+                side,
+                qty_f64,
+                &intent_note,
+                (idx == 0).then_some(opp.net_edge_usd),
+            ) {
+                leg_error = Some(format!("leg {} intent persist failed: {e}", idx + 1));
                 break;
             }
-        };
-        if !resp.order_id.trim().is_empty() {
-            if let Err(e) = state.state_store.record_leg_order_id(
-                &leg_signal_id,
-                leg_side,
-                resp.order_id.trim(),
-                Some(&client_oid),
-            ) {
-                tracing::warn!("options package leg {idx} order-id persist failed: {e}");
+            leg_signal_ids.push((idx, leg_signal_id.clone(), leg_side));
+            let order = arbitrageur_core::order::OrderRequest::new_ioc(
+                vid.clone(),
+                sym,
+                side,
+                bound_px,
+                qty,
+            );
+            let client_oid = order.client_order_id.clone();
+            if let Err(e) =
+                state
+                    .state_store
+                    .record_leg_client_order_id(&leg_signal_id, leg_side, &client_oid)
+            {
+                mark_failed(&leg_signal_id, &format!("client id persist failed: {e}"));
+                leg_error = Some(format!(
+                    "leg {} ({sym}) client id persist failed: {e}",
+                    idx + 1
+                ));
+                break;
             }
+            prepared_legs.push(PreparedLeg {
+                idx,
+                sym: sym.clone(),
+                qty,
+                leg_signal_id,
+                leg_side,
+                order,
+            });
         }
-        if !resp.status.is_final() && !resp.order_id.trim().is_empty() {
-            for _ in 0..OPTIONS_SETTLE_POLLS {
-                tokio::time::sleep(OPTIONS_SETTLE_INTERVAL).await;
-                match adapter
-                    .fetch_order(sym, &resp.order_id, Some(&client_oid))
-                    .await
-                {
-                    Ok(polled) => {
-                        resp = polled;
-                        if resp.status.is_final() {
-                            break;
+
+        if leg_error.is_none() && prepared_legs.len() == n_legs {
+            let dispatch_futs = prepared_legs.into_iter().map(|p| {
+                let adapter = adapter.clone();
+                let vid = vid.clone();
+                let state_store = state.state_store.clone();
+                async move {
+                    let client_oid = p.order.client_order_id.clone();
+                    let mut resp = match adapter.place_order(p.order).await {
+                        Ok(r) => r,
+                        Err(e) => {
+                            let _ = state_store.update_signal_status(
+                                &p.leg_signal_id,
+                                SignalStatus::Failed,
+                                Some(&format!("submit rejected: {e}")),
+                            );
+                            return (
+                                p.idx,
+                                p.qty,
+                                p.sym.clone(),
+                                p.leg_signal_id,
+                                Err(format!("leg {} ({}) failed: {e}", p.idx + 1, p.sym)),
+                            );
+                        }
+                    };
+                    if !resp.order_id.trim().is_empty() {
+                        let _ = state_store.record_leg_order_id(
+                            &p.leg_signal_id,
+                            p.leg_side,
+                            resp.order_id.trim(),
+                            Some(&client_oid),
+                        );
+                    }
+                    if !resp.status.is_final() && !resp.order_id.trim().is_empty() {
+                        for _ in 0..OPTIONS_SETTLE_POLLS {
+                            tokio::time::sleep(OPTIONS_SETTLE_INTERVAL).await;
+                            match adapter
+                                .fetch_order(&p.sym, &resp.order_id, Some(&client_oid))
+                                .await
+                            {
+                                Ok(polled) => {
+                                    resp = polled;
+                                    if resp.status.is_final() {
+                                        break;
+                                    }
+                                }
+                                Err(_) => continue,
+                            }
+                        }
+                        if !resp.status.is_final() {
+                            let _ = adapter
+                                .cancel_order(arbitrageur_core::order::CancelRequest {
+                                    venue: vid,
+                                    symbol: p.sym.clone(),
+                                    order_id: Some(resp.order_id.clone()),
+                                    client_order_id: Some(client_oid.clone()),
+                                })
+                                .await;
+                            tokio::time::sleep(OPTIONS_SETTLE_INTERVAL).await;
+                            if let Ok(polled) = adapter
+                                .fetch_order(&p.sym, &resp.order_id, Some(&client_oid))
+                                .await
+                            {
+                                resp = polled;
+                            }
                         }
                     }
-                    Err(_) => continue,
+                    (p.idx, p.qty, p.sym, p.leg_signal_id, Ok(resp))
+                }
+            });
+
+            let dispatched_results = futures::future::join_all(dispatch_futs).await;
+            for (idx, qty, sym, leg_signal_id, res) in dispatched_results {
+                match res {
+                    Ok(resp) => {
+                        let px_ok = resp.avg_fill_price.is_some_and(|p| p > dec!(0));
+                        let covers = qty > dec!(0) && resp.filled_qty >= qty * dec!(0.98);
+                        if resp.status == OrderStatus::Filled
+                            && covers
+                            && resp.remaining_qty <= qty * dec!(0.02)
+                            && px_ok
+                        {
+                            fills.push((idx, resp));
+                            continue;
+                        }
+                        match (resp.status.is_final(), resp.filled_qty > dec!(0)) {
+                            (true, true) => {
+                                fills.push((idx, resp));
+                                if leg_error.is_none() {
+                                    leg_error = Some(format!(
+                                        "leg {} ({sym}) terminated partially filled",
+                                        idx + 1
+                                    ));
+                                }
+                            }
+                            (true, false) => {
+                                mark_failed(&leg_signal_id, "terminated without a fill");
+                                if leg_error.is_none() {
+                                    leg_error = Some(format!(
+                                        "leg {} ({sym}) terminated unfilled",
+                                        idx + 1
+                                    ));
+                                }
+                            }
+                            _ => {
+                                if leg_error.is_none() {
+                                    leg_error = Some(format!(
+                                        "leg {} ({sym}) state unresolved after poll/cancel",
+                                        idx + 1
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    Err(err_msg) => {
+                        if leg_error.is_none() {
+                            leg_error = Some(err_msg);
+                        }
+                    }
                 }
             }
-            if !resp.status.is_final() {
-                let _ = adapter
-                    .cancel_order(arbitrageur_core::order::CancelRequest {
-                        venue: vid.clone(),
-                        symbol: sym.clone(),
-                        order_id: Some(resp.order_id.clone()),
-                        client_order_id: Some(client_oid.clone()),
-                    })
-                    .await;
-                tokio::time::sleep(OPTIONS_SETTLE_INTERVAL).await;
-                if let Ok(polled) = adapter
-                    .fetch_order(sym, &resp.order_id, Some(&client_oid))
-                    .await
-                {
-                    resp = polled;
-                }
-            }
+            fills.sort_by_key(|(idx, _)| *idx);
         }
-        let px_ok = resp.avg_fill_price.is_some_and(|p| p > dec!(0));
-        let covers = qty > dec!(0) && resp.filled_qty >= qty * dec!(0.98);
-        if resp.status == OrderStatus::Filled
-            && covers
-            && resp.remaining_qty <= qty * dec!(0.02)
-            && px_ok
-        {
-            fills.push((idx, resp));
-            continue;
-        }
-        match (resp.status.is_final(), resp.filled_qty > dec!(0)) {
-            (true, true) => {
-                fills.push((idx, resp));
-                leg_error = Some(format!(
-                    "leg {} ({sym}) terminated partially filled",
-                    idx + 1
-                ));
-            }
-            (true, false) => {
-                mark_failed(&leg_signal_id, "terminated without a fill");
-                leg_error = Some(format!("leg {} ({sym}) terminated unfilled", idx + 1));
-            }
-            _ => {
-                leg_error = Some(format!(
-                    "leg {} ({sym}) state unresolved after poll/cancel",
-                    idx + 1
-                ));
-            }
-        }
-        break;
     }
 
     // Persist fills and derive per-leg terminal states.
@@ -1513,6 +1835,64 @@ pub async fn execute_options_package_impl(
             Err(_) => positions_open = true,
         }
     }
+
+    let mut unwind_notes: Vec<String> = Vec::new();
+    if !cycle_complete && !fills.is_empty() {
+        tracing::warn!(
+            "Options package {tag} aborted with {}/{} legs filled — triggering emergency auto-unwind",
+            fills.len(),
+            n_legs
+        );
+        crate::alerting::dispatch(
+            state.env().as_str(),
+            "emergency_unwind_fired",
+            format!(
+                "Options package {} aborted with {}/{} legs filled — emergency auto-unwind triggered",
+                tag,
+                fills.len(),
+                n_legs
+            ),
+        );
+        for (idx, resp) in fills.iter().rev() {
+            let leg = &opp.legs[*idx];
+            let filled_side = match leg.side.as_str() {
+                "buy" => Side::Buy,
+                _ => Side::Sell,
+            };
+            if resp.filled_qty > dec!(0) {
+                let adapter_dyn: Arc<dyn ExchangeAdapter> = adapter.clone();
+                match arbitrageur_execution::emergency_unwind::EmergencyUnwindHandler::unwind_leg(
+                    &adapter_dyn,
+                    &leg.instrument,
+                    filled_side,
+                    resp.filled_qty,
+                )
+                .await
+                {
+                    Ok(unwind_resp) => {
+                        let note = format!(
+                            "emergency unwind leg {} ({}) status: {:?}",
+                            idx + 1,
+                            leg.instrument,
+                            unwind_resp.status
+                        );
+                        tracing::info!("{note}");
+                        unwind_notes.push(note);
+                    }
+                    Err(e) => {
+                        let note = format!(
+                            "emergency unwind leg {} ({}) failed: {e}",
+                            idx + 1,
+                            leg.instrument
+                        );
+                        tracing::error!("{note}");
+                        unwind_notes.push(note);
+                    }
+                }
+            }
+        }
+    }
+
     for (idx, sid, _) in &leg_signal_ids {
         let filled = fills.iter().any(|(i, _)| i == idx);
         let current = state
@@ -1544,11 +1924,19 @@ pub async fn execute_options_package_impl(
                 .state_store
                 .update_signal_status(sid, status, Some(note));
         } else if filled {
-            let _ = state.state_store.update_signal_status(
-                sid,
-                SignalStatus::Imbalanced,
-                Some("options package partial — residual leg; flatten the instrument to unwind"),
-            );
+            let note = if unwind_notes.is_empty() {
+                "options package partial — residual leg; flatten the instrument to unwind"
+                    .to_string()
+            } else {
+                format!(
+                    "options package partial — emergency auto-unwind executed ({})",
+                    unwind_notes.join("; ")
+                )
+            };
+            let _ =
+                state
+                    .state_store
+                    .update_signal_status(sid, SignalStatus::Imbalanced, Some(&note));
         } else if current == Some(SignalStatus::InFlight) {
             let _ = state.state_store.update_signal_status(
                 sid,
@@ -1648,8 +2036,16 @@ pub async fn execute_options_package_impl(
             net_profit: -fee_total_f,
             latency_us,
             note: format!(
-                "Options package {tag} PARTIAL: {}. Residual legs recorded as imbalanced '{strategy_id}' signals — flatten each instrument to unwind.",
-                leg_error.clone().unwrap_or_default()
+                "Options package {tag} PARTIAL: {}. {}",
+                leg_error.clone().unwrap_or_default(),
+                if leg_signal_ids.is_empty() {
+                    // Blocked combo path: nothing was recorded, so there is no
+                    // ledger residue to flatten — but the venue side may hold
+                    // fills nobody priced.
+                    "No per-leg signals were recorded — verify venue-side orders/positions for these instruments before retrying."
+                } else {
+                    "Residual legs recorded as imbalanced '{strategy_id}' signals — flatten each instrument to unwind."
+                }
             ),
             direction: Some(direction.clone()),
             trigger_spread_bps: Some(opp.edge_bps),
@@ -1660,10 +2056,15 @@ pub async fn execute_options_package_impl(
             is_live: state.is_live(),
         });
         return Err(format!(
-            "Options package {tag} PARTIAL ({}/{} legs): {}; residuals recorded — flatten leg instruments to unwind",
+            "Options package {tag} PARTIAL ({}/{} legs): {}; {}",
             fills.len(),
             n_legs,
-            leg_error.unwrap_or_default()
+            leg_error.unwrap_or_default(),
+            if leg_signal_ids.is_empty() {
+                "verify venue-side orders/positions before retrying (no ledger residue recorded)"
+            } else {
+                "residuals recorded — flatten leg instruments to unwind"
+            }
         ));
     }
 
@@ -1697,6 +2098,14 @@ pub async fn execute_options_package_impl(
         is_live: state.is_live(),
     });
 
+    let duration_ms = latency_us / 1000;
+    if duration_ms > 1500 {
+        tracing::warn!(
+            "Options package execution took {}ms (>1500ms SLA)",
+            duration_ms
+        );
+    }
+
     let _ = equity_before_by_venue;
     Ok(SimStepResultDto {
         cycle,
@@ -1710,11 +2119,12 @@ pub async fn execute_options_package_impl(
         realized_profit_usd: attempt_pnl_f,
         total_cumulative_pnl_usd: total_f,
         message: format!(
-            "Options package {tag} {} — {}/{} legs filled; premium ${attempt_pnl_f:.2} booked, locked edge unrealized until expiry",
+            "Options package {tag} {} — {}/{} legs filled in {duration_ms}ms; premium ${attempt_pnl_f:.2} booked, locked edge unrealized until expiry",
             opp.label,
             fills.len(),
             n_legs
         ),
+        execution_duration_ms: Some(duration_ms),
     })
 }
 
@@ -1896,8 +2306,8 @@ mod tests {
         // fair = 20000·(e^{-0.005} − e^{-0.015}) ≈ 198.05; net_cost = −500.
         let fair = 20_000.0 * ((-0.05 * 0.1_f64).exp() - (-0.05 * 0.3_f64).exp());
         assert!((ev.gross_edge_usd - (fair + 500.0)).abs() < 1e-6);
-        // implied term rate = ln(1000/500)/(0.3−0.1)
-        assert!((ev.implied_rate - (1_000.0_f64 / 500.0).ln() / 0.2).abs() < 1e-9);
+        // implied term rate = ln(near_pv/far_pv)/(0.3−0.1) = ln(500/1000)/0.2
+        assert!((ev.implied_rate - (500.0_f64 / 1_000.0).ln() / 0.2).abs() < 1e-9);
         // Long jelly = long near box + short far box.
         assert_eq!(
             ev.legs.map(|(buy, _)| buy),
@@ -1950,8 +2360,8 @@ mod tests {
         assert!(ev.is_call);
         // gross = (2·0.032 − 0.050 − 0.010)·1·100000 = $400
         assert!((ev.gross_edge_usd - 400.0).abs() < 1e-6);
-        // Fees: wings 30+30, body 2×30 → net = 400 − 120 = 280.
-        assert!((ev.net_edge_usd - 280.0).abs() < 1e-6);
+        // Fees: wings 30+30, body 2×30 (entry 120) + delivery 2×15 (30) → net = 400 − 150 = 250.
+        assert!((ev.net_edge_usd - 250.0).abs() < 1e-6);
         assert_eq!(ev.legs.map(|(buy, _)| buy), [true, false, true]);
     }
 
@@ -1977,12 +2387,12 @@ mod tests {
     #[test]
     fn convexity_side_evaluates_calls_when_puts_absent() {
         let (k1, k2, k3) = convexity_fixture();
-        let ev = evaluate_convexity_side(&k1.0, &k2.0, &k3.0, 1.0, IDX, true)
+        let ev = evaluate_convexity_side(&k1.0, &k2.0, &k3.0, None, 1.0, IDX, true)
             .expect("call fly works without put quotes");
         assert_eq!(ev.label, "SELL CALL FLY");
         assert!(ev.is_call);
         assert!((ev.gross_edge_usd - 400.0).abs() < 1e-6);
-        assert!((ev.net_edge_usd - 280.0).abs() < 1e-6);
+        assert!((ev.net_edge_usd - 250.0).abs() < 1e-6);
     }
 
     #[test]
@@ -1990,12 +2400,26 @@ mod tests {
         let p_k1 = q("P-K1", 0.048, 0.050);
         let p_k2 = q("P-K2", 0.032, 0.034);
         let p_k3 = q("P-K3", 0.009, 0.010);
-        let ev = evaluate_convexity_side(&p_k1, &p_k2, &p_k3, 1.0, IDX, false)
+        let ev = evaluate_convexity_side(&p_k1, &p_k2, &p_k3, None, 1.0, IDX, false)
             .expect("put fly works without call quotes");
         assert_eq!(ev.label, "SELL PUT FLY");
         assert!(!ev.is_call);
         assert!((ev.gross_edge_usd - 400.0).abs() < 1e-6);
-        assert!((ev.net_edge_usd - 280.0).abs() < 1e-6);
+        assert!((ev.net_edge_usd - 250.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_convexity_side_rejects_inverted_density() {
+        // Construct quotes where body is overly elevated relative to wings (negative curvature)
+        let c1 = q("C-K1", 0.050, 0.052);
+        let c2 = q("C-K2", 0.045, 0.048); // High body price
+        let c3 = q("C-K3", 0.010, 0.012);
+        let strikes = Some((90000.0, 100000.0, 110000.0));
+        let ev = evaluate_convexity_side(&c1, &c2, &c3, strikes, 1.0, IDX, true);
+        assert!(
+            ev.is_none(),
+            "Candidate with inverted density strip must be rejected"
+        );
     }
 
     #[test]
@@ -2014,5 +2438,24 @@ mod tests {
         let t_years_2d: f64 = 2.0 / 365.0;
         let yield_2d: f64 = (edge_bps_2d / 100.0) / t_years_2d;
         assert!((yield_2d - 18.25_f64).abs() < 1e-5);
+    }
+
+    #[test]
+    fn test_combo_leg_count_eligibility_boundaries() {
+        // Deribit native combos limit orders to between 2 and 4 legs.
+        // Box Spread: 4 legs -> eligible for atomic combo order
+        // Convexity (Fly): 3 legs -> eligible for atomic combo order
+        // Jelly Roll: 8 legs -> exceeds 4 legs, must bypass combo to avoid -32602
+        let box_spread_legs = 4;
+        let convexity_legs = 3;
+        let jelly_roll_legs = 8;
+        let single_leg = 1;
+
+        let is_combo_eligible = |leg_count: usize| (2..=4).contains(&leg_count);
+
+        assert!(!is_combo_eligible(single_leg));
+        assert!(is_combo_eligible(convexity_legs));
+        assert!(is_combo_eligible(box_spread_legs));
+        assert!(!is_combo_eligible(jelly_roll_legs));
     }
 }

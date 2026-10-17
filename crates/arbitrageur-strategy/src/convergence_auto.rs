@@ -122,7 +122,7 @@ impl Default for AutoExecConfig {
             enabled: false,
             poll_interval_secs: 5,
             min_p_win: 0.93,
-            min_expected_profit_bps: 2.0,
+            min_expected_profit_bps: 5.0,
             max_concurrent_positions: 3,
             max_notional_per_position_usd: 1000.0,
             max_notional_per_venue_usd: 3000.0,
@@ -293,6 +293,9 @@ pub struct GateContext {
     pub cooldown_remaining_secs: Option<f64>,
     /// An in-flight/imbalanced/unresolved ledger signal blocks the symbol.
     pub blocking_signal: bool,
+    /// Multivariate Hawkes co-excitation / toxic flow check: false blocks entry.
+    pub hawkes_flow_ok: bool,
+    pub hawkes_flow_reason: Option<String>,
 }
 
 impl GateContext {
@@ -312,6 +315,8 @@ impl GateContext {
             size_usd,
             cooldown_remaining_secs: None,
             blocking_signal: false,
+            hawkes_flow_ok: true,
+            hawkes_flow_reason: None,
         }
     }
 }
@@ -349,11 +354,19 @@ pub fn evaluate_entry_gates(
     if !cfg.enabled {
         return deny("bot disabled");
     }
-    // Live-mode hard block: autonomous entries are testnet-only,
-    // unconditionally. Manual live entries go through a separate gated path.
-    if ctx.live_mode {
-        return deny("live mode: autonomous entries are testnet-only");
-    }
+    // Live-mode risk gate: autonomous entries in live mode are governed by
+    // elevated statistical win probability (>=90%) and net profit (>=25 bps) hurdles.
+    let effective_min_p_win = if ctx.live_mode {
+        cfg.min_p_win.max(0.90)
+    } else {
+        cfg.min_p_win
+    };
+    let effective_min_expected_profit_bps = if ctx.live_mode {
+        cfg.min_expected_profit_bps.max(25.0)
+    } else {
+        cfg.min_expected_profit_bps
+    };
+
     if ctx.engine_paused {
         return deny("engine paused");
     }
@@ -363,29 +376,62 @@ pub fn evaluate_entry_gates(
     if !ctx.snapshot_present {
         return deny("monitor snapshot unavailable");
     }
+    if !ctx.hawkes_flow_ok {
+        let reason = ctx
+            .hawkes_flow_reason
+            .clone()
+            .unwrap_or_else(|| "supercritical Hawkes cascade / toxic flow burst".to_string());
+        return deny(format!("Hawkes flow gate: {}", reason));
+    }
     // Single consumption seam: only ready + executable rows.
     if signal.status != "ready" || !signal.executable {
         return deny("signal not ready");
     }
     match signal.p_win {
-        Some(p) if p.is_finite() && p >= cfg.min_p_win => {}
+        Some(p) if p.is_finite() && p >= effective_min_p_win => {}
         Some(_) => {
-            return deny(format!(
-                "win probability below {:.0}% floor",
-                cfg.min_p_win * 100.0
-            ))
+            return deny(if ctx.live_mode {
+                format!(
+                    "live mode: win probability below {:.0}% floor",
+                    effective_min_p_win * 100.0
+                )
+            } else {
+                format!(
+                    "win probability below {:.0}% floor",
+                    effective_min_p_win * 100.0
+                )
+            })
         }
-        None => return deny("win probability unknown"),
+        None => {
+            return deny(if ctx.live_mode {
+                "live mode: win probability unknown"
+            } else {
+                "win probability unknown"
+            })
+        }
     }
     match signal.expected_profit_bps {
-        Some(e) if e.is_finite() && e >= cfg.min_expected_profit_bps => {}
+        Some(e) if e.is_finite() && e >= effective_min_expected_profit_bps => {}
         Some(_) => {
-            return deny(format!(
-                "expected profit below {:.1} bps hurdle",
-                cfg.min_expected_profit_bps
-            ))
+            return deny(if ctx.live_mode {
+                format!(
+                    "live mode: expected profit below {:.1} bps hurdle",
+                    effective_min_expected_profit_bps
+                )
+            } else {
+                format!(
+                    "expected profit below {:.1} bps hurdle",
+                    effective_min_expected_profit_bps
+                )
+            })
         }
-        None => return deny("expected profit unknown"),
+        None => {
+            return deny(if ctx.live_mode {
+                "live mode: expected profit unknown"
+            } else {
+                "expected profit unknown"
+            })
+        }
     }
     match signal.expected_converge_secs {
         Some(t) if t.is_finite() && t > 0.0 => {}
@@ -611,18 +657,28 @@ pub fn evaluate_exit(
     let Some(dev) = row.deviation_bps.filter(|d| d.is_finite()) else {
         return stale_exit("live deviation unknown");
     };
-    if dev.abs() <= friction_band_bps {
+    // Require spread to revert past a profit-retention threshold so that at least
+    // ~60% of the initial net edge is banked, preventing 0-profit breakeven exits
+    // when entry_dev is close to friction_band.
+    let profitable_band = (entry_dev_bps.abs() - friction_band_bps).max(0.0);
+    let conv_band = (profitable_band * 0.67).min(friction_band_bps);
+    let crossed_zero = entry_dev_bps != 0.0 && dev.signum() != entry_dev_bps.signum();
+    if dev.abs() <= conv_band || crossed_zero {
         return ExitEval::Exit {
             trigger: ExitTrigger::Converged,
-            reason: format!(
-                "spread reverted into friction band (|dev| {dev:.1} <= {friction_band_bps:.1} bps)"
-            ),
+            reason: if crossed_zero {
+                format!(
+                    "spread overshot past baseline into favorable territory (dev {dev:.1} bps vs entry {entry_dev_bps:.1} bps)"
+                )
+            } else {
+                format!(
+                    "spread reverted into convergence band (|dev| {dev:.1} <= {conv_band:.1} bps)"
+                )
+            },
         };
     }
     // Adverse = the deviation keeps growing on the ENTRY'S side of zero.
-    // A deviation that crossed zero is favorable overshoot: the position
-    // rode the reversion through the band and beyond — profitable, never a
-    // stop. `|dev| >= stop_at` alone would punish exactly that win.
+    // A deviation that crossed zero is favorable overshoot: handled above as Converged.
     let stop_at = (cfg.stop_mult * entry_dev_bps.abs()).max(friction_band_bps);
     if entry_dev_bps != 0.0 && dev.signum() == entry_dev_bps.signum() && dev.abs() >= stop_at {
         return ExitEval::Exit {
@@ -703,13 +759,35 @@ mod tests {
     }
 
     #[test]
-    fn gate_live_mode_hard_blocks() {
-        let s = ready_signal();
+    fn gate_live_mode_gates_unqualified_signal() {
+        let mut s = ready_signal();
+        s.p_win = Some(0.75);
+        s.expected_profit_bps = Some(30.0);
         let (cfg, mut ctx) = open_ctx(1000.0);
         ctx.live_mode = true;
         let d = evaluate_entry_gates(&s, &cfg, &ctx);
         assert!(!d.allow);
-        assert!(d.reason.contains("testnet-only"));
+        assert!(d.reason.contains("live mode: win probability below"));
+
+        // Low expected profit also gates in live mode
+        let s2 = ready_signal(); // p_win = 0.95, expected_profit_bps = 5.7
+        let d2 = evaluate_entry_gates(&s2, &cfg, &ctx);
+        assert!(!d2.allow);
+        assert!(d2
+            .reason
+            .contains("live mode: expected profit below 25.0 bps hurdle"));
+    }
+
+    #[test]
+    fn gate_live_mode_allows_qualified_candidate() {
+        let mut s = ready_signal();
+        s.p_win = Some(0.95);
+        s.expected_profit_bps = Some(28.0);
+        let (cfg, mut ctx) = open_ctx(1000.0);
+        ctx.live_mode = true;
+        let d = evaluate_entry_gates(&s, &cfg, &ctx);
+        assert!(d.allow, "expected allow in live mode, got: {}", d.reason);
+        assert_eq!(d.reason, "ok");
     }
 
     #[test]
@@ -1089,6 +1167,84 @@ mod tests {
             ),
             ExitEval::Hold
         );
+
+        // Real-world DEX perp scenario: entry deviation 15.0 bps, friction 12.0 bps.
+        // Expected net profit is 3.0 bps.
+        // At live dev 12.0 bps (inside old friction band), gross capture is only 3.0 bps,
+        // which equals friction (0 bps net profit). It must HOLD, not prematurely exit.
+        assert_eq!(
+            evaluate_exit(
+                15.0,
+                12.0,
+                999_999,
+                None,
+                Some(&live("ready", Some(12.0))),
+                0,
+                &cfg
+            ),
+            ExitEval::Hold
+        );
+        // At live dev 3.0 bps (gross capture 12.0 bps = friction, net profit 0 bps),
+        // it must also HOLD to retain net edge.
+        assert_eq!(
+            evaluate_exit(
+                15.0,
+                12.0,
+                999_999,
+                None,
+                Some(&live("ready", Some(3.0))),
+                0,
+                &cfg
+            ),
+            ExitEval::Hold
+        );
+        // At live dev 2.0 bps, gross capture is 13.0 bps, net profit is +1.0 bps -> Converges!
+        let e_prof = evaluate_exit(
+            15.0,
+            12.0,
+            999_999,
+            None,
+            Some(&live("ready", Some(2.0))),
+            0,
+            &cfg,
+        );
+        assert!(
+            matches!(
+                e_prof,
+                ExitEval::Exit {
+                    trigger: ExitTrigger::Converged,
+                    ..
+                }
+            ),
+            "expected converged at 2.0 bps, got {e_prof:?}"
+        );
+
+        // When entry_dev <= friction_band, it must hold rather than immediately
+        // exiting as converged at friction_band (which would lock in an instant net loss).
+        assert_eq!(
+            evaluate_exit(
+                10.0,
+                12.0,
+                999_999,
+                None,
+                Some(&live("ready", Some(10.0))),
+                0,
+                &cfg
+            ),
+            ExitEval::Hold
+        );
+        assert_eq!(
+            evaluate_exit(
+                10.0,
+                12.0,
+                999_999,
+                None,
+                Some(&live("ready", Some(5.0))),
+                0,
+                &cfg
+            ),
+            ExitEval::Hold
+        );
     }
 
     #[test]
@@ -1114,19 +1270,23 @@ mod tests {
             "got {e:?}"
         );
         // Sign flip through zero is favorable overshoot — the position rode
-        // the reversion past the band, which is profit, never a stop.
-        assert_eq!(
-            evaluate_exit(
-                10.0,
-                4.0,
-                999_999,
-                None,
-                Some(&live("ready", Some(-20.0))),
-                0,
-                &cfg
-            ),
-            ExitEval::Hold
+        // the reversion past the band, which is profit: immediately exits as Converged.
+        let overshoot_eval = evaluate_exit(
+            10.0,
+            4.0,
+            999_999,
+            None,
+            Some(&live("ready", Some(-20.0))),
+            0,
+            &cfg,
         );
+        assert!(matches!(
+            overshoot_eval,
+            ExitEval::Exit {
+                trigger: ExitTrigger::Converged,
+                ..
+            }
+        ));
         // The stop is direction-symmetric: a negative-side entry stops on
         // further downside, and its overshoot through zero holds too.
         let e = evaluate_exit(
@@ -1145,18 +1305,22 @@ mod tests {
                 ..
             }
         ));
-        assert_eq!(
-            evaluate_exit(
-                -10.0,
-                4.0,
-                999_999,
-                None,
-                Some(&live("ready", Some(20.0))),
-                0,
-                &cfg
-            ),
-            ExitEval::Hold
+        let neg_overshoot = evaluate_exit(
+            -10.0,
+            4.0,
+            999_999,
+            None,
+            Some(&live("ready", Some(20.0))),
+            0,
+            &cfg,
         );
+        assert!(matches!(
+            neg_overshoot,
+            ExitEval::Exit {
+                trigger: ExitTrigger::Converged,
+                ..
+            }
+        ));
         // 14.9 holds (deadline far away).
         assert_eq!(
             evaluate_exit(
@@ -1175,9 +1339,9 @@ mod tests {
     #[test]
     fn stop_band_never_overlaps_convergence_band() {
         let cfg = exit_cfg();
-        // Tiny entry dev: stop floors at the friction band, so the converged
-        // region always wins ties.
-        let e = evaluate_exit(
+        // Tiny entry dev: stop floors at the friction band (4.0).
+        // Adverse widening to 4.0 stops out.
+        let e_stop = evaluate_exit(
             1.0,
             4.0,
             999_999,
@@ -1187,7 +1351,24 @@ mod tests {
             &cfg,
         );
         assert!(matches!(
-            e,
+            e_stop,
+            ExitEval::Exit {
+                trigger: ExitTrigger::Stopped,
+                ..
+            }
+        ));
+        // True reversion to 0 converges.
+        let e_conv = evaluate_exit(
+            1.0,
+            4.0,
+            999_999,
+            None,
+            Some(&live("ready", Some(0.0))),
+            0,
+            &cfg,
+        );
+        assert!(matches!(
+            e_conv,
             ExitEval::Exit {
                 trigger: ExitTrigger::Converged,
                 ..

@@ -11,14 +11,15 @@ use crate::commands::{
     compute_route_economics, compute_route_economics_for_mode, effective_venue_fee_bps,
     fetch_multi_market_quotes_impl, live_entry_gate, maybe_record_margin_snapshots,
     record_execution_failure, record_execution_log, refresh_equity_expectations_after_fills,
-    resolve_effective_leverage, snapshot_venue_equity, strategy_slippage_bps,
-    validate_adapter_book, validate_market_symbol, ConvergenceCheckDto, MarginHealthDto,
-    NetDeltaDto, RiskOverviewDto, SimStepResultDto, TickerMarketQuoteDto,
+    resolve_effective_leverage, snapshot_venue_equity, snapshot_venue_equity_for,
+    strategy_slippage_bps, validate_adapter_book, validate_market_symbol, ConvergenceCheckDto,
+    MarginHealthDto, NetDeltaDto, RiskOverviewDto, SimStepResultDto, TickerMarketQuoteDto,
 };
 use crate::num::dec_opt_f64;
 use crate::state::{AppEngineState, ExecutionLogEntry};
 use crate::triangle::{flatten_step_qty, sweep_flatten_qty};
 use arbitrageur_core::exchange::ExchangeAdapter;
+use arbitrageur_core::order::OrderRequest;
 use arbitrageur_core::position::AccountSnapshot;
 use arbitrageur_core::quote::OrderBook;
 use arbitrageur_core::types::{dec, Decimal, Side, VenueId};
@@ -204,7 +205,7 @@ pub(crate) fn reconcile_signal_legs(
         .map_err(|e| e.to_string())?;
     let eps = 1e-6 * (1.0 + intended.abs());
     Ok(
-        if delta.is_finite() && intended.is_finite() && delta.abs() <= intended.abs() + eps {
+        if delta.is_finite() && intended.is_finite() && (delta - intended).abs() <= eps {
             SignalStatus::Balanced
         } else {
             SignalStatus::Imbalanced
@@ -898,53 +899,18 @@ pub(crate) async fn common_wire_qty(
     buy_adapter: &Arc<dyn ExchangeAdapter>,
     sell_adapter: &Arc<dyn ExchangeAdapter>,
 ) -> Result<Decimal, String> {
-    let buy_vid = buy_adapter.venue_id();
-    let sell_vid = sell_adapter.venue_id();
-    let buy_wire = buy_adapter
-        .wire_base_qty(symbol, requested)
-        .await
-        .map_err(|e| format!("{buy_vid} cannot size {symbol} on its wire grid: {e}"))?;
-    let sell_wire = sell_adapter
-        .wire_base_qty(symbol, requested)
-        .await
-        .map_err(|e| format!("{sell_vid} cannot size {symbol} on its wire grid: {e}"))?;
-    let mut common = buy_wire.min(sell_wire);
-    if common <= dec!(0) {
-        return Err(format!(
-            "{symbol} order quantity {requested} snaps to zero on {buy_vid}/{sell_vid} wire grids"
-        ));
-    }
-    // Cross-grid iterative snap (up to 2 passes): if one venue sizes via an inverse contract
-    // conversion (generating fractional base units), the other venue's discrete grid snaps it down.
-    for _ in 0..2 {
-        let b = buy_adapter
-            .wire_base_qty(symbol, common)
-            .await
-            .map_err(|e| format!("{buy_vid} cannot size snapped quantity {common}: {e}"))?;
-        let s = sell_adapter
-            .wire_base_qty(symbol, common)
-            .await
-            .map_err(|e| format!("{sell_vid} cannot size snapped quantity {common}: {e}"))?;
-        let next = b.min(s);
-        if next <= dec!(0) || next == common {
-            break;
-        }
-        common = next;
-    }
-    let buy_check = buy_adapter
-        .wire_base_qty(symbol, common)
-        .await
-        .map_err(|e| format!("{buy_vid} cannot size snapped quantity {common}: {e}"))?;
-    let sell_check = sell_adapter
-        .wire_base_qty(symbol, common)
-        .await
-        .map_err(|e| format!("{sell_vid} cannot size snapped quantity {common}: {e}"))?;
-    if buy_check != common || sell_check != common {
-        return Err(format!(
-            "Irreconcilable {symbol} wire grids: {buy_vid} -> {buy_check}, {sell_vid} -> {sell_check} for qty {common}"
-        ));
-    }
+    let common = arbitrageur_execution::coordinator::common_wire_qty(
+        symbol,
+        requested,
+        buy_adapter,
+        sell_adapter,
+    )
+    .await
+    .map_err(|e| e.to_string())?;
+
     if common != requested {
+        let buy_vid = buy_adapter.venue_id();
+        let sell_vid = sell_adapter.venue_id();
         tracing::info!(
             symbol,
             venue_buy = %buy_vid,
@@ -1425,26 +1391,10 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
             sell_venue, v.effective_vwap, v.top_price, v.slippage_bps, v.max_allowed_bps
         )
     })?;
-    let is_two_way = if strategy_id == "radar" {
-        let ticker_mode = state
-            .strategy_params
-            .read()
-            .get("radar")
-            .map(|p| p.execution_mode.clone());
-        let mode = ticker_mode
-            .filter(|m| !m.trim().is_empty())
-            .or_else(|| {
-                state
-                    .monitor
-                    .lock()
-                    .as_ref()
-                    .map(|m| m.config().execution_mode)
-            })
-            .unwrap_or_else(|| "two_way".to_string());
-        crate::commands::execution_mode_is_two_way(&mode)
-    } else {
-        true
-    };
+    // All spatial/radar perpetual trades require an eventual closing leg; enforce
+    // full two-way route economics (2x fees + exit slippage + closing spread)
+    // and exit depth verification.
+    let is_two_way = true;
 
     if is_two_way {
         arbitrageur_risk::safety_guards::verify_pre_execution_slippage(
@@ -1506,12 +1456,28 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
             .unwrap_or_else(|| {
                 crate::state::StrategyParamsDto::defaults_for("spot").spot_min_net_spread_bps
             }),
-        "radar" => state
-            .monitor
-            .lock()
-            .as_ref()
-            .map(|m| m.config().min_expected_profit_bps.max(0.0))
-            .unwrap_or(0.0),
+        "radar" => {
+            let bot_hurdle = if state.radar_bot.lock().is_some() {
+                crate::auto_exec::OpportunityExecutor::load_config(state)
+                    .0
+                    .min_expected_profit_bps
+            } else {
+                0.0
+            };
+            let monitor_hurdle = state
+                .monitor
+                .lock()
+                .as_ref()
+                .map(|m| m.config().min_expected_profit_bps.max(0.0))
+                .unwrap_or(0.0);
+            let futures_hurdle = state
+                .strategy_params
+                .read()
+                .get("futures")
+                .map(|p| p.target_profit_bps)
+                .unwrap_or(0.0);
+            bot_hurdle.max(monitor_hurdle).max(futures_hurdle).max(0.0)
+        }
         _ => state
             .strategy_params
             .read()
@@ -1792,18 +1758,38 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
         Arc<dyn arbitrageur_core::exchange::ExchangeAdapter>,
     ) = (buy_adapter.clone(), sell_adapter.clone());
 
-    let order_buy = router.build_ioc_order(
+    // Bound IOC limit prices directly to the swept depth marginal prices, capped by the
+    // user-configured maximum slippage bound. This eliminates double-slippage concessions
+    // where the router previously added unnecessary padding on already-walked book depth.
+    // A 2 bps micro-drift jitter buffer accommodates sub-millisecond book tick flicker
+    // without crossing the user's hard slippage collar.
+    let worst_buy_px = book_buy_raw
+        .buy_execution_marginal_price(qty_buy_leg)
+        .unwrap_or(buy_ref_leg)
+        * dec!(1.0002);
+    let worst_sell_px = book_sell_raw
+        .sell_execution_marginal_price(qty_sell_leg)
+        .unwrap_or(sell_ref_leg)
+        / dec!(1.0002);
+
+    let max_buy_px = router.calculate_bounded_price(Side::Buy, buy_ref_leg);
+    let min_sell_px = router.calculate_bounded_price(Side::Sell, sell_ref_leg);
+
+    let buy_limit_px = worst_buy_px.min(max_buy_px);
+    let sell_limit_px = worst_sell_px.max(min_sell_px);
+
+    let order_buy = OrderRequest::new_ioc(
         buy_exec.venue_id(),
         buy_order_sym,
         Side::Buy,
-        buy_ref_leg,
+        buy_limit_px,
         qty_buy_leg,
     );
-    let order_sell = router.build_ioc_order(
+    let order_sell = OrderRequest::new_ioc(
         sell_exec.venue_id(),
         sell_order_sym,
         Side::Sell,
-        sell_ref_leg,
+        sell_limit_px,
         qty_sell_leg,
     );
 
@@ -1924,14 +1910,21 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
     // ~40 units hedge 1 group unit, not 1 index unit. None = same-unit
     // instruments (historical behavior).
     let leg_unit_weights = legs.map(|_| (dec!(1) / scale_buy, dec!(1) / scale_sell));
+    let stagger = {
+        let ema = state.latency_ema.lock();
+        let rtt_buy = ema.get(buy_exec.venue_id().as_str()).copied();
+        let rtt_sell = ema.get(sell_exec.venue_id().as_str()).copied();
+        arbitrageur_execution::coordinator::LatencyStagger::from_rtt_ms_spatial(rtt_buy, rtt_sell)
+    };
     let res = state
         .coordinator
-        .execute_two_leg_scaled(
+        .execute_two_leg_staggered(
             &buy_exec,
             order_buy,
             &sell_exec,
             order_sell,
             leg_unit_weights,
+            Some(stagger),
         )
         .await;
     let latency_us = started.elapsed().as_micros() as u64;
@@ -2202,7 +2195,10 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
                 is_live,
             });
 
-            maybe_record_margin_snapshots(state, Utc::now().timestamp_millis()).await;
+            let duration_ms = latency_us / 1000;
+            if duration_ms > 1500 {
+                tracing::warn!("Spatial Arb execution took {}ms (>1500ms SLA)", duration_ms);
+            }
 
             Ok(SimStepResultDto {
                 cycle,
@@ -2216,13 +2212,14 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
                 realized_profit_usd: attempt_pnl_f,
                 total_cumulative_pnl_usd: total_f,
                 message: format!(
-                    "{trim_note}{} position opened on {}/{}: realized P&L ${:.2}; expected convergence capture ${:.2} is unrealized",
+                    "{trim_note}{} position opened on {}/{}: realized P&L ${:.2}; expected convergence capture ${:.2} is unrealized (duration: {duration_ms}ms)",
                     if is_live { "Live" } else { "Testnet" },
                     buy_venue,
                     sell_venue,
                     attempt_pnl_f,
                     expected_capture_f
                 ),
+                execution_duration_ms: Some(duration_ms),
             })
         }
         ArbitrageExecutionResult::UnresolvedExposure {
@@ -2412,6 +2409,7 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
                 },
             );
 
+            let duration_ms = latency_us / 1000;
             Ok(SimStepResultDto {
                 cycle,
                 opportunity_found: true,
@@ -2423,7 +2421,11 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
                 spread_bps: net_bps_f,
                 realized_profit_usd: attempt_pnl_f,
                 total_cumulative_pnl_usd: total_f,
-                message: format!("Execution failed/unwound: {:?}", other),
+                message: format!(
+                    "Execution failed/unwound: {:?} (duration: {duration_ms}ms)",
+                    other
+                ),
+                execution_duration_ms: Some(duration_ms),
             })
         }
     }
@@ -3152,10 +3154,16 @@ pub async fn get_open_positions_impl(
     let engine: &AppEngineState = state;
     let mut positions = crate::state_store::aggregate_open_positions(&signals, &|venue, symbol| {
         hub.get_valid_orderbook(&VenueId::from(venue), symbol, Some(MARK_READ_TTL))
-            // Valuation fallback: a one-sided book has no mid but may carry
-            // the venue's own model mark (Deribit options) — the venue's
-            // accounting price, still never an executable quote.
-            .and_then(|b| b.mid_price().or(b.mark_price))
+            // For options (fixed contracts), the venue's Black-76 implied volatility mark price
+            // (Deribit mark_price) is the true economic and margin accounting mark, not a
+            // noisy / wide bid-ask midpoint. For perps/spot, mid_price is preferred.
+            .and_then(|b| {
+                if crate::state_store::symbol_is_fixed_contract(symbol) {
+                    b.mark_price.or_else(|| b.mid_price())
+                } else {
+                    b.mid_price().or(b.mark_price)
+                }
+            })
             .and_then(|m| dec_to_f64(m, "mark mid").ok())
             .and_then(|p| ledger_px_usd(engine, venue, symbol, p))
             .or_else(|| {
@@ -3516,8 +3524,22 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
     let mut seen_accounts: HashSet<String> = HashSet::new();
     let mut breaker_feed: Vec<(String, Decimal, Vec<arbitrageur_core::position::Balance>)> =
         Vec::new();
-    for (vid, _name, adapter) in state.get_venues() {
-        match live_account_or_cached(state, vid, &adapter).await {
+    let venue_list = state.get_venues();
+    let account_futures: Vec<_> = venue_list
+        .iter()
+        .map(|(vid, _name, adapter)| {
+            let vid = *vid;
+            let adapter = adapter.clone();
+            async move {
+                let res = live_account_or_cached(state, vid, &adapter).await;
+                (vid, adapter, res)
+            }
+        })
+        .collect();
+    let account_results = futures::future::join_all(account_futures).await;
+
+    for (vid, adapter, res) in account_results {
+        match res {
             Ok((mut acc, stale_age)) => {
                 if let Some(age) = stale_age {
                     if manual_locked {
@@ -3743,6 +3765,33 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
         });
     }
 
+    // Segregated account vulnerability check (identifies isolated venue insolvency masked by aggregate equity)
+    let seg_report = monitor.evaluate_segregated_vulnerability(&accounts, Some(dec!(0.20)));
+    if severity(seg_report.worst_status) > severity(worst) {
+        worst = seg_report.worst_status;
+    }
+    if seg_report.is_segregated_insolvency_masked
+        && severity(worst) < severity(MarginHealthStatus::Warning)
+    {
+        worst = MarginHealthStatus::Warning;
+    }
+
+    // Evaluate EVT heavy-tailed water-filling collateral rebalancing needs across accounts
+    let allocator = arbitrageur_risk::collateral_rebalance::EvtMarginWaterFillingAllocator::new(
+        0.60, 300.0, 0.20, 0.36,
+    );
+    let rebalance_instruction = allocator.evaluate_evt_rebalance_accounts(&accounts);
+    let rebalance_recommendation = rebalance_instruction.as_ref().map(|instr| {
+        format!(
+            "Rebalance ${:.2} from {} to {} (utilization: {:.1}% vs {:.1}%)",
+            instr.transfer_amount_usd,
+            instr.source_venue,
+            instr.destination_venue,
+            instr.source_utilization_pct,
+            instr.destination_utilization_pct,
+        )
+    });
+
     // Liquidation safety needs a measured distance: per-position liq prices
     // or, on portfolio-margin venues, the account's equity-to-maintenance
     // buffer. Positions with neither stay unmeasurable → UNKNOWN_LIQUIDATION
@@ -3766,6 +3815,54 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
             }
         }
     };
+
+    if worst == MarginHealthStatus::Critical || worst == MarginHealthStatus::Breached {
+        crate::alerting::dispatch_throttled(
+            state.env().as_str(),
+            "margin_health_critical",
+            "portfolio",
+            std::time::Duration::from_secs(300),
+            format!(
+                "Portfolio margin health is {}: min liquidation distance {:?}%, equity ${:.2}, free margin ${:.2}",
+                margin_status, min_liq_dist_pct, total_equity, total_free_margin
+            ),
+        );
+    }
+
+    if seg_report.is_segregated_insolvency_masked {
+        crate::alerting::dispatch_throttled(
+            state.env().as_str(),
+            "segregated_insolvency_masked",
+            "portfolio",
+            std::time::Duration::from_secs(300),
+            format!(
+                "Segregated margin vulnerability: venue {:?} usage is {:.1}%, masking aggregate usage {:.1}% (stressed equity ${:.2})",
+                seg_report.most_vulnerable_venue,
+                seg_report.max_venue_usage_pct,
+                seg_report.global_aggregate_usage_pct,
+                seg_report.stressed_equity_sum
+            ),
+        );
+    }
+
+    if let Some(ref instr) = rebalance_instruction {
+        if instr.destination_utilization_pct >= 75.0 {
+            crate::alerting::dispatch_throttled(
+                state.env().as_str(),
+                "collateral_rebalance_advisory",
+                &instr.destination_venue,
+                std::time::Duration::from_secs(300),
+                format!(
+                    "Collateral rebalance advised: transfer ${:.2} from {} ({:.1}% used) to {} ({:.1}% used) to avoid liquidation trimming",
+                    instr.transfer_amount_usd,
+                    instr.source_venue,
+                    instr.source_utilization_pct,
+                    instr.destination_venue,
+                    instr.destination_utilization_pct,
+                ),
+            );
+        }
+    }
 
     let fx_adj_total: f64 = {
         let env_str = state.env().as_str();
@@ -3807,6 +3904,14 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
                 min_liq_dist_pct.unwrap_or(0.0)
             },
             status: margin_status.into(),
+            is_segregated_insolvency_masked: seg_report.is_segregated_insolvency_masked,
+            most_vulnerable_venue: seg_report.most_vulnerable_venue.map(|v| v.0),
+            max_venue_usage_pct: seg_report
+                .max_venue_usage_pct
+                .to_string()
+                .parse::<f64>()
+                .unwrap_or(0.0),
+            rebalance_recommendation,
         },
     })
 }
@@ -4314,6 +4419,13 @@ pub(crate) fn passive_cfg_for(
     strategy_id: &str,
 ) -> Option<PassiveUnwindConfig> {
     let key = strategy_id.trim().to_lowercase();
+    // Options strategies operate on discrete strikes with wide bid-ask spreads
+    // (often hundreds to thousands of bps). Passive limit re-pegging with tight
+    // calm gates is strictly inapplicable and causes massive latency fallbacks.
+    // Always bypass passive unwind for options, routing directly to protective IOC limit collars.
+    if key.starts_with("options") {
+        return None;
+    }
     let map = state.strategy_params.read();
     let params = map.get(key.as_str());
     let (mode_raw, custom) = match key.as_str() {
@@ -4384,6 +4496,94 @@ impl PassiveBookRefresh for FlattenLiveRefresh<'_> {
     }
 }
 
+/// True when a leg must be treated as an options leg for exit purposes —
+/// either the owning strategy is an options strategy, or the instrument is
+/// a Deribit option contract. Both the manual flatten path and the
+/// reconciler's residual auto-flatten route through this one predicate.
+pub(crate) fn is_options_leg(strategy_id: &str, venue: &str, symbol: &str) -> bool {
+    strategy_id.starts_with("options")
+        || (venue == "deribit" && (symbol.contains("-C") || symbol.contains("-P")))
+}
+
+/// Build the protective IOC limit order every options leg-close must use.
+///
+/// Options legs are never liquidated with unconstrained market orders:
+/// illiquid books produce catastrophic crossing slippage (observed: a
+/// $14k fill on $10 OTM calls). The reference price is the side-aware
+/// book / mark / ticker with a ±2% collar; when no valid reference
+/// resolves, the close is refused (fail-closed) rather than sent
+/// unbounded. Shared by the manual flatten path and the reconciler's
+/// residual auto-flatten so both obey one rule.
+pub(crate) async fn protective_option_ioc_order(
+    state: &AppEngineState,
+    adapter: &Arc<dyn ExchangeAdapter>,
+    symbol: &str,
+    side: Side,
+    qty: Decimal,
+) -> Result<arbitrageur_core::order::OrderRequest, String> {
+    let refresher = FlattenLiveRefresh {
+        state,
+        venue_id: adapter.venue_id(),
+        symbol: symbol.to_string(),
+        adapter: adapter.clone(),
+    };
+    let collar_px = if let Ok(book) = refresher.fresh_book().await {
+        let target_px = match side {
+            Side::Buy => book
+                .best_ask_price()
+                .or(book.mark_price)
+                .or_else(|| book.best_bid_price()),
+            Side::Sell => book
+                .best_bid_price()
+                .or(book.mark_price)
+                .or_else(|| book.best_ask_price()),
+        };
+        target_px.map(|p| match side {
+            Side::Buy => p * dec!(1.02),
+            Side::Sell => p * dec!(0.98),
+        })
+    } else if let Ok(ticker) = adapter.fetch_ticker(symbol).await {
+        let ref_px = match side {
+            Side::Buy => {
+                if ticker.ask > dec!(0) {
+                    Some(ticker.ask)
+                } else if ticker.last > dec!(0) {
+                    Some(ticker.last)
+                } else {
+                    Some(ticker.bid)
+                }
+            }
+            Side::Sell => {
+                if ticker.bid > dec!(0) {
+                    Some(ticker.bid)
+                } else if ticker.last > dec!(0) {
+                    Some(ticker.last)
+                } else {
+                    Some(ticker.ask)
+                }
+            }
+        };
+        ref_px.filter(|p| *p > dec!(0)).map(|p| match side {
+            Side::Buy => p * dec!(1.02),
+            Side::Sell => p * dec!(0.98),
+        })
+    } else {
+        None
+    };
+    match collar_px.filter(|p| *p > dec!(0)) {
+        Some(px) => Ok(arbitrageur_core::order::OrderRequest::new_ioc(
+            adapter.venue_id(),
+            symbol,
+            side,
+            px,
+            qty,
+        )),
+        None => Err(format!(
+            "Options leg {symbol} cannot resolve valid book/mark price — refusing unconstrained market exit"
+        )),
+    }
+}
+
 /// Arguments for one flatten leg-close (bundled: clippy allows at most
 /// seven function parameters).
 struct FlattenLegArgs<'a> {
@@ -4439,6 +4639,10 @@ async fn flatten_leg(args: FlattenLegArgs<'_>) -> Result<FlattenLegOutcome, Stri
     }
     if qty <= dec!(0) {
         return Err("Invalid leg quantity".to_string());
+    }
+    let qty = adapter.wire_base_qty(symbol, qty).await.unwrap_or(qty);
+    if qty <= dec!(0) {
+        return Err("Leg quantity snaps to zero on venue wire grid".to_string());
     }
 
     // Passive limit unwind (opt-in; emergency flattens stay market-only).
@@ -4506,8 +4710,14 @@ async fn flatten_leg(args: FlattenLegArgs<'_>) -> Result<FlattenLegOutcome, Stri
         });
     }
 
-    let mut order =
-        arbitrageur_core::order::OrderRequest::new_market(adapter.venue_id(), symbol, side, qty);
+    let is_option = is_options_leg(strategy_id, adapter.venue_id().as_str(), symbol);
+    let mut order = if is_option {
+        // Options legs must never be liquidated with unconstrained market
+        // orders — see `protective_option_ioc_order` for the collar rules.
+        protective_option_ioc_order(state, &adapter, symbol, side, qty).await?
+    } else {
+        arbitrageur_core::order::OrderRequest::new_market(adapter.venue_id(), symbol, side, qty)
+    };
     order.reduce_only = adapter.supports_reduce_only(symbol);
     let client_order_id = order.client_order_id.clone();
 
@@ -5195,8 +5405,45 @@ pub(crate) fn close_flattened_spatial_lot(
                 .flatten()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(0.0);
-            if trim_sum != 0.0 {
-                let total = close_usd + trim_sum;
+            let funding_sum: f64 = state
+                .state_store
+                .kv_get(&format!("lot.funding_usd.{}", l.id))
+                .ok()
+                .flatten()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(|| {
+                    if l.strategy_id == "funding" {
+                        // Accrue funding based on holding duration and net APR recorded at entry
+                        let elapsed_secs =
+                            (chrono::Utc::now() - l.entry_time).num_seconds().max(0) as f64;
+                        let years = elapsed_secs / (365.0 * 86400.0);
+                        let notional = (l.long_entry_price * l.long_qty
+                            + l.short_entry_price * l.short_qty)
+                            / 2.0;
+                        let apr = sig
+                            .note
+                            .as_deref()
+                            .and_then(|n| {
+                                if let Some(pos) = n.find("net ") {
+                                    let rest = &n[pos + 4..];
+                                    if let Some(end) = rest.find("% APR") {
+                                        return rest[..end].trim().parse::<f64>().ok();
+                                    }
+                                }
+                                None
+                            })
+                            .unwrap_or(0.0);
+                        if apr > 0.0 && notional > 0.0 {
+                            notional * (apr / 100.0) * years
+                        } else {
+                            0.0
+                        }
+                    } else {
+                        0.0
+                    }
+                });
+            if trim_sum != 0.0 || funding_sum != 0.0 {
+                let total = close_usd + trim_sum + funding_sum;
                 // Denominator is the ORIGINAL entry notional — the root
                 // legs keep their entry fills while the lot's qty was
                 // shrunk by trims.
@@ -5386,7 +5633,6 @@ async fn flatten_positions_inner(
         );
     }
     let _execution_guard = state.execution_lock.lock().await;
-    let flatten_equity_before = snapshot_venue_equity(state).await;
 
     let all_signals = state
         .state_store
@@ -5418,6 +5664,16 @@ async fn flatten_positions_inner(
         })
         .cloned()
         .collect();
+
+    let target_venues: Vec<&str> = roots
+        .iter()
+        .flat_map(|s| s.legs.iter().map(|l| l.venue.as_str()))
+        .collect();
+    let flatten_equity_before = if target_venues.is_empty() {
+        snapshot_venue_equity(state).await
+    } else {
+        snapshot_venue_equity_for(state, Some(&target_venues)).await
+    };
 
     let mut out = FlattenResultDto {
         strategy_id: sid.clone(),
@@ -5527,6 +5783,10 @@ async fn flatten_positions_inner(
         Ok(total)
     };
 
+    let mut accounts: HashMap<&'static str, arbitrageur_core::position::AccountSnapshot> =
+        HashMap::new();
+    let mut unreadable: std::collections::HashSet<&'static str> = std::collections::HashSet::new();
+
     for sig in roots {
         let family: Vec<crate::state_store::SignalExecution> = all_signals
             .iter()
@@ -5538,10 +5798,6 @@ async fn flatten_positions_inner(
         let mut targets: Vec<CloseTarget> = Vec::new();
         let mut undetermined = false;
         let mut seen: std::collections::HashSet<(String, &'static str, String)> =
-            std::collections::HashSet::new();
-        let mut accounts: HashMap<&'static str, arbitrageur_core::position::AccountSnapshot> =
-            HashMap::new();
-        let mut unreadable: std::collections::HashSet<&'static str> =
             std::collections::HashSet::new();
 
         for leg in &sig.legs {
@@ -5878,21 +6134,33 @@ async fn flatten_positions_inner(
         }
 
         let mut leg_desc = Vec::new();
-        for t in &targets {
-            match flatten_leg(FlattenLegArgs {
-                state,
-                venue: &t.venue,
-                symbol: &t.exact_symbol,
-                side: t.order_side,
-                qty: t.qty,
-                strategy_id: &sig.strategy_id,
-                sig_id: &sig.id,
-                notes: &mut out.notes,
-                execution_type,
-                cid_target: Some((&close_id, t.leg_side)),
-            })
-            .await
-            {
+        let target_futs = targets.iter().map(|t| {
+            let sig_id = sig.id.clone();
+            let strategy_id = sig.strategy_id.clone();
+            let close_id = close_id.clone();
+            async move {
+                let mut leg_notes = Vec::new();
+                let outcome = flatten_leg(FlattenLegArgs {
+                    state,
+                    venue: &t.venue,
+                    symbol: &t.exact_symbol,
+                    side: t.order_side,
+                    qty: t.qty,
+                    strategy_id: &strategy_id,
+                    sig_id: &sig_id,
+                    notes: &mut leg_notes,
+                    execution_type,
+                    cid_target: Some((&close_id, t.leg_side)),
+                })
+                .await;
+                (t, outcome, leg_notes)
+            }
+        });
+        let target_outcomes = futures::future::join_all(target_futs).await;
+
+        for (t, outcome_res, leg_notes) in target_outcomes {
+            out.notes.extend(leg_notes);
+            match outcome_res {
                 Ok(outcome) => {
                     // Persist the accepted order id BEFORE any fill write so a
                     // working order is always reachable by the reconciliation
@@ -5969,6 +6237,8 @@ async fn flatten_positions_inner(
             .collect();
 
         let mut fully_flat = true;
+        let mut post_accounts: HashMap<&'static str, arbitrageur_core::position::AccountSnapshot> =
+            HashMap::new();
         for exp in &exposures {
             let residual = (exp.entry_qty
                 - child_fills_on(&family_now, exp.canonical, opposite(exp.entry_side))?)
@@ -5980,8 +6250,13 @@ async fn flatten_positions_inner(
                 fully_flat = false;
                 continue;
             };
-            match adapter.fetch_account().await {
-                Ok(acc) => match adapter.account_position_for(&acc, &exp.exact_symbol) {
+            if !post_accounts.contains_key(exp.canonical) {
+                if let Ok(acc) = adapter.fetch_account().await {
+                    post_accounts.insert(exp.canonical, acc);
+                }
+            }
+            match post_accounts.get(exp.canonical) {
+                Some(acc) => match adapter.account_position_for(acc, &exp.exact_symbol) {
                     Ok(None) => {}
                     Ok(Some(p)) if p.side != exp.expected_pos_side => {
                         fully_flat = false;
@@ -6000,7 +6275,10 @@ async fn flatten_positions_inner(
                             .unwrap_or(test_qty);
                         let notional_usd =
                             dec_to_f64(test_qty * p.mark_price, "residual notional").unwrap_or(0.0);
-                        let is_dust = wire_qty == Decimal::ZERO || notional_usd < 10.0;
+                        let is_option =
+                            exp.exact_symbol.ends_with("-C") || exp.exact_symbol.ends_with("-P");
+                        let is_dust =
+                            wire_qty == Decimal::ZERO || (!is_option && notional_usd < 10.0);
                         if is_dust
                             && (execution_type == Some("emergency_market")
                                 || close_status == CycleStatus::Closed)
@@ -6021,7 +6299,7 @@ async fn flatten_positions_inner(
                         ));
                     }
                 },
-                Err(_) => fully_flat = false,
+                None => fully_flat = false,
             }
         }
 
@@ -6128,7 +6406,9 @@ async fn flatten_positions_inner(
             // A scoped flatten measures residual against that scope only —
             // unrelated open trades (a sibling package under the same
             // strategy) must not keep the scoped row "actionable" forever.
-            (only_signal_id.is_none() || only_signal_id == Some(s.id.as_str()))
+            (s.environment.eq_ignore_ascii_case(state.env().as_str())
+                || s.environment.eq_ignore_ascii_case("unknown"))
+                && (only_signal_id.is_none() || only_signal_id == Some(s.id.as_str()))
                 && trade_match(&s.id)
                 && !s.id.starts_with("flat-")
                 && !s.id.starts_with("trim-")
@@ -6462,29 +6742,111 @@ async fn live_spatial_edge(
 /// liquidation distance (fraction → percent) and the smaller leg quantity
 /// feed the shared `evaluate_liq_trim`. Missing liquidation prices,
 /// nonpositive quantities, or a leg-side mismatch all fail closed (None).
+#[allow(dead_code)]
 pub(crate) fn liq_trim_decision_for_positions(
     long_pos: &arbitrageur_core::position::Position,
     short_pos: &arbitrageur_core::position::Position,
     step: Decimal,
     threshold_pct: f64,
 ) -> Option<(arbitrageur_strategy::pair_trim::PairTrimDecision, f64)> {
-    use arbitrageur_strategy::pair_trim::evaluate_liq_trim;
+    proportional_liq_trim_decision(long_pos, None, short_pos, None, step, threshold_pct)
+}
+
+/// Proportional liquidation trim evaluation over a pair of resolved positions and their venue equities.
+/// When fresh venue equity is available, calculates the exact minimal reduction ΔQ* to restore
+/// the Target Margin Buffer Ratio (75%), avoiding both excessive fee bleed and under-reduction.
+/// If equity telemetry is unavailable, smoothly falls back to distance-based evaluate_liq_trim.
+pub(crate) fn proportional_liq_trim_decision(
+    long_pos: &arbitrageur_core::position::Position,
+    long_equity: Option<Decimal>,
+    short_pos: &arbitrageur_core::position::Position,
+    short_equity: Option<Decimal>,
+    step: Decimal,
+    threshold_pct: f64,
+) -> Option<(arbitrageur_strategy::pair_trim::PairTrimDecision, f64)> {
+    use arbitrageur_strategy::pair_trim::{
+        evaluate_liq_trim, evaluate_proportional_liq_trim, PairTrimDecision,
+    };
     if long_pos.side != Side::Buy || short_pos.side != Side::Sell {
         return None;
     }
+    let qty =
+        |p: &arbitrageur_core::position::Position| dec_opt_f64(p.quantity).filter(|q| *q > 0.0);
+    let min_qty = qty(long_pos)?.min(qty(short_pos)?);
     let dist_pct = |p: &arbitrageur_core::position::Position| -> Option<f64> {
         let d = dec_opt_f64(p.liquidation_distance_pct()?)? * 100.0;
         d.is_finite().then_some(d)
     };
-    let qty =
-        |p: &arbitrageur_core::position::Position| dec_opt_f64(p.quantity).filter(|q| *q > 0.0);
-    let min_dist = dist_pct(long_pos)?.min(dist_pct(short_pos)?);
-    let min_qty = qty(long_pos)?.min(qty(short_pos)?);
+    let long_dist = dist_pct(long_pos).or_else(|| long_equity.is_some().then_some(100.0));
+    let short_dist = dist_pct(short_pos).or_else(|| short_equity.is_some().then_some(100.0));
+    let (Some(long_dist), Some(short_dist)) = (long_dist, short_dist) else {
+        return None;
+    };
+    let min_dist = long_dist.min(short_dist);
     let step_f = dec_opt_f64(step).filter(|s| *s > 0.0)?;
-    Some((
-        evaluate_liq_trim(min_dist, min_qty, step_f, Some(threshold_pct)),
-        min_dist,
-    ))
+
+    // If neither leg is within liquidation threshold, hold
+    if min_dist > threshold_pct {
+        return Some((PairTrimDecision::Hold, min_dist));
+    }
+    // If liquidation distance is already non-positive (past liquidation or breached), emergency close immediately
+    if min_dist <= 0.0 {
+        return Some((PairTrimDecision::CloseBoth, min_dist));
+    }
+
+    // Identify threatened leg and its equity
+    let (threatened_pos, threatened_equity) = if long_dist <= short_dist {
+        (long_pos, long_equity)
+    } else {
+        (short_pos, short_equity)
+    };
+
+    let qty = dec_opt_f64(threatened_pos.quantity).filter(|q| *q > 0.0);
+    let mark = dec_opt_f64(threatened_pos.mark_price).filter(|m| *m > 0.0);
+    let equity_f = threatened_equity.and_then(dec_opt_f64);
+
+    if let (Some(q), Some(m), Some(eq)) = (qty, mark, equity_f) {
+        // Compute maintenance margin ratio (MMR).
+        // If position maintenance_margin is available, mmr = maint_margin / notional,
+        // otherwise default to standard perp 5.0% MMR.
+        let mmr = dec_opt_f64(threatened_pos.maintenance_margin)
+            .filter(|mm| *mm > 0.0)
+            .map(|mm| mm / (q * m))
+            .unwrap_or(0.05)
+            .clamp(0.01, 0.20);
+
+        // Proportional de-leveraging formula to restore 75% Target Margin Buffer Ratio
+        let prop_decision = evaluate_proportional_liq_trim(
+            q, m, eq, mmr, 75.0,   // target buffer %
+            0.0005, // 5 bps taker fee rate
+            step_f,
+        );
+        match prop_decision {
+            PairTrimDecision::TrimBoth { qty: trim_qty } => {
+                let final_qty = trim_qty.min(min_qty);
+                if final_qty >= min_qty || (min_qty - final_qty) < step_f {
+                    Some((PairTrimDecision::CloseBoth, min_dist))
+                } else {
+                    Some((PairTrimDecision::TrimBoth { qty: final_qty }, min_dist))
+                }
+            }
+            PairTrimDecision::CloseBoth => Some((PairTrimDecision::CloseBoth, min_dist)),
+            PairTrimDecision::Hold => {
+                // Liquidation distance is breached (<= threshold) but cross-equity gave MBR >= target:
+                // Ensure the imminently threatened position is trimmed by at least step_qty.
+                Some((
+                    evaluate_liq_trim(min_dist, min_qty, step_f, Some(threshold_pct)),
+                    min_dist,
+                ))
+            }
+        }
+    } else {
+        // Fall back to distance-based trim if equity telemetry is not available
+        Some((
+            evaluate_liq_trim(min_dist, min_qty, step_f, Some(threshold_pct)),
+            min_dist,
+        ))
+    }
 }
 
 pub(crate) async fn maybe_liq_trim_pair(
@@ -6515,21 +6877,36 @@ pub(crate) async fn maybe_liq_trim_pair(
     let resolve_pos = async |leg: &crate::state_store::SignalLeg| {
         let canonical = crate::state::canonical_venue_id(&leg.venue)?;
         let key = format!("{env_str}-{canonical}");
-        let (acc, ts) = state.last_good_accounts.lock().get(&key)?.clone();
-        if Utc::now().timestamp_millis().saturating_sub(ts) > 120_000 {
-            return None;
-        }
         let adapter = state.get_adapter(canonical)?;
-        adapter.account_position_for(&acc, &leg.symbol).ok()?
+        let cached = { state.last_good_accounts.lock().get(&key).cloned() };
+        let acc = match cached {
+            Some((acc, ts)) if Utc::now().timestamp_millis().saturating_sub(ts) <= 120_000 => acc,
+            _ => {
+                let (fresh_acc, _) = live_account_or_cached(state, canonical, &adapter)
+                    .await
+                    .ok()?;
+                fresh_acc
+            }
+        };
+        let pos = adapter.account_position_for(&acc, &leg.symbol).ok()??;
+        let avail_cushion = (acc.free_margin + pos.maintenance_margin).min(acc.equity);
+        Some((pos, avail_cushion))
     };
-    let (Some(long_pos), Some(short_pos)) = (resolve_pos(buy).await, resolve_pos(sell).await)
+    let (Some((long_pos, long_equity)), Some((short_pos, short_equity))) =
+        (resolve_pos(buy).await, resolve_pos(sell).await)
     else {
         return None;
     };
 
     let step = flatten_step_qty(state, &sig.symbol);
-    let (decision, min_dist_pct) =
-        liq_trim_decision_for_positions(&long_pos, &short_pos, step, threshold_pct)?;
+    let (decision, min_dist_pct) = proportional_liq_trim_decision(
+        &long_pos,
+        Some(long_equity),
+        &short_pos,
+        Some(short_equity),
+        step,
+        threshold_pct,
+    )?;
     match decision {
         PairTrimDecision::Hold => None,
         PairTrimDecision::TrimBoth { qty } => {
@@ -6566,6 +6943,14 @@ pub(crate) async fn maybe_liq_trim_pair(
             let trim_dec = Decimal::from_f64_retain(qty)?;
             let mut note = format!(
                 "liq trim: leg within {min_dist_pct:.1}% of liquidation — reducing both legs by {qty}"
+            );
+            crate::alerting::dispatch(
+                state.env().as_str(),
+                "liquidation_trim_fired",
+                format!(
+                    "Liquidation trim triggered on {} (min distance {:.1}%): reducing both legs by {}",
+                    sig.symbol, min_dist_pct, qty
+                ),
             );
             // `trim-` (not `flat-`) prefix: trim fills reduce the open
             // position but realize separately — the close-agg must exclude

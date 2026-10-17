@@ -21,11 +21,15 @@ regexes = [
   # 32-byte seed used with a PyNaCl-generated expected signature.
   '''9d61b19deffd5a60ba844af492ec2cc4449c5697b326919703bac031cae7f109''',
   # Sequential-hex placeholder private key used by signer/EIP-712 test
-  # vectors (Lighter, edgeX) — with or without the 0x prefix.
-  '''(0x)?0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef(0123456789abcdef)?''',
-  # ExchangeAccounts.tsx input placeholder text — PEM header strings shown
-  # as field hints, not real key material.
-  '''-----BEGIN (RSA |EC )?PRIVATE KEY-----''',
+  # vectors (Lighter, edgeX) — with or without the 0x prefix. Anchored so
+  # the pattern can only ever match this exact placeholder, never a real
+  # key that happens to contain it as a substring.
+  '''^(0x)?0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef(0123456789abcdef)?$''',
+  # ExchangeAccounts.tsx input placeholder text — the bare PEM header shown
+  # as a field hint. Anchored to the exact header string: a real multi-line
+  # PEM block must NEVER be allowlisted (an unanchored substring match here
+  # would silently exempt every leaked private key in the tree).
+  '''^-----BEGIN (RSA |EC )?PRIVATE KEY-----$''',
   # commands.rs sanitization sentinels (SENTINEL_* strings asserting that
   # settings responses redact credential fields).
   '''SENTINEL_[A-Z0-9_]+''',

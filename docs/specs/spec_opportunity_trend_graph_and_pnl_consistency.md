@@ -121,5 +121,5 @@ A comprehensive audit and implementation pass resolving metric consistency, oppo
 ## Further Notes
 
 - The desktop user service (`arbitrageur-testnet.service`) was compiled with `--features custom-protocol` and restarted cleanly.
-- The credential vault was verified unlocked with password `<redacted>` via dev socket RPC (`/tmp/arb-dev.sock`).
+- The credential vault was verified unlocked with password `<redacted — see SECURITY.md>` via dev socket RPC (`/tmp/arb-dev.sock`).
 - All 4 feed lanes (Hyperliquid, Lighter, Robinhood, Vanta) are actively streaming with 0 consecutive failures.

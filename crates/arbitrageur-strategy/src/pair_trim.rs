@@ -115,6 +115,74 @@ pub fn evaluate_liq_trim(
     PairTrimDecision::TrimBoth { qty: trim_qty }
 }
 
+/// Proportional liquidation-distance trim block: computes the exact minimal quantity to trim
+/// from BOTH legs to restore the threatened venue's margin buffer ratio (MBR) to the target level.
+///
+/// Formula:
+///   ΔQ* = [(1 + MBR*) * Q * P * MMR - Equity] / [P * ((1 + MBR*) * MMR - f_taker)]
+pub fn evaluate_proportional_liq_trim(
+    current_qty: f64,
+    mark_price: f64,
+    threatened_equity: f64,
+    threatened_mmr: f64,    // e.g. 0.05 for 5% maintenance margin
+    target_buffer_pct: f64, // target buffer ratio e.g. 75.0%
+    taker_fee_rate: f64,    // e.g. 0.0005 for 5 bps
+    step_qty: f64,
+) -> PairTrimDecision {
+    if !current_qty.is_finite()
+        || current_qty <= 0.0
+        || !mark_price.is_finite()
+        || mark_price <= 0.0
+        || !threatened_equity.is_finite()
+        || !threatened_mmr.is_finite()
+        || threatened_mmr <= 0.0
+        || !step_qty.is_finite()
+        || step_qty <= 0.0
+    {
+        return PairTrimDecision::Hold;
+    }
+
+    if threatened_equity <= 0.0 {
+        return PairTrimDecision::CloseBoth;
+    }
+
+    let target_mbr = target_buffer_pct / 100.0;
+    let required_margin = current_qty * mark_price * threatened_mmr;
+    let current_mbr = (threatened_equity - required_margin) / required_margin;
+
+    // Buffer is already healthy: hold
+    if current_mbr >= target_mbr {
+        return PairTrimDecision::Hold;
+    }
+
+    let numerator =
+        (1.0 + target_mbr) * current_qty * mark_price * threatened_mmr - threatened_equity;
+    let denominator = mark_price * ((1.0 + target_mbr) * threatened_mmr - taker_fee_rate);
+
+    if denominator <= 0.0 {
+        return PairTrimDecision::CloseBoth;
+    }
+
+    let raw_trim = numerator / denominator;
+    if raw_trim <= 0.0 {
+        return PairTrimDecision::Hold;
+    }
+
+    if raw_trim >= current_qty || (current_qty - raw_trim) < step_qty - PAIR_DUST_EPS {
+        return PairTrimDecision::CloseBoth;
+    }
+
+    // Snap up to whole steps
+    let steps = (raw_trim / step_qty).ceil();
+    let snapped_qty = (steps * step_qty).min(current_qty);
+
+    if snapped_qty >= current_qty || (current_qty - snapped_qty) < step_qty - PAIR_DUST_EPS {
+        return PairTrimDecision::CloseBoth;
+    }
+
+    PairTrimDecision::TrimBoth { qty: snapped_qty }
+}
+
 /// Which leg of a neutral pair is overweight, and by how much.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum OverweightLeg {
@@ -140,6 +208,34 @@ pub fn rebalance_to_neutral(long_qty: f64, short_qty: f64) -> Option<(Overweight
     }
 }
 
+/// Beta-aware statistical arbitrage pair rebalancing:
+/// Targets Q_x* = Q_y * |beta|. Trims the overweight leg to restore neutrality.
+pub fn rebalance_stat_arb_pair_to_neutral(
+    qty_y: f64,
+    qty_x: f64,
+    beta: f64,
+) -> Option<(OverweightLeg, f64)> {
+    if !qty_y.is_finite()
+        || !qty_x.is_finite()
+        || !beta.is_finite()
+        || qty_y < 0.0
+        || qty_x < 0.0
+        || beta.abs() < 1e-4
+    {
+        return None;
+    }
+    let target_qty_x = qty_y * beta.abs();
+    let diff_x = qty_x - target_qty_x;
+    if diff_x.abs() <= PAIR_DUST_EPS {
+        return None;
+    }
+    if diff_x > 0.0 {
+        Some((OverweightLeg::Short, diff_x)) // Leg X is overweight
+    } else {
+        Some((OverweightLeg::Long, -diff_x / beta.abs())) // Leg Y is overweight relative to Leg X
+    }
+}
+
 /// Opportunity rotation gate: exit the current funding position to enter a
 /// higher-yield one only when the net-of-friction improvement exceeds
 /// `threshold_bps`. Invalid inputs (or a nonpositive threshold) never rotate.
@@ -159,6 +255,60 @@ pub fn rotation_improves(
         return false;
     }
     candidate_net_bps - current_net_bps - friction_bps > threshold_bps
+}
+
+/// Closed-form mathematical hysteresis rotation rule:
+/// Evaluates whether rotating from an active carry asset to a candidate asset
+/// yields an excess return that exceeds the decay-adjusted switching friction
+/// plus a safety hysteresis margin, preventing fee churn between similar-yielding assets.
+pub fn rotation_improves_with_hysteresis(
+    current_apr_pct: f64,
+    candidate_apr_pct: f64,
+    switching_friction_bps: f64,
+    candidate_halflife_hours: f64,
+    hysteresis_buffer_apr_pct: f64,
+    hold_duration_hours: f64,
+    min_hold_hours: f64,
+) -> bool {
+    if !current_apr_pct.is_finite()
+        || !candidate_apr_pct.is_finite()
+        || !switching_friction_bps.is_finite()
+        || switching_friction_bps < 0.0
+        || !candidate_halflife_hours.is_finite()
+        || candidate_halflife_hours <= 0.0
+        || !hysteresis_buffer_apr_pct.is_finite()
+        || hysteresis_buffer_apr_pct < 0.0
+        || !hold_duration_hours.is_finite()
+        || hold_duration_hours < 0.0
+        || !min_hold_hours.is_finite()
+        || min_hold_hours < 0.0
+    {
+        return false;
+    }
+
+    // Emergency exit if current position has flipped to negative carry
+    if current_apr_pct < 0.0 {
+        return candidate_apr_pct > 0.0;
+    }
+
+    // Must satisfy minimum holding period (e.g. 8-16 hours) to prevent churn
+    if hold_duration_hours < min_hold_hours {
+        return false;
+    }
+
+    // Effective horizon H_eff = (1 - e^(-lambda * H_max)) / lambda (capped at 168 hours = 7 days)
+    let lambda = (std::f64::consts::LN_2 / candidate_halflife_hours).max(0.001);
+    let h_eff = (1.0 - (-lambda * 168.0).exp()) / lambda;
+
+    // Convert switching friction (bps) to required annual excess yield (% APR)
+    // friction_bps / 10,000 = decimal cost.
+    // decimal_cost / h_eff = cost per hour.
+    // cost per hour * 8760 = annualized friction hurdle.
+    let friction_fraction = switching_friction_bps / 10_000.0;
+    let friction_apr_hurdle_pct = (friction_fraction * 8760.0 / h_eff) * 100.0;
+    let total_hurdle_apr_pct = friction_apr_hurdle_pct + hysteresis_buffer_apr_pct;
+
+    candidate_apr_pct - current_apr_pct > total_hurdle_apr_pct
 }
 
 #[cfg(test)]
@@ -305,5 +455,99 @@ mod tests {
         assert!(!rotation_improves(0.0, 10.0, 2.0, 0.0));
         assert!(!rotation_improves(f64::NAN, 10.0, 2.0, 5.0));
         assert!(!rotation_improves(0.0, 10.0, -1.0, 5.0));
+    }
+
+    #[test]
+    fn test_proportional_liq_trim_scenarios() {
+        // Position: 10 SOL at $100 = $1,000 notional.
+        // MMR = 5% ($50 margin requirement).
+        // Equity = $60 (Buffer = ($60 - $50)/$50 = 20% < 75% target).
+        // Step size = 1.0 SOL.
+        let decision = evaluate_proportional_liq_trim(
+            10.0,   // current_qty
+            100.0,  // mark_price
+            60.0,   // threatened_equity
+            0.05,   // MMR
+            75.0,   // target_buffer_pct (0.75)
+            0.0005, // taker_fee_rate (5 bps)
+            1.0,    // step_qty
+        );
+        match decision {
+            PairTrimDecision::TrimBoth { qty } => {
+                assert!(
+                    (1.0..10.0).contains(&qty),
+                    "expected partial trim, got {}",
+                    qty
+                );
+            }
+            other => panic!("expected TrimBoth, got {:?}", other),
+        }
+
+        // When buffer is already healthy (equity = $100 -> MBR = 100% > 75%):
+        assert_eq!(
+            evaluate_proportional_liq_trim(10.0, 100.0, 100.0, 0.05, 75.0, 0.0005, 1.0),
+            PairTrimDecision::Hold
+        );
+
+        // When equity is negative or zero (insolvent):
+        assert_eq!(
+            evaluate_proportional_liq_trim(10.0, 100.0, 0.0, 0.05, 75.0, 0.0005, 1.0),
+            PairTrimDecision::CloseBoth
+        );
+
+        // When position is small (1.0) and trimming would leave < step_qty:
+        assert_eq!(
+            evaluate_proportional_liq_trim(1.0, 100.0, 2.0, 0.05, 75.0, 0.0005, 1.0),
+            PairTrimDecision::CloseBoth
+        );
+    }
+
+    #[test]
+    fn rotation_with_hysteresis_churn_prevention() {
+        // Current: 20% APR, Candidate: 22% APR (+2% delta)
+        // 28 bps friction, 48h half-life, 5% hysteresis buffer.
+        // Even held for 24h (> 16h min), a +2% delta is rejected because friction hurdle requires ~43% excess APR.
+        assert!(!rotation_improves_with_hysteresis(
+            20.0, // current_apr
+            22.0, // candidate_apr
+            28.0, // switching_friction_bps
+            48.0, // halflife_hours
+            5.0,  // hysteresis_buffer_apr
+            24.0, // hold_duration_hours
+            16.0  // min_hold_hours
+        ));
+
+        // When candidate is a massive breakout yielding 120% APR (+100% delta):
+        assert!(rotation_improves_with_hysteresis(
+            20.0, 120.0, 28.0, 48.0, 5.0, 24.0, 16.0
+        ));
+
+        // Premature rotation before min_hold_hours (e.g. held only 2 hours):
+        assert!(!rotation_improves_with_hysteresis(
+            20.0, 120.0, 28.0, 48.0, 5.0, 2.0, 16.0
+        ));
+
+        // Emergency flip: current turned negative (-5% APR):
+        assert!(rotation_improves_with_hysteresis(
+            -5.0, 10.0, 28.0, 48.0, 5.0, 1.0, 16.0
+        ));
+    }
+
+    #[test]
+    fn test_rebalance_stat_arb_pair_to_neutral() {
+        // 1 BTC vs 15 ETH with beta = 15.0 -> perfectly neutral
+        assert_eq!(rebalance_stat_arb_pair_to_neutral(1.0, 15.0, 15.0), None);
+
+        // 1 BTC vs 18 ETH with beta = 15.0 -> ETH (leg X) overweight by 3.0
+        let res = rebalance_stat_arb_pair_to_neutral(1.0, 18.0, 15.0);
+        assert_eq!(res, Some((OverweightLeg::Short, 3.0)));
+
+        // 1 BTC vs 12 ETH with beta = 15.0 -> BTC (leg Y) overweight by 0.2 BTC (3 ETH equivalent)
+        let res_y = rebalance_stat_arb_pair_to_neutral(1.0, 12.0, 15.0);
+        assert_eq!(res_y, Some((OverweightLeg::Long, 0.2)));
+
+        // Degenerate inputs fail safe
+        assert_eq!(rebalance_stat_arb_pair_to_neutral(-1.0, 10.0, 1.0), None);
+        assert_eq!(rebalance_stat_arb_pair_to_neutral(1.0, 10.0, 0.0), None);
     }
 }

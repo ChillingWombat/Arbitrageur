@@ -65,6 +65,18 @@ fn default_max_spread_bps() -> f64 {
 fn default_max_fast_vol_bps() -> f64 {
     10.0
 }
+fn default_max_adverse_drift_bps() -> Option<f64> {
+    Some(5.0)
+}
+fn default_true() -> bool {
+    true
+}
+fn default_min_queue_seniority_ratio() -> Option<f64> {
+    Some(0.20)
+}
+fn default_queue_hazard_pickoff_threshold() -> Option<f64> {
+    Some(0.70)
+}
 
 /// Per-strategy passive-unwind controls. `enabled` is opt-in (default off)
 /// so existing market/IOC behavior is unchanged until the operator enables
@@ -96,6 +108,48 @@ pub struct PassiveUnwindConfig {
     /// fast-vol readings pass this leg (the spread leg is the hard guard).
     #[serde(default = "default_max_fast_vol_bps")]
     pub max_fast_vol_bps: f64,
+    /// Maximum tolerable adverse mid-price drift in basis points while an order is resting.
+    /// If live market mid drifts adversely by more than this threshold against our resting limit order,
+    /// the order is immediately canceled before snipers pick it off. Default: Some(5.0).
+    #[serde(default = "default_max_adverse_drift_bps")]
+    pub max_adverse_drift_bps: Option<f64>,
+    /// Whether Level-3 MBO queue drain hazard evacuation is active. Default: true.
+    #[serde(default = "default_true")]
+    pub enable_l3_queue_drain_evacuation: bool,
+    /// Configurable Level-3 MBO Queue Drain Forecaster for resting quote evacuation.
+    #[serde(default)]
+    pub l3_drain_forecaster: Option<arbitrageur_math::l3_hazard::QueueDrainHazardForecaster>,
+    /// Whether real-time Queue Priority Tracking & Hazard Evacuation is active. Default: true.
+    #[serde(default = "default_true")]
+    pub enable_queue_priority_tracking: bool,
+    /// Minimum acceptable queue seniority ratio before flagging stagnation. Default: Some(0.20).
+    #[serde(default = "default_min_queue_seniority_ratio")]
+    pub min_queue_seniority_ratio: Option<f64>,
+    /// Pick-off hazard index threshold triggering proactive quote withdrawal. Default: Some(0.70).
+    #[serde(default = "default_queue_hazard_pickoff_threshold")]
+    pub queue_hazard_pickoff_threshold: Option<f64>,
+    /// Configurable Queue Priority Hazard Engine.
+    #[serde(default)]
+    pub queue_priority_hazard_engine:
+        Option<arbitrageur_math::queue_priority::QueuePriorityHazardEngine>,
+    /// Optional Bouchaud Power-Law Propagator for self-impact filtering and optimal U-shaped slicing.
+    #[serde(default)]
+    pub power_law_propagator:
+        Option<arbitrageur_math::power_law_propagator::PowerLawPropagatorModel>,
+    /// Whether real-time Multi-Level OFI Toxicity Shading is active. Default: true.
+    #[serde(default = "default_true")]
+    pub enable_ofi_toxicity_shading: bool,
+    /// Configurable Multi-Level OFI Toxicity Engine.
+    #[serde(default)]
+    pub ofi_toxicity_engine:
+        Option<arbitrageur_math::micro_price_surface::MultiLevelOfiToxicityEngine>,
+    /// Whether Multi-Level Hawkes Queue Drain Forecaster is active. Default: true.
+    #[serde(default = "default_true")]
+    pub enable_hawkes_queue_drain_evacuation: bool,
+    /// Configurable Multi-Level Hawkes Queue Drain Forecaster for predictive quote evacuation.
+    #[serde(default)]
+    pub hawkes_drain_forecaster:
+        Option<arbitrageur_math::cross_hawkes::MultiLevelHawkesQueueDrainForecaster>,
 }
 
 impl Default for PassiveUnwindConfig {
@@ -107,6 +161,18 @@ impl Default for PassiveUnwindConfig {
             max_tries: default_max_tries(),
             max_spread_bps: default_max_spread_bps(),
             max_fast_vol_bps: default_max_fast_vol_bps(),
+            max_adverse_drift_bps: default_max_adverse_drift_bps(),
+            enable_l3_queue_drain_evacuation: true,
+            l3_drain_forecaster: None,
+            enable_queue_priority_tracking: true,
+            min_queue_seniority_ratio: default_min_queue_seniority_ratio(),
+            queue_hazard_pickoff_threshold: default_queue_hazard_pickoff_threshold(),
+            queue_priority_hazard_engine: None,
+            power_law_propagator: None,
+            enable_ofi_toxicity_shading: true,
+            ofi_toxicity_engine: None,
+            enable_hawkes_queue_drain_evacuation: true,
+            hawkes_drain_forecaster: None,
         }
     }
 }
@@ -141,6 +207,11 @@ impl PassiveUnwindConfig {
         }
         if !self.max_fast_vol_bps.is_finite() || self.max_fast_vol_bps <= 0.0 {
             return Err("max_fast_vol_bps must be finite and positive".to_string());
+        }
+        if let Some(drift) = self.max_adverse_drift_bps {
+            if !drift.is_finite() || drift <= 0.0 {
+                return Err("max_adverse_drift_bps must be finite and positive".to_string());
+            }
         }
         Ok(())
     }
@@ -204,6 +275,143 @@ pub fn limit_price_for(side: Side, bid: Decimal, ask: Decimal, percentile: f64) 
         return None;
     }
     Some(px_dec)
+}
+
+/// Peg a reduce-limit price inside the spread with Hawkes self-exciting arrival intensity adjustments.
+/// If a toxic surge is detected on the adverse stream, pulls the quote immediately (`None`).
+/// Otherwise, widens the peg percentile logarithmically deeper into the book to avoid adverse selection fills.
+pub fn limit_price_for_hawkes(
+    side: Side,
+    bid: Decimal,
+    ask: Decimal,
+    base_percentile: f64,
+    hawkes: Option<&arbitrageur_math::hawkes::MultivariateHawkes>,
+    stream_idx: usize,
+) -> Option<Decimal> {
+    if let Some(h) = hawkes {
+        // If toxic surge is detected on this stream, pull quote immediately
+        if h.is_toxic_pull(stream_idx, 15.0) {
+            tracing::warn!(
+                "Passive unwind limit quote pulled: Hawkes toxic flow surge detected on stream {stream_idx}"
+            );
+            return None;
+        }
+    }
+
+    let effective_percentile = if let Some(h) = hawkes {
+        let mu = if stream_idx < h.mu.len() {
+            h.mu[stream_idx].max(1e-6)
+        } else {
+            0.1
+        };
+        let lambda = h.current_intensity(stream_idx);
+        let intensity_mult = (lambda / mu).max(1.0);
+        // During arrival bursts, widen maker peg deeper toward passive edge (100.0)
+        (base_percentile + 15.0 * intensity_mult.ln()).clamp(10.0, 95.0)
+    } else {
+        base_percentile
+    };
+
+    limit_price_for(side, bid, ask, effective_percentile)
+}
+
+/// Peg a reduce-limit price inside the spread with Multi-Level Hawkes Queue Drain Forecaster.
+/// If the forecaster indicates evacuation (`should_evacuate_passive_quote == true`), pulls the quote immediately (`None`).
+/// Otherwise, delegates to `limit_price_for_hawkes`.
+#[allow(clippy::too_many_arguments)]
+pub fn limit_price_for_hawkes_with_drain(
+    side: Side,
+    bid: Decimal,
+    ask: Decimal,
+    base_percentile: f64,
+    hawkes: Option<&arbitrageur_math::hawkes::MultivariateHawkes>,
+    stream_idx: usize,
+    drain_forecaster: Option<&arbitrageur_math::cross_hawkes::MultiLevelHawkesQueueDrainForecaster>,
+    v_ahead: f64,
+    v_total: f64,
+) -> Option<Decimal> {
+    if let Some(forecaster) = drain_forecaster {
+        let verdict = forecaster.evaluate_drain_hazard(v_ahead, v_total, 0.05);
+        if verdict.should_evacuate_passive_quote {
+            tracing::warn!(
+                "Passive unwind limit quote pulled: Multi-level Hawkes queue drain hazard: {}",
+                verdict.reason
+            );
+            return None;
+        }
+    }
+    limit_price_for_hawkes(side, bid, ask, base_percentile, hawkes, stream_idx)
+}
+
+/// Peg a reduce-limit price using Guéant-Tapia-Manziadi optimal market making with perpetual funding carry.
+/// Evaluates closed-form optimal half-spreads under finite remaining unwind inventory $q$,
+/// perpetual funding drift $\phi_t$, and order flow imbalance adverse selection.
+pub fn limit_price_for_gueant(
+    side: Side,
+    bid: Decimal,
+    ask: Decimal,
+    remaining_inventory_q: f64,
+    funding_rate_phi: f64,
+    ofi_delta: Option<f64>,
+    gtm_model: Option<&arbitrageur_math::gueant_mm::GueantPerpMarketMaker>,
+) -> Option<Decimal> {
+    let bid_f = dec_to_f64_opt(bid)?;
+    let ask_f = dec_to_f64_opt(ask)?;
+    if !(bid_f > 0.0 && ask_f > 0.0 && ask_f >= bid_f) {
+        return None;
+    }
+    let mid_f = (bid_f + ask_f) * 0.5;
+    let default_model = arbitrageur_math::gueant_mm::GueantPerpMarketMaker::default();
+    let model = gtm_model.unwrap_or(&default_model);
+
+    // Unwind horizon: e.g. 5 minutes in year units (5.0 / (365.25 * 24.0 * 60.0))
+    let tau = 5.0 / 525_960.0;
+    let tick_size = (ask_f - bid_f).max(0.01) * 0.1;
+
+    let rec = model.generate_quote_recommendation(
+        mid_f,
+        remaining_inventory_q,
+        tau,
+        funding_rate_phi,
+        ofi_delta,
+        tick_size,
+    );
+
+    let raw_px = match side {
+        Side::Buy => {
+            // Unwinding short position by buying: place bid inside [bid_f, ask_f]
+            rec.recommended_bid.clamp(bid_f, ask_f)
+        }
+        Side::Sell => {
+            // Unwinding long position by selling: place ask inside [bid_f, ask_f]
+            rec.recommended_ask.clamp(bid_f, ask_f)
+        }
+    };
+
+    let px_dec = f64_to_dec_opt(raw_px)?;
+    if px_dec <= Decimal::ZERO {
+        return None;
+    }
+    Some(px_dec)
+}
+
+/// Evaluates adaptive stochastic depth unwind pacing for partial fill remainders and limit attempts.
+pub fn evaluate_stochastic_depth_unwind_pacing(
+    remaining_qty: Decimal,
+    instantaneous_depth: Option<Decimal>,
+    horizon_sec: f64,
+    executor: Option<&arbitrageur_math::stochastic_depth::StochasticDepthLiquidationExecutor>,
+) -> arbitrageur_math::stochastic_depth::ExecutionPacingDecision {
+    let rem_f = dec_to_f64_opt(remaining_qty).unwrap_or(0.0);
+    let default_exec =
+        arbitrageur_math::stochastic_depth::StochasticDepthLiquidationExecutor::default();
+    let exec = executor.unwrap_or(&default_exec);
+
+    let depth_f = instantaneous_depth
+        .and_then(dec_to_f64_opt)
+        .unwrap_or(exec.base_depth_lambda_bar);
+
+    exec.evaluate_pacing_decision(rem_f, horizon_sec, depth_f)
 }
 
 /// Calm-market gate: passive only when the spread is within bounds and fast
@@ -382,6 +590,89 @@ async fn peg_for_attempt(
     if !calm_gate_ok(spread, fast_vol_bps, cfg) {
         return Err(format!("calm gate failed (spread {spread:.2} bps)"));
     }
+    if cfg.enable_ofi_toxicity_shading {
+        if let Some(mut engine) = cfg.ofi_toxicity_engine {
+            let levels: Vec<arbitrageur_math::micro_price_surface::DepthLevelQuote> = (0..5)
+                .filter_map(|i| {
+                    let b = book.bids.get(i)?;
+                    let a = book.asks.get(i)?;
+                    Some(arbitrageur_math::micro_price_surface::DepthLevelQuote::new(
+                        b.price.to_string().parse().ok()?,
+                        b.size.to_string().parse().ok()?,
+                        a.price.to_string().parse().ok()?,
+                        a.size.to_string().parse().ok()?,
+                    ))
+                })
+                .collect();
+            if !levels.is_empty() {
+                let mid_f64 = book
+                    .mid_price()
+                    .unwrap_or(bid)
+                    .to_string()
+                    .parse::<f64>()
+                    .unwrap_or(0.0);
+                let eval = engine.update(&levels, mid_f64, 0.0, 0.50, 1.0);
+                if eval.should_evacuate_passive_quotes {
+                    let toxic_side = match eval.regime {
+                        arbitrageur_math::micro_price_surface::OfiToxicityRegime::ToxicBidSurge => {
+                            Side::Sell
+                        }
+                        arbitrageur_math::micro_price_surface::OfiToxicityRegime::ToxicAskSurge => {
+                            Side::Buy
+                        }
+                        _ => side,
+                    };
+                    if side == toxic_side {
+                        return Err(format!(
+                            "OFI toxic adverse flow surge detected ({:?}, metric={:.4}); aborting passive quote",
+                            eval.regime, eval.toxicity_metric
+                        ));
+                    }
+                }
+            }
+        }
+    }
+    if cfg.enable_hawkes_queue_drain_evacuation {
+        if let Some(ref forecaster) = cfg.hawkes_drain_forecaster {
+            let (ahead, total) = match side {
+                Side::Buy => {
+                    let a = book
+                        .bids
+                        .first()
+                        .and_then(|l| l.size.to_string().parse::<f64>().ok())
+                        .unwrap_or(1.0);
+                    let t: f64 = book
+                        .bids
+                        .iter()
+                        .take(5)
+                        .filter_map(|l| l.size.to_string().parse::<f64>().ok())
+                        .sum();
+                    (a, t.max(1.0))
+                }
+                Side::Sell => {
+                    let a = book
+                        .asks
+                        .first()
+                        .and_then(|l| l.size.to_string().parse::<f64>().ok())
+                        .unwrap_or(1.0);
+                    let t: f64 = book
+                        .asks
+                        .iter()
+                        .take(5)
+                        .filter_map(|l| l.size.to_string().parse::<f64>().ok())
+                        .sum();
+                    (a, t.max(1.0))
+                }
+            };
+            let verdict = forecaster.evaluate_drain_hazard(ahead, total, 0.05);
+            if verdict.should_evacuate_passive_quote {
+                return Err(format!(
+                    "Multi-level Hawkes queue drain hazard ({}); aborting passive quote placement",
+                    verdict.reason
+                ));
+            }
+        }
+    }
     limit_price_for(side, bid, ask, cfg.spread_percentile)
         .ok_or_else(|| "limit pricing failed".to_string())
 }
@@ -443,7 +734,18 @@ pub async fn execute_passive_reduce(
                         response: resp,
                     });
                 }
-                // Take the remainder at market immediately: a half-closed
+                // Apply adaptive stochastic depth pacing: if a critical depth vacuum is detected,
+                // pause briefly for resilience beta to replenish the top-of-book before market sweep.
+                let pacing = evaluate_stochastic_depth_unwind_pacing(remaining, None, 10.0, None);
+                if let arbitrageur_math::stochastic_depth::ExecutionPacingDecision::PauseReplenishmentWait { recommended_wait_sec, .. } = pacing {
+                    tracing::warn!(
+                        "Partial limit fill: stochastic depth vacuum detected. Pausing {recommended_wait_sec:.2}s for orderbook resilience replenishment"
+                    );
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        (recommended_wait_sec * 1000.0).clamp(50.0, 500.0) as u64,
+                    )).await;
+                }
+                // Take the remainder at market: a half-closed
                 // reduce must not be left working. Either failure below
                 // still returns the partial limit fill — the Err contract
                 // reserves Err for "no fill record exists at all".
@@ -635,6 +937,7 @@ pub async fn execute_passive_reduce_live(
         // resting order may take a beat to index) but bounded.
         let deadline =
             tokio::time::Instant::now() + std::time::Duration::from_secs(cfg.timeout_secs);
+        let attempt_start = std::time::Instant::now();
         let mut poll_misses = 0u32;
         loop {
             if cur.status.is_final() || cur.filled_qty >= cur.original_qty {
@@ -659,6 +962,253 @@ pub async fn execute_passive_reduce_live(
                     }
                 }
             }
+
+            // Microstructure Latency Racing & Limit Cancellation Drift Check:
+            // If live market mid drifts adversely by more than the threshold (default 5.0 bps),
+            // immediately break out of the resting loop to trigger priority cancellation before
+            // HFT taker snipers sweep the stale quote.
+            if !cur.status.is_final() && cur.filled_qty < cur.original_qty {
+                if let Some(drift_threshold_bps) = cfg.max_adverse_drift_bps {
+                    let maybe_mid = if let Ok(book) = refresher.fresh_book().await {
+                        book.mid_price()
+                    } else if let Ok(ticker) = adapter.fetch_ticker(symbol).await {
+                        if ticker.ask > Decimal::ZERO && ticker.bid > Decimal::ZERO {
+                            Some((ticker.ask + ticker.bid) / Decimal::from(2))
+                        } else {
+                            Some(ticker.last)
+                        }
+                    } else {
+                        None
+                    };
+
+                    if let Some(current_mid) = maybe_mid {
+                        let limit_f64: f64 = price.to_string().parse().unwrap_or(0.0);
+                        let mid_f64: f64 = current_mid.to_string().parse().unwrap_or(0.0);
+                        let side_str = match side {
+                            Side::Buy => "buy",
+                            Side::Sell => "sell",
+                        };
+                        let raw_adverse_drift_bps =
+                            arbitrageur_math::latency_racing::AsymmetricLatencyRacingEngine::adverse_drift_bps(
+                                side_str, limit_f64, mid_f64,
+                            );
+                        let adverse_drift_bps = if let Some(propagator) = cfg.power_law_propagator {
+                            let filled_f64: f64 = cur.filled_qty.to_string().parse().unwrap_or(0.0);
+                            if filled_f64 > 0.0 {
+                                let elapsed_sec = attempt_start.elapsed().as_secs_f64();
+                                let fills = [(0.0, filled_f64)];
+                                propagator.filter_self_impact(
+                                    raw_adverse_drift_bps,
+                                    elapsed_sec,
+                                    &fills,
+                                    mid_f64,
+                                )
+                            } else {
+                                raw_adverse_drift_bps
+                            }
+                        } else {
+                            raw_adverse_drift_bps
+                        };
+                        if adverse_drift_bps >= drift_threshold_bps {
+                            tracing::warn!(
+                                "passive unwind {venue} {symbol}: adverse mid drift {adverse_drift_bps:.2} bps (raw: {raw_adverse_drift_bps:.2} bps) >= threshold {drift_threshold_bps:.2} bps; triggering priority cancellation race protection"
+                            );
+                            break;
+                        }
+                    }
+
+                    // Level-3 MBO Queue Drain Hazard Protection
+                    if cfg.enable_l3_queue_drain_evacuation {
+                        if let Ok(book) = adapter.fetch_orderbook(symbol).await {
+                            let forecaster = cfg.l3_drain_forecaster.unwrap_or_default();
+                            let (vol_ahead, total_vol) = match side {
+                                Side::Buy => {
+                                    let mut ahead = Decimal::ZERO;
+                                    let mut total = Decimal::ZERO;
+                                    for lvl in &book.bids {
+                                        if lvl.price > price {
+                                            ahead += lvl.size;
+                                        }
+                                        if lvl.price >= price {
+                                            total += lvl.size;
+                                        }
+                                    }
+                                    (ahead, total.max(Decimal::ONE))
+                                }
+                                Side::Sell => {
+                                    let mut ahead = Decimal::ZERO;
+                                    let mut total = Decimal::ZERO;
+                                    for lvl in &book.asks {
+                                        if lvl.price < price {
+                                            ahead += lvl.size;
+                                        }
+                                        if lvl.price <= price {
+                                            total += lvl.size;
+                                        }
+                                    }
+                                    (ahead, total.max(Decimal::ONE))
+                                }
+                            };
+                            let (decision, metrics) =
+                                forecaster.evaluate_hazard(vol_ahead, total_vol, false);
+                            if let arbitrageur_math::l3_hazard::QueueHazardDecision::EvacuatePickoff { ref reason, .. } = decision {
+                                tracing::warn!(
+                                    "passive unwind {venue} {symbol}: L3 queue drain hazard evacuation triggered: {reason} (tau_drain={:.3}s, hazard={:.2}); aborting resting quote",
+                                    metrics.tau_drain_sec, metrics.hazard_index
+                                );
+                                break;
+                            }
+                        }
+                    }
+
+                    // Deep Order Book Queue Priority Tracking & Microstructure Hazard Protection
+                    if cfg.enable_queue_priority_tracking {
+                        if let Ok(book) = adapter.fetch_orderbook(symbol).await {
+                            let (vol_ahead, total_vol) = match side {
+                                Side::Buy => {
+                                    let mut ahead = Decimal::ZERO;
+                                    let mut total = Decimal::ZERO;
+                                    for lvl in &book.bids {
+                                        if lvl.price > price {
+                                            ahead += lvl.size;
+                                        }
+                                        if lvl.price >= price {
+                                            total += lvl.size;
+                                        }
+                                    }
+                                    (ahead, total.max(Decimal::ONE))
+                                }
+                                Side::Sell => {
+                                    let mut ahead = Decimal::ZERO;
+                                    let mut total = Decimal::ZERO;
+                                    for lvl in &book.asks {
+                                        if lvl.price < price {
+                                            ahead += lvl.size;
+                                        }
+                                        if lvl.price <= price {
+                                            total += lvl.size;
+                                        }
+                                    }
+                                    (ahead, total.max(Decimal::ONE))
+                                }
+                            };
+                            let current_mid = book.mid_price().unwrap_or(price);
+                            let hazard_engine =
+                                cfg.queue_priority_hazard_engine.unwrap_or_default();
+                            let mut tracker = crate::queue_priority::QueuePriorityTracker::new(
+                                cur.order_id.clone(),
+                                price,
+                                side,
+                                total_vol,
+                                qty - filled_total,
+                                current_mid,
+                            );
+                            tracker.q_ahead = vol_ahead;
+                            tracker.total_depth = total_vol;
+                            let (rec, snapshot) = tracker.evaluate_action(&hazard_engine);
+                            match rec {
+                                arbitrageur_math::queue_priority::QueueHazardRecommendation::ProactiveQuoteWithdrawal { ref reason, pickoff_hazard, .. } => {
+                                    tracing::warn!(
+                                        "passive unwind {venue} {symbol}: queue priority pick-off hazard evacuation: {reason} (hazard={:.2}, seniority={:.2}); aborting resting quote",
+                                        pickoff_hazard, snapshot.seniority_ratio
+                                    );
+                                    break;
+                                }
+                                arbitrageur_math::queue_priority::QueueHazardRecommendation::CancelAndReplace { ref reason, seniority_ratio, .. } => {
+                                    tracing::info!(
+                                        "passive unwind {venue} {symbol}: queue priority stagnation cancel-replace: {reason} (seniority={:.2}); cancelling to replace",
+                                        seniority_ratio
+                                    );
+                                    break;
+                                }
+                                arbitrageur_math::queue_priority::QueueHazardRecommendation::MaintainRestingQuote { .. } => {}
+                            }
+                            if cfg.enable_ofi_toxicity_shading {
+                                if let Some(mut engine) = cfg.ofi_toxicity_engine {
+                                    let levels: Vec<arbitrageur_math::micro_price_surface::DepthLevelQuote> = (0..5)
+                                        .filter_map(|i| {
+                                            let b = book.bids.get(i)?;
+                                            let a = book.asks.get(i)?;
+                                            Some(arbitrageur_math::micro_price_surface::DepthLevelQuote::new(
+                                                b.price.to_string().parse().ok()?,
+                                                b.size.to_string().parse().ok()?,
+                                                a.price.to_string().parse().ok()?,
+                                                a.size.to_string().parse().ok()?,
+                                            ))
+                                        })
+                                        .collect();
+                                    if !levels.is_empty() {
+                                        let mid_f64 =
+                                            current_mid.to_string().parse::<f64>().unwrap_or(0.0);
+                                        let eval = engine.update(&levels, mid_f64, 0.0, 0.50, 1.0);
+                                        if eval.should_evacuate_passive_quotes {
+                                            let toxic_side = match eval.regime {
+                                                arbitrageur_math::micro_price_surface::OfiToxicityRegime::ToxicBidSurge => Side::Sell,
+                                                arbitrageur_math::micro_price_surface::OfiToxicityRegime::ToxicAskSurge => Side::Buy,
+                                                _ => side,
+                                            };
+                                            if side == toxic_side {
+                                                tracing::warn!(
+                                                    "passive unwind {venue} {symbol}: OFI toxic adverse flow surge ({:?}, metric={:.4}); evacuating resting quote",
+                                                    eval.regime, eval.toxicity_metric
+                                                );
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Multi-Level Hawkes Queue Drain Hazard Evacuation
+                    if cfg.enable_hawkes_queue_drain_evacuation {
+                        if let Ok(book) = adapter.fetch_orderbook(symbol).await {
+                            let (vol_ahead, total_vol) = match side {
+                                Side::Buy => {
+                                    let mut ahead = Decimal::ZERO;
+                                    let mut total = Decimal::ZERO;
+                                    for lvl in &book.bids {
+                                        if lvl.price > price {
+                                            ahead += lvl.size;
+                                        }
+                                        if lvl.price >= price {
+                                            total += lvl.size;
+                                        }
+                                    }
+                                    (ahead, total.max(Decimal::ONE))
+                                }
+                                Side::Sell => {
+                                    let mut ahead = Decimal::ZERO;
+                                    let mut total = Decimal::ZERO;
+                                    for lvl in &book.asks {
+                                        if lvl.price < price {
+                                            ahead += lvl.size;
+                                        }
+                                        if lvl.price <= price {
+                                            total += lvl.size;
+                                        }
+                                    }
+                                    (ahead, total.max(Decimal::ONE))
+                                }
+                            };
+                            let forecaster = cfg.hawkes_drain_forecaster.unwrap_or_default();
+                            let ahead_f = vol_ahead.to_string().parse::<f64>().unwrap_or(0.0);
+                            let total_f = total_vol.to_string().parse::<f64>().unwrap_or(1.0);
+                            let verdict = forecaster.evaluate_drain_hazard(ahead_f, total_f, 0.05);
+                            if verdict.should_evacuate_passive_quote {
+                                tracing::warn!(
+                                    "passive unwind {venue} {symbol}: Hawkes multi-level queue drain hazard evacuation triggered: {} (pickoff_prob={:.2}, drain_add_ratio={:.2}); aborting resting quote",
+                                    verdict.reason,
+                                    verdict.pickoff_probability,
+                                    verdict.drain_to_add_ratio
+                                );
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
         }
 
         // Still working (or state unverifiable) at timeout: cancel and
@@ -668,14 +1218,22 @@ pub async fn execute_passive_reduce_live(
         // still be live, flipping the position past flat. The caller gets
         // `Unresolved` with the outstanding order's identity preserved.
         if !cur.status.is_final() && cur.filled_qty < cur.original_qty {
-            let _ = adapter
+            if let Err(e) = adapter
                 .cancel_order(CancelRequest {
                     venue: venue.clone(),
                     symbol: symbol.to_string(),
                     order_id: Some(cur.order_id.clone()).filter(|s| !s.is_empty()),
                     client_order_id: Some(cur.client_order_id.clone()).filter(|s| !s.is_empty()),
                 })
-                .await;
+                .await
+            {
+                tracing::warn!(
+                    "passive unwind {venue} {symbol}: cancel request failed for order {}: {e:#}; verifying terminal state",
+                    cur.order_id
+                );
+            }
+            // Allow matching engine replication window before fetching terminal order state
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             match adapter
                 .fetch_order(symbol, &cur.order_id, Some(&cur.client_order_id))
                 .await
@@ -956,6 +1514,94 @@ fn combine_partial_with_market(
     })
 }
 
+/// Selection route for unhedged or orphaned position unwinding.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum UnwindRoute {
+    /// Route A: Immediate aggressive IOC market inversion on primary venue.
+    RouteAMarketInversion { estimated_cost_usd: f64 },
+    /// Route B: Immediate Synthetic Perpetual Delta Lock + passive limit exit.
+    RouteBSyntheticPerpLock {
+        estimated_cost_usd: f64,
+        perp_hedge_symbol: String,
+        perp_hedge_qty: f64,
+    },
+}
+
+/// Evaluator that determines whether an orphaned leg should be unwound via
+/// immediate IOC reversal (Route A) or synthetic perpetual delta lock (Route B)
+/// using closed-form decision hurdle Delta_unwind* vs basis variance risk.
+#[derive(Debug, Clone, Copy)]
+pub struct DynamicPartialFillEvaluator {
+    pub risk_aversion_gamma: f64,
+}
+
+impl Default for DynamicPartialFillEvaluator {
+    fn default() -> Self {
+        Self {
+            risk_aversion_gamma: 1e-6,
+        }
+    }
+}
+
+impl DynamicPartialFillEvaluator {
+    pub fn new(gamma: f64) -> Self {
+        Self {
+            risk_aversion_gamma: gamma.max(1e-12),
+        }
+    }
+
+    /// Evaluates optimal unwinding route by balancing crossing friction against inventory variance risk:
+    /// Delta_unwind* = (Spread_1 + 2 * f_taker_1 + Delta_adverse) - (Spread_perp + 2 * f_taker_perp - f_maker_1)
+    /// R_basis = 0.5 * gamma * N^2 * sigma_basis^2 * tau
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_unwind_route(
+        &self,
+        unhedged_notional_usd: f64,
+        leg1_spread_bps: f64,
+        leg1_taker_fee_bps: f64,
+        leg1_maker_rebate_bps: f64,
+        adverse_selection_bps: f64,
+        perp_spread_bps: f64,
+        perp_taker_fee_bps: f64,
+        basis_vol_annual: f64,
+        expected_unwind_duration_sec: f64,
+        perp_symbol: Option<&str>,
+    ) -> UnwindRoute {
+        let basis_vol_sec = basis_vol_annual / (365.25 * 86400.0_f64).sqrt();
+        let tau = expected_unwind_duration_sec.max(0.1);
+
+        // Route A cost in USD: N * (Spread_1 + 2 * f_taker_1 + Delta_adverse) / 10000
+        let cost_a_bps = leg1_spread_bps + 2.0 * leg1_taker_fee_bps + adverse_selection_bps;
+        let cost_a_usd = unhedged_notional_usd * (cost_a_bps / 10_000.0);
+
+        // Route B crossing cost in USD: N * (Spread_perp + 2 * f_taker_perp - f_maker_1) / 10000
+        let cost_b_crossing_bps =
+            perp_spread_bps + 2.0 * perp_taker_fee_bps - leg1_maker_rebate_bps;
+        let cost_b_crossing_usd = unhedged_notional_usd * (cost_b_crossing_bps.max(0.0) / 10_000.0);
+
+        // Basis variance penalty: 0.5 * gamma * N^2 * sigma_basis^2 * tau
+        let basis_variance_penalty_usd = 0.5
+            * self.risk_aversion_gamma
+            * unhedged_notional_usd.powi(2)
+            * basis_vol_sec.powi(2)
+            * tau;
+
+        let total_cost_b_usd = cost_b_crossing_usd + basis_variance_penalty_usd;
+
+        if total_cost_b_usd < cost_a_usd {
+            UnwindRoute::RouteBSyntheticPerpLock {
+                estimated_cost_usd: total_cost_b_usd,
+                perp_hedge_symbol: perp_symbol.unwrap_or("BTC-PERP").to_string(),
+                perp_hedge_qty: unhedged_notional_usd,
+            }
+        } else {
+            UnwindRoute::RouteAMarketInversion {
+                estimated_cost_usd: cost_a_usd,
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1154,6 +1800,18 @@ mod tests {
             // the production default (15.0) is covered by the gate unit tests.
             max_spread_bps: 200.0,
             max_fast_vol_bps: 10.0,
+            max_adverse_drift_bps: Some(5.0),
+            enable_l3_queue_drain_evacuation: true,
+            l3_drain_forecaster: None,
+            enable_queue_priority_tracking: true,
+            min_queue_seniority_ratio: Some(0.20),
+            queue_hazard_pickoff_threshold: Some(0.70),
+            queue_priority_hazard_engine: None,
+            power_law_propagator: None,
+            enable_ofi_toxicity_shading: true,
+            ofi_toxicity_engine: None,
+            enable_hawkes_queue_drain_evacuation: true,
+            hawkes_drain_forecaster: None,
         }
     }
 
@@ -1211,6 +1869,24 @@ mod tests {
             limit_price_for(Side::Sell, bid, ask, 100.0),
             Some(dec!(101))
         );
+    }
+
+    #[test]
+    fn test_limit_price_for_gueant_unwind() {
+        let bid = dec!(50000.0);
+        let ask = dec!(50005.0);
+
+        // Long inventory (+5.0): selling to unwind -> ask spread should tighten toward bid
+        let sell_px = limit_price_for_gueant(Side::Sell, bid, ask, 5.0, 0.0, None, None);
+        assert!(sell_px.is_some());
+        let p_sell = sell_px.unwrap();
+        assert!(p_sell >= bid && p_sell <= ask);
+
+        // Short inventory (-5.0): buying to unwind -> bid spread should widen toward ask
+        let buy_px = limit_price_for_gueant(Side::Buy, bid, ask, -5.0, 0.0, None, None);
+        assert!(buy_px.is_some());
+        let p_buy = buy_px.unwrap();
+        assert!(p_buy >= bid && p_buy <= ask);
     }
 
     #[test]
@@ -1789,6 +2465,18 @@ mod tests {
             max_tries,
             max_spread_bps: 200.0,
             max_fast_vol_bps: 10.0,
+            max_adverse_drift_bps: Some(5.0),
+            enable_l3_queue_drain_evacuation: true,
+            l3_drain_forecaster: None,
+            enable_queue_priority_tracking: true,
+            min_queue_seniority_ratio: Some(0.20),
+            queue_hazard_pickoff_threshold: Some(0.70),
+            queue_priority_hazard_engine: None,
+            power_law_propagator: None,
+            enable_ofi_toxicity_shading: true,
+            ofi_toxicity_engine: None,
+            enable_hawkes_queue_drain_evacuation: true,
+            hawkes_drain_forecaster: None,
         }
     }
 
@@ -1936,5 +2624,87 @@ mod tests {
         // limit 0.4 @ 100.5 + market 0.6 @ 100.5 → vwap 100.5
         assert_eq!(report.response.avg_fill_price, Some(dec!(100.5)));
         assert_eq!(report.response.fee, Some(dec!(0.02)));
+    }
+
+    #[test]
+    fn test_evaluate_stochastic_depth_unwind_pacing() {
+        use arbitrageur_math::stochastic_depth::{
+            ExecutionPacingDecision, StochasticDepthLiquidationExecutor,
+        };
+
+        let exec = StochasticDepthLiquidationExecutor::new(1e-4, 0.01, 100.0, 0.5);
+
+        // Healthy depth: 120 vs base 100 -> Normal
+        let pacing_norm = evaluate_stochastic_depth_unwind_pacing(
+            dec!(5.0),
+            Some(dec!(120.0)),
+            10.0,
+            Some(&exec),
+        );
+        assert!(matches!(
+            pacing_norm,
+            ExecutionPacingDecision::ExecuteNormal { .. }
+        ));
+
+        // Critical depth collapse: 10 vs base 100 -> PauseReplenishmentWait
+        let pacing_pause =
+            evaluate_stochastic_depth_unwind_pacing(dec!(5.0), Some(dec!(10.0)), 10.0, Some(&exec));
+        assert!(matches!(
+            pacing_pause,
+            ExecutionPacingDecision::PauseReplenishmentWait { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_passive_unwind_ofi_toxicity_evacuation() {
+        let mut ofi_engine =
+            arbitrageur_math::micro_price_surface::MultiLevelOfiToxicityEngine::new(
+                arbitrageur_math::micro_price_surface::MultiLevelOfiConfig {
+                    toxicity_threshold: 0.05,
+                    ..Default::default()
+                },
+            );
+
+        // Pre-condition engine with initial baseline snapshot at t0
+        let t0 = vec![arbitrageur_math::micro_price_surface::DepthLevelQuote::new(
+            100.0, 10.0, 101.0, 10.0,
+        )];
+        ofi_engine.update(&t0, 100.5, 0.0, 0.40, 1.0);
+
+        let cfg = PassiveUnwindConfig {
+            enabled: true,
+            enable_ofi_toxicity_shading: true,
+            ofi_toxicity_engine: Some(ofi_engine),
+            ..enabled_cfg()
+        };
+
+        // When fresh book presents an aggressive selling crash (bid dropped to 99, ask dropped to 99.5),
+        // peg_for_attempt must detect the adverse flow surge and abort passive Buy limit placement
+        let refresh = ScriptedRefresh::new(vec![test_book(dec!(99), dec!(99.5))]);
+        let res = peg_for_attempt(&refresh, Side::Buy, &cfg, None).await;
+        assert!(res.is_err());
+        assert!(res
+            .unwrap_err()
+            .contains("OFI toxic adverse flow surge detected"));
+    }
+
+    #[tokio::test]
+    async fn test_passive_unwind_hawkes_queue_drain_evacuation() {
+        let toxic_drain = arbitrageur_math::cross_hawkes::MultiLevelHawkesQueueDrainForecaster::new(
+            50.0, 10.0, 2.0, 1.0,
+        );
+        let cfg = PassiveUnwindConfig {
+            enabled: true,
+            enable_hawkes_queue_drain_evacuation: true,
+            hawkes_drain_forecaster: Some(toxic_drain),
+            ..enabled_cfg()
+        };
+
+        let refresh = ScriptedRefresh::new(vec![test_book(dec!(100), dec!(101))]);
+        let res = peg_for_attempt(&refresh, Side::Buy, &cfg, None).await;
+        assert!(res.is_err());
+        assert!(res
+            .unwrap_err()
+            .contains("Multi-level Hawkes queue drain hazard"));
     }
 }

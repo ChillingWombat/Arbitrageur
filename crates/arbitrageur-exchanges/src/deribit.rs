@@ -9,6 +9,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use parking_lot::RwLock;
 use reqwest::Client;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use zeroize::Zeroizing;
 
@@ -62,8 +63,9 @@ struct InstrumentMeta {
     is_open: bool,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum DeribitKind {
+    #[default]
     Option,
     Future,
 }
@@ -77,7 +79,7 @@ pub enum DeribitOptionType {
 /// Top-of-book summary row for one instrument — the scanner's quote
 /// surface. Prices are venue units (base coin for options, USD for
 /// futures); `underlying_price` is the venue's USD reference.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 pub struct DeribitBookSummary {
     pub name: String,
     pub kind: DeribitKind,
@@ -86,6 +88,8 @@ pub struct DeribitBookSummary {
     pub mark: Option<Decimal>,
     pub underlying_price: Option<Decimal>,
     pub open_interest: Option<Decimal>,
+    pub mark_iv: Option<Decimal>,
+    pub estimated_delivery_price: Option<Decimal>,
 }
 
 /// Option chain entry for the synthetic-forward parity scanner — one row
@@ -102,6 +106,29 @@ pub struct DeribitOptionInstrument {
     pub contract_size: Decimal,
     pub settlement_currency: String,
     pub is_open: bool,
+}
+
+/// One leg trade descriptor for Deribit /private/create_combo
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DeribitComboTrade {
+    pub instrument_name: String,
+    pub amount: i32,
+    pub direction: String,
+}
+
+/// Leg details within a Deribit combo instrument
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DeribitComboLegInfo {
+    pub instrument_name: String,
+    pub amount: i32,
+}
+
+/// Summary details of a Deribit combo instrument
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DeribitComboSummary {
+    pub id: String,
+    pub state: String,
+    pub legs: Vec<DeribitComboLegInfo>,
 }
 
 struct CachedInstruments {
@@ -359,6 +386,67 @@ impl DeribitAdapter {
         Self::unwrap_envelope(v, path)
     }
 
+    async fn post_raw(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+        bearer: Option<&str>,
+    ) -> anyhow::Result<serde_json::Value> {
+        let url = format!("{}{}", self.base_url, path);
+        let method = path.trim_start_matches('/');
+        let rpc_payload = if body.get("jsonrpc").is_none() {
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": rand::random::<u32>(),
+                "method": method,
+                "params": body,
+            })
+        } else {
+            body.clone()
+        };
+        let mut req = self.client.post(&url).json(&rpc_payload);
+        if let Some(tok) = bearer {
+            req = req.header(reqwest::header::AUTHORIZATION, format!("Bearer {tok}"));
+        }
+        let resp = req.send().await.inspect_err(|_| {
+            self.rate_limiter.record_failure(false);
+        })?;
+        if !resp.status().is_success() {
+            let is_429 = resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS;
+            let status = resp.status().as_u16();
+            if status == 400 {
+                let text = resp.text().await.unwrap_or_default();
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                    if v.get("error").is_some() {
+                        return Ok(v);
+                    }
+                }
+                anyhow::bail!("Deribit HTTP 400 for {path}: {text}");
+            }
+            self.rate_limiter.record_failure(is_429);
+            anyhow::bail!("Deribit HTTP {status} for {path}");
+        }
+        let text = resp.text().await?;
+        serde_json::from_str(&text).map_err(|e| anyhow::anyhow!("Deribit {path} invalid JSON: {e}"))
+    }
+
+    /// Private POST — signed-rate-limited, bearer-authenticated, JSON body.
+    pub async fn private_post(
+        &self,
+        path: &str,
+        body: &serde_json::Value,
+    ) -> anyhow::Result<serde_json::Value> {
+        self.rate_limiter.acquire_signed().await?;
+        let token = self.ensure_token().await?;
+        let v = self.post_raw(path, body, Some(&token)).await?;
+        if Self::is_token_error(&v) {
+            let token = self.refresh_token(true).await?;
+            let v = self.post_raw(path, body, Some(&token)).await?;
+            return Self::unwrap_envelope(v, path);
+        }
+        Self::unwrap_envelope(v, path)
+    }
+
     /// Fetch a fresh bearer token via client_credentials, or refresh the
     /// existing one. `force` discards the cached token outright.
     async fn refresh_token(&self, force: bool) -> anyhow::Result<String> {
@@ -518,6 +606,217 @@ impl DeribitAdapter {
         Ok(out)
     }
 
+    /// Create or retrieve an existing combo matching the specified trades/legs.
+    pub async fn create_combo(
+        &self,
+        trades: &[DeribitComboTrade],
+    ) -> anyhow::Result<DeribitComboSummary> {
+        if trades.len() < 2 || trades.len() > 4 {
+            anyhow::bail!(
+                "Deribit combo requires between 2 and 4 legs (got {})",
+                trades.len()
+            );
+        }
+        let payload = serde_json::json!({
+            "trades": trades
+        });
+        let v = self.private_post("/private/create_combo", &payload).await?;
+        let id = v
+            .get("id")
+            .or_else(|| v.get("instrument_name"))
+            .and_then(|s| s.as_str())
+            .ok_or_else(|| anyhow::anyhow!("Deribit create_combo response missing id: {v}"))?;
+        let state = v
+            .get("state")
+            .and_then(|s| s.as_str())
+            .unwrap_or("active")
+            .to_string();
+        let legs = v
+            .get("legs")
+            .and_then(|l| l.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|item| {
+                        let inst = item.get("instrument_name")?.as_str()?.to_string();
+                        let amt = item.get("amount").and_then(|a| a.as_i64()).unwrap_or(1) as i32;
+                        Some(DeribitComboLegInfo {
+                            instrument_name: inst,
+                            amount: amt,
+                        })
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(DeribitComboSummary {
+            id: id.to_string(),
+            state,
+            legs,
+        })
+    }
+
+    /// Place an atomic combo order on a Deribit combo instrument created via `create_combo`.
+    pub async fn place_combo_instrument_order(
+        &self,
+        combo_id: &str,
+        side: Side,
+        amount: Decimal,
+        price: Option<Decimal>,
+        time_in_force: TimeInForce,
+        label: Option<&str>,
+    ) -> anyhow::Result<OrderResponse> {
+        let verb = match side {
+            Side::Buy => "buy",
+            Side::Sell => "sell",
+        };
+        let mut params = vec![
+            ("instrument_name".to_string(), combo_id.to_string()),
+            (
+                "amount".to_string(),
+                amount.round_dp(4).normalize().to_string(),
+            ),
+        ];
+        if let Some(p) = price {
+            params.push(("type".into(), "limit".into()));
+            params.push(("price".into(), p.normalize().to_string()));
+        } else {
+            anyhow::bail!("Deribit combo orders require a limit price; market order type is not supported on combo instruments");
+        }
+        match time_in_force {
+            TimeInForce::ImmediateOrCancel => {
+                params.push(("time_in_force".into(), "immediate_or_cancel".into()));
+            }
+            TimeInForce::FillOrKill => {
+                params.push(("time_in_force".into(), "fill_or_kill".into()));
+            }
+            _ => {}
+        }
+        if let Some(lbl) = label {
+            params.push(("label".into(), lbl.to_string()));
+        }
+        let qs = params
+            .iter()
+            .map(|(k, v)| format!("{k}={}", urlencoding(v)))
+            .collect::<Vec<_>>()
+            .join("&");
+        let v = self.private_get(&format!("/private/{verb}?{qs}")).await?;
+        let o = v.get("order").ok_or_else(|| {
+            anyhow::anyhow!("Deribit combo {verb} missing order in response: {v}")
+        })?;
+        let order_id = o
+            .get("order_id")
+            .and_then(|s| s.as_str())
+            .unwrap_or("")
+            .to_string();
+        let state = o
+            .get("order_state")
+            .and_then(|s| s.as_str())
+            .unwrap_or("open");
+        let filled_amount = o
+            .get("filled_amount")
+            .and_then(|a| a.as_f64())
+            .and_then(Decimal::from_f64_retain)
+            .unwrap_or(dec!(0));
+        let avg_price = o
+            .get("average_price")
+            .and_then(|p| p.as_f64())
+            .and_then(Decimal::from_f64_retain);
+
+        let status = match state {
+            "filled" => OrderStatus::Filled,
+            "cancelled" => {
+                if filled_amount > dec!(0) {
+                    OrderStatus::PartiallyFilled
+                } else {
+                    OrderStatus::Cancelled
+                }
+            }
+            "rejected" => OrderStatus::Rejected,
+            _ => OrderStatus::New,
+        };
+
+        Ok(OrderResponse {
+            order_id,
+            client_order_id: label.map(|s| s.to_string()).unwrap_or_default(),
+            venue: self.venue_id.clone(),
+            symbol: combo_id.to_string(),
+            status,
+            original_qty: amount,
+            filled_qty: filled_amount,
+            remaining_qty: (amount - filled_amount).max(dec!(0)),
+            avg_fill_price: avg_price,
+            fee: Some(dec!(0)),
+            fee_currency: "USD".to_string(),
+            raw_response: Some(v.to_string()),
+            timestamp: Utc::now(),
+        })
+    }
+
+    /// High-level atomic multi-leg combo execution: creates combo and executes order.
+    pub async fn place_combo_order(
+        &self,
+        trades: &[arbitrageur_core::exchange::ComboLegTrade],
+        side: Side,
+        amount: Decimal,
+        price: Option<Decimal>,
+        time_in_force: TimeInForce,
+        label: Option<&str>,
+    ) -> anyhow::Result<OrderResponse> {
+        let deribit_trades: Vec<DeribitComboTrade> = trades
+            .iter()
+            .map(|t| DeribitComboTrade {
+                instrument_name: t.instrument.clone(),
+                amount: t.amount,
+                direction: t.direction.clone(),
+            })
+            .collect();
+        let combo = self.create_combo(&deribit_trades).await?;
+        self.place_combo_instrument_order(&combo.id, side, amount, price, time_in_force, label)
+            .await
+    }
+
+    /// Retrieve active combos for a currency.
+    pub async fn combos(&self, currency: &str) -> anyhow::Result<Vec<DeribitComboSummary>> {
+        let ccy = currency.trim().to_ascii_uppercase();
+        let v = self
+            .public_get(&format!("/public/get_combos?currency={ccy}"))
+            .await?;
+        let arr = v.as_array().cloned().unwrap_or_default();
+        let mut out = Vec::new();
+        for item in arr {
+            if let Some(id) = item.get("id").and_then(|s| s.as_str()) {
+                let state = item
+                    .get("state")
+                    .and_then(|s| s.as_str())
+                    .unwrap_or("active")
+                    .to_string();
+                let legs = item
+                    .get("legs")
+                    .and_then(|l| l.as_array())
+                    .map(|legs_arr| {
+                        legs_arr
+                            .iter()
+                            .filter_map(|l| {
+                                let inst = l.get("instrument_name")?.as_str()?.to_string();
+                                let amt =
+                                    l.get("amount").and_then(|a| a.as_i64()).unwrap_or(1) as i32;
+                                Some(DeribitComboLegInfo {
+                                    instrument_name: inst,
+                                    amount: amt,
+                                })
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                out.push(DeribitComboSummary {
+                    id: id.to_string(),
+                    state,
+                    legs,
+                })
+            }
+        }
+        Ok(out)
+    }
+
     /// Top-of-book for every instrument of a currency — one call per kind,
     /// giving the parity scanner both option and future quotes without
     /// per-instrument round trips.
@@ -554,6 +853,8 @@ impl DeribitAdapter {
                     underlying_price: dec_from_json(row.get("underlying_price"))
                         .or_else(|| dec_from_json(row.get("estimated_delivery_price"))),
                     open_interest: dec_from_json(row.get("open_interest")),
+                    mark_iv: dec_from_json(row.get("mark_iv")),
+                    estimated_delivery_price: dec_from_json(row.get("estimated_delivery_price")),
                 });
             }
         }
@@ -895,6 +1196,11 @@ impl ExchangeAdapter for DeribitAdapter {
 
     fn rest_base_url(&self) -> Option<String> {
         Some(self.base_url.clone())
+    }
+
+    fn supports_reduce_only(&self, symbol: &str) -> bool {
+        let s = symbol.trim().to_ascii_uppercase();
+        !s.ends_with("-C") && !s.ends_with("-P")
     }
 
     async fn ping(&self) -> anyhow::Result<()> {
@@ -1372,7 +1678,8 @@ impl ExchangeAdapter for DeribitAdapter {
             };
             params.push(("price".into(), rounded.normalize().to_string()));
         }
-        if order.reduce_only {
+        let is_option = matches!(meta.kind, DeribitKind::Option);
+        if order.reduce_only && !is_option {
             params.push(("reduce_only".into(), "true".into()));
         }
         let qs = params
@@ -1395,13 +1702,25 @@ impl ExchangeAdapter for DeribitAdapter {
                 }
                 let is_ioc = order.order_type == OrderType::ImmediateOrCancel
                     || order.time_in_force == TimeInForce::ImmediateOrCancel;
-                if is_ioc
+                let is_collar_retryable = is_ioc
+                    || order.reduce_only
+                    || matches!(order.side, Side::Sell if err_str.contains("price_too_low"))
+                    || matches!(order.side, Side::Buy if err_str.contains("price_too_high"));
+                if is_collar_retryable
                     && (err_str.contains("price_too_high") || err_str.contains("price_too_low"))
                 {
                     if let Some(collar_px) = Self::parse_collar_price(&err_str) {
                         let can_clamp = match order.side {
-                            Side::Buy => order.price.is_some_and(|p| collar_px <= p),
-                            Side::Sell => order.price.is_some_and(|p| collar_px >= p),
+                            Side::Buy => {
+                                order.price.is_some_and(|p| collar_px <= p)
+                                    || order.reduce_only
+                                    || is_ioc
+                            }
+                            Side::Sell => {
+                                order.price.is_some_and(|p| collar_px >= p)
+                                    || order.reduce_only
+                                    || is_ioc
+                            }
                         };
                         if can_clamp {
                             let tick = Self::tick_at(&meta, collar_px);
@@ -1419,7 +1738,7 @@ impl ExchangeAdapter for DeribitAdapter {
                                 .collect::<Vec<_>>()
                                 .join("&");
                             tracing::info!(
-                                "Deribit {verb} for {instrument}: clamped IOC price from {:?} to {rounded} on venue collar ({err_str}); retrying",
+                                "Deribit {verb} for {instrument}: clamped price from {:?} to {rounded} on venue collar ({err_str}); retrying",
                                 order.price
                             );
                             self.private_get(&format!("/private/{verb}?{retry_qs}"))
@@ -1601,6 +1920,23 @@ impl ExchangeAdapter for DeribitAdapter {
         // permanently marked testnet Deribit as uncredentialed to every
         // credential gate — account reads, capability reports, dispatch.
         self.has_credentials()
+    }
+
+    fn supports_combo_orders(&self) -> bool {
+        true
+    }
+
+    async fn place_combo_order(
+        &self,
+        trades: &[arbitrageur_core::exchange::ComboLegTrade],
+        side: Side,
+        amount: Decimal,
+        price: Option<Decimal>,
+        time_in_force: TimeInForce,
+        label: Option<&str>,
+    ) -> anyhow::Result<OrderResponse> {
+        self.place_combo_order(trades, side, amount, price, time_in_force, label)
+            .await
     }
 }
 
@@ -1861,5 +2197,61 @@ mod tests {
         assert_eq!(opt.venue, VenueId::new("deribit"));
         let prices = a.fetch_market_prices().await.unwrap();
         assert!(prices.contains_key("BTC-PERPETUAL"));
+    }
+
+    #[tokio::test]
+    async fn test_deribit_combo_leg_count_bounds() {
+        let a = DeribitAdapter::for_testnet(None, None);
+        // Empty trades: < 2 legs must fail closed
+        let empty: Vec<DeribitComboTrade> = vec![];
+        assert!(a.create_combo(&empty).await.is_err());
+
+        // Single trade: < 2 legs must fail closed
+        let one = vec![DeribitComboTrade {
+            instrument_name: "BTC-25DEC26-100000-C".into(),
+            amount: 1,
+            direction: "buy".into(),
+        }];
+        assert!(a.create_combo(&one).await.is_err());
+
+        // 5 trades: > 4 legs must fail closed
+        let five = vec![
+            DeribitComboTrade {
+                instrument_name: "L1".into(),
+                amount: 1,
+                direction: "buy".into(),
+            },
+            DeribitComboTrade {
+                instrument_name: "L2".into(),
+                amount: 1,
+                direction: "buy".into(),
+            },
+            DeribitComboTrade {
+                instrument_name: "L3".into(),
+                amount: 1,
+                direction: "buy".into(),
+            },
+            DeribitComboTrade {
+                instrument_name: "L4".into(),
+                amount: 1,
+                direction: "buy".into(),
+            },
+            DeribitComboTrade {
+                instrument_name: "L5".into(),
+                amount: 1,
+                direction: "buy".into(),
+            },
+        ];
+        assert!(a.create_combo(&five).await.is_err());
+
+        // 8 trades (e.g. Jelly Roll as single combo): must fail closed
+        let eight: Vec<DeribitComboTrade> = (1..=8)
+            .map(|i| DeribitComboTrade {
+                instrument_name: format!("L{i}"),
+                amount: 1,
+                direction: "buy".into(),
+            })
+            .collect();
+        assert!(a.create_combo(&eight).await.is_err());
     }
 }

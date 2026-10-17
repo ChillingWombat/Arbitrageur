@@ -74,3 +74,8 @@ arbitrageur-exchanges = { path = "crates/arbitrageur-exchanges" }
 arbitrageur-risk = { path = "crates/arbitrageur-risk" }
 arbitrageur-execution = { path = "crates/arbitrageur-execution" }
 arbitrageur-strategy = { path = "crates/arbitrageur-strategy" }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1

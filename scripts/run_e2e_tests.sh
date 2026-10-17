@@ -27,8 +27,12 @@ case "$MODE" in
     (cd frontend && npm test)
     ;;
   backend)
-    echo "Running Backend Unit & Integration Tests..."
+    echo "Running Backend Unit & Integration Tests (Smoke)..."
     cargo test -p arbitrageur-desktop --bin arbitrageur-desktop -- state::tests
+    ;;
+  backend-full)
+    echo "Running Complete Backend Test Suite (All 610 desktop tests)..."
+    cargo test -p arbitrageur-desktop --bin arbitrageur-desktop
     ;;
   all)
     echo "1/3. Running 4-Tier E2E Test Suite..."
@@ -45,7 +49,7 @@ case "$MODE" in
     echo "======================================================================"
     ;;
   *)
-    echo "Unknown mode: $MODE (expected: all | e2e | frontend | backend)"
+    echo "Unknown mode: $MODE (expected: all | e2e | frontend | backend | backend-full)"
     exit 1
     ;;
 esac

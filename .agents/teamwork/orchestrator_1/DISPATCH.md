@@ -27,14 +27,14 @@ Key Requirements to execute:
    Investigate why automated trading bots (Radar, Spatial Arbitrage, Triangular Arbitrage, StatArb, Basis) are not achieving positive returns, and optimize their execution on testnet:
    - Re-evaluate hurdle rates, slippage modeling, fee structures, and gas/network transaction costs to ensure bots only trigger trades with positive net expected value.
    - Inspect and fix quote freshness, funding accrual attribution, and qualification criteria.
-   - Test against live testnet venues using vault unlock password `<redacted>` to verify reliable, profitable paper/testnet trade execution.
+   - Test against live testnet venues using vault unlock password `<redacted — see SECURITY.md>` to verify reliable, profitable paper/testnet trade execution.
 
 # Verification & Operational Context
 - Review `/mnt/Data/Projects/Arbitrageur/AGENTS.md` for strict standing rules and quirks (live mode is the product, audit discipline, venue quirks, fail-closed execution safety, canonical_base matching, release build commands, dev socket `/tmp/arb-dev.sock`).
 - Backend tests: `cargo test -p arbitrageur-desktop`
 - Frontend tests: `cd frontend && npm test` (node --test + scripts/test-components.mjs)
 - Linters: `cargo clippy --all-targets` and `cargo fmt --check`
-- Dev socket: `/tmp/arb-dev.sock` (unlock password: `<redacted>`)
+- Dev socket: `/tmp/arb-dev.sock` (unlock password: `<redacted — see SECURITY.md>`)
 - Keep your `progress.md` and `BRIEFING.md` updated in `/mnt/Data/Projects/Arbitrageur/.agents/teamwork/orchestrator_1/`.
 - Decompose and spawn specialist subagents as needed according to the Teamwork framework.
 - When all phases are fully implemented, verified, and passing all tests, send your final completion report / claim of victory to the Sentinel.

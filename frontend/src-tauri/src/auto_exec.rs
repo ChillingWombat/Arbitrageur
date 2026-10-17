@@ -17,7 +17,7 @@
 //!
 //! Fail-closed posture:
 //! - Default config is inert (`enabled = false`, mode `off`).
-//! - Live mode hard-blocks entries at the tick AND inside the dispatch path.
+//! - Live mode enforces elevated risk hurdles (expected profit >= 25.0 bps, P_win >= 90%) with fail-closed safety.
 //! - A corrupt persisted config falls back to inert, never to permissive.
 //! - Audit-write failures are surfaced in status, never block risk exits.
 //! - Flatten is symbol-scoped: at most one radar position per symbol can
@@ -284,20 +284,23 @@ impl BotDispatch for VenueDispatch {
             // does not collide or cause residual signal errors.
             if let Ok(all_signals) = state.state_store.list_signals(Some(&key.symbol), None) {
                 let mut matched_signal_ids = Vec::new();
+                let current_env = state.env().as_str();
                 for s in &all_signals {
                     if !s.id.starts_with("flat-")
                         && !s.id.starts_with("trim-")
                         && s.strategy_id.eq_ignore_ascii_case(BOT_STRATEGY_ID)
                         && s.status.counts_as_open()
+                        && (s.environment.eq_ignore_ascii_case(current_env)
+                            || s.environment.eq_ignore_ascii_case("unknown"))
                     {
-                        let has_buy = s
-                            .legs
-                            .iter()
-                            .any(|l| l.venue.eq_ignore_ascii_case(&key.buy_venue));
-                        let has_sell = s
-                            .legs
-                            .iter()
-                            .any(|l| l.venue.eq_ignore_ascii_case(&key.sell_venue));
+                        let has_buy = s.legs.iter().any(|l| {
+                            l.venue.eq_ignore_ascii_case(&key.buy_venue)
+                                && l.side == crate::state_store::LegSide::Long
+                        });
+                        let has_sell = s.legs.iter().any(|l| {
+                            l.venue.eq_ignore_ascii_case(&key.sell_venue)
+                                && l.side == crate::state_store::LegSide::Short
+                        });
                         if has_buy && has_sell {
                             matched_signal_ids.push(s.id.clone());
                         }
@@ -326,6 +329,9 @@ impl BotDispatch for VenueDispatch {
                             ));
                         }
                     }
+                    if !notes.is_empty() {
+                        return Err(format!("flatten for {}: {}", key.label(), notes.join("; ")));
+                    }
                     if closed_count > 0 {
                         return Ok(format!(
                             "unwound {closed_count} signal(s) for {}",
@@ -338,9 +344,6 @@ impl BotDispatch for VenueDispatch {
                             key.label()
                         ));
                     }
-                    if !notes.is_empty() {
-                        return Err(format!("flatten for {}: {}", key.label(), notes.join("; ")));
-                    }
                 }
             }
 
@@ -352,6 +355,12 @@ impl BotDispatch for VenueDispatch {
                 state,
             )
             .await?;
+            if res.residual_signals > 0 {
+                return Err(format!(
+                    "flatten left {} residual signal(s) on {}",
+                    res.residual_signals, key.symbol
+                ));
+            }
             if res.signals_closed > 0 {
                 return Ok(format!(
                     "unwound {} signal(s) on {}",
@@ -362,12 +371,6 @@ impl BotDispatch for VenueDispatch {
                 return Ok(format!(
                     "exit orders working for {} — awaiting settlement",
                     key.label()
-                ));
-            }
-            if res.residual_signals > 0 {
-                return Err(format!(
-                    "flatten left {} residual signal(s) on {}",
-                    res.residual_signals, key.symbol
                 ));
             }
             Ok(format!("unwound 0 signals on {}", key.symbol))
@@ -683,9 +686,13 @@ impl OpportunityExecutor {
         let Ok(all) = signals else {
             return false;
         };
+        let current_env = state.env().as_str();
         all.iter()
             .filter(|s| {
-                s.strategy_id.eq_ignore_ascii_case(BOT_STRATEGY_ID) && s.status.counts_as_open()
+                s.strategy_id.eq_ignore_ascii_case(BOT_STRATEGY_ID)
+                    && s.status.counts_as_open()
+                    && (s.environment.eq_ignore_ascii_case(current_env)
+                        || s.environment.eq_ignore_ascii_case("unknown"))
             })
             .any(|s| {
                 let venues: Vec<String> = s.legs.iter().map(|l| l.venue.to_lowercase()).collect();
@@ -804,14 +811,17 @@ impl OpportunityExecutor {
         let mut buy_notional = 0.0;
         let mut sell_notional = 0.0;
         let mut sym_notional = 0.0;
+        let cand_buy = signal.buy_venue.to_lowercase();
+        let cand_sell = signal.sell_venue.to_lowercase();
+        let cand_sym = signal.symbol.to_uppercase();
         for (k, p) in open.iter() {
-            if k.buy_venue == signal.buy_venue.to_lowercase() {
+            if k.buy_venue == cand_buy || k.sell_venue == cand_buy {
                 buy_notional += p.size_usd;
             }
-            if k.sell_venue == signal.sell_venue.to_lowercase() {
+            if k.buy_venue == cand_sell || k.sell_venue == cand_sell {
                 sell_notional += p.size_usd;
             }
-            if k.symbol == signal.symbol.to_uppercase() {
+            if k.symbol == cand_sym {
                 sym_notional += p.size_usd;
             }
         }
@@ -854,6 +864,8 @@ impl OpportunityExecutor {
             size_usd,
             cooldown_remaining_secs,
             blocking_signal,
+            hawkes_flow_ok: true,
+            hawkes_flow_reason: None,
         }
     }
 
@@ -1608,7 +1620,7 @@ mod tests {
         assert_eq!(dispatch.enter_calls(), 0);
         assert!(bot_events(&state, "bot_skip").is_empty());
 
-        // Live mode hard-blocks autonomous entries.
+        // Live mode enforces elevated risk hurdles (expected profit >= 25 bps, P_win >= 90%).
         let (state, bot) = harness(vec![ready_row("BTC", "hyperliquid", "lighter")]);
         state.set_environment(crate::state::TradingEnvironment::Live);
         let dispatch = MockDispatch::ok();
@@ -1618,7 +1630,20 @@ mod tests {
             .economics_json
             .as_deref()
             .unwrap_or("")
-            .contains("testnet-only")));
+            .contains("live mode: expected profit below 25.0 bps hurdle")));
+
+        // Qualified candidate in live mode successfully executes.
+        let (state_qual, bot_qual) = harness(vec![{
+            let mut r = ready_row("BTC", "hyperliquid", "lighter");
+            r.expected_profit_bps = Some(30.0);
+            r.p_win = Some(0.95);
+            r.win_probability = Some(0.95);
+            r
+        }]);
+        state_qual.set_environment(crate::state::TradingEnvironment::Live);
+        let dispatch_qual = MockDispatch::ok();
+        bot_qual.tick_once(&state_qual, &dispatch_qual).await;
+        assert_eq!(dispatch_qual.enter_calls(), 1);
 
         // Engine pause blocks.
         let (state, bot) = harness(vec![ready_row("BTC", "hyperliquid", "lighter")]);

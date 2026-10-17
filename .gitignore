@@ -56,3 +56,11 @@ vault.enc
 Arbitrageur
 *.desktop
 node_modules/
+
+# Stray build artifacts (rustc test rlibs copied into the repo root)
+*.rlib
+
+# Local-only working material: review notes and agent state. Never publish
+# these — they quote operational details (sockets, hostnames, credentials).
+.review/
+.workbuddy/

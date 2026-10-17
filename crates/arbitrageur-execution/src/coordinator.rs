@@ -18,7 +18,7 @@ const LEG_SETTLE_POLLS: u32 = 10;
 #[cfg(test)]
 const LEG_SETTLE_POLLS: u32 = 3;
 #[cfg(not(test))]
-const LEG_SETTLE_INTERVAL: Duration = Duration::from_millis(600);
+const LEG_SETTLE_INTERVAL: Duration = Duration::from_millis(150);
 #[cfg(test)]
 const LEG_SETTLE_INTERVAL: Duration = Duration::from_millis(5);
 
@@ -164,7 +164,7 @@ pub async fn enrich_fill_stats(
     #[cfg(test)]
     const POLLS: u32 = 3;
     #[cfg(not(test))]
-    const INTERVAL: Duration = Duration::from_millis(600);
+    const INTERVAL: Duration = Duration::from_millis(150);
     #[cfg(test)]
     const INTERVAL: Duration = Duration::from_millis(5);
 
@@ -310,11 +310,132 @@ fn trim_leg_pnl(
     }
 }
 
+/// Latency staggering parameters to compensate for network and matching engine asymmetry.
+/// When executing two legs across venues with different transit times, dispatching the
+/// faster venue with an offset Δτ = (RTT_slow - RTT_fast) / 2 aligns their arrival times
+/// at the matching engines, minimizing adverse selection and unhedged execution drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct LatencyStagger {
+    /// Delay before dispatching Leg A (when Venue B is slower)
+    pub delay_a: Duration,
+    /// Delay before dispatching Leg B (when Venue A is slower)
+    pub delay_b: Duration,
+}
+
+impl LatencyStagger {
+    /// Default maximum stagger cap across general strategies (2000ms).
+    pub const DEFAULT_MAX_STAGGER: Duration = Duration::from_millis(2000);
+
+    /// Default maximum stagger cap for spatial price arbitrage (250ms).
+    /// Fast CLOB and DEX quotes decay rapidly; delaying the fast leg
+    /// beyond this threshold risks quote fade and severe adverse selection.
+    pub const MAX_SPATIAL_STAGGER: Duration = Duration::from_millis(250);
+
+    /// Compute optimal latency stagger from round-trip times (RTT) in milliseconds.
+    /// Uses one-way transit approximation OWT = RTT / 2.
+    /// Caps maximum delay at 2000ms for safety.
+    pub fn from_rtt_ms(rtt_a_ms: Option<f64>, rtt_b_ms: Option<f64>) -> Self {
+        Self::from_rtt_ms_capped(rtt_a_ms, rtt_b_ms, Self::DEFAULT_MAX_STAGGER)
+    }
+
+    /// Compute optimal latency stagger from round-trip times (RTT) in milliseconds,
+    /// bounded by a caller-specified maximum stagger duration.
+    pub fn from_rtt_ms_capped(
+        rtt_a_ms: Option<f64>,
+        rtt_b_ms: Option<f64>,
+        max_stagger: Duration,
+    ) -> Self {
+        let (Some(rtt_a), Some(rtt_b)) = (rtt_a_ms, rtt_b_ms) else {
+            return Self::default();
+        };
+        if !rtt_a.is_finite() || !rtt_b.is_finite() || rtt_a <= 0.0 || rtt_b <= 0.0 {
+            return Self::default();
+        }
+        let owt_a = rtt_a / 2.0;
+        let owt_b = rtt_b / 2.0;
+        if owt_a > owt_b {
+            let delta =
+                Duration::from_micros(((owt_a - owt_b) * 1000.0).round() as u64).min(max_stagger);
+            Self {
+                delay_a: Duration::ZERO,
+                delay_b: delta,
+            }
+        } else if owt_b > owt_a {
+            let delta =
+                Duration::from_micros(((owt_b - owt_a) * 1000.0).round() as u64).min(max_stagger);
+            Self {
+                delay_a: delta,
+                delay_b: Duration::ZERO,
+            }
+        } else {
+            Self::default()
+        }
+    }
+
+    /// Compute latency stagger specifically tuned for spatial price arbitrage,
+    /// with a conservative 250ms cap to avoid fast-venue quote decay.
+    pub fn from_rtt_ms_spatial(rtt_a_ms: Option<f64>, rtt_b_ms: Option<f64>) -> Self {
+        Self::from_rtt_ms_capped(rtt_a_ms, rtt_b_ms, Self::MAX_SPATIAL_STAGGER)
+    }
+}
+
+/// Compute a common snapped base order quantity across two exchange adapters,
+/// iteratively reconciling differing wire lot sizes, tick steps, or contract scaling.
+pub async fn common_wire_qty(
+    symbol: &str,
+    requested: Decimal,
+    adapter_a: &Arc<dyn ExchangeAdapter>,
+    adapter_b: &Arc<dyn ExchangeAdapter>,
+) -> anyhow::Result<Decimal> {
+    let vid_a = adapter_a.venue_id();
+    let vid_b = adapter_b.venue_id();
+    let wire_a = adapter_a
+        .wire_base_qty(symbol, requested)
+        .await
+        .map_err(|e| anyhow::anyhow!("{vid_a} cannot size {symbol} on its wire grid: {e}"))?;
+    let wire_b = adapter_b
+        .wire_base_qty(symbol, requested)
+        .await
+        .map_err(|e| anyhow::anyhow!("{vid_b} cannot size {symbol} on its wire grid: {e}"))?;
+    let mut common = wire_a.min(wire_b);
+    if common <= Decimal::ZERO {
+        anyhow::bail!(
+            "{symbol} order quantity {requested} snaps to zero on {vid_a}/{vid_b} wire grids"
+        );
+    }
+    // Cross-grid iterative snap (up to 2 passes): if one venue sizes via an inverse contract
+    // conversion (generating fractional base units), the other venue's discrete grid snaps it down.
+    for _ in 0..2 {
+        let a = adapter_a
+            .wire_base_qty(symbol, common)
+            .await
+            .map_err(|e| anyhow::anyhow!("{vid_a} cannot size snapped quantity {common}: {e}"))?;
+        let b = adapter_b
+            .wire_base_qty(symbol, common)
+            .await
+            .map_err(|e| anyhow::anyhow!("{vid_b} cannot size snapped quantity {common}: {e}"))?;
+        let next = a.min(b);
+        if next <= Decimal::ZERO || next == common {
+            break;
+        }
+        common = next;
+    }
+    let check_a = adapter_a.wire_base_qty(symbol, common).await?;
+    let check_b = adapter_b.wire_base_qty(symbol, common).await?;
+    if check_a != common || check_b != common {
+        anyhow::bail!(
+            "Irreconcilable {symbol} wire grids: {vid_a} -> {check_a}, {vid_b} -> {check_b} for qty {common}"
+        );
+    }
+    Ok(common)
+}
+
 /// Concurrent execution coordinator for atomic multi-leg arbitrage.
 #[allow(dead_code)]
 pub struct AtomicArbitrageCoordinator {
     router: SmartOrderRouter,
     circuit_breaker: Arc<CircuitBreaker>,
+    pub racing_abort_guard: Option<arbitrageur_math::latency_racing::PreFlightRacingAbortGuard>,
 }
 
 impl AtomicArbitrageCoordinator {
@@ -322,7 +443,23 @@ impl AtomicArbitrageCoordinator {
         Self {
             router,
             circuit_breaker,
+            racing_abort_guard: None,
         }
+    }
+
+    pub fn with_racing_abort_guard(
+        mut self,
+        guard: arbitrageur_math::latency_racing::PreFlightRacingAbortGuard,
+    ) -> Self {
+        self.racing_abort_guard = Some(guard);
+        self
+    }
+
+    pub fn set_racing_abort_guard(
+        &mut self,
+        guard: Option<arbitrageur_math::latency_racing::PreFlightRacingAbortGuard>,
+    ) {
+        self.racing_abort_guard = guard;
     }
 
     pub fn router(&self) -> &SmartOrderRouter {
@@ -362,6 +499,118 @@ impl AtomicArbitrageCoordinator {
         order_b: OrderRequest,
         leg_unit_scale: Option<(Decimal, Decimal)>,
     ) -> ArbitrageExecutionResult {
+        self.execute_two_leg_staggered(
+            exchange_a,
+            order_a,
+            exchange_b,
+            order_b,
+            leg_unit_scale,
+            None,
+        )
+        .await
+    }
+
+    /// Execute atomic two-leg arbitrage with stochastic microstructure latency racing pre-flight protection.
+    /// Evaluates competitive win probability against snipers before firing Leg 1.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn execute_two_leg_with_racing_guard(
+        &self,
+        exchange_a: &Arc<dyn ExchangeAdapter>,
+        order_a: OrderRequest,
+        exchange_b: &Arc<dyn ExchangeAdapter>,
+        order_b: OrderRequest,
+        leg_unit_scale: Option<(Decimal, Decimal)>,
+        stagger: Option<LatencyStagger>,
+        gross_edge_bps: f64,
+        failed_leg_cost_bps: f64,
+        detection_lead_ms: f64,
+        racing_model: Option<&arbitrageur_math::latency_racing::CrossVenueRacingModel>,
+    ) -> ArbitrageExecutionResult {
+        if let Some(model) = racing_model {
+            let guard = self.racing_abort_guard.clone().unwrap_or_default();
+            let decision = guard.evaluate(
+                gross_edge_bps,
+                failed_leg_cost_bps,
+                detection_lead_ms,
+                model,
+            );
+            match decision {
+                arbitrageur_math::latency_racing::PreFlightDecision::Abort {
+                    reason,
+                    win_probability,
+                    required_hurdle_prob,
+                    ..
+                } => {
+                    warn!(
+                        "🛡️ Pre-flight racing abort guard triggered: {reason} (win_prob={:.2}%, hurdle={:.2}%). Aborting before leg dispatch.",
+                        win_probability * 100.0,
+                        required_hurdle_prob * 100.0
+                    );
+                    return ArbitrageExecutionResult::HaltedByRisk(format!(
+                        "Pre-flight racing abort: {reason}"
+                    ));
+                }
+                arbitrageur_math::latency_racing::PreFlightDecision::Dispatch {
+                    optimal_stagger_ms,
+                    ..
+                } => {
+                    let effective_stagger = if stagger.is_none() && optimal_stagger_ms > 0.0 {
+                        let dur =
+                            Duration::from_millis((optimal_stagger_ms.round() as u64).min(250));
+                        let mean_a = model.our_latency.mean();
+                        let mean_b = model.competitor_latency.mean();
+                        if mean_a < mean_b {
+                            Some(LatencyStagger {
+                                delay_a: dur,
+                                delay_b: Duration::ZERO,
+                            })
+                        } else {
+                            Some(LatencyStagger {
+                                delay_a: Duration::ZERO,
+                                delay_b: dur,
+                            })
+                        }
+                    } else {
+                        stagger
+                    };
+                    return self
+                        .execute_two_leg_staggered(
+                            exchange_a,
+                            order_a,
+                            exchange_b,
+                            order_b,
+                            leg_unit_scale,
+                            effective_stagger,
+                        )
+                        .await;
+                }
+            }
+        }
+
+        self.execute_two_leg_staggered(
+            exchange_a,
+            order_a,
+            exchange_b,
+            order_b,
+            leg_unit_scale,
+            stagger,
+        )
+        .await
+    }
+
+    /// `execute_two_leg_scaled` with optional latency-staggered order dispatch.
+    /// When `stagger` is provided with a non-zero delay on the faster leg, the
+    /// slower leg is launched first and the faster leg is dispatched after the
+    /// offset expires, or aborted early if the slower leg immediately rejects.
+    pub async fn execute_two_leg_staggered(
+        &self,
+        exchange_a: &Arc<dyn ExchangeAdapter>,
+        order_a: OrderRequest,
+        exchange_b: &Arc<dyn ExchangeAdapter>,
+        order_b: OrderRequest,
+        leg_unit_scale: Option<(Decimal, Decimal)>,
+        stagger: Option<LatencyStagger>,
+    ) -> ArbitrageExecutionResult {
         // 1. Pre-trade Risk Check
         if let Err(reason) = self.circuit_breaker.is_trading_allowed() {
             warn!("Arbitrage execution blocked by circuit breaker: {}", reason);
@@ -389,11 +638,83 @@ impl AtomicArbitrageCoordinator {
         let requested_qty_a = order_a.quantity;
         let requested_qty_b = order_b.quantity;
 
-        // 2. Concurrent Order Dispatch via tokio::join!
-        let (res_a, res_b) = tokio::join!(
-            exchange_a.place_order(order_a),
-            exchange_b.place_order(order_b)
-        );
+        // 2. Latency-Compensated Concurrent Order Dispatch
+        let (res_a, res_b) = match stagger {
+            Some(s) if s.delay_a > Duration::ZERO => {
+                info!(
+                    "⏱️ Latency stagger active: dispatching Leg B ({}) first; delaying Leg A ({}) by {:?}",
+                    exchange_b.name(),
+                    exchange_a.name(),
+                    s.delay_a
+                );
+                let fut_b = exchange_b.place_order(order_b);
+                tokio::pin!(fut_b);
+                let early_b = tokio::select! {
+                    res = &mut fut_b => Some(res),
+                    _ = tokio::time::sleep(s.delay_a) => None,
+                };
+                match early_b {
+                    Some(Err(e)) => {
+                        warn!(
+                            "🛡️ Staggered dispatch guard: Leg B ({}) failed early ({e}); Leg A was not dispatched",
+                            exchange_b.name()
+                        );
+                        let err_b = e.to_string();
+                        (
+                            Err(anyhow::anyhow!("Staggered dispatch cancelled: sibling leg failed before dispatch: {err_b}")),
+                            Err(anyhow::anyhow!("{err_b}")),
+                        )
+                    }
+                    Some(Ok(fill_b)) => {
+                        let res_a = exchange_a.place_order(order_a).await;
+                        (res_a, Ok(fill_b))
+                    }
+                    None => {
+                        tokio::join!(exchange_a.place_order(order_a), fut_b)
+                    }
+                }
+            }
+            Some(s) if s.delay_b > Duration::ZERO => {
+                info!(
+                    "⏱️ Latency stagger active: dispatching Leg A ({}) first; delaying Leg B ({}) by {:?}",
+                    exchange_a.name(),
+                    exchange_b.name(),
+                    s.delay_b
+                );
+                let fut_a = exchange_a.place_order(order_a);
+                tokio::pin!(fut_a);
+                let early_a = tokio::select! {
+                    res = &mut fut_a => Some(res),
+                    _ = tokio::time::sleep(s.delay_b) => None,
+                };
+                match early_a {
+                    Some(Err(e)) => {
+                        warn!(
+                            "🛡️ Staggered dispatch guard: Leg A ({}) failed early ({e}); Leg B was not dispatched",
+                            exchange_a.name()
+                        );
+                        let err_a = e.to_string();
+                        (
+                            Err(anyhow::anyhow!("{err_a}")),
+                            Err(anyhow::anyhow!("Staggered dispatch cancelled: sibling leg failed before dispatch: {err_a}")),
+                        )
+                    }
+                    Some(Ok(fill_a)) => {
+                        let res_b = exchange_b.place_order(order_b).await;
+                        (Ok(fill_a), res_b)
+                    }
+                    None => {
+                        tokio::join!(fut_a, exchange_b.place_order(order_b))
+                    }
+                }
+            }
+            _ => {
+                tokio::join!(
+                    exchange_a.place_order(order_a),
+                    exchange_b.place_order(order_b)
+                )
+            }
+        };
 
         match (res_a, res_b) {
             // Case 1: Both legs executed successfully
@@ -483,10 +804,11 @@ impl AtomicArbitrageCoordinator {
                         let keep_b = (matched_qty / wb).min(fill_b.filled_qty);
                         let excess_a = fill_a.filled_qty - keep_a;
                         let excess_b = fill_b.filled_qty - keep_b;
+                        let dust_floor = Decimal::new(1, 8); // 1e-8 base units
 
                         let (trim_a, trim_b) = tokio::join!(
                             async {
-                                if excess_a > Decimal::ZERO {
+                                if excess_a > dust_floor {
                                     Some(
                                         EmergencyUnwindHandler::unwind_leg(
                                             exchange_a, &sym_a, side_a, excess_a,
@@ -498,7 +820,7 @@ impl AtomicArbitrageCoordinator {
                                 }
                             },
                             async {
-                                if excess_b > Decimal::ZERO {
+                                if excess_b > dust_floor {
                                     Some(
                                         EmergencyUnwindHandler::unwind_leg(
                                             exchange_b, &sym_b, side_b, excess_b,
@@ -903,5 +1225,200 @@ impl AtomicArbitrageCoordinator {
                 }
             }
         }
+    }
+
+    /// Executes a multi-leg plan with Fragility-First dispatch and atomic reverse rollback.
+    /// Orders are submitted starting with the most fragile leg. If the bottleneck leg
+    /// fails, the plan aborts with strictly $0 unhedged inventory risk. If a subsequent leg
+    /// fails, all previously filled legs are unwound in reverse order.
+    pub async fn execute_plan(&self, mut plan: MultiLegExecutionPlan) -> ArbitrageExecutionResult {
+        if let Err(reason) = self.circuit_breaker.is_trading_allowed() {
+            return ArbitrageExecutionResult::HaltedByRisk(reason);
+        }
+
+        if plan.legs.is_empty() {
+            return ArbitrageExecutionResult::BothFailed {
+                error_a: "Empty execution plan".into(),
+                error_b: String::new(),
+            };
+        }
+
+        // Apply Fragility-First sequencing
+        plan.sort_fragility_first();
+
+        let mut executed_fills: Vec<(usize, OrderResponse)> = Vec::new();
+        let mut failed_leg: Option<(usize, String)> = None;
+
+        for (idx, leg) in plan.legs.iter().enumerate() {
+            match leg.exchange.place_order(leg.order.clone()).await {
+                Ok(resp) => {
+                    let settled = settle_working_leg(
+                        &leg.exchange,
+                        &leg.order.symbol,
+                        &leg.order.client_order_id,
+                        resp,
+                        false,
+                    )
+                    .await;
+
+                    if settled.status == OrderStatus::Filled
+                        && settled.filled_qty == leg.order.quantity
+                    {
+                        executed_fills.push((idx, settled));
+                    } else if settled.filled_qty > Decimal::ZERO {
+                        let fill_qty = settled.filled_qty;
+                        executed_fills.push((idx, settled));
+                        failed_leg = Some((
+                            idx,
+                            format!(
+                                "Partial fill on leg {idx}: {} / {}",
+                                fill_qty, leg.order.quantity
+                            ),
+                        ));
+                        break;
+                    } else {
+                        failed_leg = Some((
+                            idx,
+                            format!("Zero fill / reject on leg {idx}: {:?}", settled.status),
+                        ));
+                        break;
+                    }
+                }
+                Err(e) => {
+                    failed_leg = Some((idx, format!("Order dispatch error on leg {idx}: {e}")));
+                    break;
+                }
+            }
+        }
+
+        if let Some((failed_idx, err)) = failed_leg {
+            warn!(
+                "AtomicArbitrageCoordinator: ExecutionPlan aborted on leg {}: {}. Triggering atomic reverse rollback on {} filled legs",
+                failed_idx,
+                err,
+                executed_fills.len()
+            );
+
+            let mut all_unwound = true;
+            for (idx, fill) in executed_fills.iter().rev() {
+                let leg = &plan.legs[*idx];
+                let unwind_res = EmergencyUnwindHandler::unwind_leg(
+                    &leg.exchange,
+                    &leg.order.symbol,
+                    leg.order.side,
+                    fill.filled_qty,
+                )
+                .await;
+
+                match unwind_res {
+                    Ok(resp) if resp.status == OrderStatus::Filled => {
+                        info!(
+                            "AtomicArbitrageCoordinator: leg {} ({}) unwound successfully",
+                            idx, leg.order.symbol
+                        );
+                    }
+                    Ok(resp) => {
+                        error!(
+                            "AtomicArbitrageCoordinator: leg {} ({}) unwind not filled: status {:?}",
+                            idx, leg.order.symbol, resp.status
+                        );
+                        all_unwound = false;
+                    }
+                    Err(e) => {
+                        error!(
+                            "AtomicArbitrageCoordinator: leg {} ({}) unwind failed: {}",
+                            idx, leg.order.symbol, e
+                        );
+                        all_unwound = false;
+                    }
+                }
+            }
+
+            if all_unwound {
+                ArbitrageExecutionResult::BothFailed {
+                    error_a: format!(
+                        "Plan aborted at leg {failed_idx}: {err}; all filled legs successfully unwound"
+                    ),
+                    error_b: String::new(),
+                }
+            } else {
+                self.circuit_breaker.trip(format!(
+                    "Unresolved exposure during ExecutionPlan rollback at leg {failed_idx}: {err}"
+                ));
+                ArbitrageExecutionResult::UnresolvedExposure {
+                    leg_a_fill: executed_fills.first().map(|(_, f)| f.clone()),
+                    leg_b_fill: executed_fills.get(1).map(|(_, f)| f.clone()),
+                    error_a: err,
+                    error_b: "Emergency unwind failed on one or more legs during rollback".into(),
+                }
+            }
+        } else {
+            // All legs filled cleanly!
+            self.circuit_breaker.record_success();
+            let leg_a = executed_fills[0].1.clone();
+            let leg_b = executed_fills
+                .get(1)
+                .map(|(_, f)| f.clone())
+                .unwrap_or_else(|| leg_a.clone());
+
+            ArbitrageExecutionResult::Success {
+                leg_a,
+                leg_b,
+                realized_profit: Decimal::ZERO,
+            }
+        }
+    }
+}
+
+/// A single planned leg in a multi-leg arbitrage execution plan.
+#[derive(Clone)]
+pub struct PlannedLeg {
+    pub exchange: Arc<dyn ExchangeAdapter>,
+    pub order: OrderRequest,
+    /// Liquidity Fragility Index F_i. Lower values indicate more fragile/illiquid books.
+    pub fragility_index: f64,
+    /// Whether this leg is considered the critical bottleneck leg.
+    pub is_critical: bool,
+}
+
+/// An atomic multi-leg execution plan for 2, 3, or more legs with Fragility-First dispatch sequencing.
+#[derive(Clone)]
+pub struct MultiLegExecutionPlan {
+    pub legs: Vec<PlannedLeg>,
+    pub strategy_id: String,
+    pub max_slippage_bps: Decimal,
+}
+
+impl MultiLegExecutionPlan {
+    pub fn new(strategy_id: impl Into<String>, max_slippage_bps: Decimal) -> Self {
+        Self {
+            legs: Vec::new(),
+            strategy_id: strategy_id.into(),
+            max_slippage_bps,
+        }
+    }
+
+    pub fn add_leg(
+        &mut self,
+        exchange: Arc<dyn ExchangeAdapter>,
+        order: OrderRequest,
+        fragility_index: f64,
+        is_critical: bool,
+    ) {
+        self.legs.push(PlannedLeg {
+            exchange,
+            order,
+            fragility_index,
+            is_critical,
+        });
+    }
+
+    /// Sorts legs in ascending order of Liquidity Fragility Index (Fragility-First: bottleneck leg first).
+    pub fn sort_fragility_first(&mut self) {
+        self.legs.sort_by(|a, b| {
+            a.fragility_index
+                .partial_cmp(&b.fragility_index)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
     }
 }

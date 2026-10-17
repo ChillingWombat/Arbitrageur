@@ -19,8 +19,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
+use rust_decimal::Decimal;
+use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 
+use arbitrageur_core::ExchangeAdapter;
+use arbitrageur_risk::margin_monitor::MarginHealthStatus;
 use arbitrageur_strategy::convergence_auto::BotMode;
 
 use crate::commands::OPTIONS_PARITY_STRATEGY_ID;
@@ -46,7 +50,11 @@ const DEFAULT_MIN_HOURS_TO_EXPIRY: f64 = 48.0;
 const DEFAULT_MAX_DAYS_TO_EXPIRY: f64 = 60.0;
 const DEFAULT_POLL_SECS: u64 = 30;
 const DEFAULT_MAX_OPEN: u32 = 2;
-pub const DEFAULT_MIN_EXPECTED_YIELD_PCT: f64 = 10.0;
+pub const DEFAULT_MIN_EXPECTED_YIELD_PCT: f64 = 30.0;
+/// Minimum absolute nominal net USD edge required for autonomous options entry.
+/// Prevents near-dated options with tiny nominal edges from triggering trades
+/// where exchange friction would eliminate real profit.
+pub const MIN_OPTIONS_BOT_NET_EDGE_USD: f64 = 10.0;
 
 fn default_min_expected_yield_pct() -> f64 {
     DEFAULT_MIN_EXPECTED_YIELD_PCT
@@ -134,9 +142,9 @@ impl OptionsBotConfigDto {
             return Err("maxOpenPositions must be within [1, 10]".into());
         }
         if !finite(self.min_expected_yield_pct)
-            || !(0.0..=10_000.0).contains(&self.min_expected_yield_pct)
+            || !(30.0..=10_000.0).contains(&self.min_expected_yield_pct)
         {
-            return Err("minExpectedYieldPct must be within [0, 10000]".into());
+            return Err("minExpectedYieldPct must be at least 30.0% and <= 10000".into());
         }
         Ok((
             OptionsBotPolicy {
@@ -186,6 +194,47 @@ pub struct OptionsBotTickStatus {
     pub candidates: usize,
     pub best_edge_usd: Option<f64>,
     pub last_refusal: Option<String>,
+}
+
+/// Extracts the expiration timestamp in ms from an option instrument (e.g. `BTC-25DEC26-125000-C`)
+/// or opportunity ID (e.g. `opar-BTC-1766707200000-...` or `obox-BTC-1766707200000-...`).
+pub(crate) fn parse_option_expiry_ms(token: &str) -> Option<i64> {
+    // 1. Try finding a millisecond timestamp part in [1.6e12, 3.0e12]
+    for part in token.split('-') {
+        if let Ok(ts) = part.parse::<i64>() {
+            if (1_600_000_000_000..=3_000_000_000_000).contains(&ts) {
+                return Some(ts);
+            }
+        }
+    }
+    // 2. Try parsing Deribit date string (e.g. "25DEC26")
+    for part in token.split('-') {
+        if part.len() >= 6 && part.len() <= 7 {
+            if let Ok(date) = chrono::NaiveDate::parse_from_str(part, "%d%b%y") {
+                if let Some(dt) = date.and_hms_opt(8, 0, 0) {
+                    return Some(
+                        chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(dt, chrono::Utc)
+                            .timestamp_millis(),
+                    );
+                }
+            }
+        }
+    }
+    None
+}
+
+static LAST_HEDGED_SPOTS: Mutex<Option<HashMap<String, Decimal>>> = Mutex::new(None);
+
+fn get_or_init_last_hedged_spot(asset: &str, current_spot: Decimal) -> Decimal {
+    let mut guard = LAST_HEDGED_SPOTS.lock();
+    let map = guard.get_or_insert_with(HashMap::new);
+    *map.entry(asset.to_string()).or_insert(current_spot)
+}
+
+fn update_last_hedged_spot(asset: &str, spot: Decimal) {
+    let mut guard = LAST_HEDGED_SPOTS.lock();
+    let map = guard.get_or_insert_with(HashMap::new);
+    map.insert(asset.to_string(), spot);
 }
 
 pub struct OptionsBotExecutor {
@@ -350,6 +399,481 @@ impl OptionsBotExecutor {
         }
     }
 
+    /// Active Position Supervision:
+    /// 1. Options Parity Expiration Auto-Unwind: When option legs expire (or within 30m of 08:00 UTC),
+    ///    unwind the perpetual future leg to eliminate 100% naked directional delta!
+    /// 2. Options Package Early Harvest (The 88% Rule & 2h Pin Risk Boundary):
+    ///    When an open package (Box Spread, Jelly Roll, Convexity) has captured >= 88% of target edge,
+    ///    or is within 2 hours of expiry, unwind early via IOC to avoid Deribit's 3.0-6.0 bps expiration
+    ///    delivery fees, pin risk, and to recycle margin capital.
+    pub async fn supervise_open_positions(
+        state: &AppEngineState,
+        substrategy: &str,
+        strategy_id: &str,
+    ) {
+        let Ok(positions) =
+            crate::execution::get_open_positions_impl(Some(strategy_id.to_string()), state).await
+        else {
+            return;
+        };
+
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let mut portfolio_all_positions = Vec::new();
+
+        for pos in positions {
+            // Find expiry timestamp from leg symbols or pos.symbol or trade_id
+            let mut expiry_ms: Option<i64> = parse_option_expiry_ms(&pos.trade_id)
+                .or_else(|| parse_option_expiry_ms(&pos.symbol));
+            if expiry_ms.is_none() {
+                for leg_sym in &pos.leg_symbols {
+                    if let Some(exp) = parse_option_expiry_ms(leg_sym) {
+                        expiry_ms = Some(exp);
+                        break;
+                    }
+                }
+            }
+
+            let hours_to_expiry = expiry_ms.map(|exp| (exp - now_ms) as f64 / 3_600_000.0);
+
+            // 1. Options Parity Expiration Protection:
+            // When options legs expire at 08:00 UTC (or within 30m prior, or already post-expiry),
+            // market-close the open perpetual future to eliminate 100% naked directional delta!
+            if substrategy == "parity" {
+                let is_near_or_past_expiry = hours_to_expiry.is_some_and(|h| h <= 0.5);
+                if is_near_or_past_expiry {
+                    tracing::warn!(
+                        "options bot: parity trade {} reached expiration window (hours to expiry: {:?}); triggering auto-unwind of perpetual hedge",
+                        pos.trade_id,
+                        hours_to_expiry
+                    );
+                    let _ = crate::execution::flatten_trade_positions_impl(
+                        &pos.trade_id,
+                        strategy_id,
+                        Some("market"),
+                        arbitrageur_execution::virtual_ledger::CycleStatus::Closed,
+                        state,
+                    )
+                    .await;
+                    continue;
+                }
+            }
+
+            // 2. Options Package Early Harvest (The 88% Rule & 2h Expiry Pin Risk Boundary):
+            // Deribit charges 0.015% per ITM leg at settlement (3.0 bps on Box, 6.0 bps on Jelly Roll).
+            // When >= 88% of edge is realized, holding to expiry pays more in delivery fees than the remaining edge.
+            let edge_harvest_ratio = match (pos.expected_net_usd, pos.unrealized_pnl_usd) {
+                (Some(expected), Some(upnl)) if expected > 0.0 => upnl / expected,
+                _ => 0.0,
+            };
+
+            let is_edge_harvest_ready = edge_harvest_ratio >= 0.88;
+            let is_pin_risk_imminent = hours_to_expiry.is_some_and(|h| h <= 3.0 && h > 0.0);
+
+            if is_edge_harvest_ready || is_pin_risk_imminent {
+                let reason = if is_edge_harvest_ready {
+                    format!(
+                        "early harvest triggered: {:.1}% of target edge captured (+${:.2} USD) — avoiding Deribit expiration delivery fees",
+                        edge_harvest_ratio * 100.0,
+                        pos.unrealized_pnl_usd.unwrap_or(0.0)
+                    )
+                } else {
+                    format!(
+                        "near-expiry exit triggered ({:.1}h remaining) — eliminating pin risk and delivery friction",
+                        hours_to_expiry.unwrap_or(0.0)
+                    )
+                };
+
+                tracing::info!("options bot {substrategy}: trade {} {reason}", pos.trade_id);
+
+                let _ = crate::execution::flatten_trade_positions_impl(
+                    &pos.trade_id,
+                    strategy_id,
+                    Some("ioc"),
+                    arbitrageur_execution::virtual_ledger::CycleStatus::Closed,
+                    state,
+                )
+                .await;
+                continue;
+            }
+
+            // 3. Dynamic Delta Drift Supervision:
+            // For open positions, reconstruct leg exposures and evaluate net directional delta.
+            // If delta drift violates DeltaGuard limits, log alert.
+            let dg = state.delta_guard.read();
+            let mut leg_positions = Vec::new();
+            for v in &pos.venues {
+                let qty_dec = Decimal::from_f64_retain(v.net_qty.abs()).unwrap_or(dec!(0));
+                if qty_dec > dec!(0) {
+                    leg_positions.push(arbitrageur_core::position::Position {
+                        venue: arbitrageur_core::types::VenueId::new(&v.venue),
+                        symbol: v.symbol.clone(),
+                        side: if v.net_qty > 0.0 {
+                            arbitrageur_core::types::Side::Buy
+                        } else {
+                            arbitrageur_core::types::Side::Sell
+                        },
+                        quantity: qty_dec,
+                        entry_price: dec!(0),
+                        mark_price: Decimal::from_f64_retain(
+                            pos.notional_usd.unwrap_or(0.0) / v.net_qty.abs(),
+                        )
+                        .unwrap_or(dec!(0)),
+                        unrealized_pnl: Decimal::from_f64_retain(
+                            pos.unrealized_pnl_usd.unwrap_or(0.0),
+                        )
+                        .unwrap_or(dec!(0)),
+                        realized_pnl: dec!(0),
+                        liquidation_price: None,
+                        leverage: dec!(1),
+                        initial_margin: dec!(0),
+                        maintenance_margin: dec!(0),
+                        updated_at: chrono::Utc::now(),
+                    });
+                }
+            }
+            if !leg_positions.is_empty() {
+                portfolio_all_positions.extend(leg_positions.clone());
+                // Analytical Black-76 Greeks supervision (delta, gamma & vega) with live SABR volatility smile
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                let greeks = dg.calculate_analytical_greeks_with_smile(
+                    &leg_positions,
+                    Some(&*state.vol_surface),
+                    None,
+                    Some(now_ms),
+                );
+                for (asset, g) in &greeks {
+                    if g.net_delta.abs() > dec!(0.05) {
+                        tracing::warn!(
+                            "options bot {substrategy}: trade {} carries non-linear analytical delta drift on {asset}: {:.4} base delta (gamma: {:.6})",
+                            pos.trade_id, g.net_delta, g.net_gamma
+                        );
+                    }
+                    if g.net_gamma.abs() > dec!(0.0005) {
+                        tracing::warn!(
+                            "options bot {substrategy}: trade {} carries elevated non-linear gamma curvature on {asset}: {:.6} (1/USD)",
+                            pos.trade_id, g.net_gamma
+                        );
+                    }
+                    if g.net_vega.abs() > dec!(100.0) {
+                        tracing::warn!(
+                            "options bot {substrategy}: trade {} carries elevated vega exposure on {asset}: ${:.2} USD/vol",
+                            pos.trade_id, g.net_vega
+                        );
+                    }
+                }
+                if let Err((asset, exposure)) = dg.check_delta_neutrality(&leg_positions) {
+                    tracing::warn!(
+                        "options bot {substrategy}: trade {} carries unhedged delta drift on {asset}: ${exposure:.2} USD",
+                        pos.trade_id
+                    );
+                }
+            }
+        }
+
+        // 4. Portfolio-wide Multi-Asset Greeks Aggregation & Whalley-Wilmott Rehedging Supervision
+        if !portfolio_all_positions.is_empty() {
+            let mut rehedge_tasks = Vec::new();
+
+            {
+                let dg = state.delta_guard.read();
+                let now_ms = chrono::Utc::now().timestamp_millis();
+                let portfolio_greeks = dg.calculate_analytical_greeks_with_smile(
+                    &portfolio_all_positions,
+                    Some(&*state.vol_surface),
+                    None,
+                    Some(now_ms),
+                );
+                for (asset, g) in &portfolio_greeks {
+                    // Fail closed: a rehedge sized off a fabricated spot is a
+                    // fabricated order. Skip the asset until a real mark
+                    // exists instead of falling back to a hardcoded price.
+                    let Some(spot) = state
+                        .vol_surface
+                        .get_spot(asset)
+                        .or_else(|| state.vol_surface.latest_forward(asset))
+                        .and_then(Decimal::from_f64_retain)
+                        .filter(|p| *p > dec!(0))
+                    else {
+                        tracing::warn!(
+                            "options bot portfolio: no live spot/forward for {asset} — rehedge skipped (no synthetic price)"
+                        );
+                        continue;
+                    };
+
+                    let last_spot = get_or_init_last_hedged_spot(asset, spot);
+
+                    let bichuch_cfg = arbitrageur_risk::delta_guard::BichuchDeltaGammaConfig {
+                        prop_cost_rate: dec!(0.0005),
+                        quad_impact_coeff: dec!(0.000001),
+                        option_cost_rate: dec!(0.0005),
+                        risk_aversion: dec!(0.0001),
+                        implied_volatility: dec!(0.65),
+                        jump_intensity: dec!(2.0),
+                        jump_variance: dec!(0.04),
+                    };
+
+                    let decision = dg.evaluate_bichuch_2d_rehedge_trigger(
+                        spot,
+                        last_spot,
+                        g.net_delta,
+                        dec!(0),
+                        g.net_gamma,
+                        dec!(0),
+                        Some(&bichuch_cfg),
+                    );
+
+                    match decision {
+                        arbitrageur_risk::delta_guard::BichuchRehedgeDecision::DeltaRebalance {
+                            rebalance_qty,
+                            reason,
+                        }
+                        | arbitrageur_risk::delta_guard::BichuchRehedgeDecision::Both {
+                            rebalance_delta: rebalance_qty,
+                            reason,
+                            ..
+                        } => {
+                            tracing::warn!(
+                                "options bot portfolio: Bichuch 2D re-hedge recommended for {asset}: net delta {:.4}, rehedge qty {:.4} ({})",
+                                g.net_delta,
+                                rebalance_qty,
+                                reason
+                            );
+                            crate::alerting::dispatch_throttled(
+                                state.env().as_str(),
+                                "options_portfolio_rehedge",
+                                asset,
+                                std::time::Duration::from_secs(300),
+                                format!(
+                                    "Portfolio Delta Re-hedge Recommended for {asset}: net delta {:.4}, suggested rehedge {:.4} base contracts ({})",
+                                    g.net_delta, rebalance_qty, reason
+                                ),
+                            );
+
+                            // If unhedged quantity exceeds threshold, evaluate perpetual venue selection
+                            if rebalance_qty.abs() > dec!(0.001) {
+                                let perp_symbol = format!("{asset}-USDC");
+                                let hedge_side = if rebalance_qty > dec!(0) {
+                                    arbitrageur_core::types::Side::Buy
+                                } else {
+                                    arbitrageur_core::types::Side::Sell
+                                };
+                                let hedge_qty = rebalance_qty.abs();
+
+                                let candidate_venues = [
+                                    ("hyperliquid", dec!(1.5), dec!(0.0001)),
+                                    ("binance", dec!(4.5), dec!(0.0001)),
+                                ];
+                                let best_venue = dg
+                                    .evaluate_perpetual_venue_selection(
+                                        &candidate_venues,
+                                        hedge_qty * spot,
+                                        4.0,
+                                    )
+                                    .unwrap_or_else(|| "hyperliquid".to_string());
+
+                                tracing::info!(
+                                    "options bot portfolio: optimal perpetual rehedge venue selected for {asset}: {best_venue} (qty: {hedge_qty} {perp_symbol}, side: {hedge_side:?})"
+                                );
+
+                                rehedge_tasks.push((
+                                    asset.clone(),
+                                    perp_symbol,
+                                    hedge_side,
+                                    hedge_qty,
+                                    spot,
+                                    best_venue,
+                                ));
+                            }
+                        }
+                        arbitrageur_risk::delta_guard::BichuchRehedgeDecision::GammaRebalance {
+                            gamma_error,
+                            reason,
+                        } => {
+                            tracing::warn!(
+                                "options bot portfolio: Bichuch Gamma curvature adjustment recommended for {asset}: gamma error {:.6} ({})",
+                                gamma_error,
+                                reason
+                            );
+                        }
+                        arbitrageur_risk::delta_guard::BichuchRehedgeDecision::NoAction => {}
+                    }
+                }
+
+                let btc_spot = state
+                    .vol_surface
+                    .get_spot("BTC")
+                    .or_else(|| state.vol_surface.latest_forward("BTC"))
+                    .and_then(Decimal::from_f64_retain)
+                    .unwrap_or(dec!(60000.0));
+                let eth_spot = state
+                    .vol_surface
+                    .get_spot("ETH")
+                    .or_else(|| state.vol_surface.latest_forward("ETH"))
+                    .and_then(Decimal::from_f64_retain)
+                    .unwrap_or(dec!(3000.0));
+
+                // Cross-asset curvature and beta-adjusted BTC-equivalent delta
+                let cross_report = dg.evaluate_cross_asset_risk(
+                    &portfolio_greeks,
+                    btc_spot,
+                    eth_spot,
+                    dec!(1.15),
+                    dec!(0.85),
+                    dec!(15000.0),
+                );
+                if !cross_report.is_portfolio_neutral {
+                    tracing::warn!(
+                        "options bot portfolio: Cross-asset BTC-equivalent delta skew: {:.4} BTC exceeds neutrality band",
+                        cross_report.btc_equivalent_delta
+                    );
+                    crate::alerting::dispatch_throttled(
+                        state.env().as_str(),
+                        "options_cross_asset_skew",
+                        "portfolio",
+                        std::time::Duration::from_secs(300),
+                        format!(
+                            "Cross-asset BTC-equivalent delta skew {:.4} BTC exceeds neutrality tolerance",
+                            cross_report.btc_equivalent_delta
+                        ),
+                    );
+                }
+            } // drop(dg) occurs here
+
+            // Execute collected perpetual rehedge orders under the same
+            // guardrails as every other live dispatch: pause/breaker checks,
+            // the execution lock (a concurrent package or reconciler cycle
+            // must not interleave legs), live-entry eligibility in live
+            // mode, and a durable ledger intent + client-order-id BEFORE
+            // submit. A failed hedge no longer advances the last-hedged
+            // spot — doing so silently suppressed the next attempt.
+            if !rehedge_tasks.is_empty() {
+                let _execution_guard = state.execution_lock.lock().await;
+                let gate_err: Option<String> = {
+                    let venues: Vec<&str> = rehedge_tasks.iter().map(|t| t.5.as_str()).collect();
+                    if let Err(reason) = state.circuit_breaker.is_trading_allowed() {
+                        Some(format!("circuit breaker: {reason}"))
+                    } else if *state.is_paused.read() {
+                        Some("trading engine is PAUSED".to_string())
+                    } else if state.is_live() {
+                        crate::commands::live_entry_gate(state, &venues).err()
+                    } else {
+                        None
+                    }
+                };
+                if let Some(reason) = gate_err {
+                    tracing::warn!(
+                        "options bot portfolio: {} rehedge order(s) withheld — {reason}",
+                        rehedge_tasks.len()
+                    );
+                } else {
+                    for (asset, perp_symbol, hedge_side, hedge_qty, spot, best_venue) in
+                        rehedge_tasks
+                    {
+                        let Some(adapter) = state.get_adapter(&best_venue) else {
+                            tracing::error!(
+                                "options bot portfolio: rehedge venue {best_venue} not admitted — {asset} left unhedged"
+                            );
+                            continue;
+                        };
+                        if !adapter.live_order_submission_implemented()
+                            || !adapter.has_live_credentials()
+                        {
+                            tracing::error!(
+                                "options bot portfolio: {best_venue} cannot submit live orders — {asset} rehedge skipped"
+                            );
+                            continue;
+                        }
+                        let bound_px = match hedge_side {
+                            arbitrageur_core::types::Side::Buy => spot * dec!(1.0020), // 20 bps protective slippage limit
+                            arbitrageur_core::types::Side::Sell => spot * dec!(0.9980),
+                        };
+                        let rehedge_order = arbitrageur_core::order::OrderRequest::new_ioc(
+                            adapter.venue_id(),
+                            &perp_symbol,
+                            hedge_side,
+                            bound_px.round_dp(2),
+                            hedge_qty.round_dp(4),
+                        );
+                        // Durable intent BEFORE submit: an accepted-then-crashed
+                        // hedge stays discoverable by reconciliation.
+                        let signal_id = format!(
+                            "opt-rehedge-{}-{asset}",
+                            chrono::Utc::now().timestamp_millis()
+                        );
+                        let qty_f64 = hedge_qty.to_string().parse::<f64>().unwrap_or(0.0);
+                        if let Err(e) = crate::options_parity::record_options_leg_intent(
+                            state,
+                            &signal_id,
+                            "options_portfolio",
+                            best_venue.as_str(),
+                            &perp_symbol,
+                            hedge_side,
+                            qty_f64,
+                            &format!(
+                                "autonomous portfolio delta rehedge {asset}: {hedge_side:?} {hedge_qty} {perp_symbol} (spot {spot})"
+                            ),
+                            None,
+                        ) {
+                            tracing::error!(
+                                "options bot portfolio: rehedge intent persist failed — dispatch refused: {e}"
+                            );
+                            continue;
+                        }
+                        let leg_side = match hedge_side {
+                            arbitrageur_core::types::Side::Buy => crate::state_store::LegSide::Long,
+                            arbitrageur_core::types::Side::Sell => {
+                                crate::state_store::LegSide::Short
+                            }
+                        };
+                        if let Err(e) = state.state_store.record_leg_client_order_id(
+                            &signal_id,
+                            leg_side,
+                            &rehedge_order.client_order_id,
+                        ) {
+                            tracing::error!(
+                                "options bot portfolio: rehedge client id persist failed — dispatch refused: {e}"
+                            );
+                            // The intent row exists but will never be matched
+                            // to a venue order — retire it so it cannot block
+                            // this symbol forever.
+                            let _ = state.state_store.update_signal_status(
+                                &signal_id,
+                                crate::state_store::SignalStatus::Failed,
+                                Some("client order id persist failed before dispatch"),
+                            );
+                            continue;
+                        }
+                        match adapter.place_order(rehedge_order).await {
+                            Ok(resp) => {
+                                // Accepted, not necessarily filled: the signal
+                                // stays Pending and the reconciler settles it
+                                // from venue truth via the persisted client id.
+                                tracing::info!(
+                                    "options bot portfolio: rehedge SUBMITTED on {best_venue}: id={}, status={:?}, ack filled={} — venue truth settles via reconciliation",
+                                    resp.order_id,
+                                    resp.status,
+                                    resp.filled_qty
+                                );
+                                update_last_hedged_spot(&asset, spot);
+                            }
+                            Err(e) => {
+                                tracing::error!(
+                                    "options bot portfolio: rehedge submission failed on {best_venue}: {e} — {asset} remains unhedged (spot advance withheld)"
+                                );
+                                let reason = format!("rehedge submission rejected: {e}");
+                                let _ = state.state_store.update_signal_status(
+                                    &signal_id,
+                                    crate::state_store::SignalStatus::Failed,
+                                    Some(reason.as_str()),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn note_tick(state: &AppEngineState, st: OptionsBotTickStatus) {
         state
             .options_tick_status
@@ -397,6 +921,12 @@ impl OptionsBotExecutor {
             return poll;
         }
         let strategy_id = Self::ledger_strategy_id(substrategy);
+        // Active position supervision:
+        // 1. Unwinds options parity perpetual hedges upon option expiration (eliminating naked delta).
+        // 2. Early-unwinds packages (box spread, jelly roll, convexity) when >= 88% edge is realized
+        //    or when within 2h of expiration to bypass Deribit delivery fees & pin risk.
+        Self::supervise_open_positions(state, substrategy, &strategy_id).await;
+
         let Some(mut open) = Self::open_positions(state, &strategy_id) else {
             // Ledger unreadable — cannot prove the book is flat; hold mode,
             // skip entries.
@@ -420,6 +950,27 @@ impl OptionsBotExecutor {
         if !mode.entries_allowed() || open >= cfg.max_open_positions {
             Self::note_tick(state, status);
             return poll;
+        }
+
+        // Pre-flight Deribit margin check: do not scan or attempt entries if Deribit
+        // account is under critical margin pressure or margin utilization exceeds 70%.
+        if let Ok(deribit_adapter) = crate::options_parity::deribit_for_env(state) {
+            if let Ok(acc) = deribit_adapter.fetch_account().await {
+                let margin_monitor = crate::commands::margin_monitor_from_settings(state);
+                let health = margin_monitor.evaluate_account(&acc);
+                if matches!(
+                    health,
+                    MarginHealthStatus::Critical | MarginHealthStatus::Breached
+                ) || acc.margin_usage_pct >= dec!(70)
+                {
+                    tracing::warn!(
+                        "options bot {substrategy}: Deribit account margin health is {:?} (usage {}%) — entry scan skipped",
+                        health, acc.margin_usage_pct
+                    );
+                    Self::note_tick(state, status);
+                    return poll;
+                }
+            }
         }
 
         let env_str = state.env().as_str();
@@ -462,7 +1013,7 @@ impl OptionsBotExecutor {
                         max_days_to_expiry: Some(cfg.max_days_to_expiry),
                         min_edge_bps: Some(cfg.min_edge_bps),
                         min_expected_yield_pct: Some(cfg.min_expected_yield_pct),
-                        limit: None,
+                        limit: Some(100),
                     },
                     state,
                 )
@@ -472,8 +1023,19 @@ impl OptionsBotExecutor {
                         status.rows_scanned += v.len();
                         v.into_iter()
                             .filter(|o| {
+                                let pin_distance = if o.strike > 0.0 {
+                                    (o.index_price_usd - o.strike).abs() / o.strike
+                                } else {
+                                    1.0
+                                };
+                                let is_pin_risk = (o.expiry_ms
+                                    - chrono::Utc::now().timestamp_millis())
+                                    < 172_800_000
+                                    && pin_distance < 0.015;
                                 o.is_executable
                                     && o.expected_yield_pct >= cfg.min_expected_yield_pct
+                                    && o.net_edge_usd >= MIN_OPTIONS_BOT_NET_EDGE_USD
+                                    && !is_pin_risk
                             })
                             .map(|o| {
                                 let legs = vec![
@@ -499,7 +1061,7 @@ impl OptionsBotExecutor {
                         max_days_to_expiry: Some(cfg.max_days_to_expiry),
                         min_edge_bps: Some(cfg.min_edge_bps),
                         min_expected_yield_pct: Some(cfg.min_expected_yield_pct),
-                        limit: None,
+                        limit: Some(100),
                     },
                     state,
                 )
@@ -509,8 +1071,19 @@ impl OptionsBotExecutor {
                         status.rows_scanned += v.len();
                         v.into_iter()
                             .filter(|o| {
+                                let now_ms = chrono::Utc::now().timestamp_millis();
+                                let is_pin_risk = (o.expiry_ms - now_ms) < 172_800_000
+                                    && o.strikes.iter().any(|&k| {
+                                        if o.index_price_usd > 0.0 && k > 0.0 {
+                                            (o.index_price_usd - k).abs() / k < 0.015
+                                        } else {
+                                            false
+                                        }
+                                    });
                                 o.is_executable
                                     && o.expected_yield_pct >= cfg.min_expected_yield_pct
+                                    && o.net_edge_usd >= MIN_OPTIONS_BOT_NET_EDGE_USD
+                                    && !is_pin_risk
                             })
                             .map(|o| {
                                 let legs = o
@@ -636,6 +1209,128 @@ pub async fn set_options_bot_config(
     OptionsBotExecutor::save_config(&state, &config)
 }
 
+/// Spawns background worker that polls Deribit options book summaries for BTC and ETH,
+/// dynamically feeding live synthetic forward prices, mark IVs, and index spots into
+/// `state.vol_surface` (`LiveVolSurfaceCache`).
+/// Executes SABR parameter calibrations off-thread via `tokio::task::spawn_blocking`
+/// to avoid async runtime threadpool starvation.
+pub fn spawn_volatility_surface_worker(
+    state: Arc<AppEngineState>,
+) -> tauri::async_runtime::JoinHandle<()> {
+    tauri::async_runtime::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(2500));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+        tracing::info!(
+            "volatility surface cache worker started: polling Deribit BTC/ETH book summaries"
+        );
+
+        loop {
+            interval.tick().await;
+
+            if *state.is_stopped.read() {
+                tracing::info!("volatility surface worker exiting on engine stop");
+                break;
+            }
+
+            let deribit_adapter = match crate::options_parity::deribit_for_env(&state) {
+                Ok(a) => a,
+                Err(_) => {
+                    // Deribit not admitted or unconfigured in this environment
+                    continue;
+                }
+            };
+
+            for ccy in SCAN_CURRENCIES {
+                match deribit_adapter.book_summaries(ccy).await {
+                    Ok(summaries) => {
+                        let vol_cache = state.vol_surface.clone();
+                        let ccy_str = ccy.to_string();
+                        // Run parsing and SABR calibrations in spawn_blocking to keep async reactor responsive
+                        let _ = tokio::task::spawn_blocking(move || {
+                            let now_ms = chrono::Utc::now().timestamp_millis();
+                            let mut ingested_count = 0usize;
+
+                            for summary in summaries {
+                                // Extract spot / estimated delivery price if present
+                                if let Some(est_delivery) = summary.estimated_delivery_price {
+                                    if let Ok(spot_f64) = est_delivery.to_string().parse::<f64>() {
+                                        if spot_f64 > 0.0 {
+                                            vol_cache.update_spot(&ccy_str, spot_f64);
+                                        }
+                                    }
+                                }
+
+                                // Instrument name e.g. "BTC-27OCT23-30000-C"
+                                let parts: Vec<&str> = summary.name.split('-').collect();
+                                if parts.len() < 4 {
+                                    continue;
+                                }
+                                let asset = parts[0];
+                                let expiry_str = parts[1];
+                                let Ok(strike) = parts[2].parse::<f64>() else {
+                                    continue;
+                                };
+
+                                let Some(expiry_ms) = parse_option_expiry_ms(expiry_str) else {
+                                    continue;
+                                };
+                                let Some(tenor_years) = arbitrageur_risk::delta_guard::parse_expiry_tenor_years(expiry_str, now_ms) else {
+                                    continue;
+                                };
+
+                                // Forward price from underlying_price or estimated_delivery_price
+                                let forward_opt = summary
+                                    .underlying_price
+                                    .or(summary.estimated_delivery_price)
+                                    .and_then(|p| p.to_string().parse::<f64>().ok());
+
+                                let Some(forward_price) = forward_opt else {
+                                    continue;
+                                };
+
+                                // Mark IV is given in percent (e.g. 53.58 -> 0.5358)
+                                if let Some(iv_dec) = summary.mark_iv {
+                                    if let Ok(iv_raw) = iv_dec.to_string().parse::<f64>() {
+                                        let fractional_iv = iv_raw * 0.01;
+                                        if fractional_iv > 0.01 && fractional_iv < 5.0 && forward_price > 0.0 && strike > 0.0 {
+                                            vol_cache.ingest_quote(
+                                                asset,
+                                                expiry_str,
+                                                expiry_ms,
+                                                tenor_years,
+                                                forward_price,
+                                                strike,
+                                                fractional_iv,
+                                            );
+                                            ingested_count += 1;
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Prune expired slices
+                            vol_cache.prune_expired(now_ms);
+
+                            if ingested_count > 0 {
+                                tracing::trace!(
+                                    "volatility surface cache: updated {ccy_str} with {ingested_count} quotes (total slices: {}, total quotes: {})",
+                                    vol_cache.total_slices_count(),
+                                    vol_cache.total_quotes_count()
+                                );
+                            }
+                        })
+                        .await;
+                    }
+                    Err(e) => {
+                        tracing::debug!("deribit book_summaries poll failed for {ccy}: {e}");
+                    }
+                }
+            }
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -655,7 +1350,7 @@ mod tests {
             max_days_to_expiry: 60.0,
             poll_interval_secs: 30,
             max_open_positions: 2,
-            min_expected_yield_pct: 10.0,
+            min_expected_yield_pct: 30.0,
         }
     }
 
@@ -667,15 +1362,15 @@ mod tests {
         let (policy, mode) = OptionsBotExecutor::load_config(&st, "parity");
         assert_eq!(mode, BotMode::Auto);
         assert_eq!(policy.max_open_positions, 2);
-        assert_eq!(policy.min_expected_yield_pct, 10.0);
+        assert_eq!(policy.min_expected_yield_pct, 30.0);
 
         // Package substrategies arm independently and keep custom expected yield.
         let mut box_dto = armed("box_spread");
-        box_dto.min_expected_yield_pct = 15.5;
+        box_dto.min_expected_yield_pct = 35.5;
         OptionsBotExecutor::save_config(&st, &box_dto).expect("box bot arms");
         let (box_policy, mode) = OptionsBotExecutor::load_config(&st, "box_spread");
         assert_eq!(mode, BotMode::Auto);
-        assert_eq!(box_policy.min_expected_yield_pct, 15.5);
+        assert_eq!(box_policy.min_expected_yield_pct, 35.5);
 
         // Pending substrategies cannot arm.
         assert!(OptionsBotExecutor::save_config(&st, &armed("dividend")).is_err());
@@ -687,8 +1382,10 @@ mod tests {
         let (_, mode) = OptionsBotExecutor::load_config(&st, "parity");
         assert_eq!(mode, BotMode::Auto); // previous config untouched
 
-        // Bad expected yield (< 0, > 10000, NaN) fails validation.
+        // Bad expected yield (< 30.0, > 10000, NaN) fails validation.
         let mut bad_yield = armed("parity");
+        bad_yield.min_expected_yield_pct = 29.9;
+        assert!(OptionsBotExecutor::save_config(&st, &bad_yield).is_err());
         bad_yield.min_expected_yield_pct = -1.0;
         assert!(OptionsBotExecutor::save_config(&st, &bad_yield).is_err());
         bad_yield.min_expected_yield_pct = f64::NAN;
@@ -696,7 +1393,7 @@ mod tests {
         bad_yield.min_expected_yield_pct = 10_001.0;
         assert!(OptionsBotExecutor::save_config(&st, &bad_yield).is_err());
 
-        // Backward compatibility: JSON missing minExpectedYieldPct defaults to 10.0.
+        // Backward compatibility: JSON missing minExpectedYieldPct defaults to 30.0.
         let legacy_json = r#"{
             "substrategyId": "parity",
             "enabled": true,
@@ -710,9 +1407,9 @@ mod tests {
         }"#;
         let legacy_dto: OptionsBotConfigDto =
             serde_json::from_str(legacy_json).expect("deserialize legacy JSON");
-        assert_eq!(legacy_dto.min_expected_yield_pct, 10.0);
+        assert_eq!(legacy_dto.min_expected_yield_pct, 30.0);
         let (legacy_policy, _) = legacy_dto.to_policy().expect("convert legacy to policy");
-        assert_eq!(legacy_policy.min_expected_yield_pct, 10.0);
+        assert_eq!(legacy_policy.min_expected_yield_pct, 30.0);
     }
 
     #[test]
@@ -742,5 +1439,59 @@ mod tests {
         bot.tick_once(&st).await;
         let (_, mode) = OptionsBotExecutor::load_config(&st, "parity");
         assert_eq!(mode, BotMode::Off);
+    }
+
+    #[test]
+    fn test_parse_option_expiry_ms() {
+        // Deribit date formatted symbol: 25DEC26 08:00 UTC
+        let exp_call = parse_option_expiry_ms("BTC-25DEC26-125000-C");
+        assert!(exp_call.is_some());
+        assert_eq!(exp_call.unwrap(), 1798185600000);
+
+        // Opportunity ID with embedded millisecond timestamp
+        let exp_opp = parse_option_expiry_ms("opar-BTC-1766707200000-88000-deadbeef");
+        assert_eq!(exp_opp, Some(1766707200000));
+
+        // Non-option tickers fail cleanly
+        assert_eq!(parse_option_expiry_ms("BTC-PERPETUAL"), None);
+        assert_eq!(parse_option_expiry_ms("ETH-USDC"), None);
+    }
+
+    #[tokio::test]
+    async fn test_supervise_open_positions_safely_runs() {
+        let st = state();
+        OptionsBotExecutor::supervise_open_positions(&st, "parity", "options_parity").await;
+        OptionsBotExecutor::supervise_open_positions(&st, "box_spread", "options_box_spread").await;
+    }
+
+    #[tokio::test]
+    async fn test_volatility_surface_worker_spawns_and_exits() {
+        let st = Arc::new(state());
+        *st.is_stopped.write() = true;
+        let handle = spawn_volatility_surface_worker(st.clone());
+        let res = tokio::time::timeout(Duration::from_secs(1), handle).await;
+        assert!(
+            res.is_ok(),
+            "worker should terminate promptly when engine is stopped"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_volatility_surface_cache_greeks_integration() {
+        let st = Arc::new(state());
+        // Seed surface cache with live BTC quote
+        st.vol_surface.update_spot("BTC", 65000.0);
+        st.vol_surface.ingest_quote(
+            "BTC",
+            "25DEC26",
+            1798185600000,
+            1.25,
+            66000.0,
+            65000.0,
+            0.55,
+        );
+        assert_eq!(st.vol_surface.get_spot("BTC"), Some(65000.0));
+        assert!(st.vol_surface.total_quotes_count() > 0);
+        OptionsBotExecutor::supervise_open_positions(&st, "parity", "options_parity").await;
     }
 }

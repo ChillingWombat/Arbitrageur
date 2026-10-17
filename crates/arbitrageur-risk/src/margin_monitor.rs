@@ -1,5 +1,6 @@
 use arbitrageur_core::position::{AccountSnapshot, Position};
-use arbitrageur_core::types::{dec, Decimal};
+use arbitrageur_core::types::{dec, Decimal, VenueId};
+use serde::{Deserialize, Serialize};
 use tracing::{debug, warn};
 
 /// Health status of an account or position margin.
@@ -17,6 +18,19 @@ pub enum MarginHealthStatus {
     /// Never reported as Healthy: an unverifiable position is a risk the
     /// monitor cannot rule out.
     Unknown,
+}
+
+impl MarginHealthStatus {
+    pub fn severity(&self) -> u8 {
+        match self {
+            MarginHealthStatus::Breached => 5,
+            MarginHealthStatus::Critical => 4,
+            MarginHealthStatus::Warning => 3,
+            MarginHealthStatus::Unknown => 2,
+            MarginHealthStatus::Healthy => 1,
+            MarginHealthStatus::Empty => 0,
+        }
+    }
 }
 
 /// Margin monitor configuration.
@@ -118,6 +132,478 @@ impl MarginMonitor {
         }
         Some((account.equity - account.maintenance_margin) / account.equity)
     }
+
+    /// Evaluates segregated vulnerability across multiple venue accounts,
+    /// identifying isolated margin distress that global averaging masks.
+    pub fn evaluate_segregated_vulnerability(
+        &self,
+        accounts: &[AccountSnapshot],
+        volatile_collateral_haircut_pct: Option<Decimal>,
+    ) -> SegregatedVulnerabilityReport {
+        let haircut = volatile_collateral_haircut_pct.unwrap_or(dec!(0.20)); // default 20% haircut
+        let mut worst_status = MarginHealthStatus::Empty;
+        let mut most_vulnerable_venue = None;
+        let mut min_liquidation_distance: Option<Decimal> = None;
+        let mut vulnerable_venues = Vec::new();
+        let mut max_venue_usage_pct = dec!(0);
+        let mut sum_equity = dec!(0);
+        let mut sum_maintenance = dec!(0);
+        let mut stressed_equity_sum = dec!(0);
+
+        for acc in accounts {
+            sum_equity += acc.equity;
+            sum_maintenance += acc.maintenance_margin;
+
+            let status = self.evaluate_account(acc);
+            if status.severity() > worst_status.severity() {
+                worst_status = status;
+                most_vulnerable_venue = Some(acc.venue.clone());
+            }
+
+            let usage = acc.margin_usage_pct;
+            if usage > max_venue_usage_pct {
+                max_venue_usage_pct = usage;
+                if most_vulnerable_venue.is_none() || status.severity() >= worst_status.severity() {
+                    most_vulnerable_venue = Some(acc.venue.clone());
+                }
+            }
+
+            if let Some(distance) = Self::account_liquidation_distance(acc) {
+                if min_liquidation_distance.is_none_or(|d| distance < d) {
+                    min_liquidation_distance = Some(distance);
+                    most_vulnerable_venue = Some(acc.venue.clone());
+                }
+            }
+
+            if (status == MarginHealthStatus::Warning
+                || status == MarginHealthStatus::Critical
+                || status == MarginHealthStatus::Breached)
+                && !vulnerable_venues.contains(&acc.venue)
+            {
+                vulnerable_venues.push(acc.venue.clone());
+            }
+
+            // Calculate stressed equity
+            if acc.equity <= dec!(0) {
+                stressed_equity_sum += acc.equity;
+            } else if acc.balances.is_empty() {
+                stressed_equity_sum += acc.equity * (dec!(1) - haircut);
+            } else {
+                let mut stable_usd = dec!(0);
+                for b in &acc.balances {
+                    let cur = b.currency.to_uppercase();
+                    let is_stable = cur == "USDC"
+                        || cur == "USDT"
+                        || cur == "USD"
+                        || cur == "DAI"
+                        || cur == "USDE"
+                        || cur == "FDUSD"
+                        || cur == "PYUSD";
+                    if is_stable {
+                        stable_usd += b.total;
+                    }
+                }
+                let effective_stable_usd = stable_usd.min(acc.equity);
+                let volatile_usd = (acc.equity - effective_stable_usd).max(dec!(0));
+                let acc_stressed_eq = effective_stable_usd + volatile_usd * (dec!(1) - haircut);
+                stressed_equity_sum += acc_stressed_eq;
+            }
+        }
+
+        let global_aggregate_usage_pct = if sum_equity > dec!(0) {
+            (sum_maintenance / sum_equity) * dec!(100)
+        } else {
+            dec!(0)
+        };
+
+        let is_segregated_insolvency_masked = global_aggregate_usage_pct
+            < self.config.warning_margin_usage_pct
+            && (max_venue_usage_pct >= self.config.critical_margin_usage_pct
+                || worst_status == MarginHealthStatus::Critical
+                || worst_status == MarginHealthStatus::Breached);
+
+        SegregatedVulnerabilityReport {
+            worst_status,
+            most_vulnerable_venue,
+            min_liquidation_distance,
+            vulnerable_venues,
+            global_aggregate_usage_pct,
+            max_venue_usage_pct,
+            stressed_equity_sum,
+            is_segregated_insolvency_masked,
+        }
+    }
+
+    /// Evaluates joint tail copula liquidation stress across segregated accounts.
+    /// Incorporates heavy-tailed Expected Shortfall (ES_0.999) under GPD and
+    /// lower-tail dependence penalty (Clayton copula lambda_L) over transfer latency tau.
+    pub fn evaluate_tail_copula_safety(
+        &self,
+        accounts: &[AccountSnapshot],
+        copula_model: Option<&arbitrageur_math::tail_copula::CrossMarginTailEvtCopula>,
+        unwind_latency_sec: f64,
+    ) -> Vec<(
+        VenueId,
+        arbitrageur_math::tail_copula::AccountTailSafetyReport,
+    )> {
+        let default_model = arbitrageur_math::tail_copula::CrossMarginTailEvtCopula::default();
+        let model = copula_model.unwrap_or(&default_model);
+
+        accounts
+            .iter()
+            .map(|acc| {
+                let notional_sum: f64 = acc
+                    .positions
+                    .iter()
+                    .map(|p| {
+                        (p.quantity.abs() * p.entry_price)
+                            .to_string()
+                            .parse::<f64>()
+                            .unwrap_or(0.0)
+                    })
+                    .sum();
+                let mm = acc
+                    .maintenance_margin
+                    .to_string()
+                    .parse::<f64>()
+                    .unwrap_or(0.0);
+                let notional = if notional_sum > 0.0 {
+                    notional_sum
+                } else if mm > 0.0 {
+                    mm / 0.05
+                } else {
+                    0.0
+                };
+                let equity_usd = acc.equity.to_string().parse::<f64>().unwrap_or(0.0);
+                let report =
+                    model.evaluate_account_safety(equity_usd, notional, unwind_latency_sec);
+                (acc.venue.clone(), report)
+            })
+            .collect()
+    }
+
+    /// Returns true if any active segregated venue violates the dynamic tail copula buffer.
+    pub fn is_any_venue_tail_stressed(
+        &self,
+        accounts: &[AccountSnapshot],
+        copula_model: Option<&arbitrageur_math::tail_copula::CrossMarginTailEvtCopula>,
+        unwind_latency_sec: f64,
+    ) -> bool {
+        self.evaluate_tail_copula_safety(accounts, copula_model, unwind_latency_sec)
+            .into_iter()
+            .any(|(_, report)| !report.is_safe)
+    }
+
+    /// Evaluates multi-dimensional Brownian distance to insolvency across segregated accounts.
+    /// Maps AccountSnapshot instances into SegregatedVenueMarginState, applying asset covariance
+    /// if provided or default 60% annualized volatility over the operational transfer latency window.
+    pub fn evaluate_unified_distance_to_insolvency(
+        &self,
+        accounts: &[AccountSnapshot],
+        engine: Option<&arbitrageur_math::unified_margin_warning::UnifiedMarginWarningEngine>,
+        asset_covariance: Option<&[Vec<f64>]>,
+    ) -> arbitrageur_math::unified_margin_warning::UnifiedMarginWarningReport {
+        let default_engine =
+            arbitrageur_math::unified_margin_warning::UnifiedMarginWarningEngine::default();
+        let eng = engine.unwrap_or(&default_engine);
+
+        let states: Vec<arbitrageur_math::unified_margin_warning::SegregatedVenueMarginState> =
+            accounts
+                .iter()
+                .map(|acc| {
+                    let equity_usd = acc.equity.to_string().parse::<f64>().unwrap_or(0.0);
+                    let mm_usd = acc
+                        .maintenance_margin
+                        .to_string()
+                        .parse::<f64>()
+                        .unwrap_or(0.0);
+                    let notionals: Vec<f64> = acc
+                        .positions
+                        .iter()
+                        .map(|p| {
+                            let px = if p.entry_price > dec!(0) {
+                                p.entry_price
+                            } else {
+                                p.mark_price
+                            };
+                            (p.quantity.abs() * px)
+                                .to_string()
+                                .parse::<f64>()
+                                .unwrap_or(0.0)
+                        })
+                        .collect();
+                    arbitrageur_math::unified_margin_warning::SegregatedVenueMarginState::new(
+                        acc.venue.as_str(),
+                        equity_usd,
+                        mm_usd,
+                        notionals,
+                        0.0,
+                    )
+                })
+                .collect();
+
+        let empty_cov: [Vec<f64>; 0] = [];
+        let cov = asset_covariance.unwrap_or(&empty_cov);
+        eng.evaluate_portfolio(&states, cov)
+    }
+
+    /// Evaluates multi-venue signed directional stress matrix across segregated accounts.
+    ///
+    /// Unlike unsigned haircuts or portfolio-aggregated checks, this accurately models the
+    /// cross-venue liquidation cascade trap: where a delta-neutral position (e.g. Long Hyperliquid, Short Lighter)
+    /// causes catastrophic mark-to-market losses on the isolated long account under market drops,
+    /// triggering exchange liquidation and leaving the short leg nakedly exposed.
+    pub fn evaluate_signed_directional_stress_matrix(
+        &self,
+        accounts: &[AccountSnapshot],
+        shocks: Option<&[f64]>,
+    ) -> SignedDirectionalStressReport {
+        let rebalancer =
+            arbitrageur_math::collateral_barrier::CrossVenueCollateralBarrierRebalancer::default();
+        let default_shocks = [-0.35, -0.25, -0.15, 0.15, 0.25, 0.35];
+        let eval_shocks = shocks.unwrap_or(&default_shocks);
+
+        let mut margin_states = Vec::with_capacity(accounts.len());
+        let mut venue_map = std::collections::HashMap::new();
+
+        for acc in accounts {
+            let equity_usd = acc.equity.to_string().parse::<f64>().unwrap_or(0.0);
+            let mm_usd = acc
+                .maintenance_margin
+                .to_string()
+                .parse::<f64>()
+                .unwrap_or(0.0);
+
+            let mut notional_sum = 0.0;
+            let mut signed_delta_sum = 0.0;
+
+            for p in &acc.positions {
+                let qty: f64 = p.quantity.abs().to_string().parse().unwrap_or(0.0);
+                let px: f64 = p.entry_price.to_string().parse().unwrap_or(0.0);
+                let notional = qty * px;
+                notional_sum += notional;
+
+                let sign = match p.side {
+                    arbitrageur_core::types::Side::Buy => 1.0,
+                    arbitrageur_core::types::Side::Sell => -1.0,
+                };
+                signed_delta_sum += sign * notional;
+            }
+
+            let notional = if notional_sum > 0.0 {
+                notional_sum
+            } else if mm_usd > 0.0 {
+                mm_usd / 0.05
+            } else {
+                0.0
+            };
+
+            let mmr_rate = if notional > 0.0 {
+                (mm_usd / notional).max(0.01)
+            } else {
+                0.05
+            };
+
+            let state = arbitrageur_math::collateral_barrier::VenueAccountMarginState::new(
+                acc.venue.0.clone(),
+                equity_usd,
+                notional,
+                mmr_rate,
+                500.0,
+                signed_delta_sum,
+            );
+            margin_states.push(state);
+            venue_map.insert(acc.venue.0.clone(), acc.venue.clone());
+        }
+
+        let matrix = rebalancer.evaluate_stress_matrix(&margin_states, Some(eval_shocks));
+
+        let mut venue_stressed_barriers: std::collections::HashMap<VenueId, Vec<(f64, f64)>> =
+            std::collections::HashMap::new();
+        let mut worst_barrier = f64::INFINITY;
+        let mut worst_shock = 0.0;
+        let mut worst_venue = None;
+        let mut has_breach = false;
+
+        for (shock, venues) in matrix {
+            for (v_id, barrier) in venues {
+                if let Some(v) = venue_map.get(&v_id) {
+                    venue_stressed_barriers
+                        .entry(v.clone())
+                        .or_default()
+                        .push((shock, barrier));
+
+                    if barrier <= 0.0 {
+                        has_breach = true;
+                    }
+                    if barrier < worst_barrier {
+                        worst_barrier = barrier;
+                        worst_shock = shock;
+                        worst_venue = Some(v.clone());
+                    }
+                }
+            }
+        }
+
+        SignedDirectionalStressReport {
+            worst_shock_pct: worst_shock,
+            most_vulnerable_venue: worst_venue,
+            has_stress_liquidation_breach: has_breach,
+            venue_stressed_barriers,
+        }
+    }
+
+    /// Returns true if any active segregated venue violates the dynamic liquidation barrier under stress.
+    pub fn is_any_venue_liquidation_stressed(
+        &self,
+        accounts: &[AccountSnapshot],
+        shocks: Option<&[f64]>,
+    ) -> bool {
+        self.evaluate_signed_directional_stress_matrix(accounts, shocks)
+            .has_stress_liquidation_breach
+    }
+
+    /// Evaluates multi-Greek macro crash scenarios using `MultiGreekCoVaRStressEngine`.
+    pub fn evaluate_macro_stress_scenarios(
+        &self,
+        spot_price: f64,
+        portfolio_delta: f64,
+        portfolio_gamma: f64,
+        portfolio_vega: f64,
+        portfolio_theta: f64,
+        portfolio_rho: f64,
+    ) -> Vec<arbitrageur_math::portfolio_greeks_opt::MacroStressResult> {
+        arbitrageur_math::portfolio_greeks_opt::MultiGreekCoVaRStressEngine::run_standard_macro_suite(
+            spot_price,
+            portfolio_delta,
+            portfolio_gamma,
+            portfolio_vega,
+            portfolio_theta,
+            portfolio_rho,
+        )
+    }
+
+    /// Evaluates multi-venue portfolio margin headroom under the worst macro stress scenario.
+    /// If stressed margin utilization exceeds 85%, flags an automated rebalance advisory.
+    #[allow(clippy::too_many_arguments)]
+    pub fn check_macro_stress_margin_headroom(
+        &self,
+        accounts: &[AccountSnapshot],
+        spot_price: f64,
+        portfolio_delta: f64,
+        portfolio_gamma: f64,
+        portfolio_vega: f64,
+        portfolio_theta: f64,
+        portfolio_rho: f64,
+    ) -> MacroStressHeadroomReport {
+        let stress_results = self.evaluate_macro_stress_scenarios(
+            spot_price,
+            portfolio_delta,
+            portfolio_gamma,
+            portfolio_vega,
+            portfolio_theta,
+            portfolio_rho,
+        );
+
+        let worst_pnl = stress_results
+            .iter()
+            .map(|r| r.total_stressed_pnl)
+            .fold(0.0_f64, |acc, x| acc.min(x));
+
+        let worst_scenario = stress_results
+            .iter()
+            .min_by(|a, b| {
+                a.total_stressed_pnl
+                    .partial_cmp(&b.total_stressed_pnl)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|r| r.scenario_name.clone())
+            .unwrap_or_else(|| "Unknown".to_string());
+
+        let total_equity: f64 = accounts
+            .iter()
+            .map(|a| a.equity.to_string().parse::<f64>().unwrap_or(0.0))
+            .sum();
+
+        let total_mmr: f64 = accounts
+            .iter()
+            .map(|a| {
+                a.maintenance_margin
+                    .to_string()
+                    .parse::<f64>()
+                    .unwrap_or(0.0)
+            })
+            .sum();
+
+        let stressed_equity = (total_equity + worst_pnl).max(0.0);
+        let stressed_utilization_pct = if stressed_equity > 0.0 {
+            (total_mmr / stressed_equity) * 100.0
+        } else if total_mmr > 0.0 {
+            100.0
+        } else {
+            0.0
+        };
+
+        let is_rebalance_advisory_required = stressed_utilization_pct >= 85.0;
+
+        MacroStressHeadroomReport {
+            worst_scenario_name: worst_scenario,
+            worst_scenario_pnl_usd: worst_pnl,
+            baseline_equity_usd: total_equity,
+            stressed_equity_usd: stressed_equity,
+            total_maintenance_margin_usd: total_mmr,
+            stressed_margin_utilization_pct: stressed_utilization_pct,
+            is_rebalance_advisory_required,
+            scenario_results: stress_results,
+        }
+    }
+}
+
+/// Portfolio margin headroom assessment under macro stress testing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MacroStressHeadroomReport {
+    pub worst_scenario_name: String,
+    pub worst_scenario_pnl_usd: f64,
+    pub baseline_equity_usd: f64,
+    pub stressed_equity_usd: f64,
+    pub total_maintenance_margin_usd: f64,
+    pub stressed_margin_utilization_pct: f64,
+    pub is_rebalance_advisory_required: bool,
+    pub scenario_results: Vec<arbitrageur_math::portfolio_greeks_opt::MacroStressResult>,
+}
+
+/// Result of multi-venue signed directional stress testing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SignedDirectionalStressReport {
+    /// The market shock percentage that caused the worst liquidation barrier deficit
+    pub worst_shock_pct: f64,
+    /// The venue that is most vulnerable under the worst shock
+    pub most_vulnerable_venue: Option<VenueId>,
+    /// Whether any venue breached its continuous liquidation barrier (B_liq <= 0) under any evaluated shock
+    pub has_stress_liquidation_breach: bool,
+    /// Stressed liquidation barriers per venue across evaluated shocks: (shock_pct, barrier_usd)
+    pub venue_stressed_barriers: std::collections::HashMap<VenueId, Vec<(f64, f64)>>,
+}
+
+/// Segregated venue vulnerability assessment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SegregatedVulnerabilityReport {
+    /// Overall segregated portfolio health (worst across all segregated venues).
+    pub worst_status: MarginHealthStatus,
+    /// Identifier of the most vulnerable venue (lowest liquidation distance or highest usage).
+    pub most_vulnerable_venue: Option<VenueId>,
+    /// Minimum liquidation distance observed across all segregated venues.
+    pub min_liquidation_distance: Option<Decimal>,
+    /// Venues that are in Warning, Critical, or Breached state.
+    pub vulnerable_venues: Vec<VenueId>,
+    /// Global aggregate margin usage percentage: sum(maintenance) / sum(equity) * 100.
+    pub global_aggregate_usage_pct: Decimal,
+    /// Maximum margin usage percentage observed in any single venue.
+    pub max_venue_usage_pct: Decimal,
+    /// Stressed equity sum after applying collateral haircuts.
+    pub stressed_equity_sum: Decimal,
+    /// Whether any segregated venue is critically vulnerable even if global aggregate usage appears safe.
+    pub is_segregated_insolvency_masked: bool,
 }
 
 #[cfg(test)]
@@ -218,5 +704,306 @@ mod tests {
         let mut pos = pos;
         pos.liquidation_price = Some(dec!(30000));
         assert_eq!(m.evaluate_position(&pos), MarginHealthStatus::Healthy);
+    }
+
+    #[test]
+    fn test_segregated_vulnerability_detects_masked_insolvency() {
+        let monitor = MarginMonitor::new(MarginMonitorConfig::default());
+
+        // Account 1 (Hyperliquid): $90k equity, $9k maintenance -> 10% usage (Safe)
+        let mut acc1 = empty_account();
+        acc1.venue = VenueId("hyperliquid".into());
+        acc1.equity = dec!(90000);
+        acc1.maintenance_margin = dec!(9000);
+        acc1.margin_usage_pct = dec!(10.0);
+
+        // Account 2 (Lighter): $10k equity, $9.5k maintenance -> 95% usage (Critical)
+        let mut acc2 = empty_account();
+        acc2.venue = VenueId("lighter".into());
+        acc2.equity = dec!(10000);
+        acc2.maintenance_margin = dec!(9500);
+        acc2.margin_usage_pct = dec!(95.0);
+
+        let report = monitor.evaluate_segregated_vulnerability(&[acc1, acc2], None);
+
+        // Global usage is (9000 + 9500) / (90000 + 10000) = 18.5%
+        assert_eq!(report.global_aggregate_usage_pct, dec!(18.5));
+        assert_eq!(report.max_venue_usage_pct, dec!(95.0));
+        assert_eq!(report.worst_status, MarginHealthStatus::Critical);
+        assert_eq!(
+            report.most_vulnerable_venue,
+            Some(VenueId("lighter".into()))
+        );
+        assert!(report.is_segregated_insolvency_masked);
+        assert_eq!(report.vulnerable_venues, vec![VenueId("lighter".into())]);
+    }
+
+    #[test]
+    fn test_segregated_vulnerability_haircut_reduces_stressed_equity() {
+        use arbitrageur_core::position::Balance;
+        let monitor = MarginMonitor::new(MarginMonitorConfig::default());
+
+        let mut acc = empty_account();
+        acc.equity = dec!(20000);
+        acc.balances = vec![
+            Balance {
+                venue: VenueId("hyperliquid".into()),
+                currency: "USDC".into(),
+                total: dec!(10000),
+                free: dec!(10000),
+                locked: dec!(0),
+            },
+            Balance {
+                venue: VenueId("hyperliquid".into()),
+                currency: "ETH".into(),
+                total: dec!(10000),
+                free: dec!(10000),
+                locked: dec!(0),
+            },
+        ];
+
+        // 20% haircut on volatile ETH ($10k -> $8k), 0% on USDC ($10k)
+        let report = monitor.evaluate_segregated_vulnerability(&[acc], Some(dec!(0.20)));
+        assert_eq!(report.stressed_equity_sum, dec!(18000));
+    }
+
+    #[test]
+    fn test_segregated_vulnerability_with_raw_token_units() {
+        use arbitrageur_core::position::Balance;
+        let monitor = MarginMonitor::new(MarginMonitorConfig::default());
+
+        let mut acc = empty_account();
+        // $50,000 equity, held as 5,000 USDC and 0.75 BTC (raw token count, not USD)
+        acc.equity = dec!(50000);
+        acc.balances = vec![
+            Balance {
+                venue: VenueId("binance".into()),
+                currency: "USDT".into(),
+                total: dec!(5000),
+                free: dec!(5000),
+                locked: dec!(0),
+            },
+            Balance {
+                venue: VenueId("binance".into()),
+                currency: "BTC".into(),
+                total: dec!(0.75), // Raw coin amount, not USD
+                free: dec!(0.75),
+                locked: dec!(0),
+            },
+        ];
+
+        // 20% haircut on the volatile collateral ($45,000 * 0.80 = $36,000) + $5,000 stable = $41,000
+        let report = monitor.evaluate_segregated_vulnerability(&[acc], Some(dec!(0.20)));
+        assert_eq!(report.stressed_equity_sum, dec!(41000));
+    }
+
+    #[test]
+    fn test_evaluate_tail_copula_safety() {
+        let monitor = MarginMonitor::new(MarginMonitorConfig::default());
+
+        // Safe account: $2,500 equity on $10,000 notional (25% equity vs 5% MMR)
+        let mut safe_acc = empty_account();
+        safe_acc.venue = VenueId("hyperliquid".into());
+        safe_acc.equity = dec!(2500);
+        safe_acc.maintenance_margin = dec!(500);
+        safe_acc.positions = vec![Position {
+            venue: VenueId("hyperliquid".into()),
+            symbol: "ETH-PERP".into(),
+            side: arbitrageur_core::types::Side::Buy,
+            quantity: dec!(5.0),
+            entry_price: dec!(2000.0),
+            mark_price: dec!(2000.0),
+            liquidation_price: Some(dec!(1600.0)),
+            leverage: dec!(10),
+            unrealized_pnl: dec!(0),
+            realized_pnl: dec!(0),
+            initial_margin: dec!(1000),
+            maintenance_margin: dec!(500),
+            updated_at: chrono::Utc::now(),
+        }];
+
+        // Stressed account: $550 equity on $10,000 notional (5.5% equity vs 5% MMR -> 0.5% distance)
+        let mut unsafe_acc = empty_account();
+        unsafe_acc.venue = VenueId("lighter".into());
+        unsafe_acc.equity = dec!(550);
+        unsafe_acc.maintenance_margin = dec!(500);
+        unsafe_acc.positions = vec![Position {
+            venue: VenueId("lighter".into()),
+            symbol: "ETH-PERP".into(),
+            side: arbitrageur_core::types::Side::Sell,
+            quantity: dec!(5.0),
+            entry_price: dec!(2000.0),
+            mark_price: dec!(2000.0),
+            liquidation_price: Some(dec!(2050.0)),
+            leverage: dec!(20),
+            unrealized_pnl: dec!(0),
+            realized_pnl: dec!(0),
+            initial_margin: dec!(500),
+            maintenance_margin: dec!(500),
+            updated_at: chrono::Utc::now(),
+        }];
+
+        let reports = monitor.evaluate_tail_copula_safety(&[safe_acc, unsafe_acc], None, 300.0);
+        assert_eq!(reports.len(), 2);
+        assert!(reports[0].1.is_safe, "Hyperliquid should be safe");
+        assert!(
+            !reports[1].1.is_safe,
+            "Lighter should fail EVT copula buffer"
+        );
+        assert!(reports[1].1.warning_message.is_some());
+    }
+
+    #[test]
+    fn test_evaluate_unified_distance_to_insolvency() {
+        use arbitrageur_math::unified_margin_warning::MarginDefenseStage;
+        let monitor = MarginMonitor::new(MarginMonitorConfig::default());
+
+        // Safe account: $5,000 equity, $500 maintenance margin, $5,000 notional (10x leverage)
+        let mut safe_acc = empty_account();
+        safe_acc.venue = VenueId("hyperliquid".into());
+        safe_acc.equity = dec!(5000);
+        safe_acc.maintenance_margin = dec!(500);
+        safe_acc.positions = vec![Position {
+            venue: VenueId("hyperliquid".into()),
+            symbol: "ETH-PERP".into(),
+            side: arbitrageur_core::types::Side::Buy,
+            quantity: dec!(2.5),
+            entry_price: dec!(2000.0),
+            mark_price: dec!(2000.0),
+            liquidation_price: Some(dec!(1000.0)),
+            leverage: dec!(10),
+            unrealized_pnl: dec!(0),
+            realized_pnl: dec!(0),
+            initial_margin: dec!(500),
+            maintenance_margin: dec!(500),
+            updated_at: chrono::Utc::now(),
+        }];
+
+        // Stressed account: $520 equity, $500 maintenance margin, $10,000 notional ($20 buffer)
+        let mut stressed_acc = empty_account();
+        stressed_acc.venue = VenueId("lighter".into());
+        stressed_acc.equity = dec!(520);
+        stressed_acc.maintenance_margin = dec!(500);
+        stressed_acc.positions = vec![Position {
+            venue: VenueId("lighter".into()),
+            symbol: "ETH-PERP".into(),
+            side: arbitrageur_core::types::Side::Sell,
+            quantity: dec!(5.0),
+            entry_price: dec!(2000.0),
+            mark_price: dec!(2000.0),
+            liquidation_price: Some(dec!(2020.0)),
+            leverage: dec!(20),
+            unrealized_pnl: dec!(0),
+            realized_pnl: dec!(0),
+            initial_margin: dec!(500),
+            maintenance_margin: dec!(500),
+            updated_at: chrono::Utc::now(),
+        }];
+
+        let report =
+            monitor.evaluate_unified_distance_to_insolvency(&[safe_acc, stressed_acc], None, None);
+
+        assert!(
+            !report.is_portfolio_safe,
+            "Portfolio should not be safe with stressed Lighter"
+        );
+        assert_eq!(report.worst_venue, "lighter");
+        assert!(
+            report.overall_stage == MarginDefenseStage::RebalanceRequired
+                || report.overall_stage == MarginDefenseStage::EmergencyDeleveraging
+        );
+        assert!(report.total_top_up_needed_usd > 0.0);
+    }
+
+    #[test]
+    fn test_signed_directional_stress_matrix_delta_neutral_cascade() {
+        let monitor = MarginMonitor::new(MarginMonitorConfig::default());
+
+        // Account A (Hyperliquid): Long 5.0 BTC at $65,000 = $325,000 notional. Equity = $35,000. MMR = $16,250.
+        let mut long_acc = empty_account();
+        long_acc.venue = VenueId("hyperliquid".into());
+        long_acc.equity = dec!(35000);
+        long_acc.maintenance_margin = dec!(16250);
+        long_acc.positions = vec![Position {
+            venue: VenueId("hyperliquid".into()),
+            symbol: "BTC-PERP".into(),
+            side: arbitrageur_core::types::Side::Buy,
+            quantity: dec!(5.0),
+            entry_price: dec!(65000.0),
+            mark_price: dec!(65000.0),
+            liquidation_price: Some(dec!(61500.0)),
+            leverage: dec!(10),
+            unrealized_pnl: dec!(0),
+            realized_pnl: dec!(0),
+            initial_margin: dec!(32500),
+            maintenance_margin: dec!(16250),
+            updated_at: chrono::Utc::now(),
+        }];
+
+        // Account B (Lighter): Short 5.0 BTC at $65,000 = $325,000 notional. Equity = $35,000. MMR = $16,250.
+        let mut short_acc = empty_account();
+        short_acc.venue = VenueId("lighter".into());
+        short_acc.equity = dec!(35000);
+        short_acc.maintenance_margin = dec!(16250);
+        short_acc.positions = vec![Position {
+            venue: VenueId("lighter".into()),
+            symbol: "BTC-PERP".into(),
+            side: arbitrageur_core::types::Side::Sell,
+            quantity: dec!(5.0),
+            entry_price: dec!(65000.0),
+            mark_price: dec!(65000.0),
+            liquidation_price: Some(dec!(68500.0)),
+            leverage: dec!(10),
+            unrealized_pnl: dec!(0),
+            realized_pnl: dec!(0),
+            initial_margin: dec!(32500),
+            maintenance_margin: dec!(16250),
+            updated_at: chrono::Utc::now(),
+        }];
+
+        let report =
+            monitor.evaluate_signed_directional_stress_matrix(&[long_acc, short_acc], None);
+
+        // Portfolio is delta neutral in aggregate, but isolated segregated long leg breaches MMR on crash!
+        assert!(
+            report.has_stress_liquidation_breach,
+            "Segregated long account must breach liquidation barrier under crash shock"
+        );
+        assert_eq!(
+            report.most_vulnerable_venue,
+            Some(VenueId("hyperliquid".into())),
+            "Hyperliquid long account must be identified as most vulnerable"
+        );
+        assert!(
+            report.worst_shock_pct < 0.0,
+            "Worst shock should be negative crash"
+        );
+    }
+
+    #[test]
+    fn test_macro_stress_margin_headroom_evaluation() {
+        let monitor = MarginMonitor::new(MarginMonitorConfig::default());
+        let mut acc = empty_account();
+        acc.equity = dec!(20000);
+        acc.maintenance_margin = dec!(10000);
+
+        let report = monitor.check_macro_stress_margin_headroom(
+            &[acc],
+            60000.0, // spot price
+            1.0,     // long 1.0 delta => -25% drop causes -$15,000 loss
+            0.0,     // gamma
+            50.0,    // vega
+            -10.0,   // theta
+            0.0,     // rho
+        );
+
+        assert_eq!(report.baseline_equity_usd, 20000.0);
+        assert!(report.worst_scenario_pnl_usd < -10000.0);
+        assert!(report.stressed_equity_usd < 10000.0);
+        assert!(report.stressed_margin_utilization_pct > 85.0);
+        assert!(
+            report.is_rebalance_advisory_required,
+            "Rebalance advisory must trigger when stressed utilization exceeds 85%"
+        );
     }
 }

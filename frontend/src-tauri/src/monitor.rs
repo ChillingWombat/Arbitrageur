@@ -33,7 +33,7 @@ use arbitrageur_math::pair_monitor::{
 use arbitrageur_math::session::{
     apply_entry_adjust_bps, depth_mult, in_funding_mask, inverse_vol_mult, is_equity_rails,
     is_weekend, session_allow, session_of, us_cash_open, winsorized_median, FastVolEwma, SessionId,
-    FAST_VOL_HALT_MULT, SPREAD_STANDDOWN_MULT,
+    FAST_VOL_HALT_MULT, SPREAD_STANDDOWN_FLOOR_BPS, SPREAD_STANDDOWN_MULT,
 };
 use chrono::Utc;
 use parking_lot::Mutex;
@@ -543,6 +543,25 @@ fn funding_per_hour(rate: &str, interval_hours: u32) -> Option<f64> {
     per_hour.is_finite().then_some(per_hour)
 }
 
+/// Helper to identify spot, PopDEX AMM, EVM AMM, Coinbase, Boros, prediction markets, and equity assets which carry no funding obligations.
+pub(crate) fn is_spot_or_equity_leg(venue: &str, symbol: &str) -> bool {
+    let raw = venue.trim().to_lowercase();
+    let v_lower = raw
+        .strip_prefix("live_")
+        .or_else(|| raw.strip_prefix("tn_"))
+        .unwrap_or(&raw);
+    is_equity_rails(v_lower)
+        || v_lower == "popdex"
+        || v_lower == "coinbase"
+        || v_lower == "boros"
+        || v_lower == "polymarket"
+        || v_lower == "kalshi"
+        || arbitrageur_exchanges::evm_amm::ADMITTED_EVM_AMM_VENUE_IDS.contains(&v_lower)
+        || symbol.to_uppercase().ends_with("-SPOT")
+        || symbol.to_uppercase().ends_with("_SPOT")
+        || arbitrageur_core::symbol::canonical_base(symbol).ends_with("-SPOT")
+}
+
 /// Fresh per-hour funding rate for one signal leg, or `None` when the
 /// venue owes a rate and hasn't reported within 5 minutes. Spot legs have
 /// no funding market by design — they contribute 0 rather than blocking
@@ -554,7 +573,7 @@ fn funding_leg_rate_hourly(
     now: Instant,
     merge_usd: bool,
 ) -> Option<f64> {
-    if symbol.to_uppercase().ends_with("-SPOT") {
+    if is_spot_or_equity_leg(venue, symbol) {
         return Some(0.0);
     }
     // Funding is per-instrument — under `separate`, BTC-USDT and BTC-USDC
@@ -642,6 +661,230 @@ fn funding_basis_exit_reason(
     (spread_pct < threshold_pct).then(|| {
         format!("perp/spot spread {spread_pct:.3}% below the {threshold_pct:.3}% exit floor (spot mid {spot_mid}, perp mid {perp_mid})")
     })
+}
+
+/// Evaluates whether an open funding carry or basis trade has achieved >= 80% basis compression
+/// early in the epoch and should be harvested early to recycle capital.
+fn fast_basis_harvest_exit_reason(
+    state: &AppEngineState,
+    sig: &crate::state_store::SignalExecution,
+    long_leg: &crate::state_store::SignalLeg,
+    short_leg: &crate::state_store::SignalLeg,
+    ema: &HashMap<(String, String), (f64, Instant)>,
+) -> Option<String> {
+    let long_px = long_leg.fill_price.or(long_leg.intended_price)?;
+    let short_px = short_leg.fill_price.or(short_leg.intended_price)?;
+    if short_px <= long_px || long_px <= 0.0 {
+        return None;
+    }
+    let entry_basis_bps = (short_px - long_px) / ((short_px + long_px) / 2.0) * 10_000.0;
+    if entry_basis_bps < 5.0 {
+        return None;
+    }
+
+    let book = |venue: &str, symbol: &str| {
+        state
+            .market_data_hub
+            .get_valid_orderbook(
+                &arbitrageur_core::types::VenueId::new(venue),
+                symbol,
+                Some(Duration::from_secs(120)),
+            )
+            .and_then(|b| b.mid_price())
+            .and_then(dec_opt_f64)
+            .filter(|m| m.is_finite() && *m > 0.0)
+    };
+    let (Some(long_mid), Some(short_mid)) = (
+        book(&long_leg.venue, &long_leg.symbol),
+        book(&short_leg.venue, &short_leg.symbol),
+    ) else {
+        return None;
+    };
+
+    let current_basis_bps = (short_mid - long_mid) / ((short_mid + long_mid) / 2.0) * 10_000.0;
+    let compression_ratio = (entry_basis_bps - current_basis_bps) / entry_basis_bps;
+
+    let sig_age_secs = chrono::DateTime::parse_from_rfc3339(&sig.created_at)
+        .map(|t| {
+            (chrono::Utc::now() - t.with_timezone(&chrono::Utc))
+                .num_seconds()
+                .max(0)
+        })
+        .unwrap_or(0);
+    let elapsed_hours = sig_age_secs as f64 / 3600.0;
+    // Dynamic epoch duration: 1.0h for Hyperliquid (hourly settlement), 8.0h for standard CEXs
+    let total_epoch_hours = if long_leg.venue.eq_ignore_ascii_case("hyperliquid")
+        || short_leg.venue.eq_ignore_ascii_case("hyperliquid")
+    {
+        1.0
+    } else {
+        8.0
+    };
+
+    let qty = long_leg.filled_qty.max(long_leg.intended_qty);
+    let notional = qty * ((long_px + short_px) / 2.0);
+    // Taker crossing fee across 4 legs (entry buy + entry sell + exit sell + exit buy):
+    // Standard taker fee ~5 bps per execution = 20 bps total round-trip.
+    let round_trip_fee_usd = notional * 0.0005 * 4.0;
+    let is_spot_leg = long_leg.venue.to_ascii_lowercase().contains("spot")
+        || short_leg.venue.to_ascii_lowercase().contains("spot");
+    let borrow_cost_usd = if is_spot_leg {
+        notional * (0.08 / 8760.0) * elapsed_hours
+    } else {
+        0.0
+    };
+    let total_friction_usd = round_trip_fee_usd + borrow_cost_usd;
+    let unrealized_basis_pnl_usd = notional * ((entry_basis_bps - current_basis_bps) / 10_000.0);
+
+    let now_instant = Instant::now();
+    let merge_usd = state.usd_merge_quotes();
+    let rate_long_hourly = funding_leg_rate_hourly(
+        ema,
+        &long_leg.venue,
+        &long_leg.symbol,
+        now_instant,
+        merge_usd,
+    )
+    .unwrap_or(0.0);
+    let rate_short_hourly = funding_leg_rate_hourly(
+        ema,
+        &short_leg.venue,
+        &short_leg.symbol,
+        now_instant,
+        merge_usd,
+    )
+    .unwrap_or(0.0);
+
+    let epoch_hours_a = if long_leg.venue.eq_ignore_ascii_case("hyperliquid") {
+        1.0
+    } else {
+        8.0
+    };
+    let epoch_hours_b = if short_leg.venue.eq_ignore_ascii_case("hyperliquid") {
+        1.0
+    } else {
+        8.0
+    };
+
+    let (rate_long_per_epoch, rate_short_per_epoch) =
+        if rate_long_hourly.abs() > 1e-9 || rate_short_hourly.abs() > 1e-9 {
+            (
+                rate_long_hourly * epoch_hours_a,
+                rate_short_hourly * epoch_hours_b,
+            )
+        } else {
+            (0.0001, 0.0001) // Conservative fallback (1 bps) when EMA is unpopulated
+        };
+
+    // Actual funding cash flow only accrues upon passing discrete settlement epochs.
+    // Decouple accrual per leg to prevent unit mismatch between 1h (Hyperliquid) and 8h (Binance/OKX/etc.) epochs.
+    let completed_epochs_a = (elapsed_hours / epoch_hours_a).floor();
+    let completed_epochs_b = (elapsed_hours / epoch_hours_b).floor();
+    let accrued_funding_a = completed_epochs_a * (-notional * rate_long_per_epoch);
+    let accrued_funding_b = completed_epochs_b * (notional * rate_short_per_epoch);
+    let accrued_funding_usd = accrued_funding_a + accrued_funding_b;
+
+    let net_pnl_usd = unrealized_basis_pnl_usd + accrued_funding_usd - total_friction_usd;
+
+    let evaluator = arbitrageur_math::fast_basis_harvest::FastBasisHarvestEvaluator::default();
+
+    // Leung-Li (2015) optimal double stopping boundary check:
+    let friction_bps = (total_friction_usd / notional.max(1.0)) * 10_000.0;
+    let net_funding_annual = (rate_short_hourly - rate_long_hourly) * 8760.0;
+    let borrow_annual = if is_spot_leg { 0.08 } else { 0.0 };
+    let leung_li_decision = evaluator.evaluate_leung_li_exit(
+        current_basis_bps,
+        0.0,
+        15.0,
+        25.0,
+        borrow_annual,
+        net_funding_annual,
+        friction_bps,
+        None,
+    );
+
+    if let arbitrageur_math::fast_basis_harvest::BasisExitDecision::StopLossRoll {
+        exit_spread_bps,
+        hurdle_b_l_bps,
+    } = leung_li_decision
+    {
+        return Some(format!(
+            "leung-li basis stop loss: basis widened to {exit_spread_bps:.1} bps below barrier {hurdle_b_l_bps:.1} bps, rolling to prevent runaway divergence"
+        ));
+    }
+
+    if !evaluator.should_harvest_early(
+        entry_basis_bps,
+        current_basis_bps,
+        elapsed_hours,
+        total_epoch_hours,
+        accrued_funding_usd,
+        unrealized_basis_pnl_usd,
+        total_friction_usd,
+    ) {
+        return None;
+    }
+
+    // Evaluate asymmetric epoch countdown: if a positive settlement is due in <= 5 minutes,
+    // delay exit to collect the cash settlement before harvesting.
+    let now_ts = chrono::Utc::now().timestamp();
+    let s_1h = (3600 - (now_ts % 3600)) as u64;
+    let s_8h = ((8 * 3600) - (now_ts % (8 * 3600))) as u64;
+    let next_settlement_secs_a = if long_leg.venue.eq_ignore_ascii_case("hyperliquid") {
+        s_1h
+    } else {
+        s_8h
+    };
+    let next_settlement_secs_b = if short_leg.venue.eq_ignore_ascii_case("hyperliquid") {
+        s_1h
+    } else {
+        s_8h
+    };
+
+    let upcoming_payment_usd_a = -(notional * rate_long_per_epoch); // long leg pays when rate is positive
+    let upcoming_payment_usd_b = notional * rate_short_per_epoch; // short leg receives when rate is positive
+
+    use arbitrageur_math::fast_basis_harvest::AsymmetricHarvestDecision;
+    match evaluator.evaluate_asymmetric_funding_harvest(
+        entry_basis_bps,
+        current_basis_bps,
+        next_settlement_secs_a,
+        next_settlement_secs_b,
+        upcoming_payment_usd_a,
+        upcoming_payment_usd_b,
+        net_pnl_usd,
+    ) {
+        AsymmetricHarvestDecision::DelayForSettlement {
+            delay_seconds,
+            expected_payment_usd,
+        } => {
+            tracing::info!(
+                "fast basis harvest delayed for funding settlement in {delay_seconds}s (+${expected_payment_usd:.2} USD incoming)"
+            );
+            None
+        }
+        AsymmetricHarvestDecision::HarvestImmediately => {
+            let dyn_hurdle =
+                evaluator.dynamic_compression_boundary(elapsed_hours / total_epoch_hours);
+            Some(format!(
+                "fast basis harvest: basis compressed {:.1}% (hurdle {:.1}%, {entry_basis_bps:.1} -> {current_basis_bps:.1} bps) in {elapsed_hours:.2}h, net gain ~${:.2} USD",
+                compression_ratio * 100.0,
+                dyn_hurdle * 100.0,
+                net_pnl_usd
+            ))
+        }
+        AsymmetricHarvestDecision::AccelerateExitBeforeFee { seconds_remaining } => {
+            let dyn_hurdle =
+                evaluator.dynamic_compression_boundary(elapsed_hours / total_epoch_hours);
+            Some(format!(
+                "fast basis harvest (accelerated before funding fee in {seconds_remaining}s): basis compressed {:.1}% (hurdle {:.1}%, {entry_basis_bps:.1} -> {current_basis_bps:.1} bps) in {elapsed_hours:.2}h, net gain ~${:.2} USD",
+                compression_ratio * 100.0,
+                dyn_hurdle * 100.0,
+                net_pnl_usd
+            ))
+        }
+        AsymmetricHarvestDecision::Hold => None,
+    }
 }
 
 /// Resolved session inputs for one ordered pair at one timestamp.
@@ -741,7 +984,8 @@ fn session_standdown(
         return Some("equity market closed (cash session)".into());
     }
     if let (Some(dev), Some(med)) = (dev_abs_bps, session_med_bps) {
-        if dev.is_finite() && med.is_finite() && med > 0.0 && dev > med * SPREAD_STANDDOWN_MULT {
+        let threshold = (med * SPREAD_STANDDOWN_MULT).max(SPREAD_STANDDOWN_FLOOR_BPS);
+        if dev.is_finite() && med.is_finite() && med > 0.0 && dev > threshold {
             return Some("spread exceeds 3x session median".into());
         }
     }
@@ -773,6 +1017,8 @@ fn vol_halt_next(breaches: u32, ratio_above_halt: bool) -> (u32, f64, bool) {
 /// R² floor for the OU fallback — mirrors the matrix-baseline gate
 /// (`OU_MIN_R2`) so the scan never applies a second, weaker standard.
 pub(crate) const PAIR_OU_MIN_R2: f64 = 0.6;
+/// Soft R² threshold for the OU fallback below which Bayesian prior shrinkage is applied.
+pub(crate) const PAIR_OU_SOFT_MIN_R2: f64 = 0.20;
 /// Stop-band multiplier for episode segmentation, shared by both paths.
 pub(crate) const PAIR_STOP_MULT: f64 = 3.0;
 /// Series alignment gap (ms) shared by both paths.
@@ -885,7 +1131,28 @@ fn ou_fallback_p_win(
     if !dt.is_finite() || dt <= 0.0 {
         return None;
     }
-    let ou = OuModelParams::fit(vals, dt).filter(|p| {
+    // Try continuous-time Profile Likelihood MLE over exact arrival timestamps
+    let mut ts = Vec::with_capacity(series.len());
+    let mut vs = Vec::with_capacity(series.len());
+    for o in series {
+        let t = o.ts_ms as f64 / 1000.0;
+        if ts.last().is_none_or(|&last| t > last) {
+            ts.push(t);
+            vs.push(o.spread_bps);
+        }
+    }
+    let ou = (if ts.len() >= 15 {
+        OuModelParams::fit_irregular(&ts, &vs)
+    } else {
+        None
+    })
+    .or_else(|| {
+        arbitrageur_math::debiased_ou::fit_ou_debiased(vals, dt)
+            .map(|r| r.params)
+            .or_else(|| OuModelParams::fit_with_noise(vals, dt).map(|(p, _)| p))
+            .or_else(|| OuModelParams::fit(vals, dt))
+    })
+    .filter(|p| {
         p.half_life.is_finite()
             && p.half_life > 0.0
             && p.theta.is_finite()
@@ -893,7 +1160,7 @@ fn ou_fallback_p_win(
             && p.sigma.is_finite()
             && p.sigma > 0.0
             && p.r_squared
-                .is_some_and(|r| r.is_finite() && r >= PAIR_OU_MIN_R2)
+                .is_some_and(|r| r.is_finite() && r >= PAIR_OU_SOFT_MIN_R2)
     })?;
     let horizon = ou.half_life;
     if !horizon.is_finite() || horizon <= 0.0 {
@@ -916,11 +1183,19 @@ fn ou_fallback_p_win(
     if !upper.is_finite() || !lower.is_finite() {
         return None;
     }
-    let p = normal_cdf(upper) - normal_cdf(lower);
-    if !p.is_finite() {
+    let p_raw = normal_cdf(upper) - normal_cdf(lower);
+    if !p_raw.is_finite() {
         return None;
     }
-    Some(p.clamp(0.0, 1.0))
+    let r2 = ou.r_squared.unwrap_or(0.0);
+    let p_shrunk = if r2 >= PAIR_OU_MIN_R2 {
+        p_raw
+    } else {
+        let weight =
+            ((r2 - PAIR_OU_SOFT_MIN_R2) / (PAIR_OU_MIN_R2 - PAIR_OU_SOFT_MIN_R2)).clamp(0.0, 1.0);
+        weight * p_raw + (1.0 - weight) * 0.50
+    };
+    Some(p_shrunk.clamp(0.0, 1.0))
 }
 
 /// Empirical win probability for one ordered pair at one current spread —
@@ -2900,7 +3175,17 @@ impl SpreadMonitorEngine {
     async fn supervise_funding_exits(&self, state: &AppEngineState) {
         {
             let mut last = self.last_funding_exit_check.lock();
-            if last.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
+            let is_post_epoch = {
+                let now_ts = chrono::Utc::now().timestamp();
+                let sec_in_hour = now_ts % 3600;
+                sec_in_hour < 35 // First 35 seconds of the hour: post-epoch basis snapback window
+            };
+            let min_interval = if is_post_epoch {
+                Duration::from_secs(5) // Fast 5s reaction during post-epoch snapback
+            } else {
+                Duration::from_secs(60) // Standard 60s polling
+            };
+            if !cfg!(test) && last.is_some_and(|t| t.elapsed() < min_interval) {
                 return;
             }
             *last = Some(Instant::now());
@@ -3060,6 +3345,14 @@ impl SpreadMonitorEngine {
                     continue;
                 }
             }
+            // Fast Basis Harvesting: when entry basis has compressed >= 80% early in the epoch,
+            // capture the harvested basis edge immediately to recycle capital.
+            if let Some(detail) =
+                fast_basis_harvest_exit_reason(state, sig, long_leg, short_leg, &ema)
+            {
+                flatten_funding_signal(state, sig, "fast-basis-harvest", &detail).await;
+                continue;
+            }
             // net carry = short_leg rate − long_leg rate (same convention
             // as the entry scanner).
             let merge_usd = state.usd_merge_quotes();
@@ -3067,6 +3360,12 @@ impl SpreadMonitorEngine {
                 funding_leg_rate_hourly(&ema, &long_leg.venue, &long_leg.symbol, now, merge_usd),
                 funding_leg_rate_hourly(&ema, &short_leg.venue, &short_leg.symbol, now, merge_usd),
             ) else {
+                tracing::warn!(
+                    "monitor: open carry {} missing fresh funding EMA for {}/{} — skipping pass",
+                    sig.id,
+                    long_leg.venue,
+                    short_leg.venue
+                );
                 continue;
             };
             let net_apr_pct = (sr - lr) * 8760.0 * 100.0;
@@ -3080,6 +3379,17 @@ impl SpreadMonitorEngine {
                         .max(0)
                 })
                 .unwrap_or(0);
+            let now_ts = chrono::Utc::now().timestamp();
+            let s_1h = (3600 - (now_ts % 3600)) as f64;
+            let s_8h = ((8 * 3600) - (now_ts % (8 * 3600))) as f64;
+            let secs_to_settle = if long_leg.venue.eq_ignore_ascii_case("hyperliquid")
+                || short_leg.venue.eq_ignore_ascii_case("hyperliquid")
+            {
+                s_1h
+            } else {
+                s_8h
+            };
+
             if let Some(th_bps) = rotation_bps {
                 if sig_age_secs >= min_hold_s {
                     let sig_base = arbitrageur_core::symbol::canonical_base(&sig.symbol);
@@ -3093,8 +3403,20 @@ impl SpreadMonitorEngine {
                         !is_same_position
                     });
                     if let Some((alt_base, best_apr, alt_hi, alt_lo)) = best_alt {
-                        let hurdle_apr = (th_bps / 100.0).max(1.0);
+                        // Rotation incurs 4 crossing legs (close 2 existing + open 2 new).
+                        // To amortize friction over typical holding horizons, require at least
+                        // a 25.0% APR improvement over the active carry.
+                        let hurdle_apr = (th_bps / 100.0).max(25.0);
                         if *best_apr > net_apr_pct + hurdle_apr {
+                            // If a positive funding payment is due in <= 5 minutes, postpone rotation
+                            // to capture the impending cash distribution before switching pairs.
+                            if !cfg!(test) && secs_to_settle <= 300.0 && net_apr_pct >= 0.0 {
+                                tracing::info!(
+                                    "monitor: funding carry {} rotation postponed — positive settlement due in {:.0}s",
+                                    sig.id, secs_to_settle
+                                );
+                                continue;
+                            }
                             flatten_funding_signal(
                                 state,
                                 sig,
@@ -3109,12 +3431,34 @@ impl SpreadMonitorEngine {
                     }
                 }
             }
-            if net_apr_pct < min_apr {
+            let exit_hurdle_apr = (min_apr * 0.60).max(8.0);
+            if net_apr_pct < 0.0 {
+                flatten_funding_signal(
+                    state,
+                    sig,
+                    "negative-carry-flip",
+                    &format!(
+                        "net APR {net_apr_pct:.1}% flipped negative — immediate emergency unwind"
+                    ),
+                )
+                .await;
+            } else if net_apr_pct < exit_hurdle_apr {
+                // If a positive funding payout is due in <= 5 minutes, postpone the non-emergency exit
+                // to bank the settlement before closing the trade.
+                if !cfg!(test) && secs_to_settle <= 300.0 {
+                    tracing::info!(
+                        "monitor: funding carry {} hurdle exit postponed — positive settlement due in {:.0}s",
+                        sig.id, secs_to_settle
+                    );
+                    continue;
+                }
                 flatten_funding_signal(
                     state,
                     sig,
                     "carry-hurdle",
-                    &format!("net APR {net_apr_pct:.1}% below the {min_apr:.1}% exit hurdle"),
+                    &format!(
+                        "net APR {net_apr_pct:.1}% below the {exit_hurdle_apr:.1}% hysteresis exit hurdle (entry {min_apr:.1}%)"
+                    ),
                 )
                 .await;
             }
@@ -3495,9 +3839,27 @@ impl SpreadMonitorEngine {
 
         // --- qualification window --------------------------------------
         let half_life_secs = if n >= 10 {
-            let vals: Vec<f64> = series.iter().map(|o| o.spread_bps).collect();
-            let dt = series_mean_dt_secs(&series);
-            OuModelParams::fit(&vals, dt).map(|p| p.half_life)
+            let mut ts = Vec::with_capacity(series.len());
+            let mut vs = Vec::with_capacity(series.len());
+            for o in &series {
+                let t = o.ts_ms as f64 / 1000.0;
+                if ts.last().is_none_or(|&last| t > last) {
+                    ts.push(t);
+                    vs.push(o.spread_bps);
+                }
+            }
+            let irregular_hl = if ts.len() >= 15 {
+                OuModelParams::fit_irregular(&ts, &vs).map(|p| p.half_life)
+            } else {
+                None
+            };
+            irregular_hl.or_else(|| {
+                let vals: Vec<f64> = series.iter().map(|o| o.spread_bps).collect();
+                let dt = series_mean_dt_secs(&series);
+                OuModelParams::fit_with_noise(&vals, dt)
+                    .map(|(p, _)| p.half_life)
+                    .or_else(|| OuModelParams::fit(&vals, dt).map(|p| p.half_life))
+            })
         } else {
             None
         };
@@ -3532,13 +3894,13 @@ impl SpreadMonitorEngine {
             .lock()
             .get(&(buy_v.to_string(), buy_fkey.clone()))
             .map(|(r, _)| *r)
-            .or_else(|| is_equity_rails(buy_v).then_some(0.0));
+            .or_else(|| is_spot_or_equity_leg(buy_v, &buy_fkey).then_some(0.0));
         let fr_b = self
             .funding_ema
             .lock()
             .get(&(sell_v.to_string(), sell_fkey.clone()))
             .map(|(r, _)| *r)
-            .or_else(|| is_equity_rails(sell_v).then_some(0.0));
+            .or_else(|| is_spot_or_equity_leg(sell_v, &sell_fkey).then_some(0.0));
         // t_hold: OU half-life -> empirical median -> None.
         let stats_for_t = if let (Some(m), Some(s)) = (mu, sigma) {
             Some(reversion_stats(&series, m, s, 0.0, 2.0, 3.0, 1))
@@ -3587,20 +3949,33 @@ impl SpreadMonitorEngine {
         // --- current executable edge ------------------------------------
         let (edge_bps, dev_bps) = match (buy_book, sell_book, mu) {
             (Some(bk), Some(sk), Some(m)) => {
-                let ask = bk
+                let ask_opt = bk
                     .asks
                     .first()
                     .and_then(|l| l.price.to_string().parse::<f64>().ok());
-                let bid = sk
+                let bid_opt = sk
                     .bids
                     .first()
                     .and_then(|l| l.price.to_string().parse::<f64>().ok());
-                match (ask, bid) {
-                    (Some(a), Some(b)) if a > 0.0 => {
-                        let edge = (b - a) / a * 10_000.0;
-                        (Some(edge), Some(edge - m))
+                let ask_notional = match (bk.asks.first(), ask_opt) {
+                    (Some(l), Some(p)) => l.size.to_string().parse::<f64>().unwrap_or(0.0) * p,
+                    _ => 0.0,
+                };
+                let bid_notional = match (sk.bids.first(), bid_opt) {
+                    (Some(l), Some(p)) => l.size.to_string().parse::<f64>().unwrap_or(0.0) * p,
+                    _ => 0.0,
+                };
+                // Dust gating: require at least $5.0 USD notional on both touch levels
+                if ask_notional < 5.0 || bid_notional < 5.0 {
+                    (None, None)
+                } else {
+                    match (ask_opt, bid_opt) {
+                        (Some(a), Some(b)) if a > 0.0 => {
+                            let edge = (b - a) / a * 10_000.0;
+                            (Some(edge), Some(edge - m))
+                        }
+                        _ => (None, None),
                     }
-                    _ => (None, None),
                 }
             }
             _ => (None, None),
@@ -3742,9 +4117,11 @@ impl SpreadMonitorEngine {
         if let Some(dev) = dev_abs_bps {
             ewma.update(dev);
         }
-        let fast_ratio = sess.session_rv.and_then(|norm| ewma.ratio_to(norm));
+        let fast_ratio = sess
+            .session_rv
+            .and_then(|norm| ewma.ratio_to(norm.max(1.0)));
         let breached = fast_ratio
-            .map(|r| r.is_finite() && r > FAST_VOL_HALT_MULT)
+            .map(|r| r.is_finite() && r > FAST_VOL_HALT_MULT && ewma.value().unwrap_or(0.0) > 1.0)
             .unwrap_or(false);
         let prior_flags = self.vol_halt.lock().get(&key).copied().unwrap_or(0);
         let (next_flags, halve_factor, fast_halted) = vol_halt_next(prior_flags, breached);
@@ -3789,12 +4166,35 @@ impl SpreadMonitorEngine {
                 .map(|w| w >= cfg.min_win_probability)
                 .unwrap_or(true);
 
+        let expected_profit_bps =
+            exp_bps.or_else(|| dev_bps.zip(p_win).map(|(d, p)| (d - friction_bps) * p));
+        let profit_ok = if cfg.min_expected_profit_bps > 0.0 {
+            expected_profit_bps
+                .map(|e| e >= cfg.min_expected_profit_bps)
+                .unwrap_or(false)
+        } else {
+            true
+        };
+
         // --- status + lifecycle ------------------------------------------
         // Directional: a positive dev means this ordered pair (buy A / sell
         // B) is the profitable side; a negative dev belongs to the reverse
         // pair row, so it must not trigger here. The session aggregate
-        // shifts the hurdle additively (capped at 2x); provisional reads 0.
-        let entry_thresh = apply_entry_adjust_bps(friction_bps.max(1.0), sess.entry_delta_bps);
+        // Multi-level order book queue imbalance check: expand entry hurdle if resting liquidity is fragile
+        let imbalance_hurdle_bps = match (buy_book, sell_book) {
+            (Some(bk), Some(sk)) => {
+                let i_sell = sk.multi_level_imbalance(5, 0.40).unwrap_or(0.0);
+                let i_buy = bk.multi_level_imbalance(5, 0.40).unwrap_or(0.0);
+                let adverse_sell = (-i_sell).max(0.0); // bid collapse hazard on sell leg
+                let adverse_buy = i_buy.max(0.0); // ask surge hazard on buy leg
+                (adverse_sell + adverse_buy) * 1.5
+            }
+            _ => 0.0,
+        };
+        let entry_thresh = apply_entry_adjust_bps(
+            (friction_bps + imbalance_hurdle_bps).max(1.0),
+            sess.entry_delta_bps,
+        );
         let signal_active = dev_bps.map(|d| d >= entry_thresh).unwrap_or(false);
         let variation_ok = window_met
             && variation_covers_friction(
@@ -3884,6 +4284,18 @@ impl SpreadMonitorEngine {
         if !session_conf_ok {
             gate_reasons.push("session win rate below floor".into());
         }
+        if !profit_ok && cfg.min_expected_profit_bps > 0.0 {
+            match expected_profit_bps {
+                Some(e) => gate_reasons.push(format!(
+                    "expected profit {e:.1} bps < floor {:.1} bps",
+                    cfg.min_expected_profit_bps
+                )),
+                None => gate_reasons.push(format!(
+                    "expected profit unknown < floor {:.1} bps",
+                    cfg.min_expected_profit_bps
+                )),
+            }
+        }
 
         let status = if !books_ok {
             PairStatus::NoData
@@ -3899,6 +4311,7 @@ impl SpreadMonitorEngine {
             || !session_conf_ok
             || !ratio_ok
             || !coverage_ok
+            || !profit_ok
         {
             PairStatus::Triggered
         } else {
@@ -4052,6 +4465,8 @@ impl SpreadMonitorEngine {
             optimal,
             state,
             symbol,
+            expected_profit_bps,
+            cfg.min_expected_profit_bps,
         );
         if !gate_reasons.is_empty()
             && status == PairStatus::Triggered
@@ -4078,7 +4493,6 @@ impl SpreadMonitorEngine {
                 }
             }
         }
-
         let row = MonitorRowDto {
             symbol: symbol.to_string(),
             buy_venue: buy_v.to_string(),
@@ -4116,8 +4530,7 @@ impl SpreadMonitorEngine {
             outcome_censored: outcome_stats.as_ref().map(|s| s.censored as u32),
             median_hold_secs: outcome_stats.as_ref().and_then(|s| s.median_hold_secs),
             median_win_secs: outcome_stats.as_ref().and_then(|s| s.median_win_secs),
-            expected_profit_bps: exp_bps
-                .or_else(|| dev_bps.zip(p_win).map(|(d, p)| (d - friction_bps) * p)),
+            expected_profit_bps,
             expected_profit_usd: exp_usd,
             optimal_size_usd: optimal,
             breakeven_size_usd: breakeven,
@@ -4259,6 +4672,8 @@ fn execution_gate(
     optimal: Option<f64>,
     state: &AppEngineState,
     symbol: &str,
+    expected_profit_bps: Option<f64>,
+    min_expected_profit_bps: f64,
 ) -> (bool, Option<String>) {
     if *state.is_paused.read() {
         return (false, Some("engine paused".into()));
@@ -4283,6 +4698,20 @@ fn execution_gate(
     }
     if optimal.map(|s| s <= 0.0).unwrap_or(true) {
         return (false, Some("no profitable capacity".into()));
+    }
+    if min_expected_profit_bps > 0.0 {
+        match expected_profit_bps {
+            Some(exp) if exp >= min_expected_profit_bps => {}
+            Some(exp) => {
+                return (
+                    false,
+                    Some(format!(
+                        "expected profit {exp:.1} bps below {min_expected_profit_bps:.1} bps hurdle"
+                    )),
+                );
+            }
+            None => return (false, Some("expected profit unknown".into())),
+        }
     }
     match p_win {
         Some(p) if p >= p_min => {}
@@ -4851,9 +5280,9 @@ mod tests {
             None
         );
         // ...while merged mode collapses the quotes onto the base.
-        ema.insert(("coinbase".into(), "BTC".into()), (0.0004, now));
+        ema.insert(("okx".into(), "BTC".into()), (0.0004, now));
         assert_eq!(
-            funding_leg_rate_hourly(&ema, "coinbase", "BTC-USDC", now, true),
+            funding_leg_rate_hourly(&ema, "okx", "BTC-USDC", now, true),
             Some(0.0004)
         );
     }
@@ -5433,6 +5862,8 @@ mod tests {
             Some(1000.0),
             &state,
             "BTC",
+            Some(20.0),
+            0.0,
         );
         assert!(!ok);
         assert!(why.unwrap().contains("not ready"));
@@ -5451,6 +5882,8 @@ mod tests {
             Some(1000.0),
             &state,
             "BTC",
+            Some(20.0),
+            0.0,
         );
         assert!(!ok);
         assert!(why.unwrap().contains("below"));
@@ -5469,6 +5902,8 @@ mod tests {
             Some(1000.0),
             &state,
             "BTC",
+            Some(20.0),
+            0.0,
         );
         assert!(!ok);
 
@@ -5486,8 +5921,31 @@ mod tests {
             Some(1000.0),
             &state,
             "BTC",
+            Some(20.0),
+            0.0,
         );
         assert!(ok, "gate should open: {why:?}");
+
+        // Profit hurdle test: expected profit below hurdle blocks execution
+        let (ok, why) = execution_gate(
+            PairStatus::Ready,
+            true,
+            None,
+            true,
+            Some(0.95),
+            0.9,
+            None,
+            0.0,
+            false,
+            false,
+            Some(1000.0),
+            &state,
+            "BTC",
+            Some(15.0),
+            25.0,
+        );
+        assert!(!ok);
+        assert!(why.unwrap().contains("hurdle"));
     }
 
     #[test]
@@ -5509,6 +5967,8 @@ mod tests {
             Some(1000.0),
             &state,
             "BTC",
+            Some(20.0),
+            0.0,
         );
         assert!(!ok);
         assert_eq!(why.unwrap(), "exit depth insufficient for two-way close");
@@ -5527,6 +5987,8 @@ mod tests {
             Some(1000.0),
             &state,
             "BTC",
+            Some(20.0),
+            0.0,
         );
         assert!(ok);
     }
@@ -5548,6 +6010,8 @@ mod tests {
             Some(1000.0),
             &state,
             "BTC",
+            Some(20.0),
+            0.0,
         );
         assert!(!ok);
         assert_eq!(why.unwrap(), "funding window stand-down");
@@ -5564,12 +6028,16 @@ mod tests {
             Some("equity market closed (cash session)".into())
         );
         assert_eq!(
-            session_standdown(false, false, Some(9.0), Some(2.0), true),
+            session_standdown(false, false, Some(30.0), Some(2.0), true),
             Some("spread exceeds 3x session median".into())
         );
         assert_eq!(
-            session_standdown(false, false, Some(5.9), Some(2.0), true),
+            session_standdown(false, false, Some(9.0), Some(2.0), true),
             Some("fast-vol above 3x session norm (halted)".into())
+        );
+        assert_eq!(
+            session_standdown(false, false, Some(9.0), Some(2.0), false),
+            None
         );
         assert_eq!(
             session_standdown(false, false, Some(5.9), Some(2.0), false),

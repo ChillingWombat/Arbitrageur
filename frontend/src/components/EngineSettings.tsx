@@ -1880,39 +1880,7 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   onChange={(checked) => setPassiveUnwind({ ...passiveUnwind, enabled: checked })}
                 />
               </div>
-              <div className="border-t border-surface-border/60 pt-3">
-                <div className="flex items-center justify-between gap-3">
-                  <label className="text-slate-600 block text-xs" title="Allow AUTONOMOUS entries into Boros fixed-yield locks (4-leg: perp pair + two YU legs on Arbitrum mainnet). Live-only, and additionally gated on agent-approval validity, gas treasury, Boros margin, lock term, and positive post-cost return. Manual Execute is unaffected.">
-                    Auto fixed-yield entries (Boros)
-                  </label>
-                  <ToggleSwitch
-                    size="sm"
-                    ariaLabel="Auto fixed-yield entries"
-                    checked={autoFixedYield}
-                    disabled={loading}
-                    onChange={(checked) => setAutoFixedYield(checked)}
-                  />
-                </div>
-                <div className={`grid grid-cols-1 sm:grid-cols-2 gap-3 mt-2 ${autoFixedYield ? "" : "opacity-50 pointer-events-none"}`}>
-                  <div className="flex items-center justify-between gap-3">
-                    <label className="text-slate-600 block text-xs" title="Minimum lock term — short locks' entry/exit costs dominate the carry">
-                      Min lock term (days)
-                    </label>
-                    <input type="number" min="1" max="365" step="1" disabled={loading || !autoFixedYield} value={autoFixedYieldMinLockDays}
-                      onChange={(e) => setAutoFixedYieldMinLockDays(parseInt(e.target.value, 10) || 0)}
-                      className="w-24 shrink-0 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent" />
-                  </div>
-                  <div className="flex items-center justify-between gap-3">
-                    <label className="text-slate-600 block text-xs" title="Minimum Boros gas-treasury USD — the venue sponsors transaction gas from it">
-                      Min gas treasury ($)
-                    </label>
-                    <input type="number" min="0" max="10000" step="1" disabled={loading || !autoFixedYield} value={autoFixedYieldMinGas}
-                      onChange={(e) => setAutoFixedYieldMinGas(parseFloat(e.target.value) || 0)}
-                      className="w-24 shrink-0 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent" />
-                  </div>
-                </div>
-              </div>
-              <div className={`grid grid-cols-1 sm:grid-cols-2 gap-3 ${passiveUnwind.enabled ? "" : "opacity-50 pointer-events-none"}`}>
+              <div className={`grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1 border-t border-surface-border/60 ${passiveUnwind.enabled ? "" : "opacity-50 pointer-events-none"}`}>
                 <div className="flex items-center justify-between gap-3">
                   <label className="text-slate-600 block text-xs" title="Peg inside the spread: 0 = aggressive touch (fill odds like market), 50 = mid, 100 = passive edge (best price, lowest touch odds)">
                     Peg percentile (0–100)
@@ -1951,6 +1919,50 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
                   </label>
                   <input type="number" min="0.1" step="any" disabled={loading || !passiveUnwind.enabled} value={passiveUnwind.maxFastVolBps}
                     onChange={(e) => setPassiveUnwind({ ...passiveUnwind, maxFastVolBps: parseFloat(e.target.value) || 0 })}
+                    className="w-24 shrink-0 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent" />
+                </div>
+              </div>
+            </div>
+
+            {/* Autonomous Fixed-Yield Entries (Pendle Boros) */}
+            <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs space-y-3">
+              <div className="space-y-1 min-w-0">
+                <label className="text-slate-800 font-bold text-xs flex items-center">
+                  Autonomous Fixed-Yield Entries (Boros YU)
+                  <InfoTooltip
+                    position="bottom"
+                    text={"Allow autonomous entries into Boros fixed-yield locks (4-leg: perp pair + two YU legs on Arbitrum mainnet). Live-only, and additionally gated on agent-approval validity, gas treasury, Boros margin, lock term, and positive post-cost return. Manual Execute in the Funding Radar is unaffected."}
+                  />
+                </label>
+                <p className="text-xs text-slate-500">
+                  Allow the autonomous bot to execute 4-leg fixed-yield locks that convert floating funding carry into locked yields to maturity.
+                </p>
+              </div>
+              <div className="flex items-center justify-between gap-3">
+                <label className="text-slate-600 block text-xs">Enable autonomous Boros entries</label>
+                <ToggleSwitch
+                  size="sm"
+                  ariaLabel="Auto fixed-yield entries"
+                  checked={autoFixedYield}
+                  disabled={loading}
+                  onChange={(checked) => setAutoFixedYield(checked)}
+                />
+              </div>
+              <div className={`grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1 border-t border-surface-border/60 ${autoFixedYield ? "" : "opacity-50 pointer-events-none"}`}>
+                <div className="flex items-center justify-between gap-3">
+                  <label className="text-slate-600 block text-xs" title="Minimum lock term — short locks' entry/exit costs dominate the carry">
+                    Min lock term (days)
+                  </label>
+                  <input type="number" min="1" max="365" step="1" disabled={loading || !autoFixedYield} value={autoFixedYieldMinLockDays}
+                    onChange={(e) => setAutoFixedYieldMinLockDays(parseInt(e.target.value, 10) || 0)}
+                    className="w-24 shrink-0 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent" />
+                </div>
+                <div className="flex items-center justify-between gap-3">
+                  <label className="text-slate-600 block text-xs" title="Minimum Boros gas-treasury USD — the venue sponsors transaction gas from it">
+                    Min gas treasury ($)
+                  </label>
+                  <input type="number" min="0" max="10000" step="1" disabled={loading || !autoFixedYield} value={autoFixedYieldMinGas}
+                    onChange={(e) => setAutoFixedYieldMinGas(parseFloat(e.target.value) || 0)}
                     className="w-24 shrink-0 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent" />
                 </div>
               </div>
@@ -2094,6 +2106,24 @@ export const EngineSettings = React.memo<EngineSettingsProps>(({ systemStatus, o
               </div>
               <p className="text-xs text-muted leading-snug border-t border-surface-border/60 pt-1.5">
                 Beyond this, exposure-skew warnings fire and executions refuse. Currently $2,500 default.
+              </p>
+            </div>
+
+            <div className="p-3.5 bg-surface border border-surface-border rounded-lg shadow-2xs space-y-3">
+              <div className="text-slate-800 font-bold text-xs">Pre-Trade Liquidity Guardrail — Orderbook Depth</div>
+              <div className="flex items-center justify-between gap-3">
+                <label className="text-slate-600 block text-xs" title="Minimum required top-of-book market depth as a multiple of order quantity. Entries are refused if available depth is less than order_qty × min_depth_ratio.">
+                  Min orderbook depth ratio
+                </label>
+                <div className="flex items-center gap-1.5 shrink-0">
+                  <input type="number" min="1" max="100" step="0.5" disabled={loading} value={minDepthRatio}
+                    onChange={(e) => setMinDepthRatio(Math.max(1.0, parseFloat(e.target.value) || 3.0))}
+                    className="w-24 px-3 py-1.5 bg-surface-raised border border-surface-border rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-accent" />
+                  <span className="text-slate-500 text-xs">x</span>
+                </div>
+              </div>
+              <p className="text-xs text-muted leading-snug border-t border-surface-border/60 pt-1.5">
+                Refuses market execution if resting depth across both legs does not cover at least this multiple of target size (default 3.0x).
               </p>
             </div>
 

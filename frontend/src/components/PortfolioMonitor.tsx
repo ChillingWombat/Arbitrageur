@@ -604,6 +604,20 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
       (riskData?.margin_health?.status ?? margin?.status ?? "") === "FLAT" ||
       openPositions.length === 0;
     if (margin != null) {
+      if (margin.is_segregated_insolvency_masked) {
+        items.push({
+          severity: "critical",
+          title: `Masked segregated insolvency: ${formatVenueName(margin.most_vulnerable_venue ?? "venue")} at ${(margin.max_venue_usage_pct ?? 0).toFixed(0)}%`,
+          detail: `Global aggregate margin utilization is only ${margin.margin_ratio_pct.toFixed(0)}%, but individual venue is critical. Collateral rebalance required.`,
+        });
+      }
+      if (margin.rebalance_recommendation) {
+        items.push({
+          severity: "warn",
+          title: "Collateral Rebalance Recommended",
+          detail: margin.rebalance_recommendation,
+        });
+      }
       if (margin.margin_ratio_pct >= 90)
         items.push({ severity: "critical", title: `Margin utilization ${margin.margin_ratio_pct.toFixed(0)}%`, detail: "Above 90% — reduce exposure or add margin before the next volatility spike." });
       else if (margin.margin_ratio_pct >= 70)
@@ -616,8 +630,13 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
       }
     }
     const skewed = (riskData?.net_deltas ?? []).filter((d) => Math.abs(d.net_exposure_usd) > d.delta_limit_usd);
-    for (const d of skewed.slice(0, 3))
-      items.push({ severity: "warn", title: `${d.asset} exposure skew ${usd(d.net_exposure_usd)}`, detail: `Beyond the $${d.delta_limit_usd.toLocaleString("en-US")} delta-neutral tolerance.` });
+    for (const d of skewed.slice(0, 3)) {
+      if (flatBook) {
+        items.push({ severity: "warn", title: `${d.asset} external exposure skew ${usd(d.net_exposure_usd)}`, detail: `No active strategy positions open. External venue account balance is beyond the $${d.delta_limit_usd.toLocaleString("en-US")} tolerance.` });
+      } else {
+        items.push({ severity: "warn", title: `${d.asset} exposure skew ${usd(d.net_exposure_usd)}`, detail: `Beyond the $${d.delta_limit_usd.toLocaleString("en-US")} delta-neutral tolerance.` });
+      }
+    }
     if (skewed.length > 3)
       items.push({ severity: "warn", title: `${skewed.length - 3} more skewed assets`, detail: "See the DeltaGuard table below." });
     const fails = riskData?.consecutive_failures ?? 0;
@@ -757,8 +776,51 @@ const PortfolioMonitorInner: React.FC<PortfolioMonitorProps> = ({
   // Strategy display names come from the canonical STRATEGY_DISPLAY_NAMES map
   // (types/tickers) — keyed by the persisted ids: futures/funding/spot/etc.
 
+  const hasCriticalIssue = isTripped || attention.some((a) => a.severity === "critical");
+  const hasWarnIssue = !hasCriticalIssue && attention.some((a) => a.severity === "warn");
+
   return (
-    <div className="w-full p-4 pr-5 space-y-4 overflow-y-auto h-full select-none pb-24">
+    <div
+      className={`w-full p-4 pr-5 space-y-4 overflow-y-auto h-full select-none pb-24 transition-colors duration-200 ${
+        hasCriticalIssue
+          ? "bg-rose-50/50"
+          : hasWarnIssue
+          ? "bg-amber-50/40"
+          : ""
+      }`}
+    >
+      {/* Ambient Critical / Warning Alert Banner */}
+      {hasCriticalIssue && (
+        <div className="bg-rose-100/90 border border-rose-300 text-rose-950 p-3.5 rounded-xl shadow-xs flex items-start gap-3 animate-in fade-in duration-200">
+          <AlertTriangle className="w-5 h-5 text-rose-600 shrink-0 mt-0.5" />
+          <div className="text-xs space-y-1">
+            <div className="font-bold text-rose-900 text-sm">
+              Portfolio Alert: Critical Attention Required
+            </div>
+            <div className="text-rose-800">
+              {attention.find((a) => a.severity === "critical")?.title ?? "Circuit breaker tripped or critical risk limits breached."}
+              {" — "}
+              {attention.find((a) => a.severity === "critical")?.detail ?? "Check DeltaGuard and Margin gauges below."}
+            </div>
+          </div>
+        </div>
+      )}
+      {hasWarnIssue && (
+        <div className="bg-amber-100/90 border border-amber-300 text-amber-950 p-3.5 rounded-xl shadow-xs flex items-start gap-3 animate-in fade-in duration-200">
+          <AlertTriangle className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+          <div className="text-xs space-y-1">
+            <div className="font-bold text-amber-900 text-sm">
+              Portfolio Warning: Inspection Advised
+            </div>
+            <div className="text-amber-800">
+              {attention.find((a) => a.severity === "warn")?.title ?? "Position skew or margin warning detected."}
+              {" — "}
+              {attention.find((a) => a.severity === "warn")?.detail ?? "Inspect venue balances and DeltaGuard exposure."}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* 1. Strategy Switcher & Key Metrics Gadget Zone */}
       <div className="space-y-3">
         {/* Strategy Switcher Button Row */}

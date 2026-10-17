@@ -157,22 +157,29 @@ pub fn lock_vault_impl(state: &AppEngineState) -> Result<VaultStatus, String> {
     // while live positions are open rather than silently disabling exit
     // supervision; testnet sims need no credentials and lock freely.
     if state.is_live() {
-        if let Ok(signals) = state
+        // Fail closed: if the open-position query itself errors we cannot
+        // prove the account is flat, and a locked vault cannot authenticate
+        // any exit path — refuse the lock rather than stranding live
+        // positions unsupervised.
+        let signals = state
             .state_store
             .list_open_signals(Some(state.env().as_str()))
-        {
-            let open: Vec<String> = signals
-                .iter()
-                .filter(|s| s.status.counts_as_open())
-                .map(|s| format!("{}:{}", s.symbol, s.status.as_str()))
-                .collect();
-            if !open.is_empty() {
-                return Err(format!(
-                    "Cannot lock the vault while {} live position(s) are open ({}) — a locked vault cannot flatten or supervise exits. Flatten them first.",
-                    open.len(),
-                    open.join(", ")
-                ));
-            }
+            .map_err(|e| {
+                format!(
+                    "Cannot verify open live positions before locking the vault ({e}) — refusing to lock (fail-closed). Retry once the ledger is readable."
+                )
+            })?;
+        let open: Vec<String> = signals
+            .iter()
+            .filter(|s| s.status.counts_as_open())
+            .map(|s| format!("{}:{}", s.symbol, s.status.as_str()))
+            .collect();
+        if !open.is_empty() {
+            return Err(format!(
+                "Cannot lock the vault while {} live position(s) are open ({}) — a locked vault cannot flatten or supervise exits. Flatten them first.",
+                open.len(),
+                open.join(", ")
+            ));
         }
     }
     // Drop the stronghold before the vault forgets its session key —

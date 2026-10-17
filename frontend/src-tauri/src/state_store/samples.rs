@@ -741,8 +741,17 @@ impl StateStore {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
             "SELECT ts_ms, rate_8h, interval_hours FROM funding_rate_samples
-             WHERE venue_id = ?1 AND symbol = ?2
+             WHERE venue_id = ?1
+               AND (symbol = ?2
+                    OR symbol = ?2 || '-USDC'
+                    OR symbol = ?2 || '-USDT'
+                    OR symbol = ?2 || '-PERPETUAL'
+                    OR symbol = ?2 || 'USDT'
+                    OR symbol = 'PERP_' || ?2 || '_USDC'
+                    OR (INSTR(?2, '-') > 0 AND symbol = SUBSTR(?2, 1, INSTR(?2, '-') - 1))
+                    OR (INSTR(?2, '-') > 0 AND symbol LIKE SUBSTR(?2, 1, INSTR(?2, '-') - 1) || '-%'))
                AND ts_ms >= ?3 AND ts_ms <= ?4 AND environment = ?5
+             GROUP BY ts_ms
              ORDER BY ts_ms ASC",
         )?;
         let rows = stmt.query_map(
@@ -800,6 +809,14 @@ impl StateStore {
 /// siblings); `separate` mode is quote-strict — only the key's own
 /// spellings, so "BTC-USDT" and "BTC-USDC" stay independent series.
 pub(crate) fn sample_keys(symbol: &str, merge_usd: bool) -> Vec<String> {
+    if symbol_is_fixed_contract(symbol) {
+        let mut keys = vec![symbol.to_string()];
+        let up = symbol.to_uppercase();
+        if !keys.contains(&up) {
+            keys.push(up);
+        }
+        return keys;
+    }
     if merge_usd {
         return spread_symbol_aliases(symbol);
     }

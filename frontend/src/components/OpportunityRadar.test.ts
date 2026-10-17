@@ -164,3 +164,134 @@ test("OpportunityRadar: venue dropdown is anchored to right edge (right-0)", asy
   assert.match(source, /absolute right-0 top-full mt-1\.5 w-52 bg-surface/);
 });
 
+test("OpportunityRadar: blocked rows suppress profit emphasis and render blockReason", () => {
+  const mockSnapshot = {
+    generatedTsMs: Date.now(),
+    running: true,
+    rows: [
+      {
+        symbol: "BTC",
+        buyVenue: "binance",
+        sellVenue: "coinbase",
+        status: "triggered",
+        executable: false,
+        blockReason: "coverage below 80% floor",
+        expectedProfitBps: 12.5,
+        expectedProfitUsd: 150.0,
+        currentEdgeBps: 15.0,
+        baselineBps: 2.0,
+        deviationBps: 13.0,
+        pWin: 0.95,
+        winProbability: 0.95,
+        sessionId: "overlap",
+        sessionProvisional: false,
+        sessionAllow: 1.0,
+        sessionSizeMult: 1.0,
+        fundingCarryBps: 0,
+        fundingUnknown: false,
+        firstSeenMs: Date.now() - 10000,
+        lastSeenMs: Date.now(),
+        signalAgeSecs: 10,
+        expectedConvergeSecs: 300,
+        qualificationProgress: 1.0,
+        observedEpisodes: 20,
+        thresholdRatio: 0.9,
+        coverage: 0.75,
+        optimalSizeUsd: 1000,
+        breakevenSizeUsd: 2000,
+      },
+    ],
+    watchlist: ["BTC"],
+    venues: [],
+    exempted: [],
+  };
+
+  const html = renderToStaticMarkup(
+    React.createElement(OpportunityRadar, {
+      executionLogs: [],
+      isPaused: false,
+      initialSnapshot: mockSnapshot as any,
+    })
+  );
+
+  // Exp profit for blocked row should be muted (text-slate-400 font-normal) rather than bright green (text-profit)
+  assert.match(
+    html,
+    /class="px-2 py-2 text-right font-mono tabular-nums text-slate-400 font-normal"[^>]*title="Blocked \(coverage below 80% floor\)\. Forecast expectation: 12\.5 bps"/
+  );
+  // Sizing for blocked row should also be muted
+  assert.match(
+    html,
+    /class="px-2 py-2 text-right font-mono text-slate-400 font-normal"[^>]*title="Blocked \(coverage below 80% floor\)\. Forecast optimal size: \$1\.0k"/
+  );
+  // Block reason should be rendered inline
+  assert.match(html, /coverage below 80% floor/);
+  // Status badge should reflect blocked styling rather than false green
+  assert.match(html, /bg-warn-dim text-warn-strong border-warn-border/);
+  // Top edge in BotStatCards should NOT claim positive profit when zero rows are executable
+  assert.doesNotMatch(html, /\+12\.5 bps max/);
+  assert.match(html, /monitoring orderbooks/);
+  // Scanner header reflects (0 executable / 1 monitored)
+  assert.match(html, /\(0 executable \/ 1 monitored\)/);
+  // Executable Only filter button is rendered
+  assert.match(html, /Executable Only/);
+});
+
+test("OpportunityRadar: executable rows promote topEdgeBps and display executable count", () => {
+  const mockExecutableSnapshot = {
+    generatedTsMs: Date.now(),
+    running: true,
+    rows: [
+      {
+        symbol: "ETH",
+        buyVenue: "hyperliquid",
+        sellVenue: "lighter",
+        status: "ready",
+        executable: true,
+        blockReason: null,
+        expectedProfitBps: 18.2,
+        expectedProfitUsd: 250.0,
+        currentEdgeBps: 20.0,
+        baselineBps: 1.0,
+        deviationBps: 19.0,
+        pWin: 0.96,
+        winProbability: 0.96,
+        sessionId: "asia",
+        sessionProvisional: false,
+        sessionAllow: 1.0,
+        sessionSizeMult: 1.0,
+        fundingCarryBps: 0,
+        fundingUnknown: false,
+        firstSeenMs: Date.now() - 5000,
+        lastSeenMs: Date.now(),
+        signalAgeSecs: 5,
+        expectedConvergeSecs: 180,
+        qualificationProgress: 1.0,
+        observedEpisodes: 50,
+        thresholdRatio: 0.95,
+        coverage: 0.98,
+        optimalSizeUsd: 5000,
+        breakevenSizeUsd: 8000,
+      },
+    ],
+    watchlist: ["ETH"],
+    venues: [],
+    exempted: [],
+  };
+
+  const html = renderToStaticMarkup(
+    React.createElement(OpportunityRadar, {
+      executionLogs: [],
+      isPaused: false,
+      initialSnapshot: mockExecutableSnapshot as any,
+    })
+  );
+
+  // Executable row shows bright profit styling
+  assert.match(html, /text-profit font-bold/);
+  // Header shows (1 executable / 1 monitored)
+  assert.match(html, /\(1 executable \/ 1 monitored\)/);
+  // Top edge in BotStatCards shows the true executable edge
+  assert.match(html, /\+18\.2 bps max/);
+});
+

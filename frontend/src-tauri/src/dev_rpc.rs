@@ -6,6 +6,14 @@
 //! `{"id":N,"ok":<value>}` or `{"id":N,"err":"..."}`. Commands dispatch to the
 //! exact `*_impl` functions the Tauri IPC handlers wrap, so behavior matches
 //! the UI paths bit-for-bit.
+//!
+//! Security posture: this bridge carries full execution authority (order
+//! submission, flatten, circuit-breaker reset, env switch). The socket file
+//! is chmod 0600 immediately after bind, and on Linux every accepted
+//! connection is additionally checked against the socket owner's uid via
+//! SO_PEERCRED — connections from other local users are rejected even if
+//! they win the bind→chmod race. It is a single-operator tool, never an
+//! open local IPC surface.
 
 use crate::state::AppEngineState;
 use serde_json::{json, Value};
@@ -22,10 +30,56 @@ pub fn maybe_spawn(state: Arc<AppEngineState>) {
     tauri::async_runtime::spawn(async move {
         match UnixListener::bind(&path) {
             Ok(listener) => {
+                // Execution-authority surface: restrict the socket to the
+                // launching user. The chmod narrows the bind→serve race
+                // window; the per-connection peer-uid check below closes it.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    if let Err(e) =
+                        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+                    {
+                        tracing::error!(
+                            "dev rpc: cannot restrict {} to 0600 ({e}) — refusing to serve",
+                            path.display()
+                        );
+                        return;
+                    }
+                }
+                #[cfg(target_os = "linux")]
+                let owner_uid: u32 = {
+                    use std::os::unix::fs::MetadataExt;
+                    match std::fs::metadata(&path) {
+                        Ok(m) => m.uid(),
+                        // Fail closed: u32::MAX matches no real uid, so every
+                        // peer-uid check below rejects rather than admits.
+                        Err(_) => u32::MAX,
+                    }
+                };
                 tracing::info!("dev rpc: listening on {}", path.display());
                 loop {
                     match listener.accept().await {
                         Ok((stream, _)) => {
+                            #[cfg(target_os = "linux")]
+                            {
+                                match stream.peer_cred() {
+                                    Ok(cred) if cred.uid() == owner_uid => {}
+                                    Ok(cred) => {
+                                        tracing::warn!(
+                                            "dev rpc: rejected connection from uid {} (socket owner uid {})",
+                                            cred.uid(),
+                                            owner_uid
+                                        );
+                                        continue;
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            "dev rpc: peer credential check failed ({e}) — connection rejected"
+                                        );
+                                        continue;
+                                    }
+                                }
+                            }
                             let st = state.clone();
                             tauri::async_runtime::spawn(async move {
                                 if let Err(e) = handle_conn(stream, st).await {
@@ -180,6 +234,43 @@ async fn dispatch(line: &str, state: &Arc<AppEngineState>) -> Value {
             .await
             .map(|v| json!(v))
         }
+        "evaluate_fast_basis_harvest" => {
+            let entry_basis_bps = arg_f64(&args, "entry_basis_bps").unwrap_or(0.0);
+            let current_basis_bps = arg_f64(&args, "current_basis_bps").unwrap_or(0.0);
+            let elapsed_hours = arg_f64(&args, "elapsed_hours").unwrap_or(0.0);
+            let total_epoch_hours = arg_f64(&args, "total_epoch_hours").unwrap_or(8.0);
+            let accrued_funding_usd = arg_f64(&args, "accrued_funding_usd").unwrap_or(0.0);
+            let unrealized_basis_pnl_usd =
+                arg_f64(&args, "unrealized_basis_pnl_usd").unwrap_or(0.0);
+            let round_trip_fee_usd = arg_f64(&args, "round_trip_fee_usd").unwrap_or(0.0);
+
+            let evaluator =
+                arbitrageur_math::fast_basis_harvest::FastBasisHarvestEvaluator::default();
+            let should_harvest = evaluator.should_harvest_early(
+                entry_basis_bps,
+                current_basis_bps,
+                elapsed_hours,
+                total_epoch_hours,
+                accrued_funding_usd,
+                unrealized_basis_pnl_usd,
+                round_trip_fee_usd,
+            );
+            let elapsed_frac = if total_epoch_hours > 0.0 {
+                elapsed_hours / total_epoch_hours
+            } else {
+                0.0
+            };
+            let dyn_bound = evaluator.dynamic_compression_boundary(elapsed_frac);
+            let net_pnl = unrealized_basis_pnl_usd + accrued_funding_usd - round_trip_fee_usd;
+
+            Ok(json!({
+                "should_harvest_early": should_harvest,
+                "dynamic_compression_boundary": dyn_bound,
+                "net_pnl_usd": net_pnl,
+                "elapsed_hours": elapsed_hours,
+                "total_epoch_hours": total_epoch_hours,
+            }))
+        }
 
         // ── execution ───────────────────────────────────────────────────────
         "execute_spatial" => {
@@ -254,9 +345,11 @@ async fn dispatch(line: &str, state: &Arc<AppEngineState>) -> Value {
         "flatten_ticker" => {
             let sym = arg(&args, "symbol");
             let strat = arg(&args, "strategy_id").unwrap_or("futures");
-            crate::execution::flatten_ticker_positions_impl(
+            let exec_type = arg(&args, "execution_type");
+            crate::execution::flatten_ticker_positions_with_type_impl(
                 sym,
                 strat,
+                exec_type,
                 arbitrageur_execution::virtual_ledger::CycleStatus::Closed,
                 st,
             )
@@ -283,10 +376,11 @@ async fn dispatch(line: &str, state: &Arc<AppEngineState>) -> Value {
                         .map(|s| s.strategy_id)
                 })
                 .unwrap_or_else(|| "options_parity".to_string());
+            let exec_type = arg(&args, "execution_type");
             crate::execution::flatten_trade_positions_impl(
                 tid,
                 &resolved_strat,
-                None,
+                exec_type,
                 arbitrageur_execution::virtual_ledger::CycleStatus::Closed,
                 st,
             )
@@ -362,6 +456,37 @@ async fn dispatch(line: &str, state: &Arc<AppEngineState>) -> Value {
                 .await
                 .map(|v| json!(v))
         }
+        "evaluate_liq_trim" => {
+            let current_qty = arg_f64(&args, "current_qty").unwrap_or(0.0);
+            let mark_price = arg_f64(&args, "mark_price").unwrap_or(0.0);
+            let threatened_equity = arg_f64(&args, "threatened_equity").unwrap_or(0.0);
+            let threatened_mmr = arg_f64(&args, "threatened_mmr").unwrap_or(0.05);
+            let target_buffer_pct = arg_f64(&args, "target_buffer_pct").unwrap_or(75.0);
+            let taker_fee_rate = arg_f64(&args, "taker_fee_rate").unwrap_or(0.0005);
+            let step_qty = arg_f64(&args, "step_qty").unwrap_or(0.001);
+
+            let decision = arbitrageur_strategy::pair_trim::evaluate_proportional_liq_trim(
+                current_qty,
+                mark_price,
+                threatened_equity,
+                threatened_mmr,
+                target_buffer_pct,
+                taker_fee_rate,
+                step_qty,
+            );
+            Ok(json!({
+                "decision": format!("{:?}", decision),
+                "params": {
+                    "current_qty": current_qty,
+                    "mark_price": mark_price,
+                    "threatened_equity": threatened_equity,
+                    "threatened_mmr": threatened_mmr,
+                    "target_buffer_pct": target_buffer_pct,
+                    "taker_fee_rate": taker_fee_rate,
+                    "step_qty": step_qty,
+                }
+            }))
+        }
         "scan_triangle" => {
             let filter = arg(&args, "filter_asset").unwrap_or("");
             crate::triangle::scan_triangular_opportunities_impl(filter, st)
@@ -419,7 +544,7 @@ async fn dispatch(line: &str, state: &Arc<AppEngineState>) -> Value {
                 .await
                 .map(|v| json!(v))
         }
-        "close_external" => {
+        "close_external" | "close_external_position" => {
             let input = crate::external_positions::CloseExternalPositionInput {
                 venue: arg(&args, "venue").unwrap_or_default().to_string(),
                 symbol: arg(&args, "symbol").unwrap_or_default().to_string(),
@@ -474,6 +599,12 @@ async fn dispatch(line: &str, state: &Arc<AppEngineState>) -> Value {
         .and_then(|params| crate::strategy_config::save_strategy_params_impl(params, st))
         .map(|_| json!(true)),
         "adopt_position" => adopt_position(&args, st),
+        "margin_rebalance_status" => margin_rebalance_status(st),
+        "margin_rebalance_config" => margin_rebalance_config(st),
+        "set_margin_rebalance_config" => set_margin_rebalance_config(&args, st),
+        "trigger_margin_rebalance" => trigger_margin_rebalance(&args, st),
+        "confirm_margin_transfer" => confirm_margin_transfer(&args, st),
+        "fail_margin_transfer" => fail_margin_transfer(&args, st),
 
         _ => Err(format!("unknown cmd '{cmd}'")),
     };
@@ -642,6 +773,81 @@ fn adopt_position(args: &Value, state: &AppEngineState) -> Result<Value, String>
     .map(|_| json!(true))
 }
 
+fn margin_rebalance_status(state: &AppEngineState) -> Result<Value, String> {
+    let daemon = state.margin_rebalance_daemon.read();
+    Ok(json!({
+        "daemon_enabled": daemon.config.enabled,
+        "active_transfers": daemon.active_transfers,
+        "transfer_history_count": daemon.transfer_history.len(),
+        "transfer_history": daemon.transfer_history,
+        "last_dispatched_at_ms": daemon.last_dispatched_at_ms,
+        "config": daemon.config,
+    }))
+}
+
+fn margin_rebalance_config(state: &AppEngineState) -> Result<Value, String> {
+    let daemon = state.margin_rebalance_daemon.read();
+    Ok(json!(daemon.config))
+}
+
+fn set_margin_rebalance_config(args: &Value, state: &AppEngineState) -> Result<Value, String> {
+    let cfg: arbitrageur_risk::collateral_rebalance::MarginRebalanceDaemonConfig =
+        serde_json::from_value(args.get("config").cloned().unwrap_or_else(|| json!({})))
+            .map_err(|e| format!("bad config: {e}"))?;
+    state.margin_rebalance_daemon.write().config = cfg;
+    Ok(json!(true))
+}
+
+fn trigger_margin_rebalance(args: &Value, state: &AppEngineState) -> Result<Value, String> {
+    let force = args.get("force").and_then(|v| v.as_bool()).unwrap_or(false);
+    let now_ms = chrono::Utc::now().timestamp_millis();
+
+    let accounts: Vec<arbitrageur_core::position::AccountSnapshot> = {
+        let guard = state.last_good_accounts.lock();
+        guard.values().map(|(acc, _ts)| acc.clone()).collect()
+    };
+
+    let dag_router = arbitrageur_risk::collateral_rebalance::build_default_settlement_dag_router();
+    let mut daemon = state.margin_rebalance_daemon.write();
+
+    let prev_enabled = daemon.config.enabled;
+    let prev_last_ms = daemon.last_dispatched_at_ms;
+    if force {
+        daemon.config.enabled = true;
+        daemon.last_dispatched_at_ms = None;
+    }
+
+    let planned_transfer = daemon.evaluate_and_plan(&accounts, &dag_router, now_ms);
+
+    if force && !prev_enabled {
+        daemon.config.enabled = prev_enabled;
+        if planned_transfer.is_none() {
+            daemon.last_dispatched_at_ms = prev_last_ms;
+        }
+    }
+
+    Ok(json!({
+        "triggered_at_ms": now_ms,
+        "accounts_evaluated": accounts.len(),
+        "planned_transfer": planned_transfer,
+    }))
+}
+
+fn confirm_margin_transfer(args: &Value, state: &AppEngineState) -> Result<Value, String> {
+    let key = arg(args, "idempotency_key").ok_or_else(|| "idempotency_key required".to_string())?;
+    let mut daemon = state.margin_rebalance_daemon.write();
+    let confirmed = daemon.confirm_transfer(key);
+    Ok(json!({"confirmed": confirmed, "idempotency_key": key}))
+}
+
+fn fail_margin_transfer(args: &Value, state: &AppEngineState) -> Result<Value, String> {
+    let key = arg(args, "idempotency_key").ok_or_else(|| "idempotency_key required".to_string())?;
+    let reason = arg(args, "reason").unwrap_or("manually failed via dev rpc");
+    let mut daemon = state.margin_rebalance_daemon.write();
+    let failed = daemon.fail_transfer(key, reason);
+    Ok(json!({"failed": failed, "idempotency_key": key, "reason": reason}))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -726,5 +932,43 @@ mod tests {
         // Verify state remains locked
         assert!(state.circuit_breaker.is_tripped());
         assert!(*state.is_paused.read());
+    }
+
+    #[tokio::test]
+    async fn test_dev_rpc_margin_rebalance_endpoints() {
+        let state = Arc::new(AppEngineState::new());
+
+        // 1. margin_rebalance_status
+        let line_status = r#"{"id": 101, "cmd": "margin_rebalance_status", "args": {}}"#;
+        let res_status = dispatch(line_status, &state).await;
+        assert_eq!(res_status["id"], 101);
+        assert_eq!(res_status["ok"]["daemon_enabled"], false);
+        assert_eq!(res_status["ok"]["active_transfers"], json!([]));
+
+        // 2. margin_rebalance_config
+        let line_cfg = r#"{"id": 102, "cmd": "margin_rebalance_config", "args": {}}"#;
+        let res_cfg = dispatch(line_cfg, &state).await;
+        assert_eq!(res_cfg["id"], 102);
+        assert_eq!(res_cfg["ok"]["dry_run"], true);
+
+        // 3. set_margin_rebalance_config
+        let line_set = r#"{"id": 103, "cmd": "set_margin_rebalance_config", "args": {"config": {"enabled": true, "min_transfer_usd": 150.0, "trigger_utilization_pct": 80.0, "target_utilization_pct": 50.0, "cooldown_sec": 60, "max_transit_latency_sec": 120.0, "dry_run": false}}}"#;
+        let res_set = dispatch(line_set, &state).await;
+        assert_eq!(res_set["id"], 103);
+        assert_eq!(res_set["ok"], true);
+
+        // Verify config updated
+        let line_cfg2 = r#"{"id": 104, "cmd": "margin_rebalance_config", "args": {}}"#;
+        let res_cfg2 = dispatch(line_cfg2, &state).await;
+        assert_eq!(res_cfg2["ok"]["enabled"], true);
+        assert_eq!(res_cfg2["ok"]["min_transfer_usd"], 150.0);
+
+        // 4. trigger_margin_rebalance (empty accounts -> no planned transfer)
+        let line_trig =
+            r#"{"id": 105, "cmd": "trigger_margin_rebalance", "args": {"force": true}}"#;
+        let res_trig = dispatch(line_trig, &state).await;
+        assert_eq!(res_trig["id"], 105);
+        assert_eq!(res_trig["ok"]["accounts_evaluated"], 0);
+        assert!(res_trig["ok"]["planned_transfer"].is_null());
     }
 }

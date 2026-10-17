@@ -287,17 +287,29 @@ pub async fn get_external_positions_impl(
     let mut positions = Vec::new();
     let mut unreadable = Vec::new();
     let mut venue_notes = Vec::new();
-    for (vid, name, adapter) in state.get_venues() {
-        // No credentials = venue not configured, not a read failure — skip
-        // silently. `unreadable` is reserved for configured venues whose
-        // account read actually fails.
-        if !adapter.has_live_credentials() {
-            continue;
-        }
-        // Share the fresh-TTL + singleflight path so this poll coalesces
-        // with venue-balances / risk-overview reads instead of adding its
-        // own REST hit (Orderly /v1/positions rate-limits hard).
-        let account = match crate::execution::live_account_or_cached(state, vid, &adapter).await {
+    let eligible_venues: Vec<_> = state
+        .get_venues()
+        .into_iter()
+        .filter(|(_, _, adapter)| adapter.has_live_credentials())
+        .collect();
+
+    let account_futures: Vec<_> = eligible_venues
+        .iter()
+        .map(|(vid, name, adapter)| {
+            let vid = *vid;
+            let name = name.to_string();
+            let adapter = adapter.clone();
+            async move {
+                let res = crate::execution::live_account_or_cached(state, vid, &adapter).await;
+                (vid, name, adapter, res)
+            }
+        })
+        .collect();
+
+    let account_results = futures::future::join_all(account_futures).await;
+
+    for (vid, name, adapter, res) in account_results {
+        let account = match res {
             Ok((a, _age)) => a,
             Err(e) => {
                 unreadable.push(format!("{name}: account read failed: {e}"));
@@ -379,7 +391,7 @@ pub async fn get_external_positions_impl(
                 updated_at: p.updated_at.to_rfc3339(),
             });
         }
-        if let Some(note) = venue_position_note(name, raw, shown, sys_n, dust_n, bad_n) {
+        if let Some(note) = venue_position_note(&name, raw, shown, sys_n, dust_n, bad_n) {
             venue_notes.push(note);
         }
     }
@@ -583,7 +595,9 @@ pub async fn recommend_external_close_impl(
             ));
         }
     }
-    let recommended_mode = if full_fill && slip_bps <= 25.0 {
+    let is_deribit_opt =
+        venue_lc == "deribit" && (pos.symbol.ends_with("-C") || pos.symbol.ends_with("-P"));
+    let recommended_mode = if is_deribit_opt || (full_fill && slip_bps <= 25.0) {
         "limit"
     } else {
         "market"
@@ -1151,6 +1165,13 @@ pub async fn close_external_position_impl(
         let _ = state
             .state_store
             .update_signal_status(&sid, SignalStatus::Failed, Some(&note));
+    } else if status == "submitted" {
+        // Order is active and working on the venue orderbook. Keep in InFlight status
+        // so the background reconciler polls it until filled, cancelled, or the 15-minute
+        // deadline expires. Do not prematurely escalate to Unresolved at t=0.
+        let _ = state
+            .state_store
+            .update_signal_status(&sid, SignalStatus::InFlight, Some(&note));
     } else {
         mark_unresolved(&note);
     }

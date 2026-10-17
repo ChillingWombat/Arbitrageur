@@ -65,6 +65,33 @@ fn book_failure_is_unlisted(err: &str) -> bool {
         || (e.contains("unknown") && (e.contains("symbol") || e.contains("instrument") || e.contains("market")))
 }
 
+/// RAII guard for the leader of a flight. If the leader's future is dropped
+/// at an `.await` (caller disconnect, Tauri command cancellation) or panics,
+/// the slot would otherwise stay in the map forever with `result = None`:
+/// every later caller for that (venue, symbol) would await a notification
+/// that can no longer arrive, and each cancellation leaks one map entry.
+/// `Drop` publishes a cancellation error, removes the slot, and wakes the
+/// waiters so the next call starts a fresh flight.
+struct FlightLeaderGuard<'a> {
+    flights: &'a OrderbookSingleFlight,
+    slot: Arc<FlightSlot>,
+    key: (String, String),
+    /// Cleared on the normal path — after the real outcome is published the
+    /// guard must not overwrite it with a cancellation error.
+    armed: bool,
+}
+
+impl Drop for FlightLeaderGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        *self.slot.result.lock() = Some(Err("book fetch cancelled".to_string()));
+        self.flights.slots.lock().remove(&self.key);
+        self.slot.notify.notify_waiters();
+    }
+}
+
 impl OrderbookSingleFlight {
     pub fn new() -> Self {
         Self {
@@ -124,6 +151,12 @@ impl OrderbookSingleFlight {
             }
         };
         if am_leader {
+            let mut guard = FlightLeaderGuard {
+                flights: self,
+                slot: slot.clone(),
+                key: key.clone(),
+                armed: true,
+            };
             let outcome = adapter
                 .fetch_orderbook(symbol)
                 .await
@@ -146,6 +179,9 @@ impl OrderbookSingleFlight {
             *slot.result.lock() = Some(outcome.clone());
             self.slots.lock().remove(&key);
             slot.notify.notify_waiters();
+            // Publish-then-disarm: no await between these, and the guard
+            // must never replace the real outcome with a cancellation.
+            guard.armed = false;
             outcome
         } else {
             loop {

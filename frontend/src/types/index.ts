@@ -17,6 +17,7 @@ export interface SystemStatusDto {
   active_venues: VenueStatusDto[];
   /** Per-lane WS feed telemetry; absent lanes are not supervised at all. */
   feed_lanes?: FeedLaneStatusDto[];
+  unresolved_signals_count?: number;
 }
 
 export interface FeedLaneStatusDto {
@@ -707,6 +708,10 @@ export interface MarginHealthDto {
   margin_ratio_pct: number;
   liquidation_distance_pct: number;
   status: string;
+  is_segregated_insolvency_masked?: boolean;
+  most_vulnerable_venue?: string | null;
+  max_venue_usage_pct?: number;
+  rebalance_recommendation?: string | null;
 }
 
 export interface SimStepResultDto {
@@ -721,6 +726,7 @@ export interface SimStepResultDto {
   realized_profit_usd: number;
   total_cumulative_pnl_usd: number;
   message: string;
+  execution_duration_ms?: number;
 }
 
 export interface ExecutionLogEntry {

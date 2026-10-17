@@ -1744,11 +1744,30 @@ impl EvmAmmAdapter {
             .saturating_mul(125)
             .saturating_div(100)
             .max(60_000);
+
+        // Derive EIP-1559 parameters:
+        // Priority tip: min 1 gwei (or 0.05 gwei on L2 like Arbitrum/Base) up to 10% of base fee.
+        // Max fee per gas: 1.25x base fee + priority tip for 25% base fee cushion against block surges.
+        let min_tip = if self.spec.chain_id == 42161
+            || self.spec.chain_id == 8453
+            || self.spec.chain_id == 10
+        {
+            50_000_000u128 // 0.05 gwei on Arbitrum/Base/OP
+        } else {
+            1_000_000_000u128 // 1.0 gwei on Ethereum mainnet / L1
+        };
+        let priority_fee = (gas_price / 10).max(min_tip);
+        let max_fee = gas_price
+            .saturating_mul(125)
+            .saturating_div(100)
+            .saturating_add(priority_fee);
+
         Ok(TransactionRequest::default()
             .with_to(to)
             .with_input(Bytes::from(calldata))
             .with_chain_id(self.spec.chain_id)
-            .with_gas_price(gas_price)
+            .with_max_priority_fee_per_gas(priority_fee)
+            .with_max_fee_per_gas(max_fee)
             .with_gas_limit(gas_limit))
     }
 

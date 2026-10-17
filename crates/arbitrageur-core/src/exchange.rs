@@ -2,11 +2,20 @@ use crate::market::MarketMetadata;
 use crate::order::{CancelRequest, OrderRequest, OrderResponse};
 use crate::position::{AccountSnapshot, Position};
 use crate::quote::{FundingRate, OrderBook, Ticker};
-use crate::types::VenueId;
+use crate::types::{Side, TimeInForce, VenueId};
 use async_trait::async_trait;
 use rust_decimal::Decimal;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tokio::sync::broadcast;
+
+/// One leg descriptor for atomic multi-leg combo execution (e.g. Box Spread, Jelly Roll).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ComboLegTrade {
+    pub instrument: String,
+    pub amount: i32,
+    pub direction: String, // "buy" or "sell"
+}
 
 /// Unified async exchange connector interface.
 #[async_trait]
@@ -319,5 +328,26 @@ pub trait ExchangeAdapter: Send + Sync {
     /// equity, margin, or positions.
     fn economic_account_key(&self) -> Option<String> {
         None
+    }
+
+    /// Whether this venue natively supports atomic multi-leg combo execution.
+    fn supports_combo_orders(&self) -> bool {
+        false
+    }
+
+    /// Submit an atomic multi-leg combo order. Venues that don't support combos error.
+    async fn place_combo_order(
+        &self,
+        _trades: &[ComboLegTrade],
+        _side: Side,
+        _amount: Decimal,
+        _price: Option<Decimal>,
+        _time_in_force: TimeInForce,
+        _label: Option<&str>,
+    ) -> anyhow::Result<OrderResponse> {
+        anyhow::bail!(
+            "Venue {} does not support native multi-leg combo orders",
+            self.name()
+        )
     }
 }

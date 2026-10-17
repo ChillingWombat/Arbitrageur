@@ -14,7 +14,7 @@ Comprehensive survey and investigation for R3 (Dashboard Gadgets & Windows Harmo
 - Read-only investigation — do NOT implement
 - Follow audit discipline (enumerate modules/files first, don't rely only on search terms)
 - Testnet first for execution tuning, understand live vs testnet environment rules
-- Dev RPC socket at /tmp/arb-dev.sock, testnet vault password 'test-only-vault-pw'
+- Dev RPC socket at /tmp/arb-dev.sock, testnet vault password '<redacted>'
 - Output survey report `survey_r3_r4.md` and handoff report `handoff.md`
 
 ## Current Parent
@@ -32,7 +32,7 @@ Comprehensive survey and investigation for R3 (Dashboard Gadgets & Windows Harmo
 - **Key findings**:
   - R3: Duplicate toggle switches (`SwitchToggle` blue vs `ToggleSwitch` green), inline switches in `EngineSettings.tsx`, inline killswitch in `Header.tsx`, inline modals in `OpportunityRadar.tsx`. Unification into `ModalContainer.tsx` and consolidated `ToggleSwitch.tsx` documented.
   - R4: -$25,897.06 aggregate PnL across 100 testnet trades caused by premature exit condition in `convergence_auto.rs` (`friction_band_bps`), aggressive market flatten unwinding across wide testnet spreads (150-250 bps), zero-cost exit assumption in one-way qualification, options premium accounting error, and currently tripped circuit breaker.
-  - Dev RPC socket `/tmp/arb-dev.sock` verified with vault password `<redacted>`.
+  - Dev RPC socket `/tmp/arb-dev.sock` verified with vault password `<redacted — see SECURITY.md>`.
 - **Unexplored areas**:
   - None within R3/R4 scope.
 

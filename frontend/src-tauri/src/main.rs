@@ -137,6 +137,11 @@ fn main() {
         tauri::async_runtime::spawn(async move { bot.run(bg_state).await });
     }
 
+    // Spawn the live options volatility surface worker: continuously ingests
+    // Deribit book summaries, calibrates online SABR parameters, and feeds
+    // dynamic smiles and Greeks into DeltaGuard and OptionsBot.
+    options_bot::spawn_volatility_surface_worker(engine_state.clone());
+
     // Spawn periodic convergence supervisor for Simple Spread ("futures") strategy.
     // Automatically monitors open manual/automated futures positions every 5s and
     // unwinds them upon convergence into the friction band or on timeout/stop.
@@ -350,6 +355,8 @@ fn main() {
             commands::check_popdex_agent,
             commands::sign_popdex_approve_with_main,
             commands::open_external_url,
+            commands::quote_across_bridge_transfer,
+            commands::prepare_across_bridge_deposit,
             priceretriver::priceretriver_status,
             priceretriver::priceretriver_list_partitions,
             priceretriver::priceretriver_download_data,

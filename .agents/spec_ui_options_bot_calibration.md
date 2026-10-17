@@ -120,5 +120,5 @@ Traders and automated desk operators were experiencing multiple usability, visua
 ## Further Notes
 
 - Verified across 600/600 Rust backend tests (`cargo test -p arbitrageur-desktop`), 17/17 frontend test suites (`npm test`), 0 linter warnings (`cargo clippy -- -D warnings`), clean rustfmt (`cargo fmt --check`), and release compilation (`npm run build && cargo build --release --features custom-protocol`).
-- Tested live on testnet under active system service `arbitrageur-testnet.service` with unlocked vault (`<redacted>`).
+- Tested live on testnet under active system service `arbitrageur-testnet.service` with unlocked vault (`<redacted — see SECURITY.md>`).
 - Committed as `e54ec10` and pushed to `origin/main`.

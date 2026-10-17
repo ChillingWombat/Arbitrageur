@@ -35,6 +35,9 @@ pub const FAST_VOL_CAP_BPS: f64 = 500.0;
 pub const FAST_VOL_HALT_MULT: f64 = 3.0;
 /// Current spread beyond this multiple of the session median stands down.
 pub const SPREAD_STANDDOWN_MULT: f64 = 3.0;
+/// Minimum threshold in bps for spread stand-down to prevent false halts
+/// during quiet sessions with tightly compressed medians (e.g. med = 0.8 bps).
+pub const SPREAD_STANDDOWN_FLOOR_BPS: f64 = 25.0;
 
 /// Half-width of a funding-stamp stand-down, seconds.
 pub const FUNDING_MASK_HALF_WIDTH_SECS: i64 = 120;
@@ -628,10 +631,15 @@ pub fn is_ondo_venue(venue: &str) -> bool {
 
 /// True when the venue trades cash shares rather than perpetuals — the
 /// only venues whose legs owe dividend/borrow/expense carry in addition
-/// to (or instead of) perp funding. Alpaca is the share venue; Ondo legs
+/// to (or instead of) perp funding. Alpaca and IBKR are share/equity venues; Ondo legs
 /// are tokenized perps whose funding already wraps the carry.
 pub fn is_equity_rails(venue: &str) -> bool {
-    matches!(venue.trim().to_lowercase().as_str(), "alpaca")
+    let raw = venue.trim().to_lowercase();
+    let v = raw
+        .strip_prefix("live_")
+        .or_else(|| raw.strip_prefix("tn_"))
+        .unwrap_or(&raw);
+    matches!(v, "alpaca" | "ibkr" | "ig")
 }
 
 #[cfg(test)]
@@ -876,5 +884,9 @@ mod tests {
         assert!(is_ondo_venue("ondoperps"));
         assert!(is_ondo_venue(" Ondo "));
         assert!(!is_ondo_venue("hyperliquid"));
+        assert!(is_equity_rails("alpaca"));
+        assert!(is_equity_rails("ibkr"));
+        assert!(is_equity_rails(" IBKR "));
+        assert!(!is_equity_rails("hyperliquid"));
     }
 }

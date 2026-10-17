@@ -31,7 +31,7 @@ import {
   tickerBotStatus,
   type TickerBotStatus,
 } from "../hooks/useBotLifecycle";
-import type { ExecutionLogEntry, TickerStrategyConfigDto, RiskOverviewDto, SystemStatusDto, VenueVolumesDto, StrategyParamsDto } from "../types";
+import type { ExecutionLogEntry, TickerStrategyConfigDto, RiskOverviewDto, SystemStatusDto, VenueVolumesDto, StrategyParamsDto, OpenPositionDto } from "../types";
 import { deriveStepSizing } from "../services/contractSpecs";
 
 interface TickerExplorerProps {
@@ -44,6 +44,7 @@ interface TickerExplorerProps {
   futuresParams?: StrategyParamsDto | null;
   totalEquityUsd?: number | null;
   riskData?: RiskOverviewDto | null;
+  openPositions?: OpenPositionDto[];
   enabledTickers?: Set<string>;
   onToggleTicker?: (symbol: string) => void;
   onOpenSettings?: () => void;
@@ -231,7 +232,8 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
   strategyConfigs: _strategyConfigs,
   futuresParams = null,
   totalEquityUsd = null,
-  riskData,
+  riskData: _riskData,
+  openPositions,
   enabledTickers,
   onToggleTicker: _onToggleTicker,
   onOpenSettings,
@@ -370,13 +372,34 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
       };
       const netProfit = Math.round(stat.pnl * 100) / 100;
 
-      // Detect if positions are not balanced or there are other issues
-      const netDelta = riskData?.net_deltas?.find((d) => d.asset.toUpperCase() === t.base.toUpperCase());
-      const hasUnbalancedPosition = Boolean(
-        netDelta &&
-          (!netDelta.is_neutral ||
-            (Math.abs(netDelta.net_exposure_usd) >= 1.0 && Math.abs(netDelta.net_quantity) > 0.0001))
+      // Check for unbalanced positions or issues STRICTLY scoped to Simple Spread's own bot (futures strategy).
+      // External positions, options packages, or other strategies on this base asset must not show alerts here.
+      const futuresPositions = (openPositions ?? []).filter(
+        (p) =>
+          (p.strategyId === "futures" || p.strategyId === "spatial_spread") &&
+          (p.symbol.toUpperCase() === t.symbol.toUpperCase() ||
+            p.symbol.toUpperCase() === t.base.toUpperCase() ||
+            p.legSymbols.some((l) => l.toUpperCase().split("-")[0] === t.base.toUpperCase()))
       );
+
+      let futuresNetQty = 0;
+      let hasFuturesImbalance = false;
+      let isFuturesReduceOnly = false;
+      for (const p of futuresPositions) {
+        if (p.reduceOnly) {
+          isFuturesReduceOnly = true;
+        }
+        let legSum = 0;
+        for (const v of p.venues ?? []) {
+          legSum += v.netQty;
+          futuresNetQty += v.netQty;
+        }
+        if (Math.abs(legSum) > 1e-4) {
+          hasFuturesImbalance = true;
+        }
+      }
+
+      const hasUnbalancedPosition = hasFuturesImbalance || Math.abs(futuresNetQty) > 1e-4;
       const config = _strategyConfigs?.get(t.symbol);
       const stepSizing = deriveStepSizing(t.symbol, t.venues, t.basePrice, totalEquityUsd, {
         stepSizeMult: futuresParams?.stepSizeMult ?? 10,
@@ -411,10 +434,15 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
           ? Math.round((stat.entrySpreadBpsSum / stat.entrySpreadCount) * 10) / 10
           : undefined;
 
-      const hasConfigIssue = Boolean(config && config.currentAccumulatedUnits > maxUnits);
-      const hasIssue = hasUnbalancedPosition || hasConfigIssue;
-      const issueDescription = hasUnbalancedPosition
-        ? `Unbalanced Position (Net Δ: ${netDelta?.net_quantity.toFixed(3)} ${t.base})`
+      const hasOpenFutures = futuresPositions.length > 0;
+      const hasConfigIssue = Boolean(hasOpenFutures && config && config.currentAccumulatedUnits > maxUnits);
+      const hasIssue = hasOpenFutures && (hasUnbalancedPosition || isFuturesReduceOnly || hasConfigIssue);
+      const issueDescription = !hasOpenFutures
+        ? undefined
+        : hasUnbalancedPosition
+        ? `Unbalanced Futures Position (Net Δ: ${futuresNetQty.toFixed(3)} ${t.base})`
+        : isFuturesReduceOnly
+        ? "Futures Position in Reduce-Only Mode"
         : hasConfigIssue
         ? "Exceeded Max Grid Units"
         : undefined;
@@ -431,7 +459,7 @@ const TickerExplorerInner: React.FC<TickerExplorerProps> = ({
         avgVolumeUsd: getTickerAvgVolumeUsd(t.base, tickerVolumes ?? []),
       };
     });
-  }, [availableTickers, executionLogs, riskData, _strategyConfigs, futuresParams, totalEquityUsd, tickerVolumes]);
+  }, [availableTickers, executionLogs, openPositions, _strategyConfigs, futuresParams, totalEquityUsd, tickerVolumes]);
 
   // Filter by search query (bot-status filter applied separately so the
   // popover counts stay scoped to the search, not to the active filter).

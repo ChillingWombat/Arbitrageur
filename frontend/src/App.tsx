@@ -261,7 +261,10 @@ export const App: React.FC = () => {
         console.warn("Startup vault status check failed:", err);
       });
 
-    const interval = setInterval(syncVault, 3000);
+    const interval = setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
+      syncVault();
+    }, 3000);
     return () => {
       isMounted = false;
       clearInterval(interval);
@@ -592,9 +595,23 @@ export const App: React.FC = () => {
   useEffect(() => {
     refreshAllData();
     const interval = setInterval(() => {
+      if (typeof document !== "undefined" && document.hidden) return;
       refreshAllData();
     }, 3000);
-    return () => clearInterval(interval);
+    const handleVisibility = () => {
+      if (typeof document !== "undefined" && !document.hidden) {
+        refreshAllData();
+      }
+    };
+    if (typeof document !== "undefined") {
+      document.addEventListener("visibilitychange", handleVisibility);
+    }
+    return () => {
+      clearInterval(interval);
+      if (typeof document !== "undefined") {
+        document.removeEventListener("visibilitychange", handleVisibility);
+      }
+    };
   }, [refreshAllData]);
 
   // Stable callbacks for the settings modal — inline closures change
@@ -927,6 +944,7 @@ export const App: React.FC = () => {
         futuresParams={futuresParams}
         totalEquityUsd={totalEquityUsd}
         riskData={riskData}
+        openPositions={openPositions}
         enabledTickers={enabledTickers}
         onToggleTicker={handleToggleTicker}
         onOpenSettings={handleOpenSettings}
@@ -946,6 +964,7 @@ export const App: React.FC = () => {
       futuresParams,
       totalEquityUsd,
       riskData,
+      openPositions,
       enabledTickers,
       handleToggleTicker,
       handleOpenSettings,
@@ -1102,6 +1121,7 @@ export const App: React.FC = () => {
           selectedPositionKey={selectedPositionKey}
           onSelectPosition={handleSelectPosition}
           status={systemStatus}
+          riskData={riskData}
           isPaused={isPaused}
           onOpenPortfolioMonitor={handleTogglePortfolio}
           isPortfolioActive={activeTab === "portfolio_monitor"}

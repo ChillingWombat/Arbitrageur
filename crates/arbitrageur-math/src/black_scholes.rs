@@ -346,6 +346,527 @@ pub fn implied_volatility(
     }
 }
 
+/// Analytical SABR model implied volatility (Hagan et al. 2002 asymptotic expansion).
+///
+/// Parameters:
+/// - `f`: Forward price (F > 0)
+/// - `k`: Strike price (K > 0)
+/// - `t`: Time to expiration in years (T > 0)
+/// - `alpha`: Volatility level (alpha > 0)
+/// - `beta`: Elasticity parameter (beta in [0, 1], typically 1.0 for lognormal crypto perps/futures)
+/// - `rho`: Correlation between asset price and volatility (rho in (-1, 1))
+/// - `nu`: Volatility of volatility (nu >= 0)
+pub fn sabr_implied_volatility(
+    f: f64,
+    k: f64,
+    t: f64,
+    alpha: f64,
+    beta: f64,
+    rho: f64,
+    nu: f64,
+) -> Option<f64> {
+    if f <= 0.0
+        || k <= 0.0
+        || t <= 0.0
+        || alpha <= 0.0
+        || nu < 0.0
+        || rho.abs() >= 1.0
+        || !(0.0..=1.0).contains(&beta)
+    {
+        return None;
+    }
+    let one_minus_beta = 1.0 - beta;
+    if (f - k).abs() < 1e-8 {
+        // ATM formula
+        let f_b = f.powf(one_minus_beta);
+        let term1 = alpha / f_b;
+        let term2 = 1.0
+            + ((one_minus_beta.powi(2) / 24.0) * (alpha * alpha / f.powf(2.0 * one_minus_beta))
+                + 0.25 * rho * beta * nu * alpha / f_b
+                + ((2.0 - 3.0 * rho * rho) / 24.0) * nu * nu)
+                * t;
+        return Some((term1 * term2).clamp(1e-4, 10.0));
+    }
+
+    let fk = f * k;
+    let fk_b = fk.powf(one_minus_beta * 0.5);
+    let log_fk = (f / k).ln();
+    let z = (nu / alpha) * fk_b * log_fk;
+    let rad = 1.0 - 2.0 * rho * z + z * z;
+    if rad < 0.0 {
+        return None;
+    }
+    let num_x = rad.sqrt() + z - rho;
+    if num_x <= 0.0 {
+        return None;
+    }
+    let x_z = (num_x / (1.0 - rho)).ln();
+    let chi_z = if x_z.abs() < 1e-10 { 1.0 } else { z / x_z };
+
+    let denom = fk_b
+        * (1.0
+            + (one_minus_beta.powi(2) / 24.0) * log_fk.powi(2)
+            + (one_minus_beta.powi(4) / 1920.0) * log_fk.powi(4));
+    if denom <= 0.0 {
+        return None;
+    }
+    let factor = alpha / denom;
+    let term = 1.0
+        + ((one_minus_beta.powi(2) / 24.0) * (alpha * alpha / fk.powf(one_minus_beta))
+            + 0.25 * rho * beta * nu * alpha / fk_b
+            + ((2.0 - 3.0 * rho * rho) / 24.0) * nu * nu)
+            * t;
+
+    Some((factor * chi_z * term).clamp(1e-4, 10.0))
+}
+
+/// SVI (Stochastic Volatility Inspired) total implied variance w(k) = sigma^2(k, t) * t.
+/// Gatheral (2004) formulation parameterized by log-moneyness k = ln(K / F).
+///
+/// w(k) = a + b * (rho * (k - m) + sqrt((k - m)^2 + sigma^2))
+#[inline]
+pub fn svi_total_variance(k: f64, a: f64, b: f64, rho: f64, m: f64, sigma: f64) -> f64 {
+    let diff = k - m;
+    let root = (diff * diff + sigma * sigma).sqrt();
+    a + b * (rho * diff + root)
+}
+
+/// Verifies Roger Lee's (2004) asymptotic wing moment bounds:
+/// Total implied variance slope as |k| -> infinity must satisfy:
+/// limsup_{k -> +inf} w(k)/k = b * (1 + rho) <= 2.0
+/// limsup_{k -> -inf} w(k)/|k| = b * (1 - rho) <= 2.0
+/// Combined: b * (1 + |rho|) <= 2.0.
+#[inline]
+pub fn verify_svi_roger_lee_bounds(b: f64, rho: f64) -> bool {
+    b >= 0.0 && rho.abs() < 1.0 && b * (1.0 + rho.abs()) <= 2.0
+}
+
+/// SVI implied volatility sigma(k, t) = sqrt(w(k) / t).
+pub fn svi_implied_volatility(
+    k: f64,
+    t: f64,
+    a: f64,
+    b: f64,
+    rho: f64,
+    m: f64,
+    sigma: f64,
+) -> Option<f64> {
+    if t <= 0.0 || !verify_svi_roger_lee_bounds(b, rho) {
+        return None;
+    }
+    let w = svi_total_variance(k, a, b, rho, m, sigma);
+    if w <= 0.0 {
+        return None;
+    }
+    Some((w / t).sqrt().clamp(1e-4, 10.0))
+}
+
+/// Validates absence of butterfly arbitrage via Breeden-Litzenberger discrete density.
+/// For sorted strike sequence K1 < K2 < ... < Kn and corresponding call prices C1, C2, ... Cn,
+/// the second finite difference d²C/dK² must be >= 0 (non-negative risk-neutral density).
+/// Returns Ok(()) if arbitrage-free, or Err((strike, d2c)) if butterfly arbitrage is present.
+pub fn check_butterfly_arbitrage_density(
+    strikes: &[f64],
+    call_prices: &[f64],
+) -> Result<(), (f64, f64)> {
+    if strikes.len() < 3 || strikes.len() != call_prices.len() {
+        return Ok(());
+    }
+    for i in 1..strikes.len() - 1 {
+        let dk1 = strikes[i] - strikes[i - 1];
+        let dk2 = strikes[i + 1] - strikes[i];
+        if dk1 <= 0.0 || dk2 <= 0.0 {
+            continue;
+        }
+        // Second finite difference approximation of d²C/dK²
+        let slope_right = (call_prices[i + 1] - call_prices[i]) / dk2;
+        let slope_left = (call_prices[i] - call_prices[i - 1]) / dk1;
+        let d2c = (slope_right - slope_left) / (0.5 * (dk1 + dk2));
+        if d2c < -1e-6 {
+            return Err((strikes[i], d2c));
+        }
+    }
+    Ok(())
+}
+
+/// Parameters resulting from Levenberg-Marquardt SABR smile calibration.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SabrCalibratedParams {
+    pub alpha: f64,
+    pub rho: f64,
+    pub nu: f64,
+    pub rmse: f64,
+    pub iterations: usize,
+    pub converged: bool,
+}
+
+/// Compact 3x3 symmetric positive-definite linear solver via Cholesky decomposition.
+/// Solves A * x = b in closed form with zero heap allocation.
+#[allow(clippy::needless_range_loop)]
+fn solve_3x3_spd(a: [[f64; 3]; 3], b: [f64; 3]) -> Option<[f64; 3]> {
+    let mut l = [[0.0; 3]; 3];
+    for i in 0..3 {
+        for j in 0..=i {
+            let mut sum = 0.0;
+            for k in 0..j {
+                sum += l[i][k] * l[j][k];
+            }
+            if i == j {
+                let diag = a[i][i] - sum;
+                if diag <= 1e-14 {
+                    return None;
+                }
+                l[i][j] = diag.sqrt();
+            } else {
+                let diag = l[j][j];
+                if diag <= 1e-14 {
+                    return None;
+                }
+                l[i][j] = (a[i][j] - sum) / diag;
+            }
+        }
+    }
+    // Forward substitution L * y = b
+    let mut y = [0.0; 3];
+    for i in 0..3 {
+        let mut sum = 0.0;
+        for k in 0..i {
+            sum += l[i][k] * y[k];
+        }
+        y[i] = (b[i] - sum) / l[i][i];
+    }
+    // Back substitution L^T * x = y
+    let mut x = [0.0; 3];
+    for i in (0..3).rev() {
+        let mut sum = 0.0;
+        for k in (i + 1)..3 {
+            sum += l[k][i] * x[k];
+        }
+        x[i] = (y[i] - sum) / l[i][i];
+    }
+    Some(x)
+}
+
+/// Calibrate Hagan's SABR model (beta = 1.0) parameters (alpha, rho, nu) from live option strikes and implied volatilities
+/// using the damped Levenberg-Marquardt algorithm.
+///
+/// Filters noisy/extreme quotes (moneyness K/F in [0.45, 2.20], IV in [0.05, 5.0]).
+#[allow(clippy::needless_range_loop)]
+pub fn calibrate_sabr_levenberg_marquardt(
+    forward: f64,
+    strikes: &[f64],
+    market_ivs: &[f64],
+    time_to_exp: f64,
+) -> Option<SabrCalibratedParams> {
+    let n = strikes.len();
+    if n < 3 || n != market_ivs.len() || forward <= 0.0 || time_to_exp <= 0.0 {
+        return None;
+    }
+
+    // 3-tier quote noise filtering:
+    let mut valid_strikes = Vec::with_capacity(n);
+    let mut valid_ivs = Vec::with_capacity(n);
+    for i in 0..n {
+        let k = strikes[i];
+        let iv = market_ivs[i];
+        let m = k / forward;
+        if (0.45..=2.20).contains(&m) && (0.05..=5.0).contains(&iv) {
+            valid_strikes.push(k);
+            valid_ivs.push(iv);
+        }
+    }
+
+    let m_len = valid_strikes.len();
+    if m_len < 3 {
+        return None;
+    }
+
+    let mid_idx = m_len / 2;
+    let mut alpha = valid_ivs[mid_idx].clamp(0.10, 2.50);
+    let mut rho = -0.25;
+    let mut nu = 0.80;
+    let mut lambda = 1e-3;
+
+    let mut best_rmse = f64::MAX;
+    let max_iter = 25;
+    let tol = 1e-5;
+
+    for iter in 0..max_iter {
+        let mut jt_j = [[0.0; 3]; 3];
+        let mut jt_r = [0.0; 3];
+        let mut sum_sq_err = 0.0;
+
+        for i in 0..m_len {
+            let k = valid_strikes[i];
+            let mkt_iv = valid_ivs[i];
+            let model_iv = sabr_implied_volatility(forward, k, time_to_exp, alpha, 1.0, rho, nu)
+                .unwrap_or(alpha);
+
+            let r_i = model_iv - mkt_iv;
+            sum_sq_err += r_i * r_i;
+
+            let h = 1e-5;
+            let iv_a = sabr_implied_volatility(forward, k, time_to_exp, alpha + h, 1.0, rho, nu)
+                .unwrap_or(model_iv);
+            let iv_r = sabr_implied_volatility(
+                forward,
+                k,
+                time_to_exp,
+                alpha,
+                1.0,
+                (rho + h).min(0.99),
+                nu,
+            )
+            .unwrap_or(model_iv);
+            let iv_n = sabr_implied_volatility(forward, k, time_to_exp, alpha, 1.0, rho, nu + h)
+                .unwrap_or(model_iv);
+
+            let j0 = (iv_a - model_iv) / h;
+            let j1 = (iv_r - model_iv) / h;
+            let j2 = (iv_n - model_iv) / h;
+            let j_row = [j0, j1, j2];
+
+            for r in 0..3 {
+                for c in 0..3 {
+                    jt_j[r][c] += j_row[r] * j_row[c];
+                }
+                jt_r[r] += j_row[r] * r_i;
+            }
+        }
+
+        let rmse = (sum_sq_err / (m_len as f64)).sqrt();
+        best_rmse = rmse;
+
+        if rmse < tol {
+            return Some(SabrCalibratedParams {
+                alpha,
+                rho,
+                nu,
+                rmse,
+                iterations: iter,
+                converged: true,
+            });
+        }
+
+        let mut damped_a = jt_j;
+        for d in 0..3 {
+            damped_a[d][d] *= 1.0 + lambda;
+            damped_a[d][d] += 1e-6;
+        }
+
+        let rhs = [-jt_r[0], -jt_r[1], -jt_r[2]];
+
+        if let Some(delta) = solve_3x3_spd(damped_a, rhs) {
+            let next_alpha = (alpha + delta[0]).clamp(0.01, 5.0);
+            let next_rho = (rho + delta[1]).clamp(-0.99, 0.99);
+            let next_nu = (nu + delta[2]).clamp(0.01, 5.0);
+
+            let mut next_sq_err = 0.0;
+            for i in 0..m_len {
+                let k = valid_strikes[i];
+                let mkt_iv = valid_ivs[i];
+                let m_iv = sabr_implied_volatility(
+                    forward,
+                    k,
+                    time_to_exp,
+                    next_alpha,
+                    1.0,
+                    next_rho,
+                    next_nu,
+                )
+                .unwrap_or(next_alpha);
+                let diff = m_iv - mkt_iv;
+                next_sq_err += diff * diff;
+            }
+            let next_rmse = (next_sq_err / (m_len as f64)).sqrt();
+
+            if next_rmse < rmse {
+                alpha = next_alpha;
+                rho = next_rho;
+                nu = next_nu;
+                lambda = (lambda / 3.0).max(1e-7);
+            } else {
+                lambda = (lambda * 5.0).min(1e5);
+            }
+        } else {
+            lambda = (lambda * 5.0).min(1e5);
+        }
+    }
+
+    Some(SabrCalibratedParams {
+        alpha,
+        rho,
+        nu,
+        rmse: best_rmse,
+        iterations: max_iter,
+        converged: false,
+    })
+}
+
+/// Computes continuous risk-neutral probability density q(K) = e^{rT} d²C/dK²
+/// from the SABR implied volatility smile using numerical second derivatives.
+pub fn compute_breeden_litzenberger_density(
+    forward: f64,
+    strike: f64,
+    time_to_exp: f64,
+    alpha: f64,
+    rho: f64,
+    nu: f64,
+) -> Option<f64> {
+    if forward <= 0.0 || strike <= 0.0 || time_to_exp <= 0.0 {
+        return None;
+    }
+    let sigma = sabr_implied_volatility(forward, strike, time_to_exp, alpha, 1.0, rho, nu)?;
+    let sqrt_t = time_to_exp.sqrt();
+    if sigma <= 0.0 || sqrt_t <= 0.0 {
+        return None;
+    }
+    let d1 = ((forward / strike).ln() + 0.5 * sigma * sigma * time_to_exp) / (sigma * sqrt_t);
+
+    let h = (strike * 1e-4).max(1e-4);
+    let sig_up = sabr_implied_volatility(forward, strike + h, time_to_exp, alpha, 1.0, rho, nu)?;
+    let sig_dn = sabr_implied_volatility(forward, strike - h, time_to_exp, alpha, 1.0, rho, nu)?;
+    let d_sig = (sig_up - sig_dn) / (2.0 * h);
+    let d2_sig = (sig_up - 2.0 * sigma + sig_dn) / (h * h);
+
+    let term1 = 1.0 + strike * d1 * sqrt_t * d_sig;
+    let poly = term1 * term1 - (strike * strike * time_to_exp * d_sig * d_sig)
+        + (strike * strike * sigma * sqrt_t * d2_sig);
+
+    let phi_d1 = (-0.5 * d1 * d1).exp() / (2.0 * std::f64::consts::PI).sqrt();
+    let density = (phi_d1 / (strike * sigma * sqrt_t)) * poly;
+
+    Some(density)
+}
+
+/// Verifies that risk-neutral density is strictly non-negative across candidate strikes.
+pub fn check_sabr_butterfly_arbitrage_free(
+    forward: f64,
+    strikes: &[f64],
+    time_to_exp: f64,
+    alpha: f64,
+    rho: f64,
+    nu: f64,
+) -> bool {
+    for &k in strikes {
+        if let Some(density) =
+            compute_breeden_litzenberger_density(forward, k, time_to_exp, alpha, rho, nu)
+        {
+            if density < -1e-6 {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+/// Leland (1985) transaction-cost adjusted option replication engine.
+///
+/// Under discrete delta-hedging at frequency dt paying proportional transaction cost k:
+/// - Selling an option / short gamma (buying high, selling low):
+///   $$\hat{\sigma}_{\text{short}}^2 = \sigma^2 \left(1 + \sqrt{\frac{2}{\pi}} \frac{k}{\sigma \sqrt{\Delta t}}\right)$$
+/// - Buying an option / long gamma (buying low, selling high):
+///   $$\hat{\sigma}_{\text{long}}^2 = \sigma^2 \left(1 - \sqrt{\frac{2}{\pi}} \frac{k}{\sigma \sqrt{\Delta t}}\right)$$
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LelandOptionReplicator {
+    pub taker_fee_rate: f64,
+    pub rebalance_dt_sec: f64,
+}
+
+impl Default for LelandOptionReplicator {
+    fn default() -> Self {
+        Self {
+            taker_fee_rate: 0.0005, // 5 bps standard taker fee
+            rebalance_dt_sec: 60.0, // 1-minute discrete hedging interval
+        }
+    }
+}
+
+impl LelandOptionReplicator {
+    pub fn new(taker_fee_rate: f64, rebalance_dt_sec: f64) -> Self {
+        Self {
+            taker_fee_rate: taker_fee_rate.max(1e-6),
+            rebalance_dt_sec: rebalance_dt_sec.max(1.0),
+        }
+    }
+
+    /// Computes Leland transaction-cost adjusted volatility.
+    pub fn compute_leland_volatility(&self, base_annual_vol: f64, is_long_gamma: bool) -> f64 {
+        let seconds_per_year = 365.25 * 86_400.0;
+        let dt_years = self.rebalance_dt_sec / seconds_per_year;
+        let sigma = base_annual_vol.max(1e-4);
+
+        let factor =
+            (2.0 / std::f64::consts::PI).sqrt() * (self.taker_fee_rate / (sigma * dt_years.sqrt()));
+
+        let leland_var = if is_long_gamma {
+            (sigma * sigma * (1.0 - factor)).max(1e-6)
+        } else {
+            sigma * sigma * (1.0 + factor)
+        };
+
+        leland_var.sqrt()
+    }
+
+    /// Computes fair synthetic option price with Leland transaction cost adjustment.
+    #[allow(clippy::too_many_arguments)]
+    pub fn synthetic_price(
+        &self,
+        option_type: OptionType,
+        spot: f64,
+        strike: f64,
+        time_to_exp: f64,
+        r: f64,
+        base_annual_vol: f64,
+        is_long_gamma: bool,
+    ) -> Option<f64> {
+        let adj_vol = self.compute_leland_volatility(base_annual_vol, is_long_gamma);
+        black_scholes_price(option_type, spot, strike, time_to_exp, r, adj_vol)
+    }
+
+    /// Computes synthetic option Delta under Leland volatility.
+    #[allow(clippy::too_many_arguments)]
+    pub fn synthetic_delta(
+        &self,
+        option_type: OptionType,
+        spot: f64,
+        strike: f64,
+        time_to_exp: f64,
+        r: f64,
+        base_annual_vol: f64,
+        is_long_gamma: bool,
+    ) -> Option<f64> {
+        let adj_vol = self.compute_leland_volatility(base_annual_vol, is_long_gamma);
+        let greeks = black_scholes_greeks(option_type, spot, strike, time_to_exp, r, adj_vol)?;
+        Some(greeks.delta)
+    }
+
+    /// Computes target perpetual futures replication contracts for an option quantity Q:
+    /// Q_perp = Q_opt * Delta
+    #[allow(clippy::too_many_arguments)]
+    pub fn target_perp_replication_qty(
+        &self,
+        option_type: OptionType,
+        contracts: f64,
+        spot: f64,
+        strike: f64,
+        time_to_exp: f64,
+        r: f64,
+        base_annual_vol: f64,
+    ) -> Option<f64> {
+        let delta = self.synthetic_delta(
+            option_type,
+            spot,
+            strike,
+            time_to_exp,
+            r,
+            base_annual_vol,
+            true,
+        )?;
+        Some(contracts * delta)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -462,5 +983,196 @@ mod tests {
         assert!(cdf_neg7 > 0.0 && cdf_neg7 < 1e-11);
         let cdf_pos7 = standard_normal_cdf(7.0);
         assert!((cdf_pos7 - (1.0 - cdf_neg7)).abs() < 1e-14);
+    }
+
+    #[test]
+    fn test_sabr_implied_volatility_atm_and_skew() {
+        let f = 100.0;
+        let t = 0.5;
+        let alpha = 0.30;
+        let beta = 1.0; // lognormal crypto style
+        let rho = -0.25;
+        let nu = 0.50;
+
+        // ATM case
+        let atm_iv = sabr_implied_volatility(f, f, t, alpha, beta, rho, nu).expect("ATM SABR");
+        assert!(
+            (atm_iv - 0.30).abs() < 0.05,
+            "ATM SABR should be close to alpha: {atm_iv}"
+        );
+
+        // OTM Put (K < F) with negative rho should exhibit higher IV (skew)
+        let otm_put_k = 85.0;
+        let otm_put_iv =
+            sabr_implied_volatility(f, otm_put_k, t, alpha, beta, rho, nu).expect("OTM Put SABR");
+        assert!(
+            otm_put_iv > atm_iv,
+            "Negative rho implies higher OTM put vol: {otm_put_iv} > {atm_iv}"
+        );
+
+        // OTM Call (K > F)
+        let otm_call_k = 115.0;
+        let otm_call_iv =
+            sabr_implied_volatility(f, otm_call_k, t, alpha, beta, rho, nu).expect("OTM Call SABR");
+        assert!(otm_call_iv.is_finite() && otm_call_iv > 0.0);
+    }
+
+    #[test]
+    fn test_svi_total_variance_and_roger_lee_bounds() {
+        // Valid SVI parameters
+        let a = 0.04;
+        let b = 0.15;
+        let rho = -0.30;
+        let m = 0.0;
+        let sigma = 0.10;
+
+        assert!(verify_svi_roger_lee_bounds(b, rho));
+        // Violating Roger Lee bounds: b * (1 + |rho|) > 2.0
+        assert!(!verify_svi_roger_lee_bounds(1.8, 0.5)); // 1.8 * 1.5 = 2.7 > 2.0
+
+        let k = 0.1; // 10% OTM call log-moneyness
+        let t = 0.25; // 3 months
+        let w = svi_total_variance(k, a, b, rho, m, sigma);
+        assert!(w > 0.0);
+
+        let svi_iv = svi_implied_volatility(k, t, a, b, rho, m, sigma).expect("SVI IV");
+        assert!(svi_iv > 0.0 && svi_iv.is_finite());
+        assert!((svi_iv - (w / t).sqrt()).abs() < 1e-10);
+    }
+
+    #[test]
+    fn test_check_butterfly_arbitrage_density() {
+        let strikes = [80.0, 90.0, 100.0, 110.0, 120.0];
+
+        // Arbitrage-free convex call prices (e.g. from BS)
+        let s = 100.0;
+        let t = 0.5;
+        let r = 0.03;
+        let sigma = 0.30;
+        let valid_prices: Vec<f64> = strikes
+            .iter()
+            .map(|&k| black_scholes_price(OptionType::Call, s, k, t, r, sigma).unwrap())
+            .collect();
+
+        assert!(
+            check_butterfly_arbitrage_density(&strikes, &valid_prices).is_ok(),
+            "Standard Black-Scholes call prices must be arbitrage-free"
+        );
+
+        // Fabricate non-convex prices (middle strike overpriced -> negative density)
+        let mut toxic_prices = valid_prices.clone();
+        toxic_prices[2] += 5.0; // Artificial bump in 100 strike call price
+        let err = check_butterfly_arbitrage_density(&strikes, &toxic_prices);
+        assert!(
+            err.is_err(),
+            "Artificially elevated middle strike must fail butterfly arbitrage density check"
+        );
+        let (bad_k, d2c) = err.unwrap_err();
+        assert_eq!(bad_k, 100.0);
+        assert!(d2c < 0.0);
+    }
+
+    #[test]
+    fn test_calibrate_sabr_levenberg_marquardt() {
+        let forward = 100.0;
+        let time_to_exp = 0.25; // 3 months
+        let true_alpha = 0.50;
+        let true_rho = -0.25;
+        let true_nu = 0.75;
+
+        let strikes = [75.0, 85.0, 95.0, 100.0, 105.0, 115.0, 125.0];
+        let market_ivs: Vec<f64> = strikes
+            .iter()
+            .map(|&k| {
+                sabr_implied_volatility(forward, k, time_to_exp, true_alpha, 1.0, true_rho, true_nu)
+                    .unwrap()
+            })
+            .collect();
+
+        let calib = calibrate_sabr_levenberg_marquardt(forward, &strikes, &market_ivs, time_to_exp)
+            .expect("SABR calibration should succeed");
+
+        assert!(
+            calib.rmse < 0.01,
+            "Calibrated RMSE should be < 0.01, got {}",
+            calib.rmse
+        );
+        assert!(
+            (calib.alpha - true_alpha).abs() < 0.05,
+            "Alpha should be close to true alpha: {} vs {}",
+            calib.alpha,
+            true_alpha
+        );
+        assert!(
+            (calib.rho - true_rho).abs() < 0.15,
+            "Rho should be close to true rho: {} vs {}",
+            calib.rho,
+            true_rho
+        );
+    }
+
+    #[test]
+    fn test_compute_breeden_litzenberger_density() {
+        let forward = 100.0;
+        let time_to_exp = 0.5;
+        let alpha = 0.40;
+        let rho = -0.15;
+        let nu = 0.50;
+
+        let strikes = [80.0, 90.0, 100.0, 110.0, 120.0];
+        for &k in &strikes {
+            let density =
+                compute_breeden_litzenberger_density(forward, k, time_to_exp, alpha, rho, nu)
+                    .expect("Density should exist");
+            assert!(
+                density > 0.0,
+                "Density at strike {} must be positive, got {}",
+                k,
+                density
+            );
+        }
+
+        assert!(check_sabr_butterfly_arbitrage_free(
+            forward,
+            &strikes,
+            time_to_exp,
+            alpha,
+            rho,
+            nu
+        ));
+    }
+
+    #[test]
+    fn test_leland_synthetic_options_replication() {
+        let replicator = LelandOptionReplicator::new(0.0005, 60.0); // 5 bps, 60s
+        let base_vol = 0.60;
+
+        // Short gamma: buying high and selling low raises effective volatility
+        let vol_short = replicator.compute_leland_volatility(base_vol, false);
+        assert!(vol_short > base_vol);
+
+        // Long gamma: buying low and selling high lowers effective volatility (friction deducted from edge)
+        let vol_long = replicator.compute_leland_volatility(base_vol, true);
+        assert!(vol_long < base_vol);
+
+        let spot = 2500.0;
+        let strike = 2500.0;
+        let t = 30.0 / 365.25;
+        let r = 0.05;
+
+        let call_price = replicator
+            .synthetic_price(OptionType::Call, spot, strike, t, r, base_vol, false)
+            .unwrap();
+        assert!(call_price > 0.0);
+
+        let delta = replicator
+            .synthetic_delta(OptionType::Call, spot, strike, t, r, base_vol, true)
+            .unwrap();
+        assert!(delta > 0.40 && delta < 0.60); // ATM delta ~ 0.50
+
+        let hedge_qty = replicator
+            .target_perp_replication_qty(OptionType::Call, 10.0, spot, strike, t, r, base_vol)
+            .unwrap();
+        assert!((hedge_qty - (10.0 * delta)).abs() < 1e-6);
     }
 }

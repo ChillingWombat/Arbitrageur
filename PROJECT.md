@@ -36,7 +36,7 @@ Arbitrageur is a multi-venue algorithmic trading platform combining a Rust backe
 | 11 | R4.2 Slippage & Testnet Spread Toll Protection | Enforce spread-toll ceiling gate and passive exit limit unwinds to prevent crossing wide testnet spreads | M4_Legacy | survey_3 |
 | 12 | R4.3 One-Way Exit Cost Accounting | Account for unwind friction in one-way mode rather than assuming zero exit cost | M4_Legacy | survey_3 |
 | 13 | R4.4 Options Premium Cashflow Accounting | Correct options conversion accounting so premium cash outflows are not booked as instant realized losses | M4_Legacy | survey_3 |
-| 14 | R4.5 Testnet Trade Execution & Validation | Validate profitable or non-negative trade execution against testnet venues using vault password `<redacted>` | M4_Legacy | survey_3 |
+| 14 | R4.5 Testnet Trade Execution & Validation | Validate profitable or non-negative trade execution against testnet venues using vault password `<redacted — see SECURITY.md>` | M4_Legacy | survey_3 |
 | 15 | R1: Bot Status on Halt/Reset & Startup | Transition all bots to stopped (`off`/`idle`), reject unpause while tripped, individual strategy start | M1 | survey_1 |
 | 16 | R1: Header Pause/Resume Tooltip & Disablement | Header pause button disabled with tooltip when breaker tripped; resuming engine never starts bots | M1 | survey_1 |
 | 17 | R2: Strategy Filter Relocation in NetPnlChart | Move filter dropdown into card top bar next to "P&L & Equity History" title; remove redundant row | M2 | survey_2 |

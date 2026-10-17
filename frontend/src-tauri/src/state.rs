@@ -28,6 +28,7 @@ use arbitrageur_execution::smart_routing::SmartOrderRouter;
 use arbitrageur_math::kalman_filter::HedgeRatioKalmanFilter;
 use arbitrageur_risk::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 use arbitrageur_risk::delta_guard::DeltaGuard;
+use arbitrageur_strategy::options_dispersion::LiveVolSurfaceCache;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -393,8 +394,8 @@ impl StrategyParamsDto {
     pub fn defaults_for(strategy_id: &str) -> Self {
         Self {
             strategy_id: strategy_id.to_string(),
-            target_profit_bps: 1.0,
-            window_percentile: 50,
+            target_profit_bps: 5.0,
+            window_percentile: 80,
             sliding_window: "24h".into(),
             sliding_window_mode: "manual".into(),
             sliding_window_secs: 86_400,
@@ -407,7 +408,7 @@ impl StrategyParamsDto {
             auto_min_price_usd: None,
             auto_min_event_volume_usd: None,
             funding_trade_size_usd: 25000.0,
-            funding_min_apr_pct: 8.0,
+            funding_min_apr_pct: 25.0,
             funding_holding_days: 14,
             futures_max_slippage_bps: default_max_slippage(),
             funding_max_slippage_bps: default_max_slippage(),
@@ -423,7 +424,7 @@ impl StrategyParamsDto {
             prediction_liq_trim_pct: None,
             spot_trade_size_usd: 1000.0,
             spot_max_slippage_bps: 5.0,
-            spot_min_net_spread_bps: 15.0,
+            spot_min_net_spread_bps: 20.0,
             triangle_trade_size_usd: default_triangle_trade_size(),
             triangle_min_profit_bps: default_triangle_min_profit(),
             triangle_max_slippage_bps: default_max_slippage(),
@@ -441,8 +442,8 @@ impl Default for TickerStrategyConfigDto {
     fn default() -> Self {
         Self {
             symbol: "BTC-USDC".into(),
-            target_profit_bps: 1.0,
-            window_percentile: 50,
+            target_profit_bps: 5.0,
+            window_percentile: 80,
             max_accumulated_units: 3,
             current_accumulated_units: 0,
             execution_mode: "SINGLE_WAY".into(),
@@ -466,7 +467,7 @@ fn default_funding_enable_basis() -> bool {
     true
 }
 fn default_funding_max_entry_spread() -> f64 {
-    50.0
+    8.0
 }
 fn default_min_depth_ratio() -> f64 {
     3.0
@@ -484,7 +485,7 @@ fn default_triangle_trade_size() -> f64 {
     10000.0
 }
 fn default_triangle_min_profit() -> f64 {
-    2.0
+    4.0
 }
 fn default_hyperliquid_url() -> String {
     "https://api.hyperliquid.xyz".into()
@@ -1531,6 +1532,8 @@ pub struct AppEngineState {
     pub evm_stronghold: RwLock<Option<crate::stronghold::EvmStronghold>>,
     pub state_store: Arc<crate::state_store::StateStore>,
     pub virtual_ledger: RwLock<arbitrageur_execution::virtual_ledger::VirtualStrategyLedger>,
+    pub margin_rebalance_daemon:
+        RwLock<arbitrageur_risk::collateral_rebalance::MarginRebalanceDaemonState>,
     pub is_paused: RwLock<bool>,
     pub is_stopped: RwLock<bool>,
     pub execution_lock: tokio::sync::Mutex<()>,
@@ -1637,6 +1640,10 @@ pub struct AppEngineState {
     /// `fx_adjusted` quote mode: price conversion into USD, watchlist
     /// pairing, sizing, and the halt gate on depegged quote currencies.
     pub stablecoin_fx: Arc<crate::stablecoin_fx::StablecoinFx>,
+    /// Live continuous volatility surface cache & online SABR parameter calibrator.
+    /// Ingests live Deribit / OKX / Binance options surface ticks and provides
+    /// analytical SABR smiles + Greeks to DeltaGuard and OptionsBot.
+    pub vol_surface: Arc<LiveVolSurfaceCache>,
 }
 
 /// Canonical venue resolution: only exact trimmed lowercase IDs, documented
@@ -2481,7 +2488,7 @@ impl AppEngineState {
         // open options capital outlays (which are financing tracked under pnl.premium_outlay)
         // and counting only transaction fees and non-options trading profits.
         if state_store
-            .kv_get("pnl.premium_outlay.migrated_v2")
+            .kv_get("pnl.premium_outlay.migrated_v3")
             .ok()
             .flatten()
             .is_none()
@@ -2522,7 +2529,7 @@ impl AppEngineState {
                 }
             }
             let _ = state_store.kv_set(
-                "pnl.premium_outlay.migrated_v2",
+                "pnl.premium_outlay.migrated_v3",
                 &chrono::Utc::now().to_rfc3339(),
             );
         }
@@ -2645,6 +2652,9 @@ impl AppEngineState {
             evm_stronghold,
             state_store,
             virtual_ledger,
+            margin_rebalance_daemon: RwLock::new(
+                arbitrageur_risk::collateral_rebalance::MarginRebalanceDaemonState::default(),
+            ),
             is_paused: RwLock::new(engine_paused_initial),
             is_stopped: RwLock::new(engine_stopped_initial),
             execution_lock: tokio::sync::Mutex::new(()),
@@ -2677,6 +2687,7 @@ impl AppEngineState {
             orderbook_flights: Arc::new(crate::ws_primary::OrderbookSingleFlight::new()),
             account_fetch_locks: Mutex::new(std::collections::HashMap::new()),
             stablecoin_fx: crate::stablecoin_fx::StablecoinFx::new(),
+            vol_surface: Arc::new(LiveVolSurfaceCache::new()),
         }
     }
 
@@ -3906,7 +3917,7 @@ mod tests {
         assert_eq!(p.futures_max_slippage_bps, 15.0);
         assert_eq!(p.funding_max_slippage_bps, 15.0);
         assert_eq!(p.prediction_max_slippage_bps, 15.0);
-        assert_eq!(p.funding_max_entry_spread_bps, 50.0);
+        assert_eq!(p.funding_max_entry_spread_bps, 8.0);
         assert_eq!(p.funding_auto_exit_spread_pct, None);
         assert_eq!(p.funding_liq_trim_pct, None);
         assert_eq!(p.funding_rotation_threshold_bps, None);

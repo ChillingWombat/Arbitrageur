@@ -1,4 +1,5 @@
 use arbitrageur_core::exchange::ExchangeAdapter;
+use arbitrageur_core::order::OrderRequest;
 use arbitrageur_core::types::{dec, Decimal, Side};
 use arbitrageur_execution::coordinator::{ArbitrageExecutionResult, AtomicArbitrageCoordinator};
 use arbitrageur_math::spatial_spread::evaluate_spatial_spread;
@@ -23,6 +24,10 @@ pub struct SpatialSignal {
     pub spread_bps: Decimal,
     pub executable_qty: Decimal,
     pub expected_profit_usd: Decimal,
+    pub buy_price: Decimal,
+    pub sell_price: Decimal,
+    pub worst_buy_price: Decimal,
+    pub worst_sell_price: Decimal,
 }
 
 pub struct SpatialPriceArbStrategy {
@@ -39,6 +44,39 @@ pub struct SpatialPriceArbStrategy {
     /// keep a rolling distribution it never reads.
     pub samples_seen: usize,
     pub min_samples: usize,
+    pub inventory_skew_cfg: Option<arbitrageur_math::inventory_skew::InventorySkewConfig>,
+    pub net_inventory_usd: Decimal,
+    pub max_venue_margin_usage_pct: Option<f64>,
+    pub hawkes: Option<arbitrageur_math::hawkes::MultivariateHawkes>,
+    pub toxicity_evaluator: Option<arbitrageur_math::lead_lag::SpreadToxicityEvaluator>,
+    pub lead_lag: Option<arbitrageur_math::lead_lag::LeadLagResult>,
+    pub lead_venue_ofi_z: Option<f64>,
+    pub gas_cost_usd_a: Decimal,
+    pub gas_cost_usd_b: Decimal,
+    pub ofi_tracker_a: Option<arbitrageur_math::lead_lag::MultiLevelOfiTracker>,
+    pub ofi_tracker_b: Option<arbitrageur_math::lead_lag::MultiLevelOfiTracker>,
+    pub ofi_preemptor: Option<arbitrageur_math::lead_lag::OfiLeadLagPreemptor>,
+    pub last_book_a: Option<arbitrageur_core::quote::OrderBook>,
+    pub last_book_b: Option<arbitrageur_core::quote::OrderBook>,
+    pub jump_detector: Option<arbitrageur_math::volatility_jump::ManciniBipowerJumpDetector>,
+    pub racing_model: Option<arbitrageur_math::latency_racing::CrossVenueRacingModel>,
+    pub last_jump_assessment: Option<arbitrageur_math::volatility_jump::JumpAssessment>,
+    pub micro_price_surface:
+        Option<arbitrageur_math::micro_price_surface::MultiLevelMicroPriceSurface>,
+    pub multi_asset_hawkes: Option<arbitrageur_math::cross_hawkes::MultiAssetCrossHawkesEngine>,
+    pub multi_asset_avellaneda:
+        Option<arbitrageur_math::multi_asset_avellaneda::MultiAssetAvellanedaEngine>,
+    pub l2_sequencer_guard:
+        Option<arbitrageur_execution::l2_sequencer_guard::L2SequencerLatencyGuard>,
+    pub matrix_propagator: Option<arbitrageur_math::matrix_propagator::MatrixBouchaudPropagator>,
+    pub fredholm_engine:
+        Option<arbitrageur_math::matrix_propagator::FredholmOptimalExecutionEngine>,
+    pub resilience_pacer: Option<arbitrageur_math::resilience_pacer::CrossImpactResiliencePacer>,
+    pub multi_level_ofi_engine_a:
+        Option<arbitrageur_math::micro_price_surface::MultiLevelOfiToxicityEngine>,
+    pub multi_level_ofi_engine_b:
+        Option<arbitrageur_math::micro_price_surface::MultiLevelOfiToxicityEngine>,
+    pub rough_fou_engine: Option<arbitrageur_math::rough_ou::RoughFouSpreadEngine>,
 }
 
 impl SpatialPriceArbStrategy {
@@ -68,7 +106,615 @@ impl SpatialPriceArbStrategy {
             fee_b_bps,
             samples_seen: 0,
             min_samples,
+            inventory_skew_cfg: None,
+            net_inventory_usd: dec!(0),
+            max_venue_margin_usage_pct: None,
+            hawkes: None,
+            toxicity_evaluator: None,
+            lead_lag: None,
+            lead_venue_ofi_z: None,
+            gas_cost_usd_a: dec!(0),
+            gas_cost_usd_b: dec!(0),
+            ofi_tracker_a: None,
+            ofi_tracker_b: None,
+            ofi_preemptor: None,
+            last_book_a: None,
+            last_book_b: None,
+            jump_detector: None,
+            racing_model: None,
+            last_jump_assessment: None,
+            micro_price_surface: None,
+            multi_asset_hawkes: None,
+            multi_asset_avellaneda: None,
+            l2_sequencer_guard: None,
+            matrix_propagator: None,
+            fredholm_engine: None,
+            resilience_pacer: None,
+            multi_level_ofi_engine_a: None,
+            multi_level_ofi_engine_b: None,
+            rough_fou_engine: None,
         }
+    }
+
+    /// Attaches a Fractional Ornstein-Uhlenbeck (fOU) rough volatility spread engine.
+    pub fn with_rough_fou_engine(
+        mut self,
+        engine: arbitrageur_math::rough_ou::RoughFouSpreadEngine,
+    ) -> Self {
+        self.rough_fou_engine = Some(engine);
+        self
+    }
+
+    pub fn set_rough_fou_engine(
+        &mut self,
+        engine: Option<arbitrageur_math::rough_ou::RoughFouSpreadEngine>,
+    ) {
+        self.rough_fou_engine = engine;
+    }
+
+    /// Attaches Multi-Level Order Flow Imbalance (OFI) and Kyle's lambda toxicity engines for venues A and B.
+    pub fn with_multi_level_ofi_engines(
+        mut self,
+        engine_a: arbitrageur_math::micro_price_surface::MultiLevelOfiToxicityEngine,
+        engine_b: arbitrageur_math::micro_price_surface::MultiLevelOfiToxicityEngine,
+    ) -> Self {
+        self.multi_level_ofi_engine_a = Some(engine_a);
+        self.multi_level_ofi_engine_b = Some(engine_b);
+        self
+    }
+
+    pub fn set_multi_level_ofi_engines(
+        &mut self,
+        engine_a: Option<arbitrageur_math::micro_price_surface::MultiLevelOfiToxicityEngine>,
+        engine_b: Option<arbitrageur_math::micro_price_surface::MultiLevelOfiToxicityEngine>,
+    ) {
+        self.multi_level_ofi_engine_a = engine_a;
+        self.multi_level_ofi_engine_b = engine_b;
+    }
+
+    /// Attaches a Mancini (2009) & Barndorff-Nielsen Bipower Variation jump detector.
+    pub fn with_jump_detector(
+        mut self,
+        detector: arbitrageur_math::volatility_jump::ManciniBipowerJumpDetector,
+    ) -> Self {
+        self.jump_detector = Some(detector);
+        self
+    }
+
+    /// Attaches a cross-venue stochastic latency racing model.
+    pub fn with_racing_model(
+        mut self,
+        racing_model: arbitrageur_math::latency_racing::CrossVenueRacingModel,
+    ) -> Self {
+        self.racing_model = Some(racing_model);
+        self
+    }
+
+    pub fn set_jump_detector(
+        &mut self,
+        detector: Option<arbitrageur_math::volatility_jump::ManciniBipowerJumpDetector>,
+    ) {
+        self.jump_detector = detector;
+    }
+
+    pub fn set_racing_model(
+        &mut self,
+        racing_model: Option<arbitrageur_math::latency_racing::CrossVenueRacingModel>,
+    ) {
+        self.racing_model = racing_model;
+    }
+
+    /// Attaches a multi-level micro-price surface and lead-lag predictive engine.
+    pub fn with_micro_price_surface(
+        mut self,
+        surface: arbitrageur_math::micro_price_surface::MultiLevelMicroPriceSurface,
+    ) -> Self {
+        self.micro_price_surface = Some(surface);
+        self
+    }
+
+    pub fn set_micro_price_surface(
+        &mut self,
+        surface: Option<arbitrageur_math::micro_price_surface::MultiLevelMicroPriceSurface>,
+    ) {
+        self.micro_price_surface = surface;
+    }
+
+    /// Attaches a Multi-Asset Cross-Hawkes co-jump and asymmetric cross-impact engine.
+    pub fn with_multi_asset_hawkes(
+        mut self,
+        engine: arbitrageur_math::cross_hawkes::MultiAssetCrossHawkesEngine,
+    ) -> Self {
+        self.multi_asset_hawkes = Some(engine);
+        self
+    }
+
+    pub fn set_multi_asset_hawkes(
+        &mut self,
+        engine: Option<arbitrageur_math::cross_hawkes::MultiAssetCrossHawkesEngine>,
+    ) {
+        self.multi_asset_hawkes = engine;
+    }
+
+    /// Attaches a Multi-Asset Avellaneda-Stoikov-Guéant inventory reservation engine with continuous funding carry.
+    pub fn with_multi_asset_avellaneda(
+        mut self,
+        engine: arbitrageur_math::multi_asset_avellaneda::MultiAssetAvellanedaEngine,
+    ) -> Self {
+        self.multi_asset_avellaneda = Some(engine);
+        self
+    }
+
+    pub fn set_multi_asset_avellaneda(
+        &mut self,
+        engine: Option<arbitrageur_math::multi_asset_avellaneda::MultiAssetAvellanedaEngine>,
+    ) {
+        self.multi_asset_avellaneda = engine;
+    }
+
+    /// Attaches an L2 optimistic sequencer pre-confirmation latency and re-ordering hazard guard.
+    pub fn with_l2_sequencer_guard(
+        mut self,
+        guard: arbitrageur_execution::l2_sequencer_guard::L2SequencerLatencyGuard,
+    ) -> Self {
+        self.l2_sequencer_guard = Some(guard);
+        self
+    }
+
+    pub fn set_l2_sequencer_guard(
+        &mut self,
+        guard: Option<arbitrageur_execution::l2_sequencer_guard::L2SequencerLatencyGuard>,
+    ) {
+        self.l2_sequencer_guard = guard;
+    }
+
+    /// Attaches a Matrix Bouchaud Propagator and Fredholm optimal trajectory execution engine.
+    pub fn with_matrix_propagator(
+        mut self,
+        propagator: arbitrageur_math::matrix_propagator::MatrixBouchaudPropagator,
+    ) -> Self {
+        self.fredholm_engine = Some(
+            arbitrageur_math::matrix_propagator::FredholmOptimalExecutionEngine::new(
+                propagator.clone(),
+            ),
+        );
+        self.matrix_propagator = Some(propagator);
+        self
+    }
+
+    pub fn set_matrix_propagator(
+        &mut self,
+        propagator: Option<arbitrageur_math::matrix_propagator::MatrixBouchaudPropagator>,
+    ) {
+        if let Some(p) = &propagator {
+            self.fredholm_engine = Some(
+                arbitrageur_math::matrix_propagator::FredholmOptimalExecutionEngine::new(p.clone()),
+            );
+        } else {
+            self.fredholm_engine = None;
+        }
+        self.matrix_propagator = propagator;
+    }
+
+    /// Computes optimal multi-asset discrete execution trajectory via Fredholm integral inversion.
+    pub fn compute_matrix_execution_trajectory(
+        &self,
+        target_quantities: &[f64],
+        duration_sec: f64,
+        num_steps: usize,
+    ) -> Option<arbitrageur_math::matrix_propagator::MultiAssetExecutionSchedule> {
+        self.fredholm_engine.as_ref().and_then(|engine| {
+            engine.compute_optimal_schedule(target_quantities, duration_sec, num_steps)
+        })
+    }
+
+    /// Attaches an order book cross-impact resilience and child slice pacer.
+    pub fn with_resilience_pacer(
+        mut self,
+        pacer: arbitrageur_math::resilience_pacer::CrossImpactResiliencePacer,
+    ) -> Self {
+        self.resilience_pacer = Some(pacer);
+        self
+    }
+
+    /// Computes child slice size, replenishment pacing interval, and adverse selection penalty.
+    pub fn compute_resilience_child_slice(
+        &self,
+        parent_qty_remaining: f64,
+        depth_l1_a: f64,
+        depth_l1_b: f64,
+        spread_volatility_sec: f64,
+        mid_price: f64,
+    ) -> Option<arbitrageur_math::resilience_pacer::ChildSliceRecommendation> {
+        self.resilience_pacer.as_ref().map(|pacer| {
+            pacer.compute_child_slice_recommendation(
+                parent_qty_remaining,
+                depth_l1_a,
+                depth_l1_b,
+                spread_volatility_sec,
+                mid_price,
+            )
+        })
+    }
+
+    /// Attaches an anticipatory OFI lead-lag preemptor and initializes order flow imbalance trackers.
+    pub fn with_ofi_preemptor(
+        mut self,
+        preemptor: arbitrageur_math::lead_lag::OfiLeadLagPreemptor,
+    ) -> Self {
+        self.ofi_preemptor = Some(preemptor);
+        if self.ofi_tracker_a.is_none() {
+            self.ofi_tracker_a = Some(arbitrageur_math::lead_lag::MultiLevelOfiTracker::default());
+        }
+        if self.ofi_tracker_b.is_none() {
+            self.ofi_tracker_b = Some(arbitrageur_math::lead_lag::MultiLevelOfiTracker::default());
+        }
+        self
+    }
+
+    /// Ingests order books, updates multi-level OFI deltas, and computes live OFI Z-score for leading venue.
+    pub fn update_orderbooks_ofi(
+        &mut self,
+        book_a: &arbitrageur_core::quote::OrderBook,
+        book_b: &arbitrageur_core::quote::OrderBook,
+    ) -> (f64, f64) {
+        let ofi_delta_a = if let Some(ref prev_a) = self.last_book_a {
+            book_a.compute_ofi_delta(prev_a, 5, 0.40)
+        } else {
+            0.0
+        };
+        let ofi_delta_b = if let Some(ref prev_b) = self.last_book_b {
+            book_b.compute_ofi_delta(prev_b, 5, 0.40)
+        } else {
+            0.0
+        };
+
+        self.last_book_a = Some(book_a.clone());
+        self.last_book_b = Some(book_b.clone());
+
+        let z_a = self
+            .ofi_tracker_a
+            .as_mut()
+            .map(|t| t.ingest_ofi(ofi_delta_a))
+            .unwrap_or(0.0);
+        let z_b = self
+            .ofi_tracker_b
+            .as_mut()
+            .map(|t| t.ingest_ofi(ofi_delta_b))
+            .unwrap_or(0.0);
+
+        // If OFI trackers are active and lead_lag indicates a leader, dynamically assign lead_venue_ofi_z
+        if self.ofi_tracker_a.is_some() || self.ofi_tracker_b.is_some() {
+            if let Some(ref ll) = self.lead_lag {
+                match ll.leader {
+                    arbitrageur_math::lead_lag::LeadVenue::VenueALeads => {
+                        self.lead_venue_ofi_z = Some(z_a);
+                    }
+                    arbitrageur_math::lead_lag::LeadVenue::VenueBLeads => {
+                        self.lead_venue_ofi_z = Some(z_b);
+                    }
+                    arbitrageur_math::lead_lag::LeadVenue::Synchronous => {}
+                }
+            }
+        }
+
+        (z_a, z_b)
+    }
+
+    /// Attaches an inventory-skew configuration to dynamically adjust entry hurdles.
+    pub fn with_inventory_skew(
+        mut self,
+        cfg: arbitrageur_math::inventory_skew::InventorySkewConfig,
+        net_inventory_usd: Decimal,
+    ) -> Self {
+        self.inventory_skew_cfg = Some(cfg);
+        self.net_inventory_usd = net_inventory_usd;
+        self
+    }
+
+    /// Sets the maximum venue margin utilization percentage across the pair venues.
+    pub fn with_venue_margin_usage(mut self, usage_pct: f64) -> Self {
+        self.max_venue_margin_usage_pct = Some(usage_pct);
+        self
+    }
+
+    /// Attaches a Multivariate Hawkes process model for order flow clustering and toxic regime gating.
+    pub fn with_hawkes(mut self, hawkes: arbitrageur_math::hawkes::MultivariateHawkes) -> Self {
+        self.hawkes = Some(hawkes);
+        self
+    }
+
+    /// Attaches a SpreadToxicityEvaluator for lead-lag and order flow imbalance protection.
+    pub fn with_toxicity_evaluator(
+        mut self,
+        evaluator: arbitrageur_math::lead_lag::SpreadToxicityEvaluator,
+    ) -> Self {
+        self.toxicity_evaluator = Some(evaluator);
+        self
+    }
+
+    /// Updates the SpreadToxicityEvaluator.
+    pub fn set_toxicity_evaluator(
+        &mut self,
+        evaluator: Option<arbitrageur_math::lead_lag::SpreadToxicityEvaluator>,
+    ) {
+        self.toxicity_evaluator = evaluator;
+    }
+
+    /// Attaches Hayashi-Yoshida lead-lag results and OFI Z-score.
+    pub fn with_lead_lag(
+        mut self,
+        lead_lag: arbitrageur_math::lead_lag::LeadLagResult,
+        lead_venue_ofi_z: Option<f64>,
+    ) -> Self {
+        self.lead_lag = Some(lead_lag);
+        self.lead_venue_ofi_z = lead_venue_ofi_z;
+        self
+    }
+
+    /// Updates lead-lag analysis and lead venue OFI.
+    pub fn set_lead_lag(
+        &mut self,
+        lead_lag: Option<arbitrageur_math::lead_lag::LeadLagResult>,
+        lead_venue_ofi_z: Option<f64>,
+    ) {
+        self.lead_lag = lead_lag;
+        self.lead_venue_ofi_z = lead_venue_ofi_z;
+    }
+
+    /// Updates current net inventory for the pair in USD.
+    pub fn set_net_inventory_usd(&mut self, net_usd: Decimal) {
+        self.net_inventory_usd = net_usd;
+    }
+
+    /// Updates current venue margin usage percentage.
+    pub fn set_venue_margin_usage_pct(&mut self, usage_pct: f64) {
+        self.max_venue_margin_usage_pct = Some(usage_pct);
+    }
+
+    /// Updates the Multivariate Hawkes process model.
+    pub fn set_hawkes(&mut self, hawkes: Option<arbitrageur_math::hawkes::MultivariateHawkes>) {
+        self.hawkes = hawkes;
+    }
+
+    /// Ingests a high-frequency quote or trade tick into the internal Hawkes process.
+    pub fn ingest_quote_tick(&mut self, stream_idx: usize, timestamp_sec: f64) {
+        if let Some(ref mut h) = self.hawkes {
+            h.update_at_timestamp(timestamp_sec, Some(stream_idx));
+        }
+    }
+
+    /// Attaches explicit gas costs in USD for on-chain venues (e.g. EVM AMM swaps).
+    pub fn with_gas_costs(mut self, gas_a: Decimal, gas_b: Decimal) -> Self {
+        self.gas_cost_usd_a = gas_a;
+        self.gas_cost_usd_b = gas_b;
+        self
+    }
+
+    /// Updates explicit gas costs in USD for on-chain venues.
+    pub fn set_gas_costs(&mut self, gas_a: Decimal, gas_b: Decimal) {
+        self.gas_cost_usd_a = gas_a;
+        self.gas_cost_usd_b = gas_b;
+    }
+
+    /// Computes the reservation profit hurdle accounting for cross-venue inventory skew and margin health.
+    pub fn effective_hurdle_bps(&self, direction: SpatialDirection) -> Decimal {
+        self.effective_hurdle_bps_with_ref_price(direction, None)
+    }
+
+    /// Computes the reservation profit hurdle accounting for cross-venue inventory skew,
+    /// margin health, and actual evaluated trade notional.
+    pub fn effective_hurdle_bps_with_ref_price(
+        &self,
+        direction: SpatialDirection,
+        ref_price: Option<Decimal>,
+    ) -> Decimal {
+        let base_f64 = self
+            .target_profit_bps
+            .to_string()
+            .parse::<f64>()
+            .unwrap_or(5.0);
+
+        let adj_bps = if let Some(cfg) = self.inventory_skew_cfg.as_ref() {
+            let inv_f64 = self
+                .net_inventory_usd
+                .to_string()
+                .parse::<f64>()
+                .unwrap_or(0.0);
+            let qty_f64 = self.order_qty.to_string().parse::<f64>().unwrap_or(1.0);
+            let trade_size_usd = if let Some(px) = ref_price {
+                let px_f64 = px.to_string().parse::<f64>().unwrap_or(1.0);
+                (qty_f64.abs() * px_f64).max(1.0)
+            } else {
+                // Sensible fallback when quote is unobserved
+                qty_f64.abs() * 100.0
+            };
+            // Symmetric at zero inventory: balanced inventory is not penalized as 'increasing' skew
+            let is_increasing = if inv_f64.abs() < 1e-4 {
+                false
+            } else {
+                match direction {
+                    SpatialDirection::BuyASellB => inv_f64 > 0.0,
+                    SpatialDirection::BuyBSellA => inv_f64 < 0.0,
+                }
+            };
+            let usage = self.max_venue_margin_usage_pct.unwrap_or(0.0);
+            arbitrageur_math::inventory_skew::venue_aware_reservation_hurdle_bps(
+                base_f64,
+                inv_f64,
+                trade_size_usd,
+                10.0,
+                1.0,
+                is_increasing,
+                usage,
+                cfg,
+            )
+        } else {
+            base_f64
+        };
+
+        let hawkes_penalty_bps = match self
+            .hawkes
+            .as_ref()
+            .map(|h| h.classify_instantaneous_regime())
+        {
+            Some(arbitrageur_math::hawkes::HawkesRegime::Supercritical) => 25.0,
+            Some(arbitrageur_math::hawkes::HawkesRegime::Critical) => 5.0,
+            Some(arbitrageur_math::hawkes::HawkesRegime::Subcritical) | None => 0.0,
+        };
+        let hawkes_offset_bps = if let Some(h) = self.hawkes.as_ref() {
+            if h.num_streams >= 2 {
+                // Directional adverse selection offset under toxic flow:
+                // Stream 0: Buy arrivals; Stream 1: Sell arrivals
+                let offset = h.compute_toxic_reservation_offset_bps(0, 1, 0.60, 2.0, 1.0);
+                match direction {
+                    SpatialDirection::BuyASellB => (-offset).max(0.0),
+                    SpatialDirection::BuyBSellA => offset.max(0.0),
+                }
+            } else {
+                0.0
+            }
+        } else {
+            0.0
+        };
+        let toxicity_penalty_bps = if let Some(te) = self.toxicity_evaluator.as_ref() {
+            // When toxicity evaluator is active, reserve a base buffer against adverse selection drift
+            (te.ofi_z_threshold * 1.5).max(0.0)
+        } else {
+            0.0
+        };
+        let jump_penalty_bps = match self.last_jump_assessment.as_ref().map(|a| &a.action) {
+            Some(arbitrageur_math::volatility_jump::JumpAction::DefensiveSpreadWidening {
+                hurdle_expansion_bps,
+                ..
+            }) => *hurdle_expansion_bps,
+            Some(arbitrageur_math::volatility_jump::JumpAction::PullBidsAndWidenAsks {
+                hurdle_expansion_bps,
+                ..
+            }) => {
+                if direction == SpatialDirection::BuyASellB {
+                    hurdle_expansion_bps * 1.5
+                } else {
+                    *hurdle_expansion_bps
+                }
+            }
+            Some(arbitrageur_math::volatility_jump::JumpAction::PullAsksAndWidenBids {
+                hurdle_expansion_bps,
+                ..
+            }) => {
+                if direction == SpatialDirection::BuyBSellA {
+                    hurdle_expansion_bps * 1.5
+                } else {
+                    *hurdle_expansion_bps
+                }
+            }
+            Some(arbitrageur_math::volatility_jump::JumpAction::NormalDiffusion) | None => 0.0,
+        };
+
+        let multi_asset_hurdle_adj = if let Some(ref avellaneda) = self.multi_asset_avellaneda {
+            let asset_idx = avellaneda
+                .asset_symbols
+                .iter()
+                .position(|s| s.eq_ignore_ascii_case(&self.symbol))
+                .unwrap_or(0);
+            let qty_f64 = self.order_qty.to_string().parse::<f64>().unwrap_or(1.0);
+            let px_f64 = ref_price
+                .and_then(|p| p.to_string().parse::<f64>().ok())
+                .unwrap_or(100.0);
+            let dir_sign = match direction {
+                SpatialDirection::BuyASellB => 1.0,
+                SpatialDirection::BuyBSellA => -1.0,
+            };
+            let trade_size = qty_f64.abs() * dir_sign;
+            let inv_f64 = self
+                .net_inventory_usd
+                .to_string()
+                .parse::<f64>()
+                .unwrap_or(0.0)
+                / px_f64.max(1e-4);
+            let mut q_vec = vec![0.0; avellaneda.asset_symbols.len()];
+            if asset_idx < q_vec.len() {
+                q_vec[asset_idx] = inv_f64;
+            }
+            let px_vec = vec![px_f64; avellaneda.asset_symbols.len()];
+            let eval = avellaneda.evaluate_candidate_trade(
+                asset_idx, trade_size, base_f64, &q_vec, &px_vec, 10.0, 100_000.0,
+            );
+            if !eval.trade_allowed {
+                10_000.0
+            } else {
+                eval.adjusted_hurdle_bps - eval.base_hurdle_bps
+            }
+        } else {
+            0.0
+        };
+
+        let cross_hawkes_penalty_bps = if let Some(ref mah) = self.multi_asset_hawkes {
+            let now_sec = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
+            let asset_idx = mah
+                .asset_symbols
+                .iter()
+                .position(|s| s.eq_ignore_ascii_case(&self.symbol))
+                .unwrap_or(0);
+            let regime = mah.classify_regime();
+            let regime_penalty = match regime {
+                arbitrageur_math::cross_hawkes::CrossHawkesRegime::Supercritical => 30.0,
+                arbitrageur_math::cross_hawkes::CrossHawkesRegime::Critical => 8.0,
+                arbitrageur_math::cross_hawkes::CrossHawkesRegime::Subcritical => 0.0,
+            };
+            let toxic_drift = mah.toxic_reservation_drift_bps(asset_idx, now_sec);
+            let dir_drift = match direction {
+                SpatialDirection::BuyASellB => (-toxic_drift).max(0.0),
+                SpatialDirection::BuyBSellA => toxic_drift.max(0.0),
+            };
+            regime_penalty + dir_drift
+        } else {
+            0.0
+        };
+
+        let resilience_penalty_bps = if let Some(ref pacer) = self.resilience_pacer {
+            let px_f64 = ref_price
+                .map(|p| p.to_string().parse::<f64>().unwrap_or(1.0))
+                .unwrap_or(1.0);
+            let qty = self.order_qty.to_string().parse::<f64>().unwrap_or(1.0);
+            let rec = pacer.compute_child_slice_recommendation(qty.abs(), 5.0, 5.0, 0.0002, px_f64);
+            rec.adverse_selection_penalty_bps
+        } else {
+            0.0
+        };
+
+        let total_bps = adj_bps
+            + hawkes_penalty_bps
+            + hawkes_offset_bps
+            + toxicity_penalty_bps
+            + jump_penalty_bps
+            + multi_asset_hurdle_adj
+            + cross_hawkes_penalty_bps
+            + resilience_penalty_bps;
+        Decimal::from_str_exact(&format!("{:.4}", total_bps))
+            .ok()
+            .or_else(|| Decimal::from_f64_retain(total_bps))
+            .unwrap_or(self.target_profit_bps)
+    }
+
+    /// Evaluates toxicity of an observed spread opportunity given lead-lag analysis and OFI.
+    pub fn evaluate_toxicity(
+        &self,
+        quote_age_a_ms: i64,
+        quote_age_b_ms: i64,
+        lead_lag: &arbitrageur_math::lead_lag::LeadLagResult,
+        lead_venue_ofi_z: f64,
+        spread_bps: f64,
+    ) -> Option<arbitrageur_math::lead_lag::ToxicityAssessment> {
+        self.toxicity_evaluator.as_ref().map(|te| {
+            te.evaluate_toxicity(
+                quote_age_a_ms,
+                quote_age_b_ms,
+                lead_lag,
+                lead_venue_ofi_z,
+                spread_bps,
+            )
+        })
     }
 
     /// Evaluates current orderbooks and returns an arbitrage signal if profitable.
@@ -87,6 +733,191 @@ impl SpatialPriceArbStrategy {
             return Ok(None);
         }
 
+        self.update_orderbooks_ofi(&book_a, &book_b);
+
+        let mid_ref = (bid_a + ask_a + bid_b + ask_b) / dec!(4);
+        if let Some(ref mut jd) = self.jump_detector {
+            let mid_f64 = mid_ref.to_string().parse::<f64>().unwrap_or(0.0);
+            if mid_f64 > 0.0 {
+                let assessment = jd.ingest_tick(mid_f64, 1.0);
+                self.last_jump_assessment = Some(assessment.clone());
+
+                if assessment.is_jump {
+                    match assessment.action {
+                        arbitrageur_math::volatility_jump::JumpAction::PullBidsAndWidenAsks {
+                            jump_return_bps,
+                            relative_jump_ratio,
+                            ..
+                        } => {
+                            tracing::warn!(
+                                "[{}] Jump Circuit Triggered: Downward liquidation cascade ({:.2} bps, RJ={:.2}). Blocking spatial arb",
+                                self.symbol, jump_return_bps, relative_jump_ratio
+                            );
+                            return Ok(None);
+                        }
+                        arbitrageur_math::volatility_jump::JumpAction::PullAsksAndWidenBids {
+                            jump_return_bps,
+                            relative_jump_ratio,
+                            ..
+                        } => {
+                            tracing::warn!(
+                                "[{}] Jump Circuit Triggered: Upward squeeze surge (+{:.2} bps, RJ={:.2}). Blocking spatial arb",
+                                self.symbol, jump_return_bps, relative_jump_ratio
+                            );
+                            return Ok(None);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+
+        if let Some(ref mut h) = self.hawkes {
+            let now_sec = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
+            h.update_at_timestamp(now_sec, None);
+
+            if h.classify_instantaneous_regime()
+                == arbitrageur_math::hawkes::HawkesRegime::Supercritical
+                || (0..h.num_streams).any(|s| h.is_toxic_pull(s, 15.0))
+            {
+                tracing::warn!(
+                    "[{}] Spatial candidate rejected: Hawkes Supercritical/Toxic Surge detected (intensities: {:?})",
+                    self.symbol,
+                    h.all_intensities()
+                );
+                return Ok(None);
+            }
+        }
+
+        if let Some(ref te) = self.toxicity_evaluator {
+            let now = chrono::Utc::now();
+            let age_a_ms = (now - book_a.timestamp).num_milliseconds().max(0);
+            let age_b_ms = (now - book_b.timestamp).num_milliseconds().max(0);
+            if age_a_ms > te.max_quote_age_ms || age_b_ms > te.max_quote_age_ms {
+                debug!(
+                    "[{}] Stale orderbook quotes: age_a={}ms, age_b={}ms (max={}ms)",
+                    self.symbol, age_a_ms, age_b_ms, te.max_quote_age_ms
+                );
+                return Ok(None);
+            }
+
+            if let Some(ref ll) = self.lead_lag {
+                let ofi_z = self.lead_venue_ofi_z.unwrap_or(0.0);
+                let gross_spread_bps = ((bid_b - ask_a).max(bid_a - ask_b)
+                    / bid_a.max(bid_b).max(dec!(1)))
+                .to_string()
+                .parse::<f64>()
+                .unwrap_or(0.0)
+                    * 10000.0;
+                let assessment =
+                    te.evaluate_toxicity(age_a_ms, age_b_ms, ll, ofi_z, gross_spread_bps);
+                if let arbitrageur_math::lead_lag::ToxicityAssessment::ToxicAdverseSelection {
+                    expected_drift_bps,
+                    hurdle_expansion_bps,
+                } = assessment
+                {
+                    tracing::warn!(
+                        "[{}] Spatial candidate rejected: Toxic adverse selection cascade from leading venue (expected drift {:.2} bps, hurdle expansion {:.2} bps)",
+                        self.symbol, expected_drift_bps, hurdle_expansion_bps
+                    );
+                    return Ok(None);
+                }
+            }
+        }
+
+        if let Some(ref mps) = self.micro_price_surface {
+            let bids_a: Vec<f64> = book_a
+                .bids
+                .iter()
+                .take(5)
+                .map(|l| l.size.to_string().parse::<f64>().unwrap_or(0.0))
+                .collect();
+            let asks_a: Vec<f64> = book_a
+                .asks
+                .iter()
+                .take(5)
+                .map(|l| l.size.to_string().parse::<f64>().unwrap_or(0.0))
+                .collect();
+            let bids_b: Vec<f64> = book_b
+                .bids
+                .iter()
+                .take(5)
+                .map(|l| l.size.to_string().parse::<f64>().unwrap_or(0.0))
+                .collect();
+            let asks_b: Vec<f64> = book_b
+                .asks
+                .iter()
+                .take(5)
+                .map(|l| l.size.to_string().parse::<f64>().unwrap_or(0.0))
+                .collect();
+            let imb_a = mps.compute_multi_level_imbalance(&bids_a, &asks_a, 0.0, 0.0);
+            let imb_b = mps.compute_multi_level_imbalance(&bids_b, &asks_b, 0.0, 0.0);
+            let ofi_z = self.lead_venue_ofi_z.unwrap_or(0.0);
+            let features = [imb_a, ofi_z, 0.0, 1.0, imb_b, 0.0];
+            let fee_a = self.fee_a_bps.to_string().parse::<f64>().unwrap_or(2.0);
+            let fee_b = self.fee_b_bps.to_string().parse::<f64>().unwrap_or(2.0);
+            let sniping_res =
+                mps.evaluate_anticipatory_sniping(&features, 1.5, fee_a, fee_b, 8.0, 0.02, 0.50);
+            if sniping_res.decision
+                == arbitrageur_math::micro_price_surface::AnticipatorySnipingDecision::RejectAdverseSweep
+            {
+                tracing::warn!(
+                    "[{}] Spatial candidate rejected: Micro-price surface detected toxic adverse sweep (drift {:.2} bps)",
+                    self.symbol,
+                    sniping_res.expected_drift_bps
+                );
+                return Ok(None);
+            }
+        }
+
+        if let Some(ref mah) = self.multi_asset_hawkes {
+            let now_sec = chrono::Utc::now().timestamp_millis() as f64 / 1000.0;
+            let asset_idx = mah
+                .asset_symbols
+                .iter()
+                .position(|s| s.eq_ignore_ascii_case(&self.symbol))
+                .unwrap_or(0);
+            let (should_withdraw, joint_hazard) =
+                mah.check_cojump_quote_withdrawal(asset_idx, asset_idx, now_sec);
+            if should_withdraw {
+                tracing::warn!(
+                    "[{}] Spatial candidate rejected: Multi-Asset Cross-Hawkes toxic co-jump quote withdrawal active (hazard: {:.2}, spectral radius: {:.3})",
+                    self.symbol,
+                    joint_hazard,
+                    mah.spectral_radius()
+                );
+                return Ok(None);
+            }
+        }
+
+        if let Some(ref avellaneda) = self.multi_asset_avellaneda {
+            let usage = self.max_venue_margin_usage_pct.unwrap_or(0.0) / 100.0;
+            if usage >= avellaneda.config.max_margin_utilization {
+                tracing::warn!(
+                    "[{}] Spatial candidate rejected: Multi-asset margin utilization {:.1}% >= shutdown threshold {:.1}%",
+                    self.symbol,
+                    usage * 100.0,
+                    avellaneda.config.max_margin_utilization * 100.0
+                );
+                return Ok(None);
+            }
+        }
+
+        if let Some(ref guard) = self.l2_sequencer_guard {
+            let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+            let (health, stall_dt_ms) = guard.check_sequencer_health(now_ms);
+            if health
+                == arbitrageur_execution::l2_sequencer_guard::SequencerHealth::SequencerStallAbort
+            {
+                tracing::warn!(
+                    "[{}] Spatial candidate rejected: L2 Sequencer stall detected (elapsed {:.1}ms > 3*T_block)",
+                    self.symbol,
+                    stall_dt_ms
+                );
+                return Ok(None);
+            }
+        }
+
         // Direction 1: Buy A (ask_a), Sell B (bid_b) -> Spread = bid_b - ask_a
         // Direction 2: Buy B (ask_b), Sell A (bid_a) -> Spread = bid_a - ask_b
         self.samples_seen += 1;
@@ -99,6 +930,74 @@ impl SpatialPriceArbStrategy {
             return Ok(None);
         }
 
+        // Multi-Level OFI and Real-Time Kyle's Lambda Toxicity Updates
+        let (ofi_eval_a, ofi_eval_b) = {
+            use rust_decimal::prelude::ToPrimitive;
+            let eval_a = if let Some(ref mut engine_a) = self.multi_level_ofi_engine_a {
+                let mut levels =
+                    [arbitrageur_math::micro_price_surface::DepthLevelQuote::default(); 10];
+                let mut count = 0;
+                let max_levels = book_a.bids.len().min(book_a.asks.len()).min(10);
+                for i in 0..max_levels {
+                    if let (Some(b), Some(a)) = (book_a.bids.get(i), book_a.asks.get(i)) {
+                        if let (Some(bp), Some(bs), Some(ap), Some(as_)) = (
+                            b.price.to_f64(),
+                            b.size.to_f64(),
+                            a.price.to_f64(),
+                            a.size.to_f64(),
+                        ) {
+                            levels[count] =
+                                arbitrageur_math::micro_price_surface::DepthLevelQuote::new(
+                                    bp, bs, ap, as_,
+                                );
+                            count += 1;
+                        }
+                    }
+                }
+                if count > 0 {
+                    let mid = (levels[0].bid_price + levels[0].ask_price) * 0.5;
+                    Some(engine_a.update(&levels[..count], mid, 0.0, 0.50, 1.0))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let eval_b = if let Some(ref mut engine_b) = self.multi_level_ofi_engine_b {
+                let mut levels =
+                    [arbitrageur_math::micro_price_surface::DepthLevelQuote::default(); 10];
+                let mut count = 0;
+                let max_levels = book_b.bids.len().min(book_b.asks.len()).min(10);
+                for i in 0..max_levels {
+                    if let (Some(b), Some(a)) = (book_b.bids.get(i), book_b.asks.get(i)) {
+                        if let (Some(bp), Some(bs), Some(ap), Some(as_)) = (
+                            b.price.to_f64(),
+                            b.size.to_f64(),
+                            a.price.to_f64(),
+                            a.size.to_f64(),
+                        ) {
+                            levels[count] =
+                                arbitrageur_math::micro_price_surface::DepthLevelQuote::new(
+                                    bp, bs, ap, as_,
+                                );
+                            count += 1;
+                        }
+                    }
+                }
+                if count > 0 {
+                    let mid = (levels[0].bid_price + levels[0].ask_price) * 0.5;
+                    Some(engine_b.update(&levels[..count], mid, 0.0, 0.50, 1.0))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            (eval_a, eval_b)
+        };
+
         // Evaluate depth-weighted executable opportunity Direction 1: Buy A, Sell B
         if let Some(opp1) = evaluate_spatial_spread(
             &book_a,
@@ -107,15 +1006,112 @@ impl SpatialPriceArbStrategy {
             self.fee_b_bps,
             self.order_qty,
         ) {
-            if opp1.net_profit_bps >= self.target_profit_bps {
-                return Ok(Some(SpatialSignal {
-                    direction: SpatialDirection::BuyASellB,
-                    symbol: self.symbol.clone(),
-                    spread: opp1.gross_spread,
-                    spread_bps: opp1.net_profit_bps,
-                    executable_qty: opp1.executable_qty,
-                    expected_profit_usd: opp1.total_net_profit_usd,
-                }));
+            let total_gas = self.gas_cost_usd_a + self.gas_cost_usd_b;
+            let net_profit_usd = opp1.total_net_profit_usd - total_gas;
+            if net_profit_usd > dec!(0) {
+                let notional = opp1.buy_vwap * opp1.executable_qty;
+                let net_profit_bps = if notional > dec!(0) {
+                    (net_profit_usd / notional) * arbitrageur_core::types::BPS_DIVISOR
+                } else {
+                    dec!(0)
+                };
+                let hurdle1 = self.effective_hurdle_bps_with_ref_price(
+                    SpatialDirection::BuyASellB,
+                    Some(opp1.buy_vwap),
+                );
+                let passes_sequencer_guard = if let Some(ref guard) = self.l2_sequencer_guard {
+                    let net_usd_f64 = net_profit_usd.to_string().parse::<f64>().unwrap_or(0.0);
+                    let rec = guard.optimize_priority_fee(
+                        net_usd_f64,
+                        150_000.0,
+                        0.1,
+                        3000.0,
+                        50.0,
+                        false,
+                    );
+                    if !rec.dispatch_allowed {
+                        tracing::warn!(
+                            "[{}] Spatial candidate Direction 1 rejected: L2 priority tip exceeds institutional gas cap ({:.2}% of edge)",
+                            self.symbol,
+                            rec.gas_edge_share * 100.0
+                        );
+                        false
+                    } else {
+                        true
+                    }
+                } else {
+                    true
+                };
+                let passes_ofi_1 = match (&ofi_eval_a, &ofi_eval_b) {
+                    (Some(ea), _)
+                        if ea.regime
+                            == arbitrageur_math::micro_price_surface::OfiToxicityRegime::ToxicBidSurge
+                            && ea.should_evacuate_passive_quotes =>
+                    {
+                        tracing::warn!(
+                            "[{}] Spatial candidate Direction 1 rejected: Venue A toxic bid surge (OFI: {:.2}, Kyle lambda: {:.4})",
+                            self.symbol,
+                            ea.ofi_surface,
+                            ea.kyle_lambda
+                        );
+                        false
+                    }
+                    (_, Some(eb))
+                        if eb.regime
+                            == arbitrageur_math::micro_price_surface::OfiToxicityRegime::ToxicAskSurge
+                            && eb.should_evacuate_passive_quotes =>
+                    {
+                        tracing::warn!(
+                            "[{}] Spatial candidate Direction 1 rejected: Venue B toxic ask surge (OFI: {:.2}, Kyle lambda: {:.4})",
+                            self.symbol,
+                            eb.ofi_surface,
+                            eb.kyle_lambda
+                        );
+                        false
+                    }
+                    _ => true,
+                };
+                let ofi_hurdle_adj_1 = {
+                    let kyle_a = ofi_eval_a
+                        .as_ref()
+                        .map(|e| e.kyle_lambda * e.ofi_surface.max(0.0))
+                        .unwrap_or(0.0);
+                    let kyle_b = ofi_eval_b
+                        .as_ref()
+                        .map(|e| e.kyle_lambda * (-e.ofi_surface).max(0.0))
+                        .unwrap_or(0.0);
+                    Decimal::from_f64_retain((kyle_a + kyle_b).clamp(0.0, 50.0)).unwrap_or(dec!(0))
+                };
+                let rough_discount_1 = if let Some(ref mut rf) = self.rough_fou_engine {
+                    let spread_f64 = opp1
+                        .gross_spread_bps
+                        .to_string()
+                        .parse::<f64>()
+                        .unwrap_or(0.0);
+                    rf.ingest_spread(spread_f64);
+                    rf.update_hurst_adaptive(0.05);
+                    let base_hurdle_f64 = hurdle1.to_string().parse::<f64>().unwrap_or(5.0);
+                    let discount_bps = rf.compute_rough_hurdle_discount_bps(base_hurdle_f64);
+                    Decimal::from_f64_retain(discount_bps).unwrap_or(dec!(0))
+                } else {
+                    dec!(0)
+                };
+                let effective_hurdle_1 =
+                    (hurdle1 + ofi_hurdle_adj_1 - rough_discount_1).max(dec!(0));
+                if passes_ofi_1 && passes_sequencer_guard && net_profit_bps >= effective_hurdle_1 {
+                    return Ok(Some(SpatialSignal {
+                        direction: SpatialDirection::BuyASellB,
+                        symbol: self.symbol.clone(),
+                        spread: opp1.gross_spread,
+                        spread_bps: net_profit_bps,
+                        executable_qty: opp1.executable_qty,
+                        expected_profit_usd: net_profit_usd,
+                        buy_price: opp1.buy_vwap,
+                        sell_price: opp1.sell_vwap,
+                        worst_buy_price: opp1.worst_buy_price,
+                        worst_sell_price: opp1.worst_sell_price,
+                    }));
+                }
             }
         }
 
@@ -127,15 +1123,112 @@ impl SpatialPriceArbStrategy {
             self.fee_a_bps,
             self.order_qty,
         ) {
-            if opp2.net_profit_bps >= self.target_profit_bps {
-                return Ok(Some(SpatialSignal {
-                    direction: SpatialDirection::BuyBSellA,
-                    symbol: self.symbol.clone(),
-                    spread: opp2.gross_spread,
-                    spread_bps: opp2.net_profit_bps,
-                    executable_qty: opp2.executable_qty,
-                    expected_profit_usd: opp2.total_net_profit_usd,
-                }));
+            let total_gas = self.gas_cost_usd_a + self.gas_cost_usd_b;
+            let net_profit_usd = opp2.total_net_profit_usd - total_gas;
+            if net_profit_usd > dec!(0) {
+                let notional = opp2.buy_vwap * opp2.executable_qty;
+                let net_profit_bps = if notional > dec!(0) {
+                    (net_profit_usd / notional) * arbitrageur_core::types::BPS_DIVISOR
+                } else {
+                    dec!(0)
+                };
+                let hurdle2 = self.effective_hurdle_bps_with_ref_price(
+                    SpatialDirection::BuyBSellA,
+                    Some(opp2.buy_vwap),
+                );
+                let passes_sequencer_guard = if let Some(ref guard) = self.l2_sequencer_guard {
+                    let net_usd_f64 = net_profit_usd.to_string().parse::<f64>().unwrap_or(0.0);
+                    let rec = guard.optimize_priority_fee(
+                        net_usd_f64,
+                        150_000.0,
+                        0.1,
+                        3000.0,
+                        50.0,
+                        false,
+                    );
+                    if !rec.dispatch_allowed {
+                        tracing::warn!(
+                            "[{}] Spatial candidate Direction 2 rejected: L2 priority tip exceeds institutional gas cap ({:.2}% of edge)",
+                            self.symbol,
+                            rec.gas_edge_share * 100.0
+                        );
+                        false
+                    } else {
+                        true
+                    }
+                } else {
+                    true
+                };
+                let passes_ofi_2 = match (&ofi_eval_b, &ofi_eval_a) {
+                    (Some(eb), _)
+                        if eb.regime
+                            == arbitrageur_math::micro_price_surface::OfiToxicityRegime::ToxicBidSurge
+                            && eb.should_evacuate_passive_quotes =>
+                    {
+                        tracing::warn!(
+                            "[{}] Spatial candidate Direction 2 rejected: Venue B toxic bid surge (OFI: {:.2}, Kyle lambda: {:.4})",
+                            self.symbol,
+                            eb.ofi_surface,
+                            eb.kyle_lambda
+                        );
+                        false
+                    }
+                    (_, Some(ea))
+                        if ea.regime
+                            == arbitrageur_math::micro_price_surface::OfiToxicityRegime::ToxicAskSurge
+                            && ea.should_evacuate_passive_quotes =>
+                    {
+                        tracing::warn!(
+                            "[{}] Spatial candidate Direction 2 rejected: Venue A toxic ask surge (OFI: {:.2}, Kyle lambda: {:.4})",
+                            self.symbol,
+                            ea.ofi_surface,
+                            ea.kyle_lambda
+                        );
+                        false
+                    }
+                    _ => true,
+                };
+                let ofi_hurdle_adj_2 = {
+                    let kyle_b = ofi_eval_b
+                        .as_ref()
+                        .map(|e| e.kyle_lambda * e.ofi_surface.max(0.0))
+                        .unwrap_or(0.0);
+                    let kyle_a = ofi_eval_a
+                        .as_ref()
+                        .map(|e| e.kyle_lambda * (-e.ofi_surface).max(0.0))
+                        .unwrap_or(0.0);
+                    Decimal::from_f64_retain((kyle_b + kyle_a).clamp(0.0, 50.0)).unwrap_or(dec!(0))
+                };
+                let rough_discount_2 = if let Some(ref mut rf) = self.rough_fou_engine {
+                    let spread_f64 = opp2
+                        .gross_spread_bps
+                        .to_string()
+                        .parse::<f64>()
+                        .unwrap_or(0.0);
+                    rf.ingest_spread(spread_f64);
+                    rf.update_hurst_adaptive(0.05);
+                    let base_hurdle_f64 = hurdle2.to_string().parse::<f64>().unwrap_or(5.0);
+                    let discount_bps = rf.compute_rough_hurdle_discount_bps(base_hurdle_f64);
+                    Decimal::from_f64_retain(discount_bps).unwrap_or(dec!(0))
+                } else {
+                    dec!(0)
+                };
+                let effective_hurdle_2 =
+                    (hurdle2 + ofi_hurdle_adj_2 - rough_discount_2).max(dec!(0));
+                if passes_ofi_2 && passes_sequencer_guard && net_profit_bps >= effective_hurdle_2 {
+                    return Ok(Some(SpatialSignal {
+                        direction: SpatialDirection::BuyBSellA,
+                        symbol: self.symbol.clone(),
+                        spread: opp2.gross_spread,
+                        spread_bps: net_profit_bps,
+                        executable_qty: opp2.executable_qty,
+                        expected_profit_usd: net_profit_usd,
+                        buy_price: opp2.buy_vwap,
+                        sell_price: opp2.sell_vwap,
+                        worst_buy_price: opp2.worst_buy_price,
+                        worst_sell_price: opp2.worst_sell_price,
+                    }));
+                }
             }
         }
 
@@ -148,14 +1241,48 @@ impl SpatialPriceArbStrategy {
         signal: &SpatialSignal,
         coordinator: &AtomicArbitrageCoordinator,
     ) -> ArbitrageExecutionResult {
+        self.execute_signal_staggered(signal, coordinator, None)
+            .await
+    }
+
+    /// Execute the detected signal atomically with automatic spatial latency staggering computed from venue RTTs.
+    pub async fn execute_signal_with_rtt(
+        &self,
+        signal: &SpatialSignal,
+        coordinator: &AtomicArbitrageCoordinator,
+        rtt_a_ms: Option<f64>,
+        rtt_b_ms: Option<f64>,
+    ) -> ArbitrageExecutionResult {
+        let stagger = Some(
+            arbitrageur_execution::coordinator::LatencyStagger::from_rtt_ms_spatial(
+                rtt_a_ms, rtt_b_ms,
+            ),
+        );
+        self.execute_signal_staggered(signal, coordinator, stagger)
+            .await
+    }
+
+    /// Execute the detected signal atomically with optional latency-staggered order dispatch.
+    pub async fn execute_signal_staggered(
+        &self,
+        signal: &SpatialSignal,
+        coordinator: &AtomicArbitrageCoordinator,
+        stagger: Option<arbitrageur_execution::coordinator::LatencyStagger>,
+    ) -> ArbitrageExecutionResult {
         match signal.direction {
             SpatialDirection::BuyASellB => {
-                let (ticker_a, ticker_b) = tokio::join!(
-                    self.exchange_a.fetch_ticker(&self.symbol),
-                    self.exchange_b.fetch_ticker(&self.symbol),
-                );
-                let ref_a = ticker_a.map(|t| t.ask).unwrap_or(dec!(0));
-                let ref_b = ticker_b.map(|t| t.bid).unwrap_or(dec!(0));
+                let (ref_a, ref_b) = if signal.buy_price > dec!(0) && signal.sell_price > dec!(0) {
+                    (signal.buy_price, signal.sell_price)
+                } else {
+                    let (ticker_a, ticker_b) = tokio::join!(
+                        self.exchange_a.fetch_ticker(&self.symbol),
+                        self.exchange_b.fetch_ticker(&self.symbol),
+                    );
+                    (
+                        ticker_a.map(|t| t.ask).unwrap_or(dec!(0)),
+                        ticker_b.map(|t| t.bid).unwrap_or(dec!(0)),
+                    )
+                };
 
                 // Fail closed: a missing reference price must never become an
                 // extreme IOC price (unbounded buy / dust sell). Reject cleanly.
@@ -166,33 +1293,84 @@ impl SpatialPriceArbStrategy {
                     };
                 }
 
-                let order_a = coordinator.router().build_ioc_order(
-                    self.exchange_a.venue_id(),
-                    &self.symbol,
-                    Side::Buy,
-                    ref_a,
-                    signal.executable_qty,
-                );
+                // When depth-walk marginal prices are available, use them directly as the IOC limit
+                // price to prevent SmartOrderRouter from adding a secondary slippage buffer on top of
+                // the already swept book depth (which wipes out the evaluated net edge).
+                let order_a = if signal.worst_buy_price > dec!(0) {
+                    OrderRequest::new_ioc(
+                        self.exchange_a.venue_id(),
+                        &self.symbol,
+                        Side::Buy,
+                        signal.worst_buy_price.round_dp(8),
+                        signal.executable_qty,
+                    )
+                } else {
+                    coordinator.router().build_ioc_order(
+                        self.exchange_a.venue_id(),
+                        &self.symbol,
+                        Side::Buy,
+                        ref_a.round_dp(8),
+                        signal.executable_qty,
+                    )
+                };
 
-                let order_b = coordinator.router().build_ioc_order(
-                    self.exchange_b.venue_id(),
-                    &self.symbol,
-                    Side::Sell,
-                    ref_b,
-                    signal.executable_qty,
-                );
+                let order_b = if signal.worst_sell_price > dec!(0) {
+                    OrderRequest::new_ioc(
+                        self.exchange_b.venue_id(),
+                        &self.symbol,
+                        Side::Sell,
+                        signal.worst_sell_price.round_dp(8),
+                        signal.executable_qty,
+                    )
+                } else {
+                    coordinator.router().build_ioc_order(
+                        self.exchange_b.venue_id(),
+                        &self.symbol,
+                        Side::Sell,
+                        ref_b.round_dp(8),
+                        signal.executable_qty,
+                    )
+                };
+
+                let gross_edge_a = signal.spread_bps.to_string().parse::<f64>().unwrap_or(10.0);
+                let failed_cost_a = self
+                    .max_slippage_bps
+                    .to_string()
+                    .parse::<f64>()
+                    .unwrap_or(5.0)
+                    + (self.fee_a_bps + self.fee_b_bps)
+                        .to_string()
+                        .parse::<f64>()
+                        .unwrap_or(5.0);
 
                 coordinator
-                    .execute_two_leg(&self.exchange_a, order_a, &self.exchange_b, order_b)
+                    .execute_two_leg_with_racing_guard(
+                        &self.exchange_a,
+                        order_a,
+                        &self.exchange_b,
+                        order_b,
+                        None,
+                        stagger,
+                        gross_edge_a,
+                        failed_cost_a,
+                        0.0,
+                        self.racing_model.as_ref(),
+                    )
                     .await
             }
             SpatialDirection::BuyBSellA => {
-                let (ticker_b, ticker_a) = tokio::join!(
-                    self.exchange_b.fetch_ticker(&self.symbol),
-                    self.exchange_a.fetch_ticker(&self.symbol),
-                );
-                let ref_b = ticker_b.map(|t| t.ask).unwrap_or(dec!(0));
-                let ref_a = ticker_a.map(|t| t.bid).unwrap_or(dec!(0));
+                let (ref_b, ref_a) = if signal.buy_price > dec!(0) && signal.sell_price > dec!(0) {
+                    (signal.buy_price, signal.sell_price)
+                } else {
+                    let (ticker_b, ticker_a) = tokio::join!(
+                        self.exchange_b.fetch_ticker(&self.symbol),
+                        self.exchange_a.fetch_ticker(&self.symbol),
+                    );
+                    (
+                        ticker_b.map(|t| t.ask).unwrap_or(dec!(0)),
+                        ticker_a.map(|t| t.bid).unwrap_or(dec!(0)),
+                    )
+                };
 
                 if ref_b <= dec!(0) || ref_a <= dec!(0) {
                     return ArbitrageExecutionResult::BothFailed {
@@ -201,26 +1379,892 @@ impl SpatialPriceArbStrategy {
                     };
                 }
 
-                let order_b = coordinator.router().build_ioc_order(
-                    self.exchange_b.venue_id(),
-                    &self.symbol,
-                    Side::Buy,
-                    ref_b,
-                    signal.executable_qty,
-                );
+                // When depth-walk marginal prices are available, use them directly as the IOC limit
+                // price to prevent SmartOrderRouter from adding a secondary slippage buffer on top of
+                // the already swept book depth (which wipes out the evaluated net edge).
+                let order_b = if signal.worst_buy_price > dec!(0) {
+                    OrderRequest::new_ioc(
+                        self.exchange_b.venue_id(),
+                        &self.symbol,
+                        Side::Buy,
+                        signal.worst_buy_price.round_dp(8),
+                        signal.executable_qty,
+                    )
+                } else {
+                    coordinator.router().build_ioc_order(
+                        self.exchange_b.venue_id(),
+                        &self.symbol,
+                        Side::Buy,
+                        ref_b.round_dp(8),
+                        signal.executable_qty,
+                    )
+                };
 
-                let order_a = coordinator.router().build_ioc_order(
-                    self.exchange_a.venue_id(),
-                    &self.symbol,
-                    Side::Sell,
-                    ref_a,
-                    signal.executable_qty,
-                );
+                let order_a = if signal.worst_sell_price > dec!(0) {
+                    OrderRequest::new_ioc(
+                        self.exchange_a.venue_id(),
+                        &self.symbol,
+                        Side::Sell,
+                        signal.worst_sell_price.round_dp(8),
+                        signal.executable_qty,
+                    )
+                } else {
+                    coordinator.router().build_ioc_order(
+                        self.exchange_a.venue_id(),
+                        &self.symbol,
+                        Side::Sell,
+                        ref_a.round_dp(8),
+                        signal.executable_qty,
+                    )
+                };
+
+                let gross_edge_b = signal.spread_bps.to_string().parse::<f64>().unwrap_or(10.0);
+                let failed_cost_b = self
+                    .max_slippage_bps
+                    .to_string()
+                    .parse::<f64>()
+                    .unwrap_or(5.0)
+                    + (self.fee_a_bps + self.fee_b_bps)
+                        .to_string()
+                        .parse::<f64>()
+                        .unwrap_or(5.0);
 
                 coordinator
-                    .execute_two_leg(&self.exchange_b, order_b, &self.exchange_a, order_a)
+                    .execute_two_leg_with_racing_guard(
+                        &self.exchange_b,
+                        order_b,
+                        &self.exchange_a,
+                        order_a,
+                        None,
+                        stagger,
+                        gross_edge_b,
+                        failed_cost_b,
+                        0.0,
+                        self.racing_model.as_ref(),
+                    )
                     .await
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arbitrageur_core::quote::OrderBook;
+    use arbitrageur_core::types::VenueId;
+    use arbitrageur_exchanges::simulated::SimulatedExchange;
+    use arbitrageur_math::hawkes::MultivariateHawkes;
+
+    #[test]
+    fn test_spatial_strategy_hawkes_regime_hurdle() {
+        let ex_a = Arc::new(SimulatedExchange::new(
+            "a",
+            "A",
+            0,
+            dec!(2.0),
+            dec!(10000.0),
+        ));
+        let ex_b = Arc::new(SimulatedExchange::new(
+            "b",
+            "B",
+            0,
+            dec!(2.0),
+            dec!(10000.0),
+        ));
+
+        let base_strat = SpatialPriceArbStrategy::new(
+            "BTC-USDC",
+            ex_a.clone(),
+            ex_b.clone(),
+            dec!(10.0),
+            dec!(5.0),
+            dec!(0.1),
+            dec!(2.0),
+            dec!(2.0),
+            50,
+            1,
+        );
+        let base_hurdle = base_strat.effective_hurdle_bps(SpatialDirection::BuyASellB);
+        assert_eq!(base_hurdle, dec!(10.0));
+
+        // Subcritical Hawkes
+        let mut sub_hawkes = MultivariateHawkes::new(2);
+        sub_hawkes.alpha = vec![vec![0.1, 0.1], vec![0.1, 0.1]];
+        sub_hawkes.beta = vec![vec![1.0, 1.0], vec![1.0, 1.0]];
+        let sub_strat = base_strat.with_hawkes(sub_hawkes);
+        let sub_hurdle = sub_strat.effective_hurdle_bps(SpatialDirection::BuyASellB);
+        assert_eq!(sub_hurdle, dec!(10.0));
+
+        // Supercritical Hawkes (spectral radius >= 0.95)
+        let mut super_hawkes = MultivariateHawkes::new(2);
+        super_hawkes.alpha = vec![vec![1.5, 1.5], vec![1.5, 1.5]];
+        super_hawkes.beta = vec![vec![1.0, 1.0], vec![1.0, 1.0]];
+        let mut super_strat = sub_strat;
+        super_strat.set_hawkes(Some(super_hawkes));
+        let super_hurdle = super_strat.effective_hurdle_bps(SpatialDirection::BuyASellB);
+        // Base 10.0 + 25.0 penalty = 35.0 bps
+        assert_eq!(super_hurdle, dec!(35.0));
+    }
+
+    #[test]
+    fn test_spatial_strategy_hawkes_directional_toxic_flow() {
+        let ex_a = Arc::new(SimulatedExchange::new(
+            "a",
+            "A",
+            0,
+            dec!(2.0),
+            dec!(10000.0),
+        ));
+        let ex_b = Arc::new(SimulatedExchange::new(
+            "b",
+            "B",
+            0,
+            dec!(2.0),
+            dec!(10000.0),
+        ));
+
+        let strat = SpatialPriceArbStrategy::new(
+            "BTC-USDC",
+            ex_a.clone(),
+            ex_b.clone(),
+            dec!(10.0),
+            dec!(5.0),
+            dec!(0.1),
+            dec!(2.0),
+            dec!(2.0),
+            50,
+            1,
+        );
+
+        // Configure a 2-stream Hawkes tracker (Stream 0 = Buy, Stream 1 = Sell)
+        let mut hawkes = MultivariateHawkes::new(2);
+        hawkes.mu = vec![0.1, 0.1];
+        hawkes.alpha = vec![vec![0.2, 0.0], vec![0.0, 0.2]];
+        hawkes.beta = vec![vec![1.0, 1.0], vec![1.0, 1.0]];
+
+        // Simulate an aggressive selling/dumping cascade (Stream 1 sells)
+        for i in 0..5 {
+            hawkes.update_at_timestamp(1.0 + i as f64 * 0.05, Some(1));
+        }
+
+        let strat_with_hawkes = strat.with_hawkes(hawkes);
+
+        // When evaluating BuyASellB during a sell cascade, we are buying into falling knives!
+        // The hurdle must expand due to negative toxic reservation offset (-offset > 0)
+        let buy_hurdle = strat_with_hawkes.effective_hurdle_bps(SpatialDirection::BuyASellB);
+        assert!(
+            buy_hurdle > dec!(10.0),
+            "Expected expanded hurdle for BuyASellB during sell cascade, got {buy_hurdle}"
+        );
+
+        // When evaluating BuyBSellA during a sell cascade, we are selling along the cascade.
+        // Hurdle is not penalized by directional offset against us
+        let sell_hurdle = strat_with_hawkes.effective_hurdle_bps(SpatialDirection::BuyBSellA);
+        assert!(
+            buy_hurdle > sell_hurdle,
+            "Expected BuyASellB hurdle ({buy_hurdle}) > BuyBSellA hurdle ({sell_hurdle})"
+        );
+    }
+
+    #[test]
+    fn test_spatial_signal_worst_swept_prices() {
+        let sig = SpatialSignal {
+            direction: SpatialDirection::BuyASellB,
+            symbol: "BTC-USDC".into(),
+            spread: dec!(10.0),
+            spread_bps: dec!(20.0),
+            executable_qty: dec!(1.5),
+            expected_profit_usd: dec!(15.0),
+            buy_price: dec!(100.0),
+            sell_price: dec!(110.0),
+            worst_buy_price: dec!(102.0),
+            worst_sell_price: dec!(108.0),
+        };
+        assert!(sig.worst_buy_price > sig.buy_price);
+        assert!(sig.worst_sell_price < sig.sell_price);
+    }
+
+    #[tokio::test]
+    async fn test_spatial_strategy_toxic_lead_lag_rejection() {
+        let ex_a = Arc::new(SimulatedExchange::new(
+            "a",
+            "A",
+            0,
+            dec!(2.0),
+            dec!(10000.0),
+        ));
+        let ex_b = Arc::new(SimulatedExchange::new(
+            "b",
+            "B",
+            0,
+            dec!(2.0),
+            dec!(10000.0),
+        ));
+
+        ex_a.seed_market(
+            "BTC-USDC",
+            dec!(99.0),
+            dec!(100.0),
+            dec!(10.0),
+            dec!(0.0001),
+        );
+        ex_b.seed_market(
+            "BTC-USDC",
+            dec!(105.0),
+            dec!(106.0),
+            dec!(10.0),
+            dec!(0.0001),
+        );
+
+        let te = arbitrageur_math::lead_lag::SpreadToxicityEvaluator::new(0.4, 500, 2.0);
+        let ll = arbitrageur_math::lead_lag::LeadLagResult {
+            lead_lag_ratio: 2.5,
+            optimal_lag_ms: 50,
+            peak_correlation: 0.85,
+            leader: arbitrageur_math::lead_lag::LeadVenue::VenueALeads,
+            zero_lag_correlation: 0.50,
+        };
+
+        // When Venue A OFI Z is -3.0 (aggressive sell cascade on leader), candidate must be rejected
+        let mut strat = SpatialPriceArbStrategy::new(
+            "BTC-USDC",
+            ex_a.clone(),
+            ex_b.clone(),
+            dec!(10.0),
+            dec!(5.0),
+            dec!(0.1),
+            dec!(2.0),
+            dec!(2.0),
+            50,
+            0,
+        )
+        .with_toxicity_evaluator(te)
+        .with_lead_lag(ll, Some(-3.0));
+
+        let res = strat.evaluate_opportunity().await.unwrap();
+        assert!(
+            res.is_none(),
+            "Toxic adverse selection on leading venue must reject spatial opportunity"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_spatial_strategy_gas_cost_accounting() {
+        let ex_a = Arc::new(SimulatedExchange::new(
+            "a",
+            "A",
+            0,
+            dec!(2.0),
+            dec!(10000.0),
+        ));
+        let ex_b = Arc::new(SimulatedExchange::new(
+            "b",
+            "B",
+            0,
+            dec!(2.0),
+            dec!(10000.0),
+        ));
+
+        // Buy A @ 100.0, Sell B @ 105.0. Spread = $5.0. Qty = 1.0. Gross net profit ~$4.96.
+        ex_a.seed_market("BTC-USDC", dec!(99.0), dec!(100.0), dec!(10.0), dec!(0.0));
+        ex_b.seed_market("BTC-USDC", dec!(105.0), dec!(106.0), dec!(10.0), dec!(0.0));
+
+        let mut strat = SpatialPriceArbStrategy::new(
+            "BTC-USDC",
+            ex_a.clone(),
+            ex_b.clone(),
+            dec!(10.0),
+            dec!(5.0),
+            dec!(1.0),
+            dec!(2.0),
+            dec!(2.0),
+            50,
+            0,
+        )
+        // Gas cost $10 on Venue A exceeds the $4.96 net profit -> must be rejected
+        .with_gas_costs(dec!(10.0), dec!(0.0));
+
+        let res = strat.evaluate_opportunity().await.unwrap();
+        assert!(
+            res.is_none(),
+            "Gas cost exceeding spread profit must reject opportunity"
+        );
+
+        // Affordable gas cost $1.00 -> should execute and reflect net profit of ~$3.96
+        let mut strat_affordable = strat;
+        strat_affordable.set_gas_costs(dec!(1.0), dec!(0.0));
+        let res_affordable = strat_affordable.evaluate_opportunity().await.unwrap();
+        assert!(
+            res_affordable.is_some(),
+            "Affordable gas cost should allow profitable execution"
+        );
+        let signal = res_affordable.unwrap();
+        assert!(
+            signal.expected_profit_usd > dec!(3.5) && signal.expected_profit_usd < dec!(4.5),
+            "Expected profit should deduct the $1.00 gas cost: got {}",
+            signal.expected_profit_usd
+        );
+    }
+
+    #[tokio::test]
+    async fn test_spatial_strategy_ofi_tracker_and_preemptor() {
+        let ex_a = Arc::new(SimulatedExchange::new(
+            "a",
+            "A",
+            0,
+            dec!(1.0),
+            dec!(10000.0),
+        ));
+        let ex_b = Arc::new(SimulatedExchange::new(
+            "b",
+            "B",
+            0,
+            dec!(1.0),
+            dec!(10000.0),
+        ));
+
+        let mut strat = SpatialPriceArbStrategy::new(
+            "BTC-USDC",
+            ex_a.clone(),
+            ex_b.clone(),
+            dec!(5.0),
+            dec!(5.0),
+            dec!(1.0),
+            dec!(1.0),
+            dec!(1.0),
+            50,
+            0,
+        )
+        .with_ofi_preemptor(arbitrageur_math::lead_lag::OfiLeadLagPreemptor::new(
+            3.0, 35.0, 2.0,
+        ));
+
+        let mut b1 = OrderBook::new(VenueId::new("a"), "BTC-USDC".to_string());
+        b1.bids.push(arbitrageur_core::quote::BookLevel::new(
+            dec!(100.0),
+            dec!(2.0),
+        ));
+        b1.asks.push(arbitrageur_core::quote::BookLevel::new(
+            dec!(101.0),
+            dec!(2.0),
+        ));
+
+        let mut b2 = OrderBook::new(VenueId::new("b"), "BTC-USDC".to_string());
+        b2.bids.push(arbitrageur_core::quote::BookLevel::new(
+            dec!(100.0),
+            dec!(2.0),
+        ));
+        b2.asks.push(arbitrageur_core::quote::BookLevel::new(
+            dec!(101.0),
+            dec!(2.0),
+        ));
+
+        strat.update_orderbooks_ofi(&b1, &b2);
+
+        // Next tick: Venue A experiences aggressive buy sweep (bid jumps to 102.0)
+        let mut b1_next = OrderBook::new(VenueId::new("a"), "BTC-USDC".to_string());
+        b1_next.bids.push(arbitrageur_core::quote::BookLevel::new(
+            dec!(102.0),
+            dec!(5.0),
+        ));
+        b1_next.asks.push(arbitrageur_core::quote::BookLevel::new(
+            dec!(103.0),
+            dec!(1.0),
+        ));
+
+        let (z_a, _) = strat.update_orderbooks_ofi(&b1_next, &b2);
+        assert!(z_a.is_finite());
+    }
+
+    #[test]
+    fn test_spatial_strategy_jump_circuit_protection() {
+        let ex_a = Arc::new(SimulatedExchange::new(
+            "a",
+            "A",
+            0,
+            dec!(2.0),
+            dec!(10000.0),
+        ));
+        let ex_b = Arc::new(SimulatedExchange::new(
+            "b",
+            "B",
+            0,
+            dec!(2.0),
+            dec!(10000.0),
+        ));
+
+        let mut strat = SpatialPriceArbStrategy::new(
+            "BTC-USDC",
+            ex_a,
+            ex_b,
+            dec!(5.0),
+            dec!(2.0),
+            dec!(0.1),
+            dec!(1.0),
+            dec!(1.0),
+            50,
+            0,
+        )
+        .with_jump_detector(
+            arbitrageur_math::volatility_jump::ManciniBipowerJumpDetector::new(30, 3.0, 0.49, 0.30),
+        );
+
+        let base_hurdle = strat.effective_hurdle_bps(SpatialDirection::BuyASellB);
+        assert_eq!(base_hurdle, dec!(5.0));
+
+        // Warm up jump detector with 25 steady ticks around 50,000
+        let mut px = 50000.0;
+        for i in 0..25 {
+            let step = if i % 2 == 0 { 2.0 } else { -1.5 };
+            px += step;
+            strat.jump_detector.as_mut().unwrap().ingest_tick(px, 1.0);
+        }
+
+        // Trigger flash crash jump (-5%)
+        let crash_px = px * 0.95;
+        let assessment = strat
+            .jump_detector
+            .as_mut()
+            .unwrap()
+            .ingest_tick(crash_px, 1.0);
+        strat.last_jump_assessment = Some(assessment);
+
+        let expanded_hurdle = strat.effective_hurdle_bps(SpatialDirection::BuyASellB);
+        assert!(
+            expanded_hurdle > base_hurdle,
+            "Hurdle must expand during liquidation cascade: got {expanded_hurdle}, base {base_hurdle}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_spatial_strategy_micro_price_surface_gating() {
+        let ex_a = Arc::new(SimulatedExchange::new(
+            "a",
+            "A",
+            0,
+            dec!(1.0),
+            dec!(10000.0),
+        ));
+        let ex_b = Arc::new(SimulatedExchange::new(
+            "b",
+            "B",
+            0,
+            dec!(1.0),
+            dec!(10000.0),
+        ));
+
+        // Market A: Bid 60000, Ask 60010 (Buy A at 60010)
+        ex_a.seed_market(
+            "BTC-USDC",
+            dec!(60000.0),
+            dec!(60010.0),
+            dec!(5.0),
+            dec!(0.0001),
+        );
+        // Market B: Bid 60150, Ask 60160 (Sell B at 60150, >140 spread on 60k is ~23 bps edge)
+        ex_b.seed_market(
+            "BTC-USDC",
+            dec!(60150.0),
+            dec!(60160.0),
+            dec!(5.0),
+            dec!(0.0001),
+        );
+
+        let mut strat = SpatialPriceArbStrategy::new(
+            "BTC-USDC",
+            ex_a.clone(),
+            ex_b.clone(),
+            dec!(5.0),
+            dec!(1.0),
+            dec!(0.5),
+            dec!(0.0),
+            dec!(0.0),
+            10,
+            0,
+        );
+
+        // Without micro-price surface, opportunity is detected
+        let opp = strat.evaluate_opportunity().await.unwrap();
+        assert!(
+            opp.is_some(),
+            "Expected profitable opportunity without micro price surface"
+        );
+
+        // Now attach micro price surface configured with an adverse drift prediction
+        let config = arbitrageur_math::micro_price_surface::MultiLevelMicroPriceConfig {
+            min_hurdle_bps: 15.0, // requires 15 bps to snipe, else falls to adverse rejection
+            ..Default::default()
+        };
+        let mut surface =
+            arbitrageur_math::micro_price_surface::MultiLevelMicroPriceSurface::new(config);
+        // Set weight for Down class (c=2) on bias feature (f=3) to strongly predict downward drift
+        surface.weights[2][3] = 10.0;
+        strat.set_micro_price_surface(Some(surface));
+
+        // With adverse sweep detected, evaluate_opportunity rejects and returns None
+        let opp_gated = strat.evaluate_opportunity().await.unwrap();
+        assert!(
+            opp_gated.is_none(),
+            "Micro price surface should have gated adverse sweep"
+        );
+    }
+
+    fn setup_test_exchanges(
+        bid_a: Decimal,
+        ask_a: Decimal,
+        bid_b: Decimal,
+        ask_b: Decimal,
+        depth: Decimal,
+        step: Decimal,
+    ) -> (Arc<SimulatedExchange>, Arc<SimulatedExchange>) {
+        let ex_a = Arc::new(SimulatedExchange::new(
+            "a",
+            "A",
+            0,
+            dec!(1.0),
+            dec!(100000.0),
+        ));
+        let ex_b = Arc::new(SimulatedExchange::new(
+            "b",
+            "B",
+            0,
+            dec!(1.0),
+            dec!(100000.0),
+        ));
+        ex_a.seed_market("BTC", bid_a, ask_a, depth, step);
+        ex_b.seed_market("BTC", bid_b, ask_b, depth, step);
+        (ex_a, ex_b)
+    }
+
+    #[tokio::test]
+    async fn test_spatial_arb_multi_asset_hawkes_gating() {
+        let (ex_a, ex_b) = setup_test_exchanges(
+            dec!(100.0),
+            dec!(100.02),
+            dec!(100.10),
+            dec!(100.12),
+            dec!(10.0),
+            dec!(0.0001),
+        );
+
+        let mut strat = SpatialPriceArbStrategy::new(
+            "BTC",
+            ex_a.clone(),
+            ex_b.clone(),
+            dec!(5.0),
+            dec!(1.0),
+            dec!(0.5),
+            dec!(0.0),
+            dec!(0.0),
+            10,
+            0,
+        );
+
+        // Under normal baseline, opportunity is detected
+        let opp = strat.evaluate_opportunity().await.unwrap();
+        assert!(opp.is_some(), "Expected normal opportunity to be detected");
+
+        // Construct MultiAssetCrossHawkesEngine with BTC and ETH
+        let cfg = arbitrageur_math::cross_hawkes::CrossHawkesConfig {
+            baseline_intensity: 0.1,
+            self_excitation_alpha: 0.8,
+            decay_beta: 1.0,
+            toxic_cojump_threshold: 4.5,
+            ..Default::default()
+        };
+        let assets = vec!["BTC".to_string(), "ETH".to_string()];
+        let venues = vec!["binance".to_string(), "hyperliquid".to_string()];
+        let adv = vec![20_000_000_000.0, 10_000_000_000.0];
+        let correlations = vec![vec![1.0, 0.85], vec![0.85, 1.0]];
+        let self_impact = vec![0.001, 0.001];
+
+        let mut hawkes = arbitrageur_math::cross_hawkes::MultiAssetCrossHawkesEngine::new(
+            assets,
+            venues,
+            adv,
+            correlations,
+            self_impact,
+            cfg,
+        );
+
+        // Base hurdle before toxic events
+        let base_hurdle = strat.effective_hurdle_bps(SpatialDirection::BuyASellB);
+
+        // Inject burst of aggressive sell events on BTC stream 1 (asset 0, venue 0, sell)
+        let now = 1000.0;
+        for t in 0..15 {
+            hawkes.record_event(1, now + t as f64 * 0.01);
+        }
+
+        strat.set_multi_asset_hawkes(Some(hawkes));
+
+        // After toxic burst, hurdle expands due to toxic reservation drift
+        let toxic_hurdle = strat.effective_hurdle_bps(SpatialDirection::BuyBSellA);
+        assert!(
+            toxic_hurdle >= base_hurdle,
+            "Toxic hurdle {} should be >= base hurdle {}",
+            toxic_hurdle,
+            base_hurdle
+        );
+
+        // If co-jump threshold triggers or supercritical regime, opportunity is rejected
+        if let Some(ref mut h) = strat.multi_asset_hawkes {
+            // Pump excitation state to force co-jump trigger
+            for i in 0..h.total_streams {
+                for j in 0..h.total_streams {
+                    h.excited_state[i][j] = 50.0;
+                }
+            }
+        }
+        let opp_blocked = strat.evaluate_opportunity().await.unwrap();
+        assert!(
+            opp_blocked.is_none(),
+            "Expected opportunity to be blocked by Cross-Hawkes quote withdrawal"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_spatial_arb_multi_asset_avellaneda() {
+        let (ex_a, ex_b) = setup_test_exchanges(
+            dec!(100.0),
+            dec!(100.02),
+            dec!(100.10),
+            dec!(100.12),
+            dec!(10.0),
+            dec!(0.0001),
+        );
+
+        let mut strat = SpatialPriceArbStrategy::new(
+            "BTC",
+            ex_a.clone(),
+            ex_b.clone(),
+            dec!(5.0),
+            dec!(1.0),
+            dec!(0.5),
+            dec!(0.0),
+            dec!(0.0),
+            10,
+            0,
+        );
+
+        let config = arbitrageur_math::multi_asset_avellaneda::MultiAssetAvellanedaConfig {
+            risk_aversion_gamma: 1e-4,
+            max_margin_utilization: 0.85,
+            ..Default::default()
+        };
+        let assets = vec!["BTC".to_string(), "ETH".to_string()];
+        let cov = vec![vec![0.0016, 0.0012], vec![0.0012, 0.0025]];
+        let mmr = vec![0.05, 0.05];
+
+        let avellaneda = arbitrageur_math::multi_asset_avellaneda::MultiAssetAvellanedaEngine::new(
+            assets, cov, mmr, config,
+        );
+
+        strat.set_multi_asset_avellaneda(Some(avellaneda));
+
+        // When margin usage is below cap (50%), opportunity is admissible
+        strat.set_venue_margin_usage_pct(50.0);
+        let opp = strat.evaluate_opportunity().await.unwrap();
+        assert!(opp.is_some(), "Opportunity should pass at 50% margin usage");
+
+        // When margin usage reaches 90% (>= 85% shutdown threshold), opportunity fails closed
+        strat.set_venue_margin_usage_pct(90.0);
+        let opp_blocked = strat.evaluate_opportunity().await.unwrap();
+        assert!(
+            opp_blocked.is_none(),
+            "Opportunity should be blocked at 90% margin usage exceeding barrier"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_spatial_arb_l2_sequencer_guard() {
+        let (ex_a, ex_b) = setup_test_exchanges(
+            dec!(60000.0),
+            dec!(60010.0),
+            dec!(60150.0),
+            dec!(60160.0),
+            dec!(10.0),
+            dec!(0.0001),
+        );
+
+        let mut strat = SpatialPriceArbStrategy::new(
+            "BTC",
+            ex_a.clone(),
+            ex_b.clone(),
+            dec!(5.0),
+            dec!(1.0),
+            dec!(0.5),
+            dec!(0.0),
+            dec!(0.0),
+            10,
+            0,
+        );
+
+        let cfg = arbitrageur_execution::l2_sequencer_guard::L2SequencerGuardConfig::arbitrum_one();
+        let now_ms = chrono::Utc::now().timestamp_millis() as u64;
+        let guard =
+            arbitrageur_execution::l2_sequencer_guard::L2SequencerLatencyGuard::new(cfg, now_ms);
+
+        strat.set_l2_sequencer_guard(Some(guard));
+
+        // When sequencer is healthy, opportunity passes
+        let opp = strat.evaluate_opportunity().await.unwrap();
+        assert!(
+            opp.is_some(),
+            "Opportunity should pass under healthy sequencer"
+        );
+
+        // Simulate sequencer stall (last receipt 2000ms ago >> 3*250ms = 750ms stall limit)
+        if let Some(ref mut g) = strat.l2_sequencer_guard {
+            g.last_preconf_timestamp_ms = now_ms.saturating_sub(2500);
+        }
+
+        let opp_stalled = strat.evaluate_opportunity().await.unwrap();
+        assert!(
+            opp_stalled.is_none(),
+            "Opportunity must be aborted during sequencer stall"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_spatial_arb_resilience_pacer_slicing() {
+        let (ex_a, ex_b) = setup_test_exchanges(
+            dec!(3000.0),
+            dec!(3001.0),
+            dec!(3020.0),
+            dec!(3021.0),
+            dec!(10.0),
+            dec!(0.0001),
+        );
+
+        let pacer = arbitrageur_math::resilience_pacer::CrossImpactResiliencePacer::default();
+
+        let strat = SpatialPriceArbStrategy::new(
+            "ETH",
+            ex_a,
+            ex_b,
+            dec!(5.0),
+            dec!(1.0),
+            dec!(2.0),
+            dec!(0.0),
+            dec!(0.0),
+            10,
+            0,
+        )
+        .with_resilience_pacer(pacer);
+
+        let slice_rec = strat
+            .compute_resilience_child_slice(
+                10.0,   // parent remaining
+                4.0,    // L1 depth venue a
+                4.0,    // L1 depth venue b
+                0.0002, // spread vol
+                3000.0, // mid px
+            )
+            .expect("slice recommendation");
+
+        // Max slice is depth * 0.50 = 2.0
+        assert_eq!(slice_rec.slice_quantity, 2.0);
+        assert_eq!(slice_rec.remaining_quantity, 8.0);
+        assert!(slice_rec.pacing_interval_sec >= 0.020);
+        assert!(slice_rec.adverse_selection_penalty_bps > 0.0);
+    }
+
+    #[tokio::test]
+    async fn test_spatial_arb_multi_level_ofi_toxicity_rejection() {
+        let (ex_a, ex_b) = setup_test_exchanges(
+            dec!(3000.0),
+            dec!(3001.0),
+            dec!(3020.0),
+            dec!(3021.0),
+            dec!(10.0),
+            dec!(0.0001),
+        );
+
+        let mut ofi_engine_a =
+            arbitrageur_math::micro_price_surface::MultiLevelOfiToxicityEngine::new(
+                arbitrageur_math::micro_price_surface::MultiLevelOfiConfig {
+                    toxicity_threshold: 0.05,
+                    ..Default::default()
+                },
+            );
+
+        // Pre-condition engine A with a baseline snapshot at lower price
+        let t0 = vec![arbitrageur_math::micro_price_surface::DepthLevelQuote::new(
+            2900.0, 5.0, 2901.0, 5.0,
+        )];
+        ofi_engine_a.update(&t0, 2900.5, 0.0, 0.40, 1.0);
+
+        let ofi_engine_b =
+            arbitrageur_math::micro_price_surface::MultiLevelOfiToxicityEngine::default();
+
+        let mut strat = SpatialPriceArbStrategy::new(
+            "BTC",
+            ex_a,
+            ex_b,
+            dec!(5.0),
+            dec!(1.0),
+            dec!(1.0),
+            dec!(0.0),
+            dec!(0.0),
+            10,
+            0,
+        )
+        .with_multi_level_ofi_engines(ofi_engine_a, ofi_engine_b);
+
+        // Under huge bid price surge (from 2900 to 3000), OFI detects toxic adverse sweep on A
+        let opp = strat.evaluate_opportunity().await.unwrap();
+        assert!(
+            opp.is_none(),
+            "Opportunity should be rejected when Venue A exhibits toxic bid surge"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_spatial_arb_rough_fou_hurdle_discount() {
+        // Ex A: Ask = 3000.0, Ex B: Bid = 3002.5.
+        // Gross spread = (3002.5 - 3000.0) / 3000.0 * 10,000 = 8.33 bps.
+        let (ex_a, ex_b) = setup_test_exchanges(
+            dec!(2999.0),
+            dec!(3000.0),
+            dec!(3002.5),
+            dec!(3003.0),
+            dec!(1.0),
+            dec!(0.0001),
+        );
+
+        // Without rough fOU engine, target_profit_bps = 10.0 bps > 8.33 bps -> rejected
+        let mut base_strat = SpatialPriceArbStrategy::new(
+            "BTC",
+            ex_a.clone(),
+            ex_b.clone(),
+            dec!(10.0), // 10 bps hurdle
+            dec!(1.0),
+            dec!(1.0),
+            dec!(0.0),
+            dec!(0.0),
+            10,
+            0,
+        );
+
+        let base_opp = base_strat.evaluate_opportunity().await.unwrap();
+        assert!(
+            base_opp.is_none(),
+            "8.33 bps profit should be rejected under 10.0 bps base hurdle"
+        );
+
+        // With rough fOU engine (H = 0.12), compression discount lowers hurdle to ~7.7 bps -> admitted!
+        let rough_engine =
+            arbitrageur_math::rough_ou::RoughFouSpreadEngine::new(0.12, 1.5, 0.002, 0.0, 100);
+        let mut rough_strat = base_strat.with_rough_fou_engine(rough_engine);
+
+        let rough_opp = rough_strat.evaluate_opportunity().await.unwrap();
+        assert!(
+            rough_opp.is_some(),
+            "8.33 bps profit should be executed under rough fOU compressed hurdle"
+        );
+        let sig = rough_opp.unwrap();
+        assert_eq!(sig.direction, SpatialDirection::BuyASellB);
     }
 }

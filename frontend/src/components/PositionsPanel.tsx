@@ -12,7 +12,7 @@ import {
   Zap,
   Clock,
 } from "lucide-react";
-import type { OpenPositionDto, SystemStatusDto } from "../types";
+import type { OpenPositionDto, SystemStatusDto, RiskOverviewDto } from "../types";
 
 import {
   scopeAndSortPositions,
@@ -35,6 +35,7 @@ interface PositionsPanelProps {
   selectedPositionKey: string | null;
   onSelectPosition: (position: OpenPositionDto) => void;
   status?: SystemStatusDto | null;
+  riskData?: RiskOverviewDto | null;
   isPaused?: boolean;
   onOpenPortfolioMonitor?: () => void;
   isPortfolioActive?: boolean;
@@ -79,6 +80,7 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
   selectedPositionKey,
   onSelectPosition,
   status,
+  riskData,
   isPaused: propIsPaused,
   onOpenPortfolioMonitor,
   isPortfolioActive,
@@ -94,6 +96,20 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
   const isTripped = status?.circuit_breaker_tripped ?? false;
   const isStopped = status?.is_stopped ?? (isTripped && status?.circuit_breaker_status?.includes("KILLSWITCH")) ?? false;
   const isPaused = propIsPaused ?? status?.is_paused ?? false;
+
+  const hasCriticalPortfolioIssue =
+    isTripped ||
+    (status?.circuit_breaker_tripped ?? false) ||
+    (riskData?.margin_health?.status === "CRITICAL") ||
+    ((riskData?.margin_health?.margin_ratio_pct ?? 0) >= 90) ||
+    (riskData?.margin_health?.status !== "FLAT" && (riskData?.margin_health?.liquidation_distance_pct ?? 100) <= 10);
+
+  const hasWarnPortfolioIssue =
+    !hasCriticalPortfolioIssue &&
+    (((riskData?.margin_health?.margin_ratio_pct ?? 0) >= 70) ||
+      (riskData?.margin_health?.status !== "FLAT" && (riskData?.margin_health?.liquidation_distance_pct ?? 100) <= 25) ||
+      ((riskData?.net_deltas ?? []).some((d) => !d.is_neutral && Math.abs(d.net_exposure_usd) > d.delta_limit_usd)) ||
+      ((status?.unresolved_signals_count ?? 0) > 0));
 
   const [scope, setScope] = useState<PositionScope>("all");
   const [sortOption, setSortOption] = useState<PositionSortOption>("name");
@@ -550,15 +566,43 @@ const PositionsPanelInner: React.FC<PositionsPanelProps> = ({
         <button
           type="button"
           onClick={onOpenPortfolioMonitor}
-          className={`w-full py-2 px-2 rounded-lg text-xs font-sans font-semibold transition-all shadow-2xs flex items-center justify-center space-x-2 cursor-pointer border active:scale-[0.98] ${
+          className={`w-full py-2 px-2.5 rounded-lg text-xs font-sans font-semibold transition-all shadow-2xs flex items-center justify-between cursor-pointer border active:scale-[0.98] ${
             isPortfolioActive
               ? "bg-accent text-white border-accent shadow-xs font-bold"
+              : hasCriticalPortfolioIssue
+              ? "bg-rose-100/90 hover:bg-rose-200/90 text-rose-950 border-rose-300 shadow-xs"
+              : hasWarnPortfolioIssue
+              ? "bg-amber-100/90 hover:bg-amber-200/90 text-amber-950 border-amber-300 shadow-xs"
               : "bg-surface hover:bg-slate-50 text-slate-800 hover:text-slate-900 border-surface-border hover:border-slate-300"
           }`}
-          title="Open Portfolio Monitor (Consolidated DeltaGuard, Margins &amp; Strategy Performance)"
+          title={
+            hasCriticalPortfolioIssue
+              ? "Critical Portfolio Issue detected — Click to inspect in Portfolio Monitor"
+              : hasWarnPortfolioIssue
+              ? "Portfolio Warning detected — Click to inspect in Portfolio Monitor"
+              : "Open Portfolio Monitor (Consolidated DeltaGuard, Margins & Strategy Performance)"
+          }
         >
-          <Activity className={`w-3.5 h-3.5 ${isPortfolioActive ? "text-white" : "text-accent-strong"}`} />
-          <span>Portfolio Monitor</span>
+          <div className="flex items-center space-x-2">
+            <Activity className={`w-3.5 h-3.5 ${
+              isPortfolioActive
+                ? "text-white"
+                : hasCriticalPortfolioIssue
+                ? "text-rose-600"
+                : hasWarnPortfolioIssue
+                ? "text-amber-600"
+                : "text-accent-strong"
+            }`} />
+            <span>Portfolio Monitor</span>
+          </div>
+          {hasCriticalPortfolioIssue ? (
+            <span className="flex h-2 w-2 relative">
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-rose-400 opacity-75"></span>
+              <span className="relative inline-flex rounded-full h-2 w-2 bg-rose-600"></span>
+            </span>
+          ) : hasWarnPortfolioIssue ? (
+            <span className="inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
+          ) : null}
         </button>
 
         <button

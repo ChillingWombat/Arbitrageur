@@ -414,6 +414,14 @@ pub struct MarginHealthDto {
     pub margin_ratio_pct: f64,
     pub liquidation_distance_pct: f64,
     pub status: String,
+    #[serde(default)]
+    pub is_segregated_insolvency_masked: bool,
+    #[serde(default)]
+    pub most_vulnerable_venue: Option<String>,
+    #[serde(default)]
+    pub max_venue_usage_pct: f64,
+    #[serde(default)]
+    pub rebalance_recommendation: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -429,6 +437,8 @@ pub struct SimStepResultDto {
     pub realized_profit_usd: f64,
     pub total_cumulative_pnl_usd: f64,
     pub message: String,
+    #[serde(default)]
+    pub execution_duration_ms: Option<u64>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -569,6 +579,47 @@ pub(crate) fn effective_venue_fee_bps(state: &AppEngineState, venue: &str) -> f6
     }
 }
 
+pub(crate) fn effective_venue_spot_fee_bps(state: &AppEngineState, venue: &str) -> f64 {
+    let raw = venue.to_ascii_lowercase();
+    let v = raw
+        .strip_prefix("live_")
+        .or_else(|| raw.strip_prefix("tn_"))
+        .unwrap_or(&raw);
+    match v {
+        "binance" => 10.0,
+        "okx" => 8.0,
+        "kraken" => 26.0,
+        "coinbase" => 50.0,
+        "bybit" => 10.0,
+        _ => effective_venue_fee_bps(state, venue),
+    }
+}
+
+/// Estimated on-chain transaction gas cost (USD) for an execution leg on a specific venue.
+/// Off-chain CLOBs (Binance, OKX, Hyperliquid, Lighter, Deribit, Alpaca, IBKR) incur 0 gas cost.
+/// EVM AMMs require on-chain gas based on target chain architecture (Ethereum L1, Polygon, L2 rollups, BSC).
+pub(crate) fn venue_estimated_gas_cost_usd(venue_id: &str) -> f64 {
+    let raw = venue_id.to_ascii_lowercase();
+    let v = raw
+        .strip_prefix("live_")
+        .or_else(|| raw.strip_prefix("tn_"))
+        .unwrap_or(&raw);
+    match v {
+        // Ethereum L1 DEXes: ~150k gas @ 25 gwei & $3000 ETH ≈ $11.25 USD
+        "uniswap" | "uniswap_v2" | "sushiswap" => 12.0,
+        // BNB Chain: ~150k gas @ 3 gwei & $600 BNB ≈ $0.27 USD
+        "pancakeswap" | "pancakeswap_v3" => 0.30,
+        // Polygon PoS: ~150k gas @ 50 gwei & $0.40 POL ≈ $0.003 USD
+        "quickswap" => 0.01,
+        // Arbitrum / Base / Optimism: ~150k gas L2 + L1 DA fee ≈ $0.15 USD
+        "camelot" | "aerodrome" | "velodrome" | "ramses" => 0.15,
+        // Avalanche: ~150k gas @ 25 nAVAX & $25 AVAX ≈ $0.10 USD
+        "pharaoh" | "blackhole" => 0.10,
+        // Off-chain / CLOB / Appchain venues have 0 on-chain gas paid by trader
+        _ => 0.0,
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct RouteEconomics {
     buy_fee_bps: f64,
@@ -582,6 +633,10 @@ pub(crate) struct RouteEconomics {
     pub(crate) expected_net_bps: f64,
     required_gross_bps: f64,
     pub(crate) estimated_profit_usd: f64,
+    #[allow(dead_code)]
+    pub(crate) gas_cost_usd: f64,
+    #[allow(dead_code)]
+    pub(crate) gas_cost_bps: f64,
 }
 
 pub(crate) fn compute_route_economics(
@@ -611,6 +666,29 @@ pub(crate) fn compute_route_economics_for_mode(
     sell_fee_bps: f64,
     target_profit_bps: f64,
     two_way: bool,
+) -> Option<RouteEconomics> {
+    compute_route_economics_with_gas(
+        book_buy,
+        book_sell,
+        qty,
+        buy_fee_bps,
+        sell_fee_bps,
+        target_profit_bps,
+        two_way,
+        0.0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compute_route_economics_with_gas(
+    book_buy: &OrderBook,
+    book_sell: &OrderBook,
+    qty: Decimal,
+    buy_fee_bps: f64,
+    sell_fee_bps: f64,
+    target_profit_bps: f64,
+    two_way: bool,
+    gas_cost_usd: f64,
 ) -> Option<RouteEconomics> {
     let buy_best_ask = dec_opt_f64(book_buy.best_ask_price()?).filter(|p| *p > 0.0)?;
     let sell_best_bid = dec_opt_f64(book_sell.best_bid_price()?).filter(|p| *p > 0.0)?;
@@ -659,18 +737,28 @@ pub(crate) fn compute_route_economics_for_mode(
         (0.0, 0.0, buy_fee_bps + sell_fee_bps)
     };
 
-    let expected_friction_bps =
-        round_trip_commission_bps + entry_slippage_bps + exit_slippage_bps + closing_spread_bps;
+    let notional = ((buy_entry_vwap + sell_entry_vwap) / 2.0) * qty_f;
+    let gas_cost_bps = if notional > 0.0 && gas_cost_usd > 0.0 {
+        (gas_cost_usd / notional) * 10_000.0
+    } else {
+        0.0
+    };
+
+    let expected_friction_bps = round_trip_commission_bps
+        + entry_slippage_bps
+        + exit_slippage_bps
+        + closing_spread_bps
+        + gas_cost_bps;
     let expected_net_bps = top_gross_bps - expected_friction_bps;
     let required_gross_bps = expected_friction_bps + target_profit_bps;
-    let notional = ((buy_entry_vwap + sell_entry_vwap) / 2.0) * qty_f;
-    let estimated_profit_usd = expected_net_bps / 10_000.0 * notional;
+    let estimated_profit_usd = (expected_net_bps / 10_000.0) * notional;
 
     if ![
         top_gross_bps,
         entry_slippage_bps,
         exit_slippage_bps,
         closing_spread_bps,
+        gas_cost_bps,
         expected_friction_bps,
         expected_net_bps,
         required_gross_bps,
@@ -694,6 +782,8 @@ pub(crate) fn compute_route_economics_for_mode(
         expected_net_bps,
         required_gross_bps,
         estimated_profit_usd,
+        gas_cost_usd,
+        gas_cost_bps,
     })
 }
 
@@ -2141,14 +2231,18 @@ pub async fn scan_spatial_opportunities_impl(
             }
             let (buy_id, buy_name, ref book_buy, buy_fee) = books[i];
             let (sell_id, sell_name, ref book_sell, sell_fee) = books[j];
+            let route_gas_usd =
+                venue_estimated_gas_cost_usd(buy_id) + venue_estimated_gas_cost_usd(sell_id);
 
-            if let Some(econ) = compute_route_economics(
+            if let Some(econ) = compute_route_economics_with_gas(
                 book_buy,
                 book_sell,
                 target_qty_dec,
                 buy_fee,
                 sell_fee,
                 min_bps,
+                true,
+                route_gas_usd,
             ) {
                 let best_ask = book_buy
                     .best_ask_price()
@@ -2444,13 +2538,17 @@ pub async fn scan_spot_opportunities_impl(
                     Some(q) if q > dec!(0) => q,
                     _ => continue,
                 };
-                let Some(econ) = compute_route_economics(
+                let route_gas_usd =
+                    venue_estimated_gas_cost_usd(buy_id) + venue_estimated_gas_cost_usd(sell_id);
+                let Some(econ) = compute_route_economics_with_gas(
                     book_buy,
                     book_sell,
                     order_qty,
                     buy_fee,
                     sell_fee,
                     min_net_bps,
+                    true,
+                    route_gas_usd,
                 ) else {
                     continue;
                 };
@@ -5513,12 +5611,26 @@ pub(crate) async fn maybe_record_margin_snapshots(state: &AppEngineState, now_ms
 /// `refresh_equity_expectations_after_fills` measures own-fill deltas
 /// against. Reads the active environment's admitted adapters in parallel.
 pub(crate) async fn snapshot_venue_equity(state: &AppEngineState) -> HashMap<String, f64> {
+    snapshot_venue_equity_for(state, None).await
+}
+
+pub(crate) async fn snapshot_venue_equity_for(
+    state: &AppEngineState,
+    filter: Option<&[&str]>,
+) -> HashMap<String, f64> {
     let env_str = state.env().as_str();
     let venues = state.get_venues();
     let mut tasks = Vec::with_capacity(venues.len());
     for (vid, _name, adapter) in venues {
+        if let Some(list) = filter {
+            if !list.iter().any(|v| v.eq_ignore_ascii_case(vid)) {
+                continue;
+            }
+        } else if state.is_live() && !adapter.has_live_credentials() {
+            continue;
+        }
         tasks.push(async move {
-            match tokio::time::timeout(std::time::Duration::from_secs(5), adapter.fetch_account())
+            match tokio::time::timeout(std::time::Duration::from_secs(3), adapter.fetch_account())
                 .await
             {
                 Ok(Ok(acc)) => Some((vid, acc)),
@@ -5549,10 +5661,16 @@ pub(crate) async fn refresh_equity_expectations_after_fills(
     state: &AppEngineState,
     before: &HashMap<String, f64>,
 ) {
+    if before.is_empty() {
+        return;
+    }
     let now_ms = Utc::now().timestamp_millis();
     let env_str = state.env().as_str();
     for (vid, _name, adapter) in state.get_venues() {
         let key = format!("{env_str}-{vid}");
+        let Some(&b) = before.get(&key) else {
+            continue;
+        };
         let Ok(mut acc) = adapter.fetch_account().await else {
             continue;
         };
@@ -5575,9 +5693,6 @@ pub(crate) async fn refresh_equity_expectations_after_fills(
         if !after.is_finite() {
             continue;
         }
-        let Some(b) = before.get(&key).copied() else {
-            continue;
-        };
         let prior = state
             .state_store
             .get_equity_expectation(&key)
@@ -10260,6 +10375,19 @@ mod tests {
                 timestamp: Utc::now(),
             });
 
+        let now_ms = Utc::now().timestamp_millis();
+        for i in 0..20 {
+            let t = now_ms - (20 - i) * 3_600_000;
+            let _ = state.state_store.record_funding_rate_samples(
+                t,
+                &[
+                    ("hyperliquid", "DOT-USDC", 0.0064, 1),
+                    ("lighter", "DOT-USDC", 0.0001, 8),
+                ],
+                state.env().as_str(),
+            );
+        }
+
         // $20 notional fits the seeded 10-lot test books on both legs.
         let res = execute_funding_carry_impl(
             "DOT-USDC",
@@ -10306,6 +10434,52 @@ mod tests {
                 .collect();
             assert_eq!(lots.len(), 1, "funding entry must open one ledger lot");
         }
+    }
+
+    #[tokio::test]
+    async fn test_funding_carry_rejects_negative_expected_return() {
+        let state = setup_test_state_with_venues();
+        // High entry spread cross (~100 bps) so costs dominate and expected return is negative.
+        seed_test_book(&state, "hyperliquid", "DOT-USDC", dec!(4.30), dec!(4.50));
+        seed_test_book(&state, "lighter", "DOT-USDC", dec!(4.30), dec!(4.50));
+        state
+            .market_data_hub
+            .update_funding(arbitrageur_core::quote::FundingRate {
+                venue: arbitrageur_core::types::VenueId::new("hyperliquid"),
+                symbol: "DOT-USDC".to_string(),
+                rate: dec!(0.0002),
+                predicted_rate: None,
+                interval_hours: 8,
+                next_funding_time: Utc::now(),
+                timestamp: Utc::now(),
+            });
+        state
+            .market_data_hub
+            .update_funding(arbitrageur_core::quote::FundingRate {
+                venue: arbitrageur_core::types::VenueId::new("lighter"),
+                symbol: "DOT-USDC".to_string(),
+                rate: dec!(0.0001),
+                predicted_rate: None,
+                interval_hours: 8,
+                next_funding_time: Utc::now(),
+                timestamp: Utc::now(),
+            });
+
+        let err = execute_funding_carry_impl(
+            "DOT-USDC",
+            "lighter",
+            "hyperliquid",
+            20.0,
+            &state,
+            false,
+            None,
+        )
+        .await
+        .expect_err("unprofitable carry entry must be refused");
+        assert!(
+            err.contains("non-positive") || err.contains("hurdle") || err.contains("spread"),
+            "expected refusal for negative return or spread: {err}"
+        );
     }
 
     #[tokio::test]
@@ -10419,6 +10593,18 @@ mod tests {
                     next_funding_time: Utc::now(),
                     timestamp: Utc::now(),
                 });
+        }
+        let now_ms = Utc::now().timestamp_millis();
+        for i in 0..20 {
+            let t = now_ms - (20 - i) * 3_600_000;
+            let _ = state.state_store.record_funding_rate_samples(
+                t,
+                &[
+                    ("hyperliquid", "BTC-USDC", 0.0001, 8),
+                    ("lighter", "BTC-USDC", 0.0008, 1),
+                ],
+                state.env().as_str(),
+            );
         }
     }
 
@@ -11247,6 +11433,46 @@ mod tests {
 
         let no_asks = mk_route_book("hyperliquid", &[(64200.0, 10.0)], &[]);
         assert!(compute_route_economics(&no_asks, &book_sell, dec!(5.0), 2.0, 1.5, 1.0).is_none());
+    }
+
+    #[test]
+    fn test_route_economics_with_gas_deduction() {
+        let book_buy = mk_route_book("uniswap", &[(3000.0, 10.0)], &[(3001.0, 10.0)]);
+        let book_sell = mk_route_book("binance", &[(3010.0, 10.0)], &[(3011.0, 10.0)]);
+        // With 0 gas:
+        let econ_no_gas = compute_route_economics_with_gas(
+            &book_buy,
+            &book_sell,
+            dec!(1.0),
+            30.0, // Uni 30 bps
+            10.0, // Binance 10 bps
+            5.0,
+            true,
+            0.0,
+        )
+        .expect("route economics no gas");
+
+        // With $12 Ethereum L1 gas on Uni:
+        let econ_with_gas = compute_route_economics_with_gas(
+            &book_buy,
+            &book_sell,
+            dec!(1.0),
+            30.0,
+            10.0,
+            5.0,
+            true,
+            12.0,
+        )
+        .expect("route economics with gas");
+
+        // Notional is ~$3000. $12 on $3000 is 40.0 bps drag!
+        assert!((econ_with_gas.gas_cost_bps - 39.9).abs() < 1.0);
+        assert_eq!(econ_with_gas.gas_cost_usd, 12.0);
+        assert!(econ_with_gas.expected_net_bps < econ_no_gas.expected_net_bps);
+        assert!(
+            (econ_no_gas.estimated_profit_usd - econ_with_gas.estimated_profit_usd - 12.0).abs()
+                < 0.1
+        );
     }
 
     #[tokio::test]
@@ -12491,8 +12717,8 @@ mod tests {
         // 1. Initial query for non-existing returns default with correct symbol
         let def = get_ticker_strategy_config_impl("BTC-USDC", &state).expect("default config");
         assert_eq!(def.symbol, "BTC-USDC");
-        assert_eq!(def.target_profit_bps, 1.0);
-        assert_eq!(def.window_percentile, 50);
+        assert_eq!(def.target_profit_bps, 5.0);
+        assert_eq!(def.window_percentile, 80);
         assert_eq!(def.execution_mode, "SINGLE_WAY");
         assert_eq!(def.user_target_leverage, 5);
 
@@ -13758,7 +13984,7 @@ mod tests {
             .iter()
             .find(|r| r.param == "targetProfitBps")
             .unwrap();
-        assert!((target.current - 1.0).abs() < 1e-12);
+        assert!((target.current - 5.0).abs() < 1e-12);
         let lev = rep
             .rows
             .iter()
@@ -18437,4 +18663,35 @@ pub async fn sign_popdex_approve_with_main(
         },
         tx_hash,
     })
+}
+
+/// Evaluates dynamic solver Dutch auction pricing for an Across intent bridge transfer.
+#[tauri::command]
+pub async fn quote_across_bridge_transfer(
+    input_amount_usd: f64,
+    urgency_multiplier: Option<f64>,
+) -> Result<arbitrageur_exchanges::across_bridge::AcrossBridgeQuote, String> {
+    if !input_amount_usd.is_finite() || input_amount_usd <= 0.0 {
+        return Err("input_amount_usd must be finite and positive".to_string());
+    }
+    let mult = urgency_multiplier.unwrap_or(1.0).clamp(0.1, 10.0);
+    let adapter = arbitrageur_exchanges::across_bridge::AcrossIntentBridgeAdapter::new();
+    Ok(adapter.evaluate_quote(input_amount_usd, mult))
+}
+
+/// Prepares an Across V3 deposit transaction with Pareto gas tip bidding for private builder submission.
+#[tauri::command]
+pub async fn prepare_across_bridge_deposit(
+    req: arbitrageur_exchanges::across_bridge::AcrossBridgeDepositRequest,
+    gross_profit_usd: Option<f64>,
+    gas_units: Option<f64>,
+    base_fee_gwei: Option<f64>,
+    eth_price_usd: Option<f64>,
+) -> Result<arbitrageur_exchanges::across_bridge::AcrossBridgePrivateSubmissionPlan, String> {
+    let adapter = arbitrageur_exchanges::across_bridge::AcrossIntentBridgeAdapter::new();
+    let profit = gross_profit_usd.unwrap_or(100.0);
+    let gas = gas_units.unwrap_or(240_000.0);
+    let base_fee = base_fee_gwei.unwrap_or(15.0);
+    let eth_price = eth_price_usd.unwrap_or(3000.0);
+    adapter.prepare_private_deposit_submission(&req, profit, gas, base_fee, eth_price)
 }

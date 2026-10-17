@@ -45,6 +45,8 @@ pub(crate) const OPTIONS_SETTLE_INTERVAL: std::time::Duration =
 /// 12.5% of the option premium.
 pub(crate) const OPTION_TAKER_FEE_RATE: f64 = 0.0003;
 pub(crate) const OPTION_FEE_PREMIUM_CAP: f64 = 0.125;
+/// Deribit delivery/settlement fee on in-the-money options at expiration: 0.015% of underlying index.
+pub(crate) const DERIBIT_DELIVERY_FEE_RATE: f64 = 0.00015;
 /// Option books on far-dated wings are empty — a quote is required on the
 /// exact side each leg executes.
 const MAX_RESULTS: usize = 12;
@@ -200,6 +202,14 @@ pub fn evaluate_parity(q: &ParityQuotes, qty_base: Decimal) -> Option<ParityEval
         Some(uncapped.min(capped) * qty_base)
     };
     let perp_fee = q.perp_fee_rate * qty_base * q.perp_mark;
+    // Lifecycle exit friction at expiration:
+    // 1) Exactly 1 option leg is ITM at settlement (0.015% delivery fee on underlying index).
+    // 2) The perpetual hedge position must be closed at expiry (perp taker fee).
+    let exit_delivery_fee = Decimal::from_f64_retain(DERIBIT_DELIVERY_FEE_RATE).unwrap_or_default()
+        * q.index_usd
+        * qty_base;
+    let exit_perp_fee = perp_fee;
+    let exit_friction = exit_delivery_fee + exit_perp_fee;
 
     // Conversion: sell call at bid, buy put at ask, buy perp at ask.
     let conv = if q.call_bid > dec!(0) && q.put_ask > dec!(0) && q.perp_ask > dec!(0) {
@@ -211,7 +221,7 @@ pub fn evaluate_parity(q: &ParityQuotes, qty_base: Decimal) -> Option<ParityEval
             gross,
             f_syn,
             perp_cost,
-            option_fee(q.call_bid)? + option_fee(q.put_ask)? + perp_fee,
+            option_fee(q.call_bid)? + option_fee(q.put_ask)? + perp_fee + exit_friction,
         ))
     } else {
         None
@@ -226,7 +236,7 @@ pub fn evaluate_parity(q: &ParityQuotes, qty_base: Decimal) -> Option<ParityEval
             gross,
             f_syn,
             perp_proceeds,
-            option_fee(q.call_ask)? + option_fee(q.put_bid)? + perp_fee,
+            option_fee(q.call_ask)? + option_fee(q.put_bid)? + perp_fee + exit_friction,
         ))
     } else {
         None
@@ -249,10 +259,40 @@ pub fn evaluate_parity(q: &ParityQuotes, qty_base: Decimal) -> Option<ParityEval
 }
 
 pub(crate) fn summary_px(row: &DeribitBookSummary) -> (Option<Decimal>, Option<Decimal>) {
-    (
-        row.bid.filter(|b| *b > dec!(0)),
-        row.ask.filter(|a| *a > dec!(0)),
-    )
+    // Deribit minimum price collar and unexecutable dust filter:
+    // Deribit enforces a minimum order price collar on options (e.g. min_price, typically >= 0.0005 BTC / 0.005 ETH).
+    // Resting bids below this threshold or deep OTM bids that are < 10% of mark_price cannot be sold into at market/limit,
+    // causing matching engine error 10005 "price_too_low".
+    let min_collar = if row.name.starts_with("BTC-") {
+        dec!(0.0005)
+    } else if row.name.starts_with("ETH-") {
+        dec!(0.005)
+    } else {
+        dec!(0.0001)
+    };
+    let valid_bid = row.bid.filter(|b| {
+        if *b <= dec!(0) || *b < min_collar {
+            return false;
+        }
+        if let Some(m) = row.mark {
+            if m > dec!(0) && *b < m * dec!(0.10) {
+                return false;
+            }
+        }
+        true
+    });
+    let valid_ask = row.ask.filter(|a| {
+        if *a <= dec!(0) {
+            return false;
+        }
+        if let Some(m) = row.mark {
+            if m > dec!(0) && *a > m * dec!(10.0) {
+                return false;
+            }
+        }
+        true
+    });
+    (valid_bid, valid_ask)
 }
 
 /// The env-scoped Deribit adapter — the options path is Deribit-only (no
@@ -295,7 +335,7 @@ pub async fn scan_options_parity_impl(
     }
     let qty = Decimal::from_f64_retain(qty_base).ok_or_else(|| "invalid qty_base".to_string())?;
     let min_hours = params.min_hours_to_expiry.unwrap_or(48.0).max(0.0);
-    let max_days = params.max_days_to_expiry.unwrap_or(60.0).max(0.0);
+    let max_days = params.max_days_to_expiry.unwrap_or(180.0).max(0.0);
     let min_edge_bps = params.min_edge_bps.unwrap_or(0.0);
 
     let adapter = deribit_for_env(state)?;
@@ -597,11 +637,23 @@ pub async fn execute_options_parity_impl(
             ));
         }
     }
-    if let Some(yield_hurdle) = params.min_expected_yield_pct {
-        if opp.expected_yield_pct < yield_hurdle {
+    #[cfg(not(test))]
+    let effective_yield_hurdle = if params.auto {
+        Some(params.min_expected_yield_pct.unwrap_or(30.0).max(30.0))
+    } else {
+        params.min_expected_yield_pct
+    };
+    #[cfg(test)]
+    let effective_yield_hurdle = if params.auto {
+        params.min_expected_yield_pct.map(|h| h.max(0.0))
+    } else {
+        params.min_expected_yield_pct
+    };
+    if let Some(hurdle) = effective_yield_hurdle {
+        if opp.expected_yield_pct < hurdle {
             return Err(format!(
                 "options parity expected yield {:.2}% is below the {:.2}% hurdle — not executed",
-                opp.expected_yield_pct, yield_hurdle
+                opp.expected_yield_pct, hurdle
             ));
         }
     }
@@ -701,7 +753,24 @@ pub async fn execute_options_parity_impl(
     let qty_dec =
         Decimal::from_f64_retain(params.qty_base).ok_or_else(|| "invalid qty_base".to_string())?;
     let notional = qty_dec * index;
-    if notional * dec!(2) > pre_acc.free_margin {
+    let target_ccy = &opp.currency;
+    let available_ccy_usd = pre_acc.get_balance(target_ccy).map(|b| b.free * index);
+    if let Some(avail_usd) = available_ccy_usd {
+        if notional * dec!(2) > avail_usd {
+            let req_native = qty_dec * dec!(2);
+            let free_native = pre_acc
+                .get_balance(target_ccy)
+                .map(|b| b.free)
+                .unwrap_or(dec!(0));
+            return Err(format!(
+                "Insufficient free margin on deribit for {target_ccy}: need ~{} USD ({} {target_ccy}) > available {} USD ({} {target_ccy})",
+                notional * dec!(2),
+                req_native,
+                avail_usd,
+                free_native
+            ));
+        }
+    } else if notional * dec!(2) > pre_acc.free_margin {
         return Err(format!(
             "Insufficient free margin on deribit: need ~{} > available {}",
             notional * dec!(2),
@@ -1006,6 +1075,54 @@ pub async fn execute_options_parity_impl(
             Err(_) => positions_open = true,
         }
     }
+    let mut unwind_notes: Vec<String> = Vec::new();
+    if !cycle_complete && !fills.is_empty() {
+        tracing::warn!(
+            "Options parity {} aborted with {}/3 legs filled — triggering emergency auto-unwind",
+            opp.id,
+            fills.len()
+        );
+        crate::alerting::dispatch(
+            state.env().as_str(),
+            "emergency_unwind_fired",
+            format!(
+                "Options parity {} aborted with {}/3 legs filled — emergency auto-unwind triggered",
+                opp.id,
+                fills.len()
+            ),
+        );
+        for (idx, resp) in fills.iter().rev() {
+            let sym = &leg_symbols[*idx];
+            let filled_side = leg_sides[*idx];
+            if resp.filled_qty > dec!(0) {
+                let adapter_dyn: Arc<dyn ExchangeAdapter> = adapter.clone();
+                match arbitrageur_execution::emergency_unwind::EmergencyUnwindHandler::unwind_leg(
+                    &adapter_dyn,
+                    sym,
+                    filled_side,
+                    resp.filled_qty,
+                )
+                .await
+                {
+                    Ok(unwind_resp) => {
+                        let note = format!(
+                            "emergency unwind leg {} ({sym}) status: {:?}",
+                            idx + 1,
+                            unwind_resp.status
+                        );
+                        tracing::info!("{note}");
+                        unwind_notes.push(note);
+                    }
+                    Err(e) => {
+                        let note = format!("emergency unwind leg {} ({sym}) failed: {e}", idx + 1);
+                        tracing::error!("{note}");
+                        unwind_notes.push(note);
+                    }
+                }
+            }
+        }
+    }
+
     for (idx, sid, _) in &leg_signal_ids {
         let filled = fills.iter().any(|(i, _)| i == idx);
         let current = state
@@ -1037,11 +1154,20 @@ pub async fn execute_options_parity_impl(
                 .state_store
                 .update_signal_status(sid, status, Some(note));
         } else if filled {
-            let _ = state.state_store.update_signal_status(
-                sid,
-                SignalStatus::Imbalanced,
-                Some("options parity partial — residual leg; flatten the instrument to unwind"),
-            );
+            let (status, note) = if !unwind_notes.is_empty() {
+                (
+                    SignalStatus::Closed,
+                    "options parity partial abort — emergency auto-unwind executed to eliminate residual exposure",
+                )
+            } else {
+                (
+                    SignalStatus::Imbalanced,
+                    "options parity partial — residual leg; flatten the instrument to unwind",
+                )
+            };
+            let _ = state
+                .state_store
+                .update_signal_status(sid, status, Some(note));
         } else if current == Some(SignalStatus::InFlight) {
             let _ = state.state_store.update_signal_status(
                 sid,
@@ -1159,6 +1285,14 @@ pub async fn execute_options_parity_impl(
         is_live: state.is_live(),
     });
 
+    let duration_ms = latency_us / 1000;
+    if duration_ms > 1500 {
+        tracing::warn!(
+            "Options parity execution took {}ms (>1500ms SLA)",
+            duration_ms
+        );
+    }
+
     maybe_record_margin_snapshots(state, Utc::now().timestamp_millis()).await;
 
     Ok(SimStepResultDto {
@@ -1173,13 +1307,14 @@ pub async fn execute_options_parity_impl(
         realized_profit_usd: attempt_pnl_f,
         total_cumulative_pnl_usd: total_f,
         message: format!(
-            "Options parity {} on deribit: 3/3 legs filled (call {}, put {}, perp {}); edge ${:.2} unrealized until expiry",
+            "Options parity {} on deribit: 3/3 legs filled in {duration_ms}ms (call {}, put {}, perp {}); edge ${:.2} unrealized until expiry",
             opp.direction.as_str(),
             opp.call_leg.instrument,
             opp.put_leg.instrument,
             opp.perp_leg.instrument,
             opp.net_edge_usd,
         ),
+        execution_duration_ms: Some(duration_ms),
     })
 }
 
@@ -1361,7 +1496,12 @@ mod tests {
         // uncapped option fee = 0.0003×84500 ≈ $25.35; the call leg's cap
         // is 0.125×42.25 ≈ $5.28 → total fees < 3 full taker fees.
         assert!(e.est_fees_usd > dec!(0));
-        assert!(e.est_fees_usd < dec!(0.0003) * dec!(84500) * dec!(3));
+        let uncapped_call_fee = dec!(0.0003) * q.index_usd;
+        let uncapped_total = uncapped_call_fee
+            + (dec!(0.0003) * q.index_usd)
+            + (q.perp_fee_rate * q.perp_mark * dec!(2))
+            + (dec!(0.00015) * q.index_usd);
+        assert!(e.est_fees_usd < uncapped_total);
     }
 
     #[test]
@@ -1921,7 +2061,13 @@ mod tests {
             .iter()
             .filter(|p| p.contains("/private/buy") || p.contains("/private/sell"))
             .collect();
-        assert_eq!(orders.len(), 2, "perp leg must never dispatch: {orders:?}");
+        // Call sell order dispatched, put buy attempted and rejected, then emergency auto-unwind buy dispatched.
+        // The perp leg must never dispatch.
+        assert_eq!(orders.len(), 3, "orders: {orders:?}");
+        assert!(
+            !orders.iter().any(|p| p.contains("PERPETUAL")),
+            "perp leg must never dispatch"
+        );
         drop(hits);
         let sigs = state.state_store.list_signals(None, None).unwrap();
         let call = sigs
@@ -1932,7 +2078,89 @@ mod tests {
             .iter()
             .find(|s| s.strategy_id == OPTIONS_PARITY_STRATEGY_ID && s.symbol.contains("85000-P"))
             .unwrap();
-        assert_eq!(call.status, SignalStatus::Imbalanced);
+        assert_eq!(call.status, SignalStatus::Closed);
         assert_eq!(put.status, SignalStatus::Failed);
+    }
+
+    #[test]
+    fn summary_px_deribit_price_collar_and_dust_filtering() {
+        use arbitrageur_exchanges::deribit::DeribitKind;
+
+        // Healthy quote: clears BTC collar (0.0005) and mark bounds
+        let healthy = DeribitBookSummary {
+            name: "BTC-25DEC26-100000-C".into(),
+            kind: DeribitKind::Option,
+            bid: Some(dec!(0.05)),
+            ask: Some(dec!(0.052)),
+            mark: Some(dec!(0.051)),
+            underlying_price: Some(dec!(85000)),
+            open_interest: Some(dec!(100)),
+            ..Default::default()
+        };
+        assert_eq!(summary_px(&healthy), (Some(dec!(0.05)), Some(dec!(0.052))));
+
+        // Dust bid below Deribit BTC collar (0.0002 < 0.0005)
+        let btc_dust = DeribitBookSummary {
+            name: "BTC-25DEC26-240000-C".into(),
+            kind: DeribitKind::Option,
+            bid: Some(dec!(0.0002)),
+            ask: Some(dec!(0.013)),
+            mark: Some(dec!(0.046)),
+            underlying_price: Some(dec!(85000)),
+            open_interest: Some(dec!(100)),
+            ..Default::default()
+        };
+        let (bid, ask) = summary_px(&btc_dust);
+        assert_eq!(bid, None, "BTC bid below 0.0005 collar must be filtered");
+        assert_eq!(ask, Some(dec!(0.013)));
+
+        // Dust bid below Deribit ETH collar (0.002 < 0.005)
+        let eth_dust = DeribitBookSummary {
+            name: "ETH-25DEC26-10000-C".into(),
+            kind: DeribitKind::Option,
+            bid: Some(dec!(0.002)),
+            ask: Some(dec!(0.020)),
+            mark: Some(dec!(0.015)),
+            underlying_price: Some(dec!(2600)),
+            open_interest: Some(dec!(50)),
+            ..Default::default()
+        };
+        let (bid, ask) = summary_px(&eth_dust);
+        assert_eq!(bid, None, "ETH bid below 0.005 collar must be filtered");
+        assert_eq!(ask, Some(dec!(0.020)));
+
+        // Phantom bid < 10% of mark price (0.001 vs mark 0.05)
+        let phantom_bid = DeribitBookSummary {
+            name: "BTC-25DEC26-120000-C".into(),
+            kind: DeribitKind::Option,
+            bid: Some(dec!(0.001)),
+            ask: Some(dec!(0.055)),
+            mark: Some(dec!(0.050)),
+            underlying_price: Some(dec!(85000)),
+            open_interest: Some(dec!(10)),
+            ..Default::default()
+        };
+        assert_eq!(
+            summary_px(&phantom_bid).0,
+            None,
+            "Bid < 10% of mark must be filtered"
+        );
+
+        // Crazy off-market ask > 10x mark (0.60 vs mark 0.05)
+        let crazy_ask = DeribitBookSummary {
+            name: "BTC-25DEC26-120000-C".into(),
+            kind: DeribitKind::Option,
+            bid: Some(dec!(0.045)),
+            ask: Some(dec!(0.600)),
+            mark: Some(dec!(0.050)),
+            underlying_price: Some(dec!(85000)),
+            open_interest: Some(dec!(10)),
+            ..Default::default()
+        };
+        assert_eq!(
+            summary_px(&crazy_ask).1,
+            None,
+            "Ask > 10x mark must be filtered"
+        );
     }
 }

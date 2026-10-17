@@ -91,8 +91,9 @@ API credentials and private keys are protected on the local filesystem:
 ### Prerequisites
 
 You will need:
-- Rust (stable toolchain, 2021 edition)
-- Node.js (v20 or newer)
+- Rust (pinned by `rust-toolchain.toml` — 1.96.0)
+- Node.js (v22.6 or newer — the frontend test suite uses
+  `node --experimental-strip-types`; CI pins v24)
 - Pixi (optional, recommended for managing dependencies and tasks)
 
 ### Building the Project

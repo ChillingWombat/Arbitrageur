@@ -19,7 +19,7 @@ Perform a comprehensive survey and investigation for R3 (Dashboard Gadgets & Win
    - Inspect hurdle rates, slippage modeling, fee structures, and gas/network costs.
    - Inspect quote freshness checks, funding accrual attribution, and qualification criteria.
    - Identify why bots are not achieving positive returns and determine exact fixes for profitable testnet execution.
-   - Inspect dev RPC (`/tmp/arb-dev.sock`) and testnet vault unlocking with password `<redacted>`.
+   - Inspect dev RPC (`/tmp/arb-dev.sock`) and testnet vault unlocking with password `<redacted — see SECURITY.md>`.
 3. Output:
    - Write your survey report to `/mnt/Data/Projects/Arbitrageur/.agents/teamwork/survey_explorer_3/survey_r3_r4.md`.
    - Write your handoff to `/mnt/Data/Projects/Arbitrageur/.agents/teamwork/survey_explorer_3/handoff.md` with sections: Observation, Logic Chain, Caveats, Conclusion, Verification Method.

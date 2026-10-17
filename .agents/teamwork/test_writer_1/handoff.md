@@ -41,7 +41,7 @@
      - Spread-toll ceiling gate: rejects wide bid-ask spreads exceeding $\text{max\_half\_spread\_bps}$.
      - One-way mode exit cost: non-zero friction accounting.
      - Options premium cashflow: debit outflow is asset inventory purchase, not instant realized loss.
-     - Vault password verification: accepts `"test-only-vault-pw"` for testnet operations.
+     - Vault password verification: accepts `"<redacted>"` for testnet operations.
 
 2. **Automated Test Execution Results**:
    - Command: `node --experimental-strip-types tests/e2e/runner.mjs`
@@ -81,7 +81,7 @@
    - **Tier 1 (Feature Coverage)**: Verified happy-path functionality across all 4 features (R1: 5 tests, R2: 5 tests, R3: 5 tests, R4: 6 tests).
    - **Tier 2 (Boundary & Corner Cases)**: Verified extreme edge cases (R1 boundaries #32 and #61, dust notional < $1, 1e-18 qty, locked vault fail-closed behavior, polling timeouts, burst concurrency, crossed orderbooks, zero liquidity, outlier spikes > 1000 bps, sub-lot sizing).
    - **Tier 3 (Cross-Feature Combinations)**: Verified pairwise subsystem interactions (killswitch mid-trade cancelling in-flight legs and pausing coordinator, vault auto-lock during flatten, circuit breaker trip blocking bot qualification, UI ToggleSwitch sync with circuit breaker state, partitioned deduplication between engine signals and external unmanaged positions).
-   - **Tier 4 (Real-World Application Scenarios)**: Verified 5 complete operational lifecycles (Flash crash multi-venue halt, Testnet Radar bot mean-reversion trade lifecycle with positive PnL, Partial venue timeout during emergency unwind, Vault security lifecycle with `"test-only-vault-pw"`, Dashboard live monitoring and operator parameter tuning).
+   - **Tier 4 (Real-World Application Scenarios)**: Verified 5 complete operational lifecycles (Flash crash multi-venue halt, Testnet Radar bot mean-reversion trade lifecycle with positive PnL, Partial venue timeout during emergency unwind, Vault security lifecycle with `"<redacted>"`, Dashboard live monitoring and operator parameter tuning).
 
 3. **Progressive Testability & Isolation**:
    - Tests instantiate self-contained mock Dev RPC Unix sockets (`MockDevRpcServer`) when running offline or in CI pipelines, and connect directly to live `/tmp/arb-dev.sock` when active.

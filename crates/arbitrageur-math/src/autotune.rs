@@ -453,9 +453,16 @@ pub fn recommend(h: &TuneHistory) -> AutotuneReport {
     let val_vals = spread_vals(&h.validate);
     let fit_ms = mean_sigma(&fit_vals);
     let val_ms = mean_sigma(&val_vals);
-    let fit_ou = seg_dt(&h.fit, h.dt_fit_secs).and_then(|dt| OuModelParams::fit(&fit_vals, dt));
-    let val_ou =
-        seg_dt(&h.validate, h.dt_val_secs).and_then(|dt| OuModelParams::fit(&val_vals, dt));
+    let fit_ou = seg_dt(&h.fit, h.dt_fit_secs).and_then(|dt| {
+        OuModelParams::fit_with_noise(&fit_vals, dt)
+            .map(|(p, _)| p)
+            .or_else(|| OuModelParams::fit(&fit_vals, dt))
+    });
+    let val_ou = seg_dt(&h.validate, h.dt_val_secs).and_then(|dt| {
+        OuModelParams::fit_with_noise(&val_vals, dt)
+            .map(|(p, _)| p)
+            .or_else(|| OuModelParams::fit(&val_vals, dt))
+    });
 
     // Regime gate: any shift aborts everything.
     let regime_shift: Option<String> = match (fit_ms, val_ms) {
@@ -594,7 +601,21 @@ pub fn recommend(h: &TuneHistory) -> AutotuneReport {
         && h.friction_val_bps.is_finite()
         && h.friction_val_bps >= 0.0;
     let target_raw: Option<f64> = if friction_ok {
-        let raw = h.friction_fit_bps + AUTOTUNE_TARGET_SIGMA_K * sig_f;
+        // When an OU fit with adequate goodness-of-fit R² >= AUTOTUNE_OU_MIN_R2 and sample size is
+        // available, solve the exact Bertram (2010) renewal-reward quadrature for the optimal half-width
+        // threshold that maximizes the asymptotic Sharpe ratio net of friction costs. Fall back to
+        // the standard 1σ heuristic if OU fit is unmeasured or poor.
+        let bertram_dist = fit_ou.and_then(|p| {
+            if p.r_squared.is_some_and(|r| r >= AUTOTUNE_OU_MIN_R2)
+                && h.fit.len() >= AUTOTUNE_OU_MIN_N
+            {
+                crate::optimal_thresholds::compute_bertram_thresholds(&p, h.friction_fit_bps)
+                    .map(|b| b.optimal_distance)
+            } else {
+                None
+            }
+        });
+        let raw = bertram_dist.unwrap_or(h.friction_fit_bps + AUTOTUNE_TARGET_SIGMA_K * sig_f);
         Some(raw.clamp(AUTOTUNE_TARGET_MIN, AUTOTUNE_TARGET_MAX))
     } else {
         None

@@ -20,7 +20,9 @@
 //! The supervisor runs one pass immediately at startup (restart recovery)
 //! and then every `POLL_INTERVAL_SECS`.
 
-use crate::execution::{passive_cfg_for, FlattenLiveRefresh};
+use crate::execution::{
+    is_options_leg, passive_cfg_for, protective_option_ioc_order, FlattenLiveRefresh,
+};
 use crate::state::AppEngineState;
 use crate::state_store::{
     LegSide, NewSignalExecution, NewSignalLeg, SignalExecution, SignalLeg, SignalStatus,
@@ -1536,12 +1538,42 @@ async fn dispatch_residual_flatten(state: &AppEngineState, signal_id: &str) {
                 }
             }
             None => {
-                let mut req = OrderRequest::new_market(
-                    adapter.venue_id(),
-                    leg.symbol.clone(),
-                    order_side,
-                    qty_dec,
-                );
+                // `passive_cfg_for` returns None both for `mode = off` and
+                // for every options strategy — the two are NOT
+                // interchangeable. Options legs must never be sent as
+                // unconstrained market orders (illiquid books cross
+                // catastrophically; the manual flatten path refuses exactly
+                // this), so they get the shared protective IOC collar and
+                // are refused when no valid reference price resolves.
+                let mut req = if is_options_leg(
+                    &exec.strategy_id,
+                    adapter.venue_id().as_str(),
+                    &leg.symbol,
+                ) {
+                    match protective_option_ioc_order(
+                        state,
+                        &adapter,
+                        &leg.symbol,
+                        order_side,
+                        qty_dec,
+                    )
+                    .await
+                    {
+                        Ok(req) => req,
+                        Err(e) => {
+                            tracing::error!("reconcile: {e}");
+                            note_err(e);
+                            continue;
+                        }
+                    }
+                } else {
+                    OrderRequest::new_market(
+                        adapter.venue_id(),
+                        leg.symbol.clone(),
+                        order_side,
+                        qty_dec,
+                    )
+                };
                 // Spot instruments carry no reduce-only flag — the venue
                 // refuses an oversell itself, same guarantee.
                 req.reduce_only = adapter.supports_reduce_only(&leg.symbol);

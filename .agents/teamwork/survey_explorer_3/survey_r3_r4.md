@@ -214,11 +214,11 @@ let exit_est_opt = match exec_mode {
   {"cmd": "<command_name>", "args": { ... }}
   ```
 
-#### Unlocking the Testnet Vault (`<redacted>`)
+#### Unlocking the Testnet Vault (`<redacted — see SECURITY.md>`)
 - Credentials are encrypted in `~/.arbitrageur/vault.enc` using format `ARBVLT2`:
   - KDF: Argon2id (64MB memory, 3 iterations, 1 parallelism).
   - Cipher: AES-256-GCM (12-byte nonce, 16-byte authentication tag).
-  - Password rules: Desktop vault supports 6+ character passwords without arbitrary composition requirements. Unit tests (`vault::tests`) verify that `<redacted>` is fully valid.
+  - Password rules: Desktop vault supports 6+ character passwords without arbitrary composition requirements. Unit tests (`vault::tests`) verify that `<redacted — see SECURITY.md>` is fully valid.
 - Command to unlock via socket:
   ```bash
   echo '{"cmd":"unlock_vault","args":{"password":"<redacted>"}}' | socat - UNIX-CONNECT:/tmp/arb-dev.sock
@@ -266,4 +266,4 @@ To achieve positive returns on testnet, the engine parameters must be updated in
    - Correct the mathematical exit condition in `convergence_auto.rs` (`evaluate_exit`).
    - Add spread toll qualification filter to reject orders when `book_spread > max_allowed_spread`.
    - Update `options_bot.rs` execution logging to prevent booking upfront options conversion cashflows as immediate net losses.
-   - Provide a CLI/RPC script to unlock the vault (`<redacted>`) and reset the tripped circuit breaker.
+   - Provide a CLI/RPC script to unlock the vault (`<redacted — see SECURITY.md>`) and reset the tripped circuit breaker.

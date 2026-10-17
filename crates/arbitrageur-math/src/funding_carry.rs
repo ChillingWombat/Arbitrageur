@@ -2,6 +2,8 @@ use arbitrageur_core::quote::FundingRate;
 use arbitrageur_core::types::{dec, Decimal, BPS_DIVISOR};
 use chrono::Datelike;
 
+pub const DEFAULT_FUNDING_MIN_APR_PCT: f64 = 18.0;
+
 /// Detailed breakdown of a cross-exchange funding rate carry opportunity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FundingCarryOpportunity {
@@ -106,6 +108,91 @@ pub fn evaluate_funding_carry(
     })
 }
 
+/// Detailed breakdown of a cross-exchange funding rate carry opportunity
+/// augmented with discrete epoch countdown and short-term time-weighted IRR.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FundingCarryCountdownOpportunity {
+    /// Underlying continuous carry metrics.
+    pub carry: FundingCarryOpportunity,
+    /// Seconds remaining until next discrete settlement on the earning leg.
+    pub seconds_to_settlement: i64,
+    /// Annualized internal rate of return (IRR / APR) if held strictly across
+    /// the immediate upcoming settlement:
+    /// IRR = (Net Impending Cash Flow - Round-trip Fees) / Trade Size * (8760 * 3600 / holding_sec).
+    pub immediate_epoch_irr_apr: Decimal,
+    /// Whether the funding rate is locked in with low remaining uncertainty (<= 30 min / 1800s to settlement).
+    pub is_locked_in: bool,
+    /// Expected net cash payout in USD on the next impending settlement (after subtracting counter-leg payment).
+    pub next_epoch_payout_usd: Decimal,
+}
+
+/// Evaluates funding carry with discrete settlement countdown and time-weighted IRR.
+///
+/// Prioritizes impending settlements where the rate is locked in and the short holding
+/// duration produces high annualized capital efficiency.
+pub fn evaluate_funding_carry_with_countdown(
+    venue_a: &FundingRate,
+    venue_b: &FundingRate,
+    round_trip_fee_bps: Decimal,
+    trade_size_usd: Decimal,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Option<FundingCarryCountdownOpportunity> {
+    let carry = evaluate_funding_carry(venue_a, venue_b, round_trip_fee_bps, trade_size_usd)?;
+
+    // Identify which venue is short (earning) and which is long (paying)
+    let (earning_rate, paying_rate) = if venue_a.venue.as_str() == carry.short_venue.as_str() {
+        (venue_a, venue_b)
+    } else {
+        (venue_b, venue_a)
+    };
+
+    let seconds_to_settlement = (earning_rate.next_funding_time - now).num_seconds();
+    let effective_countdown_sec =
+        seconds_to_settlement.clamp(30, (earning_rate.interval_hours.max(1) as i64) * 3600);
+
+    // Earning leg periodic payout
+    let earn_rate = earning_rate.predicted_rate.unwrap_or(earning_rate.rate);
+    let earn_cash_usd = trade_size_usd * earn_rate;
+
+    // Paying leg cost over the countdown duration:
+    // If paying venue settles within the countdown window, charge full period rate;
+    // otherwise charge pro-rated hourly rate.
+    let pay_seconds_to_settlement = (paying_rate.next_funding_time - now).num_seconds();
+    let pay_rate = paying_rate.predicted_rate.unwrap_or(paying_rate.rate);
+    let pay_cash_usd =
+        if pay_seconds_to_settlement > 0 && pay_seconds_to_settlement <= effective_countdown_sec {
+            trade_size_usd * pay_rate
+        } else {
+            let paying_hourly = pay_rate / Decimal::from(paying_rate.interval_hours.max(1));
+            let duration_hours = Decimal::from(effective_countdown_sec) / dec!(3600);
+            trade_size_usd * paying_hourly * duration_hours
+        };
+
+    let next_epoch_payout_usd = earn_cash_usd - pay_cash_usd;
+    let fee_ratio = round_trip_fee_bps / BPS_DIVISOR;
+    let round_trip_fees_usd = trade_size_usd * fee_ratio;
+    let net_epoch_profit_usd = next_epoch_payout_usd - round_trip_fees_usd;
+
+    // Time-weighted annualized IRR: (net_epoch_profit_usd / trade_size_usd) * (8760 * 3600 / effective_countdown_sec)
+    let immediate_epoch_irr_apr = if trade_size_usd > dec!(0) && effective_countdown_sec > 0 {
+        let net_return = net_epoch_profit_usd / trade_size_usd;
+        let annual_multiplier = dec!(31536000) / Decimal::from(effective_countdown_sec); // 8760 * 3600 = 31,536,000
+        net_return.checked_mul(annual_multiplier).unwrap_or(dec!(0))
+    } else {
+        dec!(0)
+    };
+
+    let is_locked_in = seconds_to_settlement <= 1800 && seconds_to_settlement > 0;
+
+    Some(FundingCarryCountdownOpportunity {
+        carry,
+        seconds_to_settlement,
+        immediate_epoch_irr_apr,
+        is_locked_in,
+        next_epoch_payout_usd,
+    })
+}
+
 /// Hourly-compounded APY for a per-hour rate: `(1 + h)^8760 - 1`.
 /// `None` when the result is not finite — hourly rates above ~3.3%
 /// overflow `f64`, and reporting a clamped ceiling as "APY" fabricates a
@@ -165,28 +252,46 @@ pub fn evaluate_spot_perp_basis(
     round_trip_fee_bps: Decimal,
     trade_size_usd: Decimal,
 ) -> Option<SpotPerpBasisBreakdown> {
+    evaluate_spot_perp_basis_with_borrow(
+        spot_price,
+        perp_price,
+        perp_funding,
+        round_trip_fee_bps,
+        trade_size_usd,
+        None,
+    )
+}
+
+/// Evaluates Spot-Perp Cash and Carry with explicit spot collateral borrow APR:
+/// Subtracts spot margin borrow financing cost from perp funding harvest to reflect honest net carry.
+pub fn evaluate_spot_perp_basis_with_borrow(
+    spot_price: Decimal,
+    perp_price: Decimal,
+    perp_funding: &FundingRate,
+    round_trip_fee_bps: Decimal,
+    trade_size_usd: Decimal,
+    borrow_apr: Option<Decimal>,
+) -> Option<SpotPerpBasisBreakdown> {
     if spot_price <= dec!(0) || perp_price <= dec!(0) {
         return None;
     }
-    // Hourly rate earned by the short-perp leg.
-    let hourly_funding = perp_funding.rate / Decimal::from(perp_funding.interval_hours.max(1));
-    if hourly_funding <= dec!(0) {
+    // Hourly rate earned by the short-perp leg minus spot margin borrow rate
+    let raw_hourly = perp_funding.rate / Decimal::from(perp_funding.interval_hours.max(1));
+    let borrow_hourly = borrow_apr.unwrap_or(dec!(0)) / dec!(8760);
+    let net_hourly = raw_hourly - borrow_hourly;
+    if net_hourly <= dec!(0) {
         return None;
     }
     let basis_bps = ((perp_price - spot_price) / spot_price) * BPS_DIVISOR;
 
-    let net_rate_8h = hourly_funding.checked_mul(dec!(8)).unwrap_or(dec!(999999));
-    let net_apr = hourly_funding
-        .checked_mul(dec!(8760))
-        .unwrap_or(dec!(999999));
+    let net_rate_8h = net_hourly.checked_mul(dec!(8)).unwrap_or(dec!(999999));
+    let net_apr = net_hourly.checked_mul(dec!(8760)).unwrap_or(dec!(999999));
 
     let fee_ratio = round_trip_fee_bps / BPS_DIVISOR;
-    let break_even_hours = fee_ratio
-        .checked_div(hourly_funding)
-        .unwrap_or(dec!(999999));
+    let break_even_hours = fee_ratio.checked_div(net_hourly).unwrap_or(dec!(999999));
 
     let daily_income_usd = trade_size_usd
-        .checked_mul(hourly_funding)
+        .checked_mul(net_hourly)
         .and_then(|d| d.checked_mul(dec!(24)))
         .unwrap_or(dec!(999999));
 
@@ -196,7 +301,7 @@ pub fn evaluate_spot_perp_basis(
         symbol: perp_funding.symbol.clone(),
         net_rate_8h,
         net_apr,
-        net_apy: compounded_apy(hourly_funding),
+        net_apy: compounded_apy(net_hourly),
         round_trip_fee_bps,
         break_even_hours,
         recommended_size_usd: trade_size_usd,
@@ -296,9 +401,10 @@ pub fn estimate_funding_hold_hours(
         return None;
     }
     const MAX_HOLD_HOURS: f64 = 168.0; // 7-day persistence cap
+
     let apr = min_apr_pct
         .filter(|v| v.is_finite() && *v >= 0.0)
-        .unwrap_or(8.0);
+        .unwrap_or(DEFAULT_FUNDING_MIN_APR_PCT);
     let threshold_8h = apr / 100.0 / 365.0 / 3.0;
     let spread_note = if spread_cost > 0.0 {
         format!(" incl. {spread_cost:.1} bps entry spread")
@@ -498,7 +604,7 @@ pub fn expected_carry_return_usd(
     }
     let apr = min_apr_pct
         .filter(|v| v.is_finite() && *v >= 0.0)
-        .unwrap_or(8.0);
+        .unwrap_or(DEFAULT_FUNDING_MIN_APR_PCT);
     let threshold_8h = apr / 100.0 / 365.0 / 3.0;
     let exit_8h = threshold_8h.min(net_rate_8h);
     let avg_8h = (net_rate_8h + exit_8h) / 2.0;
@@ -509,6 +615,46 @@ pub fn expected_carry_return_usd(
     let costs = trade_size_usd * (round_trip_fee_bps + spread) / 10_000.0;
     let net = accrual - costs;
     net.is_finite().then_some(net)
+}
+
+/// Comprehensive expected return in USD for a funding carry or spot-perp basis trade,
+/// accounting for both funding rate accrual and basis convergence PnL.
+///
+/// For cash-and-carry trades with positive initial basis (contango: perp > spot),
+/// as the perp converges toward spot at exit, basis compression delivers:
+/// `notional * (entry_basis_bps - exit_basis_bps) / 10_000.0`
+#[allow(clippy::too_many_arguments)]
+pub fn expected_basis_carry_return_usd(
+    net_rate_8h: f64,
+    entry_basis_bps: Option<f64>,
+    exit_basis_target_bps: Option<f64>,
+    round_trip_fee_bps: f64,
+    entry_spread_cost_bps: Option<f64>,
+    hold_hours: Option<f64>,
+    min_apr_pct: Option<f64>,
+    trade_size_usd: f64,
+) -> Option<f64> {
+    let funding_net = expected_carry_return_usd(
+        net_rate_8h,
+        round_trip_fee_bps,
+        entry_spread_cost_bps,
+        hold_hours,
+        min_apr_pct,
+        trade_size_usd,
+    )
+    .unwrap_or(0.0);
+
+    let basis_convergence_usd = match (entry_basis_bps, exit_basis_target_bps) {
+        (Some(entry_b), Some(exit_b))
+            if entry_b.is_finite() && exit_b.is_finite() && entry_b > exit_b =>
+        {
+            trade_size_usd * (entry_b - exit_b) / 10_000.0
+        }
+        _ => 0.0,
+    };
+
+    let total = funding_net + basis_convergence_usd;
+    total.is_finite().then_some(total)
 }
 
 /// Modelled-hold context aligning win probability with
@@ -899,7 +1045,7 @@ pub fn funding_win_probability(
             let apr = h
                 .min_apr_pct
                 .filter(|v| v.is_finite() && *v >= 0.0)
-                .unwrap_or(8.0);
+                .unwrap_or(DEFAULT_FUNDING_MIN_APR_PCT);
             let threshold_8h = apr / 100.0 / 365.0 / 3.0;
             let exit_8h = threshold_8h.min(rate_f);
             ((rate_f + exit_8h) / 2.0) * (h.hold_hours / 8.0)
@@ -1142,6 +1288,168 @@ pub fn funding_depth_curve(
         }
     }
     points
+}
+
+/// Real-time continuous Funding Rate TWAP forecast across the settlement epoch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FundingTwapForecast {
+    /// Epoch progress fraction tau in [0.0, 1.0].
+    pub epoch_progress: f64,
+    /// Accumulated Time-Weighted Average Price (TWAP) of premium up to the evaluation timestamp.
+    pub accumulated_twap_rate: f64,
+    /// Current instantaneous premium rate: (perp_mark - spot_index) / spot_index.
+    pub current_premium_rate: f64,
+    /// Predicted settlement funding rate for this epoch.
+    pub predicted_funding_rate: f64,
+    /// Predicted Annualized Percentage Rate (APR) in %.
+    pub predicted_apr_pct: f64,
+    /// Mathematically immutable weight locked into this epoch's payment [0.0, 1.0].
+    pub locked_weight: f64,
+    /// Remaining-period average premium required to flip the sign of the payment.
+    /// None if payment sign is already mathematically irreversible.
+    pub reversal_premium_required: Option<f64>,
+    /// High probability that remaining period fluctuations could invert funding direction.
+    pub is_sign_flip_risk: bool,
+}
+
+pub struct FundingRateTwapForecaster;
+
+impl FundingRateTwapForecaster {
+    /// Forecast upcoming funding rate given epoch timestamps, premium observations, and clamp parameters.
+    ///
+    /// - `epoch_start_ms`: Start timestamp of current funding epoch (e.g. 00:00, 08:00 UTC).
+    /// - `epoch_end_ms`: Scheduled settlement timestamp (e.g. +8h or +1h).
+    /// - `current_time_ms`: Current timestamp.
+    /// - `premium_samples`: Historical (timestamp_ms, premium_rate) tuples within the current epoch.
+    /// - `current_spot_index`: Current spot / oracle index price.
+    /// - `current_perp_mark`: Current perpetual mark price.
+    /// - `interval_hours`: Funding interval in hours (typically 8.0 or 1.0).
+    /// - `interest_rate`: Fixed epoch interest rate (typically 0.0001 = 0.01% for 8h, or 0.0).
+    /// - `clamp_range`: (clamp_min, clamp_max) for the interest rate component (typically (-0.0005, 0.0005)).
+    #[allow(clippy::too_many_arguments)]
+    pub fn forecast(
+        epoch_start_ms: i64,
+        epoch_end_ms: i64,
+        current_time_ms: i64,
+        premium_samples: &[(i64, f64)],
+        current_spot_index: f64,
+        current_perp_mark: f64,
+        interval_hours: f64,
+        interest_rate: f64,
+        clamp_range: (f64, f64),
+    ) -> Option<FundingTwapForecast> {
+        let epoch_duration = epoch_end_ms - epoch_start_ms;
+        if epoch_duration <= 0
+            || interval_hours <= 0.0
+            || !current_spot_index.is_finite()
+            || current_spot_index <= 0.0
+            || !current_perp_mark.is_finite()
+            || current_perp_mark <= 0.0
+            || !interest_rate.is_finite()
+            || !clamp_range.0.is_finite()
+            || !clamp_range.1.is_finite()
+            || clamp_range.0 > clamp_range.1
+        {
+            return None;
+        }
+
+        let elapsed = (current_time_ms - epoch_start_ms).clamp(0, epoch_duration);
+        let tau = (elapsed as f64) / (epoch_duration as f64);
+        let current_premium = (current_perp_mark - current_spot_index) / current_spot_index;
+
+        // Compute accumulated TWAP of premium over the elapsed window [epoch_start_ms, current_time_ms]
+        let accumulated_twap = if elapsed == 0 || premium_samples.is_empty() {
+            current_premium
+        } else {
+            let mut valid_samples: Vec<(i64, f64)> = premium_samples
+                .iter()
+                .filter(|(t, p)| *t >= epoch_start_ms && *t <= current_time_ms && p.is_finite())
+                .copied()
+                .collect();
+            valid_samples.sort_by_key(|(t, _)| *t);
+
+            if valid_samples.is_empty() {
+                current_premium
+            } else {
+                let mut total_area = 0.0;
+                let mut total_time = 0.0;
+
+                // Time from epoch_start_ms to first sample
+                if valid_samples[0].0 > epoch_start_ms {
+                    let dt = (valid_samples[0].0 - epoch_start_ms) as f64;
+                    total_area += valid_samples[0].1 * dt;
+                    total_time += dt;
+                }
+
+                for w in valid_samples.windows(2) {
+                    let dt = (w[1].0 - w[0].0) as f64;
+                    if dt > 0.0 {
+                        total_area += 0.5 * (w[0].1 + w[1].1) * dt;
+                        total_time += dt;
+                    }
+                }
+
+                // Time from last sample to current_time_ms
+                let last = valid_samples.last().unwrap();
+                if current_time_ms > last.0 {
+                    let dt = (current_time_ms - last.0) as f64;
+                    total_area += 0.5 * (last.1 + current_premium) * dt;
+                    total_time += dt;
+                }
+
+                if total_time > 0.0 {
+                    total_area / total_time
+                } else {
+                    current_premium
+                }
+            }
+        };
+
+        // Blended predicted premium TWAP across full epoch
+        let predicted_premium = tau * accumulated_twap + (1.0 - tau) * current_premium;
+
+        // Interest clamp: F = Premium + clamp(Interest - Premium, min, max)
+        let interest_component =
+            (interest_rate - predicted_premium).clamp(clamp_range.0, clamp_range.1);
+        let predicted_funding = predicted_premium + interest_component;
+
+        let periods_per_year = 8760.0 / interval_hours;
+        let predicted_apr_pct = predicted_funding * periods_per_year * 100.0;
+
+        let locked_weight = tau;
+
+        // Required remaining premium to reverse the sign of predicted funding
+        let remaining_weight = 1.0 - tau;
+        let reversal_premium_required = if remaining_weight <= 1e-6 {
+            None // Immutable, epoch ended
+        } else {
+            let p_rem = -(tau * accumulated_twap) / remaining_weight;
+            if p_rem.abs() > 0.50 {
+                None // Mathematically impossible in realistic markets (>50% spread)
+            } else {
+                Some(p_rem)
+            }
+        };
+
+        let is_sign_flip_risk = if remaining_weight > 0.70 {
+            true // early in epoch (<30% done)
+        } else if let Some(p_req) = reversal_premium_required {
+            (p_req - current_premium).abs() < 0.0030 // within 30 bps of current price
+        } else {
+            false
+        };
+
+        Some(FundingTwapForecast {
+            epoch_progress: tau,
+            accumulated_twap_rate: accumulated_twap,
+            current_premium_rate: current_premium,
+            predicted_funding_rate: predicted_funding,
+            predicted_apr_pct,
+            locked_weight,
+            reversal_premium_required,
+            is_sign_flip_risk,
+        })
+    }
 }
 
 #[cfg(test)]
@@ -1619,5 +1927,188 @@ mod funding_capacity_tests {
         assert!(curve[0].cum_exp_bps.is_none());
         assert!(curve[0].marg_exp_bps.is_none());
         assert!(approx(curve[0].cum_net_bps, curve[0].marg_net_bps));
+    }
+}
+
+#[cfg(test)]
+mod funding_twap_forecast_tests {
+    use super::*;
+
+    #[test]
+    fn test_funding_twap_forecast_basic() {
+        let start = 1_000_000;
+        let end = start + 8 * 3600 * 1000; // 8 hours
+        let now = start + 4 * 3600 * 1000; // 4 hours in (50% progress)
+
+        let spot = 100.0;
+        let perp = 100.05; // 5 bps premium = 0.0005
+        let samples = vec![
+            (start + 3600 * 1000, 0.0004),
+            (start + 2 * 3600 * 1000, 0.0005),
+            (start + 3 * 3600 * 1000, 0.0006),
+        ];
+
+        let forecast = FundingRateTwapForecaster::forecast(
+            start,
+            end,
+            now,
+            &samples,
+            spot,
+            perp,
+            8.0,
+            0.0001,
+            (-0.0005, 0.0005),
+        )
+        .expect("forecast should succeed");
+
+        assert!((forecast.epoch_progress - 0.5).abs() < 1e-4);
+        assert!((forecast.locked_weight - 0.5).abs() < 1e-4);
+        assert!(forecast.predicted_funding_rate > 0.0);
+        assert!(forecast.predicted_apr_pct > 0.0);
+    }
+
+    #[test]
+    fn test_funding_twap_forecast_locked_end_of_epoch() {
+        let start = 1_000_000;
+        let end = start + 8 * 3600 * 1000;
+        let now = end; // 100% progress
+
+        let spot = 1000.0;
+        let perp = 1005.0; // 50 bps premium = 0.005
+        let samples = vec![
+            (start + 2 * 3600 * 1000, 0.005),
+            (start + 6 * 3600 * 1000, 0.005),
+        ];
+
+        let forecast = FundingRateTwapForecaster::forecast(
+            start,
+            end,
+            now,
+            &samples,
+            spot,
+            perp,
+            8.0,
+            0.0001,
+            (-0.0005, 0.0005),
+        )
+        .expect("forecast should succeed");
+
+        assert!((forecast.epoch_progress - 1.0).abs() < 1e-4);
+        assert!((forecast.locked_weight - 1.0).abs() < 1e-4);
+        assert!(forecast.reversal_premium_required.is_none());
+        assert!(!forecast.is_sign_flip_risk);
+    }
+
+    #[test]
+    fn test_funding_twap_forecast_rejects_bad_inputs() {
+        assert!(FundingRateTwapForecaster::forecast(
+            100,
+            50,
+            60,
+            &[],
+            100.0,
+            100.0,
+            8.0,
+            0.0,
+            (0.0, 0.0)
+        )
+        .is_none()); // end < start
+
+        assert!(FundingRateTwapForecaster::forecast(
+            100,
+            200,
+            150,
+            &[],
+            -10.0,
+            100.0,
+            8.0,
+            0.0,
+            (0.0, 0.0)
+        )
+        .is_none()); // spot <= 0
+
+        assert!(FundingRateTwapForecaster::forecast(
+            100,
+            200,
+            150,
+            &[],
+            100.0,
+            100.0,
+            0.0,
+            0.0,
+            (0.0, 0.0)
+        )
+        .is_none()); // interval <= 0
+    }
+}
+
+#[cfg(test)]
+mod funding_carry_countdown_tests {
+    use super::*;
+    use arbitrageur_core::types::VenueId;
+    use chrono::{Duration, Utc};
+
+    #[test]
+    fn test_evaluate_funding_carry_with_countdown_locked_in() {
+        let now = Utc::now();
+        let rate_a = FundingRate {
+            venue: VenueId::new("binance"),
+            symbol: "BTC-USDT".to_string(),
+            rate: dec!(0.0008),
+            predicted_rate: Some(dec!(0.0008)),
+            interval_hours: 8,
+            next_funding_time: now + Duration::seconds(900),
+            timestamp: now,
+        };
+        let rate_b = FundingRate {
+            venue: VenueId::new("hyperliquid"),
+            symbol: "BTC-USDT".to_string(),
+            rate: dec!(0.00001),
+            predicted_rate: Some(dec!(0.00001)),
+            interval_hours: 1,
+            next_funding_time: now + Duration::seconds(1800),
+            timestamp: now,
+        };
+
+        let opp =
+            evaluate_funding_carry_with_countdown(&rate_a, &rate_b, dec!(2.0), dec!(10000.0), now)
+                .expect("should identify countdown carry opportunity");
+
+        assert_eq!(opp.carry.short_venue, "binance");
+        assert_eq!(opp.carry.long_venue, "hyperliquid");
+        assert_eq!(opp.seconds_to_settlement, 900);
+        assert!(opp.is_locked_in);
+        assert!(opp.next_epoch_payout_usd > dec!(7.0));
+        assert!(opp.immediate_epoch_irr_apr > dec!(5.0));
+    }
+
+    #[test]
+    fn test_evaluate_funding_carry_with_countdown_far_settlement() {
+        let now = Utc::now();
+        let rate_a = FundingRate {
+            venue: VenueId::new("binance"),
+            symbol: "BTC-USDT".to_string(),
+            rate: dec!(0.0004),
+            predicted_rate: None,
+            interval_hours: 8,
+            next_funding_time: now + Duration::seconds(25200),
+            timestamp: now,
+        };
+        let rate_b = FundingRate {
+            venue: VenueId::new("hyperliquid"),
+            symbol: "BTC-USDT".to_string(),
+            rate: dec!(0.00001),
+            predicted_rate: None,
+            interval_hours: 1,
+            next_funding_time: now + Duration::seconds(1800),
+            timestamp: now,
+        };
+
+        let opp =
+            evaluate_funding_carry_with_countdown(&rate_a, &rate_b, dec!(2.0), dec!(10000.0), now)
+                .expect("should identify opportunity");
+
+        assert_eq!(opp.seconds_to_settlement, 25200);
+        assert!(!opp.is_locked_in);
     }
 }

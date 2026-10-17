@@ -1455,14 +1455,18 @@ export const SignalDetailModal: React.FC<SignalDetailModalProps> = React.memo(
                 </span>
               )}
               <span
-                className={`px-2 py-0.5 rounded-full border text-[11px] font-sans font-semibold ${STATUS_STYLE[r.status]}`}
+                className={`px-2 py-0.5 rounded-full border text-[11px] font-sans font-semibold ${
+                  !r.executable && r.status !== "preparing"
+                    ? "bg-warn-dim text-warn-strong border-warn-border"
+                    : STATUS_STYLE[r.status] ?? "bg-surface-raised text-slate-600 border-surface-border"
+                }`}
                 title={
                   r.status === "preparing"
                     ? `history ${(r.qualificationProgress * 100).toFixed(0)}% of window · ${r.observedEpisodes} episodes`
-                    : r.blockReason ?? r.status
+                    : r.blockReason ? `Blocked: ${r.blockReason}` : r.status
                 }
               >
-                {r.status}
+                {!r.executable && r.status === "ready" ? "blocked" : r.status}
                 {r.status === "preparing" && ` ${(r.qualificationProgress * 100).toFixed(0)}%`}
               </span>
             </div>
@@ -1573,6 +1577,11 @@ export const SignalDetailModal: React.FC<SignalDetailModalProps> = React.memo(
             </DetailSection>
 
             <DetailSection title="Sizing & PnL">
+              {!r.executable && r.blockReason && (
+                <div className="p-2.5 rounded-lg bg-warn-dim border border-warn-border text-xs text-warn-strong font-sans col-span-2">
+                  <span className="font-semibold">Execution Blocked:</span> {r.blockReason}. Sizing and expected profit values are model forecasts, not actionable trades.
+                </div>
+              )}
               <DetailField
                 label="Expected profit (signed PnL)"
                 value={fmtBpsU(r.expectedProfitBps)}
@@ -1696,10 +1705,18 @@ const RadarRow: React.FC<RadarRowProps> = React.memo(
             )}
           </td>
           <td
-            className={`px-2 py-2 text-right font-mono tabular-nums font-bold ${
-              (r.expectedProfitBps ?? 0) >= 0 ? "text-profit" : "text-loss"
+            className={`px-2 py-2 text-right font-mono tabular-nums ${
+              !r.executable
+                ? "text-slate-400 font-normal"
+                : (r.expectedProfitBps ?? 0) >= 0
+                ? "text-profit font-bold"
+                : "text-loss font-bold"
             }`}
-            title="Signed probability-weighted PnL expectation (negative = expected loss)"
+            title={
+              !r.executable && r.blockReason
+                ? `Blocked (${r.blockReason}). Forecast expectation: ${fmtBpsStr(r.expectedProfitBps)}`
+                : "Signed probability-weighted PnL expectation (negative = expected loss)"
+            }
           >
             {fmtBpsU(r.expectedProfitBps)}
           </td>
@@ -1742,26 +1759,73 @@ const RadarRow: React.FC<RadarRowProps> = React.memo(
           <td className="px-2 py-2 text-right font-mono" title="Fraction of expected window buckets with both venues observed (coverage gate)">
             {fmtPct(r.coverage)}
           </td>
-          <td className="px-2 py-2 text-right font-mono">{fmtUsd(r.expectedProfitUsd)}</td>
-          <td className="px-2 py-2 text-right font-mono">{fmtUsd(r.optimalSizeUsd)}</td>
-          <td className="px-2 py-2 text-right font-mono">{fmtUsd(r.breakevenSizeUsd)}</td>
+          <td
+            className={`px-2 py-2 text-right font-mono ${
+              !r.executable ? "text-slate-400" : ""
+            }`}
+            title={
+              !r.executable && r.blockReason
+                ? `Blocked (${r.blockReason}). Forecast USD: ${fmtUsd(r.expectedProfitUsd)}`
+                : undefined
+            }
+          >
+            {fmtUsd(r.expectedProfitUsd)}
+          </td>
+          <td
+            className={`px-2 py-2 text-right font-mono ${
+              !r.executable ? "text-slate-400 font-normal" : ""
+            }`}
+            title={
+              !r.executable && r.blockReason
+                ? `Blocked (${r.blockReason}). Forecast optimal size: ${fmtUsd(r.optimalSizeUsd)}`
+                : undefined
+            }
+          >
+            {fmtUsd(r.optimalSizeUsd)}
+          </td>
+          <td
+            className={`px-2 py-2 text-right font-mono ${
+              !r.executable ? "text-slate-400 font-normal" : ""
+            }`}
+            title={
+              !r.executable && r.blockReason
+                ? `Blocked (${r.blockReason}). Forecast breakeven size: ${fmtUsd(r.breakevenSizeUsd)}`
+                : undefined
+            }
+          >
+            {fmtUsd(r.breakevenSizeUsd)}
+          </td>
           <td className="px-2 py-2 text-right font-mono" title={`first seen ${fmtTs(r.firstSeenMs)}`}>
             {fmtDur(r.signalAgeSecs)}
           </td>
           <td className="px-2 py-2 text-right font-mono">{fmtDur(r.expectedConvergeSecs)}</td>
           <td className="px-2 py-2">
-            <span
-              className={`px-2 py-0.5 rounded-full border text-[11px] font-sans font-semibold ${STATUS_STYLE[r.status]}`}
-              title={
-                r.status === "preparing"
-                  ? `history ${(r.qualificationProgress * 100).toFixed(0)}% of window · ${r.observedEpisodes} episodes`
-                  : r.blockReason ?? r.status
-              }
-            >
-              {r.status}
-              {r.status === "preparing" &&
-                ` ${(r.qualificationProgress * 100).toFixed(0)}%`}
-            </span>
+            <div className="flex items-center gap-1.5 flex-nowrap">
+              <span
+                className={`px-2 py-0.5 rounded-full border text-[11px] font-sans font-semibold shrink-0 ${
+                  !r.executable && r.status !== "preparing"
+                    ? "bg-warn-dim text-warn-strong border-warn-border"
+                    : STATUS_STYLE[r.status] ?? "bg-surface-raised text-slate-600 border-surface-border"
+                }`}
+                title={
+                  r.status === "preparing"
+                    ? `history ${(r.qualificationProgress * 100).toFixed(0)}% of window · ${r.observedEpisodes} episodes`
+                    : r.blockReason ? `Blocked: ${r.blockReason}` : r.status
+                }
+              >
+                {!r.executable && r.status === "ready" ? "blocked" : r.status}
+                {r.status === "preparing" &&
+                  ` ${(r.qualificationProgress * 100).toFixed(0)}%`}
+              </span>
+              {r.blockReason && !r.executable && r.status !== "preparing" && (
+                <span
+                  className="text-[10px] text-slate-400 font-mono truncate max-w-36"
+                  title={r.blockReason}
+                >
+                  {r.blockReason}
+                </span>
+              )}
+            </div>
           </td>
           <td className="px-2 py-2 text-right" onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-end gap-1.5">
@@ -1799,6 +1863,7 @@ interface OpportunityRadarProps {
   openPositions?: OpenPositionDto[];
   initialBotStatus?: RadarBotStatusDto | null;
   initialSelectedDetailPos?: OpenPositionDto | null;
+  initialSnapshot?: MonitorSnapshotDto | null;
 }
 
 const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({
@@ -1808,8 +1873,9 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({
   openPositions = [],
   initialBotStatus = null,
   initialSelectedDetailPos = null,
+  initialSnapshot = null,
 }) => {
-  const [snap, setSnap] = useState<MonitorSnapshotDto | null>(null);
+  const [snap, setSnap] = useState<MonitorSnapshotDto | null>(initialSnapshot);
   const [cfg, setCfg] = useState<MonitorConfigDto | null>(null);
   const [showConfig, setShowConfig] = useState(false);
   const [search, setSearch] = useState("");
@@ -1822,6 +1888,7 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({
   const minExpTouched = useRef(false);
   const [minPWin, setMinPWin] = useState(() => to2dpStr(defaultRadarBotConfig().minPWin * 100)); // default mirrors the bot entry hurdle (bot minPWin, shown as %)
   const minPWinTouched = useRef(false);
+  const [onlyExecutable, setOnlyExecutable] = useState(false);
   const [showVenueMenu, setShowVenueMenu] = useState(false);
   const venueMenuRef = useRef<HTMLDivElement>(null);
 
@@ -1920,35 +1987,23 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({
   useEffect(() => {
     let dead = false;
     const tick = async () => {
+      if (typeof document !== "undefined" && document.hidden) return;
       try {
-        const s = await api.getMonitorSnapshot();
-        if (!dead) setSnap(s);
+        const [snapRes, botRes, sigsRes, pnlRes, posRes] = await Promise.allSettled([
+          api.getMonitorSnapshot(),
+          api.getRadarBotStatus(),
+          api.listSignalExecutions(),
+          api.getStrategyFillPnl("radar"),
+          api.getOpenPositions("radar"),
+        ]);
+        if (dead) return;
+        if (snapRes.status === "fulfilled") setSnap(snapRes.value);
+        if (botRes.status === "fulfilled") setBotStatus(botRes.value);
+        if (sigsRes.status === "fulfilled") setSignals(sigsRes.value);
+        if (pnlRes.status === "fulfilled") setFillPnl(pnlRes.value);
+        if (posRes.status === "fulfilled") setLivePositions(posRes.value);
       } catch {
-        /* engine not running yet */
-      }
-      try {
-        const st = await api.getRadarBotStatus();
-        if (!dead) setBotStatus(st);
-      } catch {
-        /* bot task not installed / backend down — gadget keeps last state */
-      }
-      try {
-        const sigs = await api.listSignalExecutions();
-        if (!dead) setSignals(sigs);
-      } catch {
-        /* ledger unreadable — stat cards render unknown, never zero */
-      }
-      try {
-        const pnl = await api.getStrategyFillPnl("radar");
-        if (!dead) setFillPnl(pnl);
-      } catch {
-        /* attributed PnL unavailable — profit cell keeps the "—" fallback */
-      }
-      try {
-        const pList = await api.getOpenPositions("radar");
-        if (!dead) setLivePositions(pList);
-      } catch {
-        /* positions unreadable */
+        /* individual errors handled per branch */
       }
     };
     tick();
@@ -2060,8 +2115,11 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({
     const mp = Number(minPWin);
     if (Number.isFinite(mp) && minPWin !== "")
       out = out.filter((r) => (getWin(r) ?? -Infinity) >= mp / 100);
+    if (onlyExecutable) {
+      out = out.filter((r) => r.executable);
+    }
     return out;
-  }, [snap, search, venueFilters, minExpBps, minPWin]);
+  }, [snap, search, venueFilters, minExpBps, minPWin, onlyExecutable]);
 
   const key = useCallback((r: MonitorRowDto) => `${r.symbol}:${r.buyVenue}:${r.sellVenue}`, []);
 
@@ -2135,8 +2193,10 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({
 
   const topEdgeBps = useMemo(() => {
     if (!snap || snap.rows.length === 0) return null;
-    const max = Math.max(...snap.rows.map((r) => r.expectedProfitBps ?? 0));
-    return Number.isFinite(max) ? max : null;
+    const executableRows = snap.rows.filter((r) => r.executable);
+    if (executableRows.length === 0) return null;
+    const max = Math.max(...executableRows.map((r) => r.expectedProfitBps ?? 0));
+    return Number.isFinite(max) && max > 0 ? max : null;
   }, [snap]);
 
   return (
@@ -2318,9 +2378,16 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({
           Filters are display-only; none of these affect the monitor or strategy. */}
       <div className="flex-1 min-h-0 flex flex-col bg-surface rounded-xl border border-surface-border shadow-card overflow-hidden">
         <div className="flex items-center justify-between gap-3 px-4 py-2.5 border-b border-surface-border text-xs font-sans shrink-0 bg-surface-raised/40">
-          <h3 className="text-[13px] font-bold font-sans tracking-wider text-slate-900">
-            Opportunity Scanner
-          </h3>
+          <div className="flex items-center gap-2">
+            <h3 className="text-[13px] font-bold font-sans tracking-wider text-slate-900">
+              Opportunity Scanner
+            </h3>
+            {snap && (
+              <span className="text-[11px] font-mono text-slate-400">
+                ({snap.rows.filter((r) => r.executable).length} executable / {snap.rows.length} monitored)
+              </span>
+            )}
+          </div>
           <div className="flex items-center gap-2 text-xs font-sans">
             <div
               className="flex items-center gap-1.5 bg-surface border border-surface-border rounded-lg px-2.5 py-1.5 shadow-2xs hover:border-slate-300 focus-within:border-primary focus-within:ring-2 focus-within:ring-primary/15 transition-all"
@@ -2434,6 +2501,19 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({
               />
               <span className="text-muted text-[11px] font-medium">%</span>
             </div>
+            <button
+              type="button"
+              onClick={() => setOnlyExecutable((v) => !v)}
+              className={`flex items-center gap-1.5 border rounded-lg px-2.5 py-1.5 text-xs font-sans transition-all cursor-pointer shadow-2xs ${
+                onlyExecutable
+                  ? "bg-profit-dim text-profit font-semibold border-profit-border ring-1 ring-profit/20"
+                  : "bg-surface text-muted border-surface-border hover:border-slate-300 hover:text-slate-700"
+              }`}
+              title="Display filter — show only actionable, executable opportunities passing all safety, liquidity and confidence gates"
+            >
+              <span className={`w-1.5 h-1.5 rounded-full ${onlyExecutable ? "bg-profit" : "bg-slate-400"}`} />
+              <span>Executable Only</span>
+            </button>
             {(snap?.exempted.length ?? 0) > 0 && (
               <span className="text-slate-500 flex items-center gap-1 text-[11px] font-sans">
                 <EyeOff size={12} /> {snap?.exempted.length} hidden
@@ -2465,13 +2545,13 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({
               </th>
               <th
                 className="px-2 py-1.5 text-right"
-                title="Directional trade win probability after all gates (0% when this direction has no edge or is blocked). Measured on spread reversion, not P&L — Net% is the P&L-defined rate. Reversion Probability lives in the detail card."
+                title="Trade win %: directional trade win probability after all gates (0% when this direction has no edge or is blocked). Measured on spread reversion, not P&L — Net% is the P&L-defined rate. Reversion Probability lives in the detail card."
               >
                 Win %
               </th>
               <th
                 className="px-2 py-1.5 text-right"
-                title="Empirical P(net > 0): historical excursions at this deviation replayed through the exit policy and scored on real net bps. Tooltip shows the Wilson 90% interval and censored share — wide interval = thin evidence."
+                title="Empirical net-positive %: empirical P(net > 0), historical excursions at this deviation replayed through the exit policy and scored on real net bps. Tooltip shows the Wilson 90% interval and censored share — wide interval = thin evidence."
               >
                 Net %
               </th>
@@ -2496,7 +2576,7 @@ const OpportunityRadarInner: React.FC<OpportunityRadarProps> = ({
               <th className="px-2 py-1.5 text-right" title="Expected time for the spread to revert to baseline">
                 Time to Converge
               </th>
-              <th className="px-2 py-1.5">Status</th>
+              <th className="px-2 py-1.5 min-w-36">Status</th>
               <th className="px-2 py-1.5 text-right">Action</th>
             </tr>
           </thead>

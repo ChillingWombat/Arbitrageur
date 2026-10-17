@@ -3282,6 +3282,58 @@ fn test_aggregate_open_positions_marks_to_market_and_filters() {
 }
 
 #[test]
+fn test_aggregate_open_positions_jelly_roll_linear_accretion() {
+    let store = StateStore::open_in_memory().unwrap();
+    let mut sig = two_leg_signal("ojel-1", "BTC", None, None);
+    sig.strategy_id = "options_jelly_roll".to_string();
+    sig.expected_net_usd = Some(100.0);
+    sig.legs = vec![
+        crate::state_store::NewSignalLeg {
+            account_id: None,
+            venue: "deribit".to_string(),
+            side: LegSide::Long,
+            symbol: Some("BTC-25DEC26-100000-C".to_string()),
+            intended_qty: 0.1,
+            intended_price: Some(1000.0),
+            unit_scale: None,
+        },
+        crate::state_store::NewSignalLeg {
+            account_id: None,
+            venue: "deribit".to_string(),
+            side: LegSide::Short,
+            symbol: Some("BTC-26MAR27-100000-C".to_string()),
+            intended_qty: 0.1,
+            intended_price: Some(1200.0),
+            unit_scale: None,
+        },
+    ];
+    store.record_signal_execution(&sig, "testnet").unwrap();
+    store
+        .apply_leg_fill("ojel-1", LegSide::Long, 0.1, 1000.0, 1.0, None)
+        .unwrap();
+    store
+        .apply_leg_fill("ojel-1", LegSide::Short, 0.1, 1200.0, 1.0, None)
+        .unwrap();
+    store
+        .update_signal_status("ojel-1", SignalStatus::Balanced, None)
+        .unwrap();
+
+    let signals = store.list_signals(None, None).unwrap();
+    // In wide/crossed testnet books, summing legs individually would produce severe phantom losses.
+    // Package linear accretion protects against phantom MTM loss.
+    let positions = aggregate_open_positions(&signals, &|_, _| Some(500.0));
+    assert_eq!(positions.len(), 1);
+    let ojel = &positions[0];
+    assert_eq!(ojel.strategy_id, "options_jelly_roll");
+    assert_eq!(ojel.expected_net_usd, Some(100.0));
+    let pnl = ojel.unrealized_pnl_usd.unwrap();
+    assert!(
+        pnl >= -ojel.fees_usd,
+        "unrealized PnL should accrete linearly from -fees, got {pnl}"
+    );
+}
+
+#[test]
 fn test_aggregate_open_positions_partial_flatten_nets_residual() {
     let store = StateStore::open_in_memory().unwrap();
     filled_two_leg(

@@ -43,7 +43,7 @@ A comprehensive multi-subsystem overhaul delivering:
 22. As an algorithmic trader, I want route execution gating to enforce minimum net profit hurdles net of taker fees, so that non-profitable routes are rejected before reaching exchange wire adapters.
 23. As an algorithmic trader, I want route execution gating to enforce a maximum spread divergence ceiling, so that corrupted orderbook feeds or mismatched ticker symbols are rejected as toxic quotes.
 24. As an algorithmic trader, I want radar convergence bot positions to exit only when spread deviation reverts to statistical equilibrium, so that positions are not prematurely liquidated while still inside the friction band.
-25. As an algorithmic trader, I want testnet operations to authenticate using master password `<redacted>`, so that automated testnet verification runs smoothly without manual intervention.
+25. As an algorithmic trader, I want testnet operations to authenticate using master password `<redacted — see SECURITY.md>`, so that automated testnet verification runs smoothly without manual intervention.
 
 ## Implementation Decisions
 
@@ -104,7 +104,7 @@ A comprehensive multi-subsystem overhaul delivering:
 ## Out of Scope
 - Modifying underlying venue exchange API signature algorithms (e.g. Deribit, Lighter, Hyperliquid, OKX).
 - Redesigning database schema versions beyond existing v38/v39 migrations.
-- Live mainnet capital deployment (all execution verification conducted in testnet environment using testnet credentials and vault password `<redacted>`).
+- Live mainnet capital deployment (all execution verification conducted in testnet environment using testnet credentials and vault password `<redacted — see SECURITY.md>`).
 
 ## Further Notes
 - All verification checks across Rust backend (`cargo test`), strategy engine (`arbitrageur-strategy`), frontend unit suites (`npm test`), 4-tier E2E tests (`runner.mjs`), and static linters (`cargo clippy`, `cargo fmt`) pass with 100% success rate and zero regressions.

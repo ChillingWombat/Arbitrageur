@@ -55,7 +55,7 @@
 4. **Dev RPC & Vault Unlocking**:
    - Dev socket located at `/tmp/arb-dev.sock` (`ARBITRAGEUR_DEV_SOCK=/tmp/arb-dev.sock`).
    - Unlocked via JSON RPC: `echo '{"cmd":"unlock_vault","args":{"password":"<redacted>"}}' | socat - UNIX-CONNECT:/tmp/arb-dev.sock`.
-   - Unit tests (`cargo test -p arbitrageur-desktop vault::tests`) prove `<redacted>` is accepted by Argon2id + AES-256-GCM without password complexity enforcement.
+   - Unit tests (`cargo test -p arbitrageur-desktop vault::tests`) prove `<redacted — see SECURITY.md>` is accepted by Argon2id + AES-256-GCM without password complexity enforcement.
 
 ---
 

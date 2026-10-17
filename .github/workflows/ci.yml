@@ -157,5 +157,5 @@ jobs:
 
       - name: Verify systemd unit templates
         run: |
-          systemd-analyze verify ops/deploy/arbitrageur@.service ops/deploy/arbitrager@.service
+          systemd-analyze verify ops/deploy/arbitrageur@.service ops/deploy/arbitrageur-notify@.service
           ! grep -R '\${' ops/deploy/*.service

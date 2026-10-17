@@ -1,14 +1,100 @@
+pub mod atomic_bundle;
+pub mod causal_dml_impact;
+pub mod conformal_adadelta_shield;
+pub mod conformal_adagrad_shield;
+pub mod conformal_adam_shield;
+pub mod conformal_bernstein_shield;
+pub mod conformal_chance_constrained;
+pub mod conformal_cvar_shield;
+pub mod conformal_dkw_process;
+pub mod conformal_double_kernel_shield;
+pub mod conformal_erm_slippage;
+pub mod conformal_evt_tail_guard;
+pub mod conformal_extreme_copula;
+pub mod conformal_forest_shield;
+pub mod conformal_lookahead_shield;
+pub mod conformal_matrix_bernstein;
+pub mod conformal_matrix_completion;
+pub mod conformal_matrix_shield;
+pub mod conformal_momentum_shield;
+pub mod conformal_mot_shield;
+pub mod conformal_nadam_shield;
+pub mod conformal_nesterov_shield;
+pub mod conformal_omd_shield;
+pub mod conformal_optimal_transport;
+pub mod conformal_quasi_hyperbolic_shield;
+pub mod conformal_rademacher_shield;
+pub mod conformal_risk_guard;
+pub mod conformal_rkhs_shield;
+pub mod conformal_rmsprop_shield;
+pub mod conformal_spline_shield;
+pub mod conformal_srm_shield;
+pub mod conformal_svrg_shield;
+pub mod conformal_wasserstein_drift;
 pub mod coordinator;
 pub mod emergency_unwind;
+pub mod l2_sequencer_guard;
+pub mod mcafee_combinatorial_auction;
+pub mod mean_field_liquidation;
+pub mod modular_session_account;
+pub mod omd_dual_averaging;
 pub mod passive_unwind;
+pub mod queue_priority;
+pub mod sac_execution;
+pub mod shared_sequencer_bundle;
 pub mod smart_routing;
 pub mod virtual_ledger;
+pub mod viscoelastic_cascade_guard;
+pub mod zk_intent_settlement;
 
+pub use atomic_bundle::*;
+pub use causal_dml_impact::*;
+pub use conformal_adadelta_shield::*;
+pub use conformal_adagrad_shield::*;
+pub use conformal_adam_shield::*;
+pub use conformal_bernstein_shield::*;
+pub use conformal_chance_constrained::*;
+pub use conformal_cvar_shield::*;
+pub use conformal_dkw_process::*;
+pub use conformal_double_kernel_shield::*;
+pub use conformal_erm_slippage::*;
+pub use conformal_evt_tail_guard::*;
+pub use conformal_extreme_copula::*;
+pub use conformal_forest_shield::*;
+pub use conformal_lookahead_shield::*;
+pub use conformal_matrix_bernstein::*;
+pub use conformal_matrix_completion::*;
+pub use conformal_matrix_shield::*;
+pub use conformal_momentum_shield::*;
+pub use conformal_mot_shield::*;
+pub use conformal_nadam_shield::*;
+pub use conformal_nesterov_shield::*;
+pub use conformal_omd_shield::*;
+pub use conformal_optimal_transport::*;
+pub use conformal_quasi_hyperbolic_shield::*;
+pub use conformal_rademacher_shield::*;
+pub use conformal_risk_guard::*;
+pub use conformal_rkhs_shield::*;
+pub use conformal_rmsprop_shield::*;
+pub use conformal_spline_shield::*;
+pub use conformal_srm_shield::*;
+pub use conformal_svrg_shield::*;
+pub use conformal_wasserstein_drift::*;
 pub use coordinator::*;
 pub use emergency_unwind::*;
+pub use l2_sequencer_guard::*;
+pub use mcafee_combinatorial_auction::*;
+pub use mean_field_liquidation::*;
+pub use modular_session_account::*;
+pub use omd_dual_averaging::*;
 pub use passive_unwind::*;
+pub use queue_priority::*;
+pub use sac_execution::*;
+pub use shared_sequencer_bundle::*;
 pub use smart_routing::*;
 pub use virtual_ledger::*;
+pub use viscoelastic_cascade_guard::*;
+pub use zk_intent_settlement::*;
 
 #[cfg(test)]
 mod tests {
@@ -310,6 +396,130 @@ mod tests {
         assert_eq!(calls.len(), 2);
         assert_eq!(calls[1].side, Side::Sell);
         assert_eq!(calls[1].quantity, dec!(1.0));
+    }
+
+    #[test]
+    fn test_latency_stagger_from_rtt() {
+        use crate::coordinator::LatencyStagger;
+        use std::time::Duration;
+
+        // Venue B slower (200ms vs 100ms): OWT difference = (200 - 100)/2 = 50ms delay for Leg A
+        let s1 = LatencyStagger::from_rtt_ms(Some(100.0), Some(200.0));
+        assert_eq!(s1.delay_a, Duration::from_millis(50));
+        assert_eq!(s1.delay_b, Duration::ZERO);
+
+        // Venue A slower (300ms vs 100ms): OWT difference = (300 - 100)/2 = 100ms delay for Leg B
+        let s2 = LatencyStagger::from_rtt_ms(Some(300.0), Some(100.0));
+        assert_eq!(s2.delay_a, Duration::ZERO);
+        assert_eq!(s2.delay_b, Duration::from_millis(100));
+
+        // Equal latencies: zero delay
+        let s3 = LatencyStagger::from_rtt_ms(Some(150.0), Some(150.0));
+        assert_eq!(s3.delay_a, Duration::ZERO);
+        assert_eq!(s3.delay_b, Duration::ZERO);
+
+        // Missing or nonpositive inputs: default zero delay
+        assert_eq!(
+            LatencyStagger::from_rtt_ms(None, Some(100.0)),
+            LatencyStagger::default()
+        );
+        assert_eq!(
+            LatencyStagger::from_rtt_ms(Some(-10.0), Some(100.0)),
+            LatencyStagger::default()
+        );
+
+        // Capped at 2000ms max safety threshold
+        let s_cap = LatencyStagger::from_rtt_ms(Some(100.0), Some(10_000.0));
+        assert_eq!(s_cap.delay_a, Duration::from_millis(2000));
+    }
+
+    #[tokio::test]
+    async fn test_two_leg_staggered_success() {
+        use crate::coordinator::LatencyStagger;
+        use std::time::Duration;
+
+        let mock_a = MockExchange::new("ex_a", vec![], MockResponse::Full);
+        let mock_b = MockExchange::new("ex_b", vec![], MockResponse::Full);
+        let log_a = mock_a.call_log();
+        let log_b = mock_b.call_log();
+        let ex_a: Arc<dyn ExchangeAdapter> = Arc::new(mock_a);
+        let ex_b: Arc<dyn ExchangeAdapter> = Arc::new(mock_b);
+
+        let (coordinator, _cb) = make_coordinator();
+        let order_a = OrderRequest::new_limit(
+            ex_a.venue_id(),
+            "BTC-USDC",
+            Side::Buy,
+            dec!(60000),
+            dec!(1.0),
+        );
+        let order_b = OrderRequest::new_limit(
+            ex_b.venue_id(),
+            "BTC-USDC",
+            Side::Sell,
+            dec!(60100),
+            dec!(1.0),
+        );
+
+        let stagger = LatencyStagger {
+            delay_a: Duration::from_millis(10),
+            delay_b: Duration::ZERO,
+        };
+        let res = coordinator
+            .execute_two_leg_staggered(&ex_a, order_a, &ex_b, order_b, None, Some(stagger))
+            .await;
+        match res {
+            ArbitrageExecutionResult::Success { .. } => {}
+            other => panic!("Expected Success, got {:?}", other),
+        }
+        assert_eq!(log_a.lock().unwrap().len(), 1);
+        assert_eq!(log_b.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn test_two_leg_staggered_early_failure_aborts_faster_leg() {
+        use crate::coordinator::LatencyStagger;
+        use std::time::Duration;
+
+        let mock_a = MockExchange::new("ex_a", vec![], MockResponse::Full);
+        // Slower venue B fails immediately
+        let mock_b = MockExchange::new("ex_b", vec![], MockResponse::Fail);
+        let log_a = mock_a.call_log();
+        let log_b = mock_b.call_log();
+        let ex_a: Arc<dyn ExchangeAdapter> = Arc::new(mock_a);
+        let ex_b: Arc<dyn ExchangeAdapter> = Arc::new(mock_b);
+
+        let (coordinator, _cb) = make_coordinator();
+        let order_a = OrderRequest::new_limit(
+            ex_a.venue_id(),
+            "BTC-USDC",
+            Side::Buy,
+            dec!(60000),
+            dec!(1.0),
+        );
+        let order_b = OrderRequest::new_limit(
+            ex_b.venue_id(),
+            "BTC-USDC",
+            Side::Sell,
+            dec!(60100),
+            dec!(1.0),
+        );
+
+        // Delay A by 50ms so B runs first
+        let stagger = LatencyStagger {
+            delay_a: Duration::from_millis(50),
+            delay_b: Duration::ZERO,
+        };
+        let res = coordinator
+            .execute_two_leg_staggered(&ex_a, order_a, &ex_b, order_b, None, Some(stagger))
+            .await;
+        match res {
+            ArbitrageExecutionResult::BothFailed { .. } => {}
+            other => panic!("Expected BothFailed, got {:?}", other),
+        }
+        // CRITICAL SAFETY PROPERTY: Because B failed during A's delay, A was NEVER dispatched!
+        assert_eq!(log_a.lock().unwrap().len(), 0);
+        assert_eq!(log_b.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -1444,5 +1654,332 @@ mod tests {
         let out = enrich_fill_stats(&ex, "BTC-USDC", cid, complete.clone()).await;
         assert_eq!(out.order_id, "a-order");
         assert_eq!(out.avg_fill_price, Some(dec!(100)));
+    }
+
+    #[test]
+    fn test_multi_leg_fragility_first_sorting() {
+        let mock_a: Arc<dyn ExchangeAdapter> =
+            Arc::new(MockExchange::new("ex_a", vec![], MockResponse::Full));
+        let mock_b: Arc<dyn ExchangeAdapter> =
+            Arc::new(MockExchange::new("ex_b", vec![], MockResponse::Full));
+        let mock_c: Arc<dyn ExchangeAdapter> =
+            Arc::new(MockExchange::new("ex_c", vec![], MockResponse::Full));
+
+        let mut plan = MultiLegExecutionPlan::new("test_strategy", dec!(10.0));
+        let dummy_req = OrderRequest::new_market(
+            arbitrageur_core::types::VenueId::new("test"),
+            "BTC-USDC",
+            Side::Buy,
+            dec!(1.0),
+        );
+
+        // Add 3 legs in arbitrary order: Liquid (15.2), Fragile (0.4), Moderate (3.8)
+        plan.add_leg(mock_a, dummy_req.clone(), 15.2, false);
+        plan.add_leg(mock_b, dummy_req.clone(), 0.4, true);
+        plan.add_leg(mock_c, dummy_req.clone(), 3.8, false);
+
+        plan.sort_fragility_first();
+
+        // Must be sorted in ascending order of fragility index: 0.4 -> 3.8 -> 15.2
+        assert_eq!(plan.legs[0].fragility_index, 0.4);
+        assert_eq!(plan.legs[1].fragility_index, 3.8);
+        assert_eq!(plan.legs[2].fragility_index, 15.2);
+    }
+
+    #[tokio::test]
+    async fn test_multi_leg_execution_plan_success() {
+        let mock_a: Arc<dyn ExchangeAdapter> = Arc::new(MockExchange::new(
+            "ex_a",
+            vec![MockResponse::Full],
+            MockResponse::Full,
+        ));
+        let mock_b: Arc<dyn ExchangeAdapter> = Arc::new(MockExchange::new(
+            "ex_b",
+            vec![MockResponse::Full],
+            MockResponse::Full,
+        ));
+
+        let mut plan = MultiLegExecutionPlan::new("triangular", dec!(5.0));
+        let req_a = OrderRequest::new_market(
+            arbitrageur_core::types::VenueId::new("ex_a"),
+            "BTC-USDC",
+            Side::Buy,
+            dec!(0.5),
+        );
+        let req_b = OrderRequest::new_market(
+            arbitrageur_core::types::VenueId::new("ex_b"),
+            "ETH-BTC",
+            Side::Buy,
+            dec!(0.5),
+        );
+
+        plan.add_leg(mock_a, req_a, 2.0, false);
+        plan.add_leg(mock_b, req_b, 0.5, true);
+
+        let (coordinator, _cb) = make_coordinator();
+
+        let res = coordinator.execute_plan(plan).await;
+        match res {
+            ArbitrageExecutionResult::Success { leg_a, leg_b, .. } => {
+                assert_eq!(leg_a.filled_qty, dec!(0.5));
+                assert_eq!(leg_b.filled_qty, dec!(0.5));
+            }
+            other => panic!("expected Success, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn test_multi_leg_execution_plan_bottleneck_abort_zero_loss() {
+        // Bottleneck leg fails immediately
+        let mock_a: Arc<dyn ExchangeAdapter> = Arc::new(MockExchange::new(
+            "ex_a",
+            vec![MockResponse::Fail],
+            MockResponse::Fail,
+        ));
+        let mock_b_calls = Arc::new(Mutex::new(Vec::new()));
+        let mock_b: Arc<dyn ExchangeAdapter> = Arc::new(MockExchange {
+            name: "ex_b".into(),
+            script: vec![MockResponse::Full],
+            fallback: MockResponse::Full,
+            calls: mock_b_calls.clone(),
+            fetch_script: Arc::new(Mutex::new(Vec::new())),
+            cancels: Arc::new(Mutex::new(Vec::new())),
+        });
+
+        let mut plan = MultiLegExecutionPlan::new("options_box", dec!(5.0));
+        let req = OrderRequest::new_market(
+            arbitrageur_core::types::VenueId::new("ex"),
+            "SYM",
+            Side::Buy,
+            dec!(1.0),
+        );
+
+        // Bottleneck leg has fragility 0.1 (executed first), liquid leg has 10.0
+        plan.add_leg(mock_a, req.clone(), 0.1, true);
+        plan.add_leg(mock_b, req.clone(), 10.0, false);
+
+        let (coordinator, _cb) = make_coordinator();
+
+        let res = coordinator.execute_plan(plan).await;
+        match res {
+            ArbitrageExecutionResult::BothFailed { .. } => {}
+            other => panic!("expected BothFailed on bottleneck abort, got {:?}", other),
+        }
+
+        // Fragility-First guarantee: Leg B was NEVER touched, 0 capital at risk!
+        assert_eq!(mock_b_calls.lock().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_dynamic_partial_fill_evaluator() {
+        let evaluator = DynamicPartialFillEvaluator::new(1e-6);
+
+        // Case 1: Wide-spread options / altcoin (35 bps spread) -> selects Route B Synthetic Perp Lock
+        let route_options = evaluator.evaluate_unwind_route(
+            25000.0, // $25k notional
+            35.0,    // 35 bps spread
+            5.0,     // 5 bps taker fee
+            -1.0,    // -1 bps maker rebate
+            10.0,    // 10 bps adverse selection
+            0.5,     // 0.5 bps perp spread
+            2.5,     // 2.5 bps perp taker fee
+            0.80,    // 80% annual basis vol
+            15.0,    // 15 sec expected unwind
+            Some("BTC-PERP"),
+        );
+
+        match route_options {
+            UnwindRoute::RouteBSyntheticPerpLock {
+                perp_hedge_symbol, ..
+            } => {
+                assert_eq!(perp_hedge_symbol, "BTC-PERP");
+            }
+            UnwindRoute::RouteAMarketInversion { .. } => {
+                panic!("expected Route B Synthetic Perp Lock for wide-spread options");
+            }
+        }
+
+        // Case 2: Ultra-tight major on CEX (0.5 bps spread, 0 adverse selection) -> selects Route A Immediate Market Inversion
+        let route_tight = evaluator.evaluate_unwind_route(
+            1000.0, // $1k notional
+            0.5,    // 0.5 bps spread
+            2.0,    // 2 bps taker fee
+            0.0,    // 0 maker rebate
+            0.0,    // 0 adverse selection
+            0.5,    // 0.5 bps perp spread
+            2.5,    // 2.5 bps perp taker fee
+            0.80,   // 80% annual basis vol
+            15.0,   // 15 sec expected unwind
+            Some("BTC-PERP"),
+        );
+
+        match route_tight {
+            UnwindRoute::RouteAMarketInversion { .. } => {}
+            UnwindRoute::RouteBSyntheticPerpLock { .. } => {
+                panic!("expected Route A Market Inversion for ultra-tight major");
+            }
+        }
+    }
+
+    #[test]
+    fn test_limit_price_for_hawkes() {
+        use crate::passive_unwind::limit_price_for_hawkes;
+        use arbitrageur_math::hawkes::MultivariateHawkes;
+
+        let bid = dec!(100.0);
+        let ask = dec!(102.0);
+
+        // Without Hawkes: normal base percentile 50.0 (mid-price 101.0)
+        let calm = limit_price_for_hawkes(Side::Buy, bid, ask, 50.0, None, 0);
+        assert_eq!(calm, Some(dec!(101.0)));
+
+        // With Subcritical Hawkes: calm intensity peg matches
+        let mut hawkes = MultivariateHawkes::new(2);
+        hawkes.mu = vec![0.1, 0.1];
+        hawkes.alpha = vec![vec![0.5, 0.0], vec![0.0, 0.5]];
+        hawkes.beta = vec![vec![1.0, 1.0], vec![1.0, 1.0]];
+
+        let hawkes_calm = limit_price_for_hawkes(Side::Buy, bid, ask, 50.0, Some(&hawkes), 0);
+        assert_eq!(hawkes_calm, Some(dec!(101.0)));
+
+        // Moderate burst of arrivals on stream 0 excites lambda/mu to ~3x: maker quote widens deeper (toward bid 100.0)
+        hawkes.alpha = vec![vec![0.1, 0.0], vec![0.0, 0.1]];
+        for i in 0..2 {
+            hawkes.update_at_timestamp(1.0 + i as f64 * 0.01, Some(0));
+        }
+        let hawkes_burst =
+            limit_price_for_hawkes(Side::Buy, bid, ask, 50.0, Some(&hawkes), 0).unwrap();
+        // Widened deeper toward passive touch: Buy price should be lower than mid (closer to bid 100.0)
+        assert!(
+            hawkes_burst < dec!(101.0),
+            "Expected widened buy peg < 101.0, got {hawkes_burst}"
+        );
+
+        // Extreme toxic surge (>15x mu): quote is pulled entirely (None)
+        hawkes.alpha = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
+        for i in 0..15 {
+            hawkes.update_at_timestamp(2.0 + i as f64 * 0.01, Some(0));
+        }
+        let hawkes_pulled = limit_price_for_hawkes(Side::Buy, bid, ask, 50.0, Some(&hawkes), 0);
+        assert_eq!(
+            hawkes_pulled, None,
+            "Expected quote to be pulled under toxic surge"
+        );
+
+        // Test with Multi-Level Hawkes Queue Drain Forecaster
+        use crate::passive_unwind::limit_price_for_hawkes_with_drain;
+        use arbitrageur_math::cross_hawkes::MultiLevelHawkesQueueDrainForecaster;
+
+        let normal_drain = MultiLevelHawkesQueueDrainForecaster::default();
+        let peg_normal = limit_price_for_hawkes_with_drain(
+            Side::Buy,
+            bid,
+            ask,
+            50.0,
+            None,
+            0,
+            Some(&normal_drain),
+            10.0,
+            25.0,
+        );
+        assert_eq!(peg_normal, Some(dec!(101.0)));
+
+        let toxic_drain = MultiLevelHawkesQueueDrainForecaster::new(50.0, 10.0, 2.0, 1.0);
+        let peg_toxic = limit_price_for_hawkes_with_drain(
+            Side::Buy,
+            bid,
+            ask,
+            50.0,
+            None,
+            0,
+            Some(&toxic_drain),
+            1.0,
+            10.0,
+        );
+        assert_eq!(
+            peg_toxic, None,
+            "Expected quote to be pulled under multi-level queue drain hazard"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_two_leg_with_racing_guard_abort_and_dispatch() {
+        let ex_a = Arc::new(MockExchange::new("mock_a", vec![], MockResponse::Full))
+            as Arc<dyn ExchangeAdapter>;
+        let ex_b = Arc::new(MockExchange::new("mock_b", vec![], MockResponse::Full))
+            as Arc<dyn ExchangeAdapter>;
+
+        let (mut coord, _cb) = make_coordinator();
+        coord.set_racing_abort_guard(Some(
+            arbitrageur_math::latency_racing::PreFlightRacingAbortGuard::default(),
+        ));
+
+        let our =
+            arbitrageur_math::latency_racing::LatencyDistribution::new_empirical(2.0, 4.0, 1.0);
+        let comp =
+            arbitrageur_math::latency_racing::LatencyDistribution::new_empirical(2.0, 4.0, 1.0);
+        let racing_model = arbitrageur_math::latency_racing::CrossVenueRacingModel::new(our, comp);
+
+        let order_a = OrderRequest::new_limit(
+            ex_a.venue_id(),
+            "BTC-USDC",
+            Side::Buy,
+            dec!(60000),
+            dec!(1.0),
+        );
+        let order_b = OrderRequest::new_limit(
+            ex_b.venue_id(),
+            "BTC-USDC",
+            Side::Sell,
+            dec!(60100),
+            dec!(1.0),
+        );
+
+        // 1. Unfavorable race: Competitor has 4ms lead (-4.0ms) -> Win prob ~0.2% < 50% -> Abort before dispatch!
+        let abort_res = coord
+            .execute_two_leg_with_racing_guard(
+                &ex_a,
+                order_a.clone(),
+                &ex_b,
+                order_b.clone(),
+                None,
+                None,
+                10.0,
+                5.0,
+                -4.0,
+                Some(&racing_model),
+            )
+            .await;
+
+        match abort_res {
+            ArbitrageExecutionResult::HaltedByRisk(reason) => {
+                assert!(reason.contains("Pre-flight racing abort"));
+            }
+            _ => panic!("Expected HaltedByRisk from pre-flight abort guard"),
+        }
+
+        // 2. Favorable race: We have 3ms lead (+3.0ms) -> Win prob > 95% -> Safe dispatch!
+        let dispatch_res = coord
+            .execute_two_leg_with_racing_guard(
+                &ex_a,
+                order_a,
+                &ex_b,
+                order_b,
+                None,
+                None,
+                10.0,
+                5.0,
+                3.0,
+                Some(&racing_model),
+            )
+            .await;
+
+        match dispatch_res {
+            ArbitrageExecutionResult::Success { leg_a, leg_b, .. } => {
+                assert!(leg_a.order_id.starts_with("mock_order_"));
+                assert!(leg_b.order_id.starts_with("mock_order_"));
+            }
+            _ => panic!("Expected Success from favorable race dispatch"),
+        }
     }
 }

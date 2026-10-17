@@ -188,6 +188,7 @@ export const OPTIONS_SUBSTRATEGIES: OptionsSubstrategy[] = [
     every reachable underlying at this size and edge hurdle. */
 const SCAN_QTY_BASE = 0.1;
 const MIN_EDGE_BPS = 5;
+const DEFAULT_MIN_EXPECTED_YIELD_PCT = 30;
 const SCAN_CURRENCIES = ["BTC", "ETH"] as const;
 
 interface OptionsArbitrageProps {
@@ -230,12 +231,17 @@ export type OptionsScannedOpp =
 export const substrategyOfOpp = (o: OptionsScannedOpp): string =>
   o.kind === "parity" ? "parity" : o.p.substrategy_id;
 
-/** Filter scan results by the rail selection ("all" passes everything). */
+/** Filter scan results by the rail selection ("all" passes everything),
+ *  with optional minimum expected yield percentage filtering. */
 export const filterOptionsOpps = <T extends OptionsScannedOpp>(
   opps: T[],
   selected: string,
-): T[] =>
-  selected === "all" ? opps : opps.filter((o) => substrategyOfOpp(o) === selected);
+  minYieldPct: number = 0,
+): T[] => {
+  const bySub = selected === "all" ? opps : opps.filter((o) => substrategyOfOpp(o) === selected);
+  if (minYieldPct <= 0) return bySub;
+  return bySub.filter((o) => (o.p.expected_yield_pct ?? 0) >= minYieldPct);
+};
 
 /** Filter execution logs by substrategy. "all" keeps every options-strategy
  *  row (any catalogued `options_*` owner) — parity rows only under `parity`. */
@@ -682,6 +688,12 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
    *  manual Scan shows what the bot would see; "all" uses fixed defaults. */
   const scanQty = botSubstrategy && botCfg ? botCfg.qtyBase : SCAN_QTY_BASE;
   const scanEdge = botSubstrategy && botCfg ? botCfg.minEdgeBps : MIN_EDGE_BPS;
+  const scanYield =
+    botSubstrategy && botCfg
+      ? botCfg.minExpectedYieldPct
+      : DEFAULT_MIN_EXPECTED_YIELD_PCT;
+  const scanMinHours = botSubstrategy && botCfg ? botCfg.minHoursToExpiry : 48;
+  const scanMaxDays = botSubstrategy && botCfg ? botCfg.maxDaysToExpiry : 180;
 
   const botPhase: BotPhase = flattening
     ? "stopping"
@@ -753,20 +765,21 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
 
   const filteredOpps = useMemo(
     () =>
-      filterOptionsOpps(opps, selected).filter(
+      filterOptionsOpps(opps, selected, scanYield).filter(
         (o) =>
           dirFilter === "all" || o.kind !== "parity" || o.p.direction === dirFilter,
       ),
-    [opps, selected, dirFilter],
+    [opps, selected, dirFilter, scanYield],
   );
   const oppCounts = useMemo(() => {
     const m = new Map<string, number>();
     for (const o of opps) {
+      if ((o.p.expected_yield_pct ?? 0) < scanYield) continue;
       const id = substrategyOfOpp(o);
       m.set(id, (m.get(id) ?? 0) + 1);
     }
     return m;
-  }, [opps]);
+  }, [opps, scanYield]);
   const filteredLogs = useMemo(
     () => filterOptionsLogs(executionLogs, selected),
     [executionLogs, selected],
@@ -820,9 +833,9 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
               currency,
               qty_base: scanQty,
               min_edge_bps: scanEdge,
-              min_hours_to_expiry: botCfg?.minHoursToExpiry,
-              max_days_to_expiry: botCfg?.maxDaysToExpiry,
-              min_expected_yield_pct: botCfg?.minExpectedYieldPct,
+              min_hours_to_expiry: scanMinHours,
+              max_days_to_expiry: scanMaxDays,
+              min_expected_yield_pct: scanYield,
             });
             return v.map((p) => ({ kind: "parity" as const, p }));
           }
@@ -831,9 +844,9 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
             currency,
             qty_base: scanQty,
             min_edge_bps: scanEdge,
-            min_hours_to_expiry: botCfg?.minHoursToExpiry,
-            max_days_to_expiry: botCfg?.maxDaysToExpiry,
-            min_expected_yield_pct: botCfg?.minExpectedYieldPct,
+            min_hours_to_expiry: scanMinHours,
+            max_days_to_expiry: scanMaxDays,
+            min_expected_yield_pct: scanYield,
           });
           return v.map((p) => ({ kind: "package" as const, p }));
         }),
@@ -862,7 +875,7 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
     } finally {
       setScanning(false);
     }
-  }, [scanQty, scanEdge, botCfg, selected, selDef]);
+  }, [scanQty, scanEdge, scanYield, scanMinHours, scanMaxDays, selected, selDef]);
 
   const runExecute = useCallback(
     async (opp: OptionsScannedOpp) => {
@@ -877,7 +890,7 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
                 currency: opp.p.currency,
                 qty_base: opp.p.qty_base_suggested,
                 min_edge_bps: scanEdge,
-                min_expected_yield_pct: botCfg?.minExpectedYieldPct,
+                min_expected_yield_pct: scanYield,
               } satisfies OptionsParityExecutionParams)
             : await api.executeOptionsPackage({
                 id: opp.p.id,
@@ -885,7 +898,7 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
                 currency: opp.p.currency,
                 qty_base: opp.p.qty_base_suggested,
                 min_edge_bps: scanEdge,
-                min_expected_yield_pct: botCfg?.minExpectedYieldPct,
+                min_expected_yield_pct: scanYield,
               } satisfies OptionsPackageExecutionParams);
         setExecuted((s) => new Set(s).add(opp.p.id));
         setMessage(res.message);
@@ -897,7 +910,7 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
         setConfirmOpp(null);
       }
     },
-    [onRefreshAll, scanEdge],
+    [onRefreshAll, scanEdge, scanYield],
   );
 
   return (
@@ -927,6 +940,11 @@ export const OptionsArbitrage: React.FC<OptionsArbitrageProps> = ({
                     <span className="text-muted">Min Edge</span>
                     <span className="font-bold text-slate-900 tabular-nums">{scanEdge}</span>
                     <span className="text-muted">BPS</span>
+                  </div>
+                  <div className="ribbon-pill shrink-0" title="Minimum expected yield / APR hurdle">
+                    <span className="text-muted">Min Yield</span>
+                    <span className="font-bold text-slate-900 tabular-nums">{scanYield}</span>
+                    <span className="text-muted">%</span>
                   </div>
                   <div className="ribbon-pill shrink-0" title="Scan/entry size in base units">
                     <span className="text-muted">Qty</span>

@@ -22,7 +22,9 @@ import {
 } from "./test_helpers.ts";
 
 const REPO_ROOT = path.resolve(".");
-const AUDIT_FILE = path.join(REPO_ROOT, "docs/AUDIT_ISSUES_32_61.md");
+const AUDIT_FILE = fs.existsSync(path.join(REPO_ROOT, "docs/AUDIT_ISSUES_32_61.md"))
+  ? path.join(REPO_ROOT, "docs/AUDIT_ISSUES_32_61.md")
+  : path.join(REPO_ROOT, "docs/archive/AUDIT_ISSUES_32_61.md");
 
 describe("Tier 2: Boundary & Corner Cases", () => {
   // =========================================================================

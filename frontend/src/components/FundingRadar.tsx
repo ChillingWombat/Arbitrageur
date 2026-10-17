@@ -1229,24 +1229,64 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
     [selectedOpp, fundingOpps]
   );
 
+  // Helper to identify execution logs that represent completed/flattened carry cycles,
+  // excluding open entry dispatches (which record trade_type "Funding" and net_profit 0).
+  const isClosedFundingLog = (l: ExecutionLogEntry): boolean => {
+    const tt = (l.trade_type ?? "").toLowerCase();
+    const note = (l.note ?? "").toLowerCase();
+    const dir = (l.direction ?? "").toLowerCase();
+    const id = l.id ?? "";
+    return (
+      tt.includes("flatten") ||
+      tt.includes("unwind") ||
+      tt.includes("close") ||
+      id.startsWith("exec-flatten") ||
+      note.includes("flatten") ||
+      dir.includes("flatten")
+    );
+  };
+
   // --- Top Telemetry Metric Strip ---
   // 1. Total Net Profit & completed cycles count
   const totalNetProfit = useMemo(() => {
+    const closedLogs = fundingLogs.filter(isClosedFundingLog);
+    if (closedLogs.length > 0) {
+      return closedLogs.reduce(
+        (sum, l) => sum + (l.net_pnl ?? l.net_profit ?? 0),
+        0
+      );
+    }
+    const closedOpps = (tradedOpps ?? []).filter(
+      (o) =>
+        ["funding", "funding_rate"].includes((o.strategyId ?? "").toLowerCase()) &&
+        (o.status === "closed" || o.lotStatus === "closed")
+    );
+    if (closedOpps.length > 0) {
+      return closedOpps.reduce(
+        (sum, o) => sum + (o.realizedPnlUsd ?? o.legNetFlowUsd ?? 0),
+        0
+      );
+    }
     return fundingLogs.reduce(
       (sum, l) => sum + (l.net_pnl ?? l.net_profit ?? 0),
       0
     );
-  }, [fundingLogs]);
+  }, [fundingLogs, tradedOpps]);
 
   const closedFundingCount = useMemo(() => {
-    const fromLogs = fundingLogs.filter(
-      (l) => l.net_pnl != null || l.net_profit != null
-    ).length;
-    if (fromLogs > 0) return fromLogs;
-    return (tradedOpps ?? []).filter(
+    const closedLogs = fundingLogs.filter(isClosedFundingLog);
+    if (closedLogs.length > 0) return closedLogs.length;
+
+    const closedOpps = (tradedOpps ?? []).filter(
       (o) =>
         ["funding", "funding_rate"].includes((o.strategyId ?? "").toLowerCase()) &&
         (o.status === "closed" || o.lotStatus === "closed")
+    );
+    if (closedOpps.length > 0) return closedOpps.length;
+
+    // Fallback: only count logs with non-zero realized PnL (entries are 0.0)
+    return fundingLogs.filter(
+      (l) => (l.net_pnl ?? l.net_profit ?? 0) !== 0
     ).length;
   }, [fundingLogs, tradedOpps]);
 
@@ -1316,6 +1356,18 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
       };
     }
 
+    if (closedFundingCount === 0) {
+      return {
+        totalApr: null,
+        totalAprSubtext:
+          fundingPositions.length > 0
+            ? "Positions open (awaiting settlement)"
+            : "No closed cycles yet",
+        totalAprTooltip:
+          "Total APR will be computed after carry cycles complete and settle.",
+      };
+    }
+
     const now = Date.now();
     const elapsedMs = Math.max(now - firstTradeTs, 3600_000); // 1h baseline to avoid microsecond blowup
     const elapsedDays = elapsedMs / (86_400 * 1000);
@@ -1347,7 +1399,7 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
       totalAprSubtext: subtext,
       totalAprTooltip: tooltip,
     };
-  }, [firstTradeTs, tradeSize, totalFundingNotional, totalNetProfit, closedFundingCount]);
+  }, [firstTradeTs, tradeSize, totalFundingNotional, totalNetProfit, closedFundingCount, fundingPositions.length]);
 
   // 3. Average Realized Return per completed carry cycle
   const avgCycleReturn = useMemo(() => {
@@ -1367,9 +1419,29 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
         ? totalFundingNotional
         : 500;
     const avgBps = (avgUsd / capitalBase) * 10000;
-    const winningCycles = fundingLogs.filter(
-      (l) => (l.net_pnl ?? l.net_profit ?? 0) > 0
-    ).length;
+
+    const closedLogs = fundingLogs.filter(isClosedFundingLog);
+    const targetPool =
+      closedLogs.length > 0
+        ? closedLogs
+        : (tradedOpps ?? []).filter(
+            (o) =>
+              ["funding", "funding_rate"].includes((o.strategyId ?? "").toLowerCase()) &&
+              (o.status === "closed" || o.lotStatus === "closed")
+          );
+
+    const winningCycles =
+      targetPool.length > 0
+        ? targetPool.filter(
+            (item) =>
+              "realizedPnlUsd" in item
+                ? (item.realizedPnlUsd ?? 0) > 0
+                : (item.net_pnl ?? item.net_profit ?? 0) > 0
+          ).length
+        : fundingLogs.filter(
+            (l) => (l.net_pnl ?? l.net_profit ?? 0) > 0
+          ).length;
+
     const winRate = (winningCycles / closedFundingCount) * 100;
 
     const valStr =
@@ -1387,7 +1459,7 @@ export const FundingRadar: React.FC<FundingRadarProps> = ({
     const tooltip = `Average realized return per completed carry cycle: ${valStr} (${avgBps >= 0 ? "+" : ""}${avgBps.toFixed(2)} bps on $${capitalBase.toLocaleString()} base) with ${winRate.toFixed(1)}% win rate (${winningCycles}/${closedFundingCount} profitable cycles)`;
 
     return { valStr, toneCls, subtext, tooltip };
-  }, [totalNetProfit, closedFundingCount, tradeSize, totalFundingNotional, fundingLogs]);
+  }, [totalNetProfit, closedFundingCount, tradeSize, totalFundingNotional, fundingLogs, tradedOpps]);
 
   // 5. Est. 24h Yield
   const { estDailyYield, yieldSubtext } = useMemo(() => {

@@ -130,3 +130,63 @@ pub fn dispatch(environment: &'static str, event: &'static str, detail: String) 
         }
     });
 }
+
+/// Dispatch an alert if at least `cooldown` has elapsed since the last alert for `(event, key)`.
+pub fn dispatch_throttled(
+    environment: &'static str,
+    event: &'static str,
+    key: &str,
+    cooldown: std::time::Duration,
+    detail: String,
+) {
+    static THROTTLES: OnceLock<
+        parking_lot::Mutex<std::collections::HashMap<(String, String), std::time::Instant>>,
+    > = OnceLock::new();
+    let throttles =
+        THROTTLES.get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+    let mut lock = throttles.lock();
+    let cache_key = (event.to_string(), key.to_string());
+    if let Some(prev) = lock.get(&cache_key) {
+        if prev.elapsed() < cooldown {
+            return;
+        }
+    }
+    lock.insert(cache_key, std::time::Instant::now());
+    drop(lock);
+    dispatch(environment, event, detail);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_dispatch_throttled_cooldown() {
+        // Dispatches without panicking even without runtime / webhook url
+        dispatch_throttled(
+            "testnet",
+            "test_event",
+            "test_key",
+            std::time::Duration::from_secs(60),
+            "detail 1".into(),
+        );
+
+        // Immediate subsequent call with same key is throttled
+        dispatch_throttled(
+            "testnet",
+            "test_event",
+            "test_key",
+            std::time::Duration::from_secs(60),
+            "detail 2".into(),
+        );
+
+        // Different key is not throttled
+        dispatch_throttled(
+            "testnet",
+            "test_event",
+            "different_key",
+            std::time::Duration::from_secs(60),
+            "detail 3".into(),
+        );
+    }
+}

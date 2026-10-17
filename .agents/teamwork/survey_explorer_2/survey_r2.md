@@ -338,7 +338,7 @@ In `dev_rpc.rs`:
    - Verify `api.ts` maps `triggerKillswitch` and parses new DTO structure.
 3. **Live Testnet Dev RPC Verification (`/tmp/arb-dev.sock`)**:
    - Testnet launch with `ARBITRAGEUR_DEV_SOCK=/tmp/arb-dev.sock`.
-   - Unlock vault via `unlock_vault` with password `<redacted>`.
+   - Unlock vault via `unlock_vault` with password `<redacted — see SECURITY.md>`.
    - Verify `{"cmd":"stop_all"}` or `{"cmd":"killswitch"}` executes.
    - Inspect `system_status`: confirms `circuit_breaker_tripped: true` and `is_paused: true`.
    - Inspect `open_positions`: confirms zero open positions.

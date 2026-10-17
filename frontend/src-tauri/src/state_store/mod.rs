@@ -779,6 +779,46 @@ pub fn aggregate_open_positions(
             }
         }
 
+        if (strategy_id == "options_box_spread" || strategy_id == "options_jelly_roll")
+            && expected_any
+            && expected_sum > 0.0
+        {
+            // Box spreads and Jelly rolls have deterministic locked-in terminal payout.
+            // Summing wide testnet bid-ask spreads across individual legs produces
+            // severe phantom mark-to-market losses. Mark the package to its linear time accretion
+            // of the locked-in expected profit between entry and expiry.
+            let now = Utc::now();
+            let opened = chrono::DateTime::parse_from_rfc3339(&opened_at)
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or(now);
+            let elapsed_secs = (now - opened).num_seconds().max(0) as f64;
+
+            let mut latest_expiry: Option<chrono::DateTime<Utc>> = None;
+            for (_, sym) in nets.keys() {
+                let parts: Vec<&str> = sym.split('-').collect();
+                if parts.len() >= 2 {
+                    if let Ok(date) = chrono::NaiveDate::parse_from_str(parts[1], "%d%b%y") {
+                        if let Some(naive_dt) = date.and_hms_opt(8, 0, 0) {
+                            let exp_utc =
+                                chrono::DateTime::<Utc>::from_naive_utc_and_offset(naive_dt, Utc);
+                            if latest_expiry.is_none_or(|prev| exp_utc > prev) {
+                                latest_expiry = Some(exp_utc);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let duration_secs = if let Some(exp) = latest_expiry {
+                (exp - opened).num_seconds().max(86400) as f64
+            } else {
+                30.0 * 86400.0
+            };
+
+            let accrued_ratio = (elapsed_secs / duration_secs).clamp(0.0, 1.0);
+            pnl = Some(expected_sum * accrued_ratio);
+        }
+
         // Zero-net rows (a venue flattened to flat by an offsetting child
         // signal) carry no current exposure — drop them; if the whole trade
         // nets flat (e.g. unfilled in-flight signal) keep its legs at zero.

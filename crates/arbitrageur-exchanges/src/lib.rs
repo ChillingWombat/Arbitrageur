@@ -1,3 +1,4 @@
+pub mod across_bridge;
 pub mod alpaca;
 pub mod arcus;
 pub mod aster;
@@ -24,6 +25,7 @@ pub mod variational;
 pub mod wallet;
 pub mod ws;
 
+pub use across_bridge::*;
 pub use alpaca::*;
 pub use arcus::*;
 pub use aster::*;

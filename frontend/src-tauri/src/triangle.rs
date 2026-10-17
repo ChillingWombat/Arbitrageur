@@ -131,6 +131,7 @@ const TRIANGLE_BASES: [&str; 5] = ["BTC", "ETH", "SOL", "BNB", "XRP"];
 /// Fixed scan notional: matches the frontend "Est. Profit ($10k)" column.
 const TRIANGLE_SCAN_NOTIONAL_USD: f64 = 10_000.0;
 
+#[derive(Clone)]
 struct TrianglePlan {
     base_a: String,
     base_b: String,
@@ -141,28 +142,105 @@ struct TrianglePlan {
     path: String,
 }
 
-/// Canonical USDC -> A -> B -> USDC cycle on one venue. Only the "{A}-{B}"
-/// orientation is attempted for the middle leg; the reverse triangle is a
-/// separate candidate (ordered pairs are enumerated both ways). When the
-/// venue does not list a leg symbol, book resolution fails closed and the
-/// candidate is skipped — never synthesized.
+/// Canonical USDC -> A -> B -> USDC cycle on one venue.
+/// Enumerates both middle-leg quotation conventions:
+/// 1. Direct: `{base_a}-{base_b}` with `[BuyBase, SellBase, SellBase]`
+/// 2. Inverted: `{base_b}-{base_a}` with `[BuyBase, BuyBase, SellBase]` (e.g. ETH-BTC when base_a is BTC and base_b is ETH)
+fn candidate_triangle_plans(base_a: &str, base_b: &str) -> [TrianglePlan; 2] {
+    [
+        TrianglePlan {
+            base_a: base_a.to_string(),
+            base_b: base_b.to_string(),
+            leg_symbols: [
+                format!("{base_a}-{TRIANGLE_QUOTE}"),
+                format!("{base_a}-{base_b}"),
+                format!("{base_b}-{TRIANGLE_QUOTE}"),
+            ],
+            leg_sides: [
+                TriLegSide::BuyBase,
+                TriLegSide::SellBase,
+                TriLegSide::SellBase,
+            ],
+            order_sides: [Side::Buy, Side::Sell, Side::Sell],
+            leg_actions: ["BUY", "SELL", "SELL"],
+            path: format!("{TRIANGLE_QUOTE} → {base_a} → {base_b} → {TRIANGLE_QUOTE}"),
+        },
+        TrianglePlan {
+            base_a: base_a.to_string(),
+            base_b: base_b.to_string(),
+            leg_symbols: [
+                format!("{base_a}-{TRIANGLE_QUOTE}"),
+                format!("{base_b}-{base_a}"),
+                format!("{base_b}-{TRIANGLE_QUOTE}"),
+            ],
+            leg_sides: [
+                TriLegSide::BuyBase,
+                TriLegSide::BuyBase,
+                TriLegSide::SellBase,
+            ],
+            order_sides: [Side::Buy, Side::Buy, Side::Sell],
+            leg_actions: ["BUY", "BUY", "SELL"],
+            path: format!("{TRIANGLE_QUOTE} → {base_a} → {base_b} → {TRIANGLE_QUOTE}"),
+        },
+    ]
+}
+
+#[allow(dead_code)]
 fn triangle_plan(base_a: &str, base_b: &str) -> TrianglePlan {
+    candidate_triangle_plans(base_a, base_b)[0].clone()
+}
+
+fn triangle_plan_from_opp(opp: &TriangleOpportunityDto) -> TrianglePlan {
+    let order_side = |action: &str| {
+        if action == "BUY" {
+            Side::Buy
+        } else {
+            Side::Sell
+        }
+    };
+    let leg_side = |action: &str| {
+        if action == "BUY" {
+            TriLegSide::BuyBase
+        } else {
+            TriLegSide::SellBase
+        }
+    };
     TrianglePlan {
-        base_a: base_a.to_string(),
-        base_b: base_b.to_string(),
+        base_a: opp.intermediate_a.clone(),
+        base_b: opp.intermediate_b.clone(),
         leg_symbols: [
-            format!("{base_a}-{TRIANGLE_QUOTE}"),
-            format!("{base_a}-{base_b}"),
-            format!("{base_b}-{TRIANGLE_QUOTE}"),
+            opp.leg1.symbol.clone(),
+            opp.leg2.symbol.clone(),
+            opp.leg3.symbol.clone(),
         ],
         leg_sides: [
-            TriLegSide::BuyBase,
-            TriLegSide::SellBase,
-            TriLegSide::SellBase,
+            leg_side(&opp.leg1.action),
+            leg_side(&opp.leg2.action),
+            leg_side(&opp.leg3.action),
         ],
-        order_sides: [Side::Buy, Side::Sell, Side::Sell],
-        leg_actions: ["BUY", "SELL", "SELL"],
-        path: format!("{TRIANGLE_QUOTE} → {base_a} → {base_b} → {TRIANGLE_QUOTE}"),
+        order_sides: [
+            order_side(&opp.leg1.action),
+            order_side(&opp.leg2.action),
+            order_side(&opp.leg3.action),
+        ],
+        leg_actions: [
+            if opp.leg1.action == "BUY" {
+                "BUY"
+            } else {
+                "SELL"
+            },
+            if opp.leg2.action == "BUY" {
+                "BUY"
+            } else {
+                "SELL"
+            },
+            if opp.leg3.action == "BUY" {
+                "BUY"
+            } else {
+                "SELL"
+            },
+        ],
+        path: opp.path.clone(),
     }
 }
 
@@ -343,7 +421,7 @@ fn triangle_target_profit_bps(state: &AppEngineState) -> f64 {
         .map(|p| p.triangle_min_profit_bps)
         .or_else(|| params.get("futures").map(|p| p.target_profit_bps))
         .filter(|v| v.is_finite() && *v >= 0.0)
-        .unwrap_or(2.0)
+        .unwrap_or(4.0)
 }
 
 pub async fn scan_triangular_opportunities_impl(
@@ -399,89 +477,95 @@ pub async fn scan_triangular_opportunities_impl(
                 if !filter.is_empty() && filter != base_a && filter != base_b {
                     continue;
                 }
-                let plan = triangle_plan(base_a, base_b);
-                let mut get_venue_book = |sym: &str| -> Option<Arc<OrderBook>> {
-                    if let Some(cached) = venue_book_cache.get(sym) {
-                        return cached.clone();
-                    }
-                    let book = state
-                        .market_data_hub
-                        .get_valid_orderbook(
-                            &venue_id,
-                            sym,
-                            Some(std::time::Duration::from_secs(2)),
-                        )
-                        .filter(|b| validate_adapter_book(b, &venue_id, sym).is_ok())
-                        .map(Arc::new);
-                    venue_book_cache.insert(sym.to_string(), book.clone());
-                    book
-                };
+                for plan in candidate_triangle_plans(base_a, base_b) {
+                    let mut get_venue_book = |sym: &str| -> Option<Arc<OrderBook>> {
+                        if let Some(cached) = venue_book_cache.get(sym) {
+                            return cached.clone();
+                        }
+                        let book = state
+                            .market_data_hub
+                            .get_valid_orderbook(
+                                &venue_id,
+                                sym,
+                                Some(std::time::Duration::from_secs(2)),
+                            )
+                            .filter(|b| validate_adapter_book(b, &venue_id, sym).is_ok())
+                            .map(Arc::new);
+                        venue_book_cache.insert(sym.to_string(), book.clone());
+                        book
+                    };
 
-                let Some(b0) = get_venue_book(&plan.leg_symbols[0]) else {
-                    continue;
-                };
-                let Some(b2) = get_venue_book(&plan.leg_symbols[2]) else {
-                    continue;
-                };
-                let Some(b1) = get_venue_book(&plan.leg_symbols[1]) else {
-                    continue;
-                };
-                let books = [b0, b1, b2];
-                // The evaluator's notional is leg-1 quote (USDC): the USD
-                // trade size converts in at the venue rate, and the
-                // USDC-denominated profit converts back out.
-                let eval = match evaluate_triangle_books(
-                    &books,
-                    plan.leg_sides,
-                    fee,
-                    trade_size / usdc_rate,
-                ) {
-                    Some(e) => e,
-                    None => continue,
-                };
-                let eval = TriangleEval {
-                    profit_usd: eval.profit_usd * usdc_rate,
-                    ..eval
-                };
-                let legs = [
-                    TriangleLegDto {
-                        symbol: plan.leg_symbols[0].clone(),
-                        action: plan.leg_actions[0].to_string(),
-                        price: eval.leg_prices[0],
-                        fee_bps: fee,
-                    },
-                    TriangleLegDto {
-                        symbol: plan.leg_symbols[1].clone(),
-                        action: plan.leg_actions[1].to_string(),
-                        price: eval.leg_prices[1],
-                        fee_bps: fee,
-                    },
-                    TriangleLegDto {
-                        symbol: plan.leg_symbols[2].clone(),
-                        action: plan.leg_actions[2].to_string(),
-                        price: eval.leg_prices[2],
-                        fee_bps: fee,
-                    },
-                ];
-                opps.push(TriangleOpportunityDto {
-                    id: format!("{vid}-TRI-{base_a}-{base_b}-{TRIANGLE_QUOTE}"),
-                    venue: vname.to_string(),
-                    path: plan.path.clone(),
-                    base_asset: TRIANGLE_QUOTE.to_string(),
-                    intermediate_a: plan.base_a.clone(),
-                    intermediate_b: plan.base_b.clone(),
-                    leg1: legs[0].clone(),
-                    leg2: legs[1].clone(),
-                    leg3: legs[2].clone(),
-                    gross_spread_bps: eval.gross_bps,
-                    total_fee_bps: eval.fee_bps,
-                    net_spread_bps: eval.net_bps,
-                    net_profit_usd: eval.profit_usd,
-                    trade_size_usd: trade_size,
-                    estimated_latency_ms: latency_ms,
-                    is_executable: eval.net_bps >= hurdle,
-                    depth_curve: triangle_depth_curve(&books, plan.leg_sides, fee, trade_size),
-                });
+                    let Some(b0) = get_venue_book(&plan.leg_symbols[0]) else {
+                        continue;
+                    };
+                    let Some(b2) = get_venue_book(&plan.leg_symbols[2]) else {
+                        continue;
+                    };
+                    let Some(b1) = get_venue_book(&plan.leg_symbols[1]) else {
+                        continue;
+                    };
+                    let books = [b0, b1, b2];
+                    // The evaluator's notional is leg-1 quote (USDC): the USD
+                    // trade size converts in at the venue rate, and the
+                    // USDC-denominated profit converts back out.
+                    let eval = match evaluate_triangle_books(
+                        &books,
+                        plan.leg_sides,
+                        fee,
+                        trade_size / usdc_rate,
+                    ) {
+                        Some(e) => e,
+                        None => continue,
+                    };
+                    let eval = TriangleEval {
+                        profit_usd: eval.profit_usd * usdc_rate,
+                        ..eval
+                    };
+                    let legs = [
+                        TriangleLegDto {
+                            symbol: plan.leg_symbols[0].clone(),
+                            action: plan.leg_actions[0].to_string(),
+                            price: eval.leg_prices[0],
+                            fee_bps: fee,
+                        },
+                        TriangleLegDto {
+                            symbol: plan.leg_symbols[1].clone(),
+                            action: plan.leg_actions[1].to_string(),
+                            price: eval.leg_prices[1],
+                            fee_bps: fee,
+                        },
+                        TriangleLegDto {
+                            symbol: plan.leg_symbols[2].clone(),
+                            action: plan.leg_actions[2].to_string(),
+                            price: eval.leg_prices[2],
+                            fee_bps: fee,
+                        },
+                    ];
+                    let opp_id = if plan.leg_actions[1] == "BUY" {
+                        format!("{vid}-TRI-{base_a}-{base_b}-{TRIANGLE_QUOTE}-INV")
+                    } else {
+                        format!("{vid}-TRI-{base_a}-{base_b}-{TRIANGLE_QUOTE}")
+                    };
+                    opps.push(TriangleOpportunityDto {
+                        id: opp_id,
+                        venue: vname.to_string(),
+                        path: plan.path.clone(),
+                        base_asset: TRIANGLE_QUOTE.to_string(),
+                        intermediate_a: plan.base_a.clone(),
+                        intermediate_b: plan.base_b.clone(),
+                        leg1: legs[0].clone(),
+                        leg2: legs[1].clone(),
+                        leg3: legs[2].clone(),
+                        gross_spread_bps: eval.gross_bps,
+                        total_fee_bps: eval.fee_bps,
+                        net_spread_bps: eval.net_bps,
+                        net_profit_usd: eval.profit_usd,
+                        trade_size_usd: trade_size,
+                        estimated_latency_ms: latency_ms,
+                        is_executable: eval.net_bps >= hurdle,
+                        depth_curve: triangle_depth_curve(&books, plan.leg_sides, fee, trade_size),
+                    });
+                }
             }
         }
     }
@@ -550,17 +634,27 @@ fn record_triangle_leg_intent(
 }
 
 /// Resolve a leg's bounded IOC price from the dispatch-time book: the
-/// execution VWAP for the exact wire quantity, padded by
-/// `TRIANGLE_IOC_BOUND_BPS` so the order fills the evaluated depth but can
-/// never sweep past it into unbounded slippage. `None` when the book cannot
-/// price the quantity — the cycle must abort, not dispatch blind.
+/// depth-swept marginal price with a small 2 bps micro-drift buffer, capped by
+/// `TRIANGLE_IOC_BOUND_BPS` past VWAP. This ensures the order fills the evaluated
+/// depth without granting excessive slippage leakage on each leg of the 3-leg cycle.
 fn triangle_leg_bound_px(book: &OrderBook, side: Side, qty: Decimal) -> Option<Decimal> {
     let bound = dec!(1) + Decimal::from(TRIANGLE_IOC_BOUND_BPS) / dec!(10_000);
-    let vwap = match side {
-        Side::Buy => book.buy_execution_vwap(qty).map(|(v, _, _)| v * bound),
-        Side::Sell => book.sell_execution_vwap(qty).map(|(v, _, _)| v / bound),
-    }?;
-    (vwap > dec!(0)).then_some(vwap)
+    let micro_drift = dec!(1) + dec!(2) / dec!(10_000);
+    let px = match side {
+        Side::Buy => {
+            let (vwap, _, _) = book.buy_execution_vwap(qty)?;
+            let marginal = book.buy_execution_marginal_price(qty).unwrap_or(vwap);
+            let buffered = marginal * micro_drift;
+            buffered.min(vwap * bound)
+        }
+        Side::Sell => {
+            let (vwap, _, _) = book.sell_execution_vwap(qty)?;
+            let marginal = book.sell_execution_marginal_price(qty).unwrap_or(vwap);
+            let buffered = marginal / micro_drift;
+            buffered.max(vwap / bound)
+        }
+    };
+    (px > dec!(0)).then_some(px)
 }
 
 /// Realized PnL of a completed triangle cycle, denominated in the cycle's
@@ -571,6 +665,8 @@ fn triangle_leg_bound_px(book: &OrderBook, side: Side, qty: Decimal) -> Option<D
 /// Legs or fees that cannot be converted are skipped rather than guessed;
 /// on a complete 3-leg cycle every leg is convertible by construction.
 fn triangle_settlement_pnl(
+    state: &AppEngineState,
+    venue_id: &str,
     leg_symbols: &[String; 3],
     order_sides: &[Side; 3],
     fills: &[(usize, arbitrageur_core::order::OrderResponse)],
@@ -588,8 +684,13 @@ fn triangle_settlement_pnl(
     let to_settle = |amount: Decimal, ccy: &str| -> Option<Decimal> {
         if is_usd_family(ccy) {
             Some(amount)
+        } else if let Some(px) = settle_px.get(&canonical_base(ccy)) {
+            Some(amount * px)
         } else {
-            settle_px.get(&canonical_base(ccy)).map(|px| amount * px)
+            let factor = state.fx_price_factor(Some(venue_id), ccy);
+            Decimal::from_f64_retain(factor)
+                .filter(|f| *f > dec!(0))
+                .map(|f| amount * f)
         }
     };
     let mut pnl = Decimal::ZERO;
@@ -681,7 +782,7 @@ pub async fn execute_triangle_arbitrage_impl(
             "triangular opportunity is no longer available (missing legs or stale books)"
                 .to_string()
         })?;
-    let plan = triangle_plan(&opp.intermediate_a, &opp.intermediate_b);
+    let plan = triangle_plan_from_opp(&opp);
     // Serialize dispatch against every other execution path. The rescan
     // above runs unlocked (it fans out over venues and may hit the network);
     // everything from the dispatch-time book resolution on is mutually
@@ -896,7 +997,7 @@ pub async fn execute_triangle_arbitrage_impl(
         // position and the ledger residual stay bit-identical and flatten
         // closes exactly. from_f64_retain's exact-binary expansion disagrees
         // at ~1e-22 and would strand dust.
-        let qty = match Decimal::from_str_exact(&qty_f.to_string())
+        let mut qty = match Decimal::from_str_exact(&qty_f.to_string())
             .ok()
             .filter(|q| *q > dec!(0))
         {
@@ -906,6 +1007,65 @@ pub async fn execute_triangle_arbitrage_impl(
                 break;
             }
         };
+
+        // Universal dynamic asset & balance propagation:
+        // Determine available inventory received from the preceding leg (idx - 1)
+        // and clamp the current leg's quantity to prevent "Insufficient balance" venue rejections.
+        if idx > 0 && !fills.is_empty() {
+            let prev_idx = idx - 1;
+            let prev_fill = &fills[prev_idx].1;
+            let prev_side = plan.order_sides[prev_idx];
+            let prev_sym = &plan.leg_symbols[prev_idx];
+            let prev_base = canonical_base(prev_sym);
+            let prev_px = prev_fill.avg_fill_price.unwrap_or(dec!(0));
+
+            let avail_inventory = match prev_side {
+                Side::Buy => {
+                    let fee = if prev_fill.fee_currency.eq_ignore_ascii_case(&prev_base) {
+                        prev_fill.fee.unwrap_or(dec!(0))
+                    } else {
+                        dec!(0)
+                    };
+                    prev_fill.filled_qty.saturating_sub(fee)
+                }
+                Side::Sell => {
+                    let gross_quote = prev_fill.filled_qty * prev_px;
+                    let fee = if prev_fill
+                        .fee_currency
+                        .eq_ignore_ascii_case(&symbol_quote(prev_sym).unwrap_or_default())
+                    {
+                        prev_fill.fee.unwrap_or(dec!(0))
+                    } else {
+                        dec!(0)
+                    };
+                    gross_quote.saturating_sub(fee)
+                }
+            };
+
+            match order_side {
+                Side::Sell => {
+                    if avail_inventory > dec!(0) && avail_inventory < qty {
+                        tracing::info!(
+                            "triangle: clamping leg {idx} sell qty from {qty} to available proceeds {avail_inventory}"
+                        );
+                        qty = avail_inventory;
+                    }
+                }
+                Side::Buy => {
+                    let est_px = Decimal::from_f64_retain(eval.leg_prices[idx]).unwrap_or(dec!(1));
+                    if est_px > dec!(0) && avail_inventory > dec!(0) {
+                        let max_buyable = avail_inventory / est_px;
+                        if max_buyable < qty {
+                            tracing::info!(
+                                "triangle: clamping leg {idx} buy qty from {qty} to {max_buyable} (available quote: {avail_inventory})"
+                            );
+                            qty = max_buyable;
+                        }
+                    }
+                }
+            }
+        }
+
         // Snap each leg onto the venue's wire grid before dispatch: a fill
         // floored by the adapter would otherwise read as a partial fill and
         // flatten the whole cycle on a representability artifact.
@@ -1179,6 +1339,74 @@ pub async fn execute_triangle_arbitrage_impl(
             Err(_) => false,
         };
     }
+    // If the cycle did not complete, perform an atomic reverse rollback on all filled legs
+    let mut all_unwound = true;
+    if !cycle_complete && !fills.is_empty() {
+        tracing::warn!(
+            "triangle: cycle incomplete ({} of 3 legs filled); executing reverse emergency rollback",
+            fills.len()
+        );
+        for (fill_idx, fill_resp) in fills.iter().rev() {
+            let sym = &plan.leg_symbols[*fill_idx];
+            let order_side = plan.order_sides[*fill_idx];
+            let mut unwind_qty = fill_resp.filled_qty;
+            if unwind_qty > dec!(0) {
+                // Spot balance guard: check available token balance to prevent 'insufficient balance' rejects
+                if !adapter.supports_reduce_only(sym) && order_side == Side::Buy {
+                    if let Ok(acc) = adapter.fetch_account().await {
+                        let base_currency = canonical_base(sym);
+                        if let Some(bal) = acc
+                            .balances
+                            .iter()
+                            .find(|b| b.currency.eq_ignore_ascii_case(&base_currency))
+                        {
+                            if bal.free < unwind_qty {
+                                tracing::warn!(
+                                    "triangle rollback: clamping unwind sell qty from {unwind_qty} to available balance {} {base_currency}",
+                                    bal.free
+                                );
+                                unwind_qty = bal.free;
+                            }
+                        }
+                    }
+                }
+
+                let wire_qty = adapter
+                    .wire_base_qty(sym, unwind_qty)
+                    .await
+                    .unwrap_or(unwind_qty);
+
+                if wire_qty > dec!(0) {
+                    tracing::warn!(
+                        "triangle: executing emergency rollback for {wire_qty} {sym} (original side: {order_side:?})"
+                    );
+                    match arbitrageur_execution::emergency_unwind::EmergencyUnwindHandler::unwind_leg(
+                        &adapter, sym, order_side, wire_qty,
+                    )
+                    .await
+                    {
+                        Ok(resp) if resp.status == arbitrageur_core::types::OrderStatus::Filled => {
+                            tracing::info!("triangle: rollback filled for {sym}");
+                        }
+                        Ok(resp) => {
+                            tracing::error!(
+                                "triangle: rollback order not fully filled for {sym}: status {:?}",
+                                resp.status
+                            );
+                            all_unwound = false;
+                        }
+                        Err(e) => {
+                            tracing::error!("triangle: rollback failed for {sym}: {e}");
+                            all_unwound = false;
+                        }
+                    }
+                } else {
+                    tracing::warn!("triangle: rollback skipped for {sym} as wire quantity is zero");
+                }
+            }
+        }
+    }
+
     for (idx, sid, _) in &leg_signal_ids {
         let filled = fills.iter().any(|(i, _)| i == idx);
         // A leg already resolved at break time (Failed / Unresolved) keeps
@@ -1207,11 +1435,19 @@ pub async fn execute_triangle_arbitrage_impl(
                 );
             }
         } else if filled {
-            let _ = state.state_store.update_signal_status(
-                sid,
-                SignalStatus::Imbalanced,
-                Some("triangle cycle partial — residual leg; flatten the symbol to unwind"),
-            );
+            if all_unwound {
+                let _ = state.state_store.update_signal_status(
+                    sid,
+                    SignalStatus::Closed,
+                    Some("triangle cycle partial — emergency unwind rollback filled, flat"),
+                );
+            } else {
+                let _ = state.state_store.update_signal_status(
+                    sid,
+                    SignalStatus::Imbalanced,
+                    Some("triangle cycle partial — residual leg; flatten the symbol to unwind"),
+                );
+            }
         } else {
             // Persisted intent whose order never reached the venue (bound
             // failure, upstream abort): nothing exists venue-side — Failed
@@ -1231,12 +1467,33 @@ pub async fn execute_triangle_arbitrage_impl(
     // A partial cycle books only its fees — the residual is an open
     // position, not realized PnL.
     let attempt_pnl: Decimal = if cycle_complete {
-        triangle_settlement_pnl(&plan.leg_symbols, &plan.order_sides, &fills)
+        triangle_settlement_pnl(
+            state,
+            vid.as_str(),
+            &plan.leg_symbols,
+            &plan.order_sides,
+            &fills,
+        )
     } else {
-        -fills
-            .iter()
-            .filter_map(|(_, r)| r.fee)
-            .fold(Decimal::ZERO, |a, f| a + f)
+        let mut total_fee_usd = Decimal::ZERO;
+        for (idx, r) in &fills {
+            if let Some(f) = r.fee.filter(|fee| *fee > dec!(0)) {
+                let sym = &plan.leg_symbols[*idx];
+                let fee_ccy = if r.fee_currency.trim().is_empty() {
+                    symbol_quote(sym).unwrap_or_default()
+                } else {
+                    r.fee_currency.trim().to_string()
+                };
+                let rate = if is_usd_family(&fee_ccy) {
+                    dec!(1)
+                } else {
+                    Decimal::from_f64_retain(state.fx_price_factor(Some(vid.as_str()), &fee_ccy))
+                        .unwrap_or(dec!(1))
+                };
+                total_fee_usd += f * rate;
+            }
+        }
+        -total_fee_usd
     };
     let attempt_pnl_f = attempt_pnl.to_string().parse::<f64>().unwrap_or(0.0);
     let total_f =
@@ -1309,6 +1566,11 @@ pub async fn execute_triangle_arbitrage_impl(
         is_live: state.is_live(),
     });
 
+    let duration_ms = latency_us / 1000;
+    if duration_ms > 1500 {
+        tracing::warn!("Triangle execution took {}ms (>1500ms SLA)", duration_ms);
+    }
+
     maybe_record_margin_snapshots(state, Utc::now().timestamp_millis()).await;
 
     Ok(SimStepResultDto {
@@ -1323,9 +1585,10 @@ pub async fn execute_triangle_arbitrage_impl(
         realized_profit_usd: attempt_pnl_f,
         total_cumulative_pnl_usd: total_f,
         message: format!(
-            "Triangle cycle dispatched on {}: 3/3 legs filled, realized P&L ${attempt_pnl_f:.2}; spread position open — flatten leg symbols to unwind",
+            "Triangle cycle dispatched on {} in {duration_ms}ms: 3/3 legs filled, realized P&L ${attempt_pnl_f:.2}; spread position open — flatten leg symbols to unwind",
             params.venue
         ),
+        execution_duration_ms: Some(duration_ms),
     })
 }
 
@@ -1358,5 +1621,82 @@ pub async fn execute_triangle_arbitrage(
             );
             Err(e)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_candidate_triangle_plans_direct_and_inverted() {
+        let plans = candidate_triangle_plans("BTC", "ETH");
+        assert_eq!(plans.len(), 2);
+
+        // Plan 0: direct middle (BTC-ETH)
+        assert_eq!(plans[0].leg_symbols[0], "BTC-USDC");
+        assert_eq!(plans[0].leg_symbols[1], "BTC-ETH");
+        assert_eq!(plans[0].leg_symbols[2], "ETH-USDC");
+        assert_eq!(plans[0].leg_sides[0], TriLegSide::BuyBase);
+        assert_eq!(plans[0].leg_sides[1], TriLegSide::SellBase);
+        assert_eq!(plans[0].leg_sides[2], TriLegSide::SellBase);
+        assert_eq!(plans[0].order_sides[1], Side::Sell);
+        assert_eq!(plans[0].leg_actions[1], "SELL");
+
+        // Plan 1: inverted middle (ETH-BTC)
+        assert_eq!(plans[1].leg_symbols[0], "BTC-USDC");
+        assert_eq!(plans[1].leg_symbols[1], "ETH-BTC");
+        assert_eq!(plans[1].leg_symbols[2], "ETH-USDC");
+        assert_eq!(plans[1].leg_sides[0], TriLegSide::BuyBase);
+        assert_eq!(plans[1].leg_sides[1], TriLegSide::BuyBase);
+        assert_eq!(plans[1].leg_sides[2], TriLegSide::SellBase);
+        assert_eq!(plans[1].order_sides[1], Side::Buy);
+        assert_eq!(plans[1].leg_actions[1], "BUY");
+    }
+
+    #[test]
+    fn test_triangle_plan_from_opp_reconstruction() {
+        let opp = TriangleOpportunityDto {
+            id: "binance-TRI-BTC-ETH-USDC-INV".into(),
+            venue: "Binance".into(),
+            path: "USDC → BTC → ETH → USDC".into(),
+            base_asset: "USDC".into(),
+            intermediate_a: "BTC".into(),
+            intermediate_b: "ETH".into(),
+            leg1: TriangleLegDto {
+                symbol: "BTC-USDC".into(),
+                action: "BUY".into(),
+                price: 85000.0,
+                fee_bps: 5.0,
+            },
+            leg2: TriangleLegDto {
+                symbol: "ETH-BTC".into(),
+                action: "BUY".into(),
+                price: 0.035,
+                fee_bps: 5.0,
+            },
+            leg3: TriangleLegDto {
+                symbol: "ETH-USDC".into(),
+                action: "SELL".into(),
+                price: 3000.0,
+                fee_bps: 5.0,
+            },
+            gross_spread_bps: 20.0,
+            total_fee_bps: 15.0,
+            net_spread_bps: 5.0,
+            net_profit_usd: 5.0,
+            trade_size_usd: 10000.0,
+            estimated_latency_ms: 50,
+            is_executable: true,
+            depth_curve: vec![],
+        };
+
+        let plan = triangle_plan_from_opp(&opp);
+        assert_eq!(plan.base_a, "BTC");
+        assert_eq!(plan.base_b, "ETH");
+        assert_eq!(plan.leg_symbols[1], "ETH-BTC");
+        assert_eq!(plan.order_sides[1], Side::Buy);
+        assert_eq!(plan.leg_sides[1], TriLegSide::BuyBase);
+        assert_eq!(plan.leg_actions[1], "BUY");
     }
 }

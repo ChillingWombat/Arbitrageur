@@ -99,14 +99,20 @@ pub fn get_strategy_params_impl(
     strategy_id: &str,
     state: &AppEngineState,
 ) -> Result<StrategyParamsDto, String> {
-    if !KNOWN_STRATEGY_IDS.contains(&strategy_id) {
+    if !KNOWN_STRATEGY_IDS.contains(&strategy_id) && strategy_id != "radar" {
         return Err(format!("unknown strategy_id '{strategy_id}'"));
     }
     let params = state.strategy_params.read();
-    Ok(params
-        .get(strategy_id)
-        .cloned()
-        .unwrap_or_else(|| StrategyParamsDto::defaults_for(strategy_id)))
+    if let Some(p) = params.get(strategy_id) {
+        return Ok(p.clone());
+    }
+    if strategy_id == "radar" {
+        if let Some(mut p) = params.get("futures").cloned() {
+            p.strategy_id = "radar".to_string();
+            return Ok(p);
+        }
+    }
+    Ok(StrategyParamsDto::defaults_for(strategy_id))
 }
 
 pub(crate) fn canonical_sliding_window(secs: u64) -> String {
@@ -125,7 +131,7 @@ pub fn save_strategy_params_impl(
     mut params: StrategyParamsDto,
     state: &AppEngineState,
 ) -> Result<(), String> {
-    if !KNOWN_STRATEGY_IDS.contains(&params.strategy_id.as_str()) {
+    if !KNOWN_STRATEGY_IDS.contains(&params.strategy_id.as_str()) && params.strategy_id != "radar" {
         return Err(format!("unknown strategy_id '{}'", params.strategy_id));
     }
     if !matches!(params.sliding_window_mode.as_str(), "manual" | "auto") {
@@ -348,7 +354,7 @@ pub struct StrategyPresetDto {
     pub user_target_leverage: u32,
 }
 
-pub const STRATEGY_PRESET_VERSION: u32 = 1;
+pub const STRATEGY_PRESET_VERSION: u32 = 2;
 
 /// The curated preset table. Ordering is the UI order: safest first.
 /// Posture ladder: Conservative takes only deep, rare dislocations with
@@ -373,10 +379,10 @@ pub fn strategy_presets() -> Vec<StrategyPresetDto> {
         StrategyPresetDto {
             id: "balanced".into(),
             label: "Balanced".into(),
-            description: "Normal-regime posture: the shipping defaults' spirit — 75th-percentile window, moderate hurdle, 20% equity cap, 5x leverage.".into(),
+            description: "Normal-regime posture: elevated 5.0 bps hurdle to clear DEX taker friction, 80th-percentile window, 20% equity cap, 5x leverage.".into(),
             version: STRATEGY_PRESET_VERSION,
-            target_profit_bps: 3.0,
-            window_percentile: 75,
+            target_profit_bps: 5.0,
+            window_percentile: 80,
             sliding_window_secs: 43_200, // 12h
             execution_mode: "SINGLE_WAY".into(),
             step_size_mult: 10.0,
@@ -387,10 +393,10 @@ pub fn strategy_presets() -> Vec<StrategyPresetDto> {
         StrategyPresetDto {
             id: "aggressive".into(),
             label: "Aggressive".into(),
-            description: "Opportunity-rich posture: thin 1.5 bps hurdle, 24h window, double-way entries, bigger steps, 8x leverage. Expect materially more turnover and drawdown variance.".into(),
+            description: "Opportunity-rich posture: 4.0 bps hurdle to ensure positive net capture after taker fees, 70th-percentile window, double-way entries, 8x leverage.".into(),
             version: STRATEGY_PRESET_VERSION,
-            target_profit_bps: 1.5,
-            window_percentile: 60,
+            target_profit_bps: 4.0,
+            window_percentile: 70,
             sliding_window_secs: 86_400, // 24h
             execution_mode: "DOUBLE_WAY".into(),
             step_size_mult: 15.0,
@@ -546,11 +552,14 @@ mod preset_tests {
     #[test]
     fn preset_audit_rejects_unknown_id_and_version_drift() {
         let state = AppEngineState::new();
-        let err = record_preset_applied_impl("BTC-USD", "yolo", 1, &state).unwrap_err();
+        let err = record_preset_applied_impl("BTC-USD", "yolo", STRATEGY_PRESET_VERSION, &state)
+            .unwrap_err();
         assert!(err.contains("unknown strategy preset"), "{err}");
         let err = record_preset_applied_impl("BTC-USD", "balanced", 999, &state).unwrap_err();
         assert!(err.contains("version mismatch"), "{err}");
-        let err = record_preset_applied_impl("BTC USD!", "balanced", 1, &state).unwrap_err();
+        let err =
+            record_preset_applied_impl("BTC USD!", "balanced", STRATEGY_PRESET_VERSION, &state)
+                .unwrap_err();
         assert!(err.contains("Invalid market symbol"), "{err}");
     }
 

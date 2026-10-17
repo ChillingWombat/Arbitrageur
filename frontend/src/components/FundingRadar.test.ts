@@ -283,4 +283,79 @@ test("FundingRadar: scanner comment documents 5x2 compact cards", async () => {
   assert.match(source, /Opportunity Scanner — fixed window, 5x2 compact cards, click for details/);
 });
 
+test("FundingRadar: entry orders with net_profit=0 are excluded from completed cycles count", () => {
+  const logs = [
+    // 2 open entries
+    {
+      id: "exec-entry-1",
+      timestamp: new Date().toISOString(),
+      trade_type: "Funding",
+      strategy_id: "funding",
+      symbol: "ETH-USDC",
+      venue_a: "hyperliquid",
+      venue_b: "lighter",
+      leg_a_status: "filled",
+      leg_b_status: "filled",
+      success: true,
+      gross_profit: 0,
+      fees: 0.25,
+      net_profit: 0.0,
+      latency_us: 100,
+      note: "carry entry",
+    },
+    {
+      id: "exec-entry-2",
+      timestamp: new Date().toISOString(),
+      trade_type: "Funding",
+      strategy_id: "funding",
+      symbol: "SOL-USDC",
+      venue_a: "hyperliquid",
+      venue_b: "lighter",
+      leg_a_status: "filled",
+      leg_b_status: "filled",
+      success: true,
+      gross_profit: 0,
+      fees: 0.25,
+      net_profit: 0.0,
+      latency_us: 100,
+      note: "carry entry",
+    },
+    // 1 closed flatten cycle with profit
+    {
+      id: "exec-flatten-1",
+      timestamp: new Date().toISOString(),
+      trade_type: "Flatten",
+      strategy_id: "funding",
+      symbol: "BTC-USDC",
+      venue_a: "hyperliquid",
+      venue_b: "lighter",
+      leg_a_status: "filled",
+      leg_b_status: "filled",
+      success: true,
+      gross_profit: 2.5,
+      fees: 0.5,
+      net_profit: 2.0,
+      latency_us: 150,
+      note: "manual flatten",
+    },
+  ];
+
+  const html = renderToStaticMarkup(
+    React.createElement(FundingRadar, {
+      opportunities: [],
+      tradeSize: 1000,
+      loading: false,
+      executionLogs: logs as any,
+    })
+  );
+
+  // Exactly 1 completed cycle, NOT 3
+  assert.match(html, /1 completed cycles/);
+  // Net profit is $2.00
+  assert.match(html, /\+\$2\.00/);
+  // 100% win rate (1 win / 1 closed cycle), NOT 33%
+  assert.match(html, /100% win/);
+});
+
+
 

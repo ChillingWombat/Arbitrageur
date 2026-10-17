@@ -11,7 +11,19 @@ use tracing::{debug, trace};
 use crate::quote::{FundingRate, OrderBook};
 use crate::types::{Decimal, VenueId};
 
-/// Event dispatched across the Market Data Bus whenever an orderbook or funding rate changes.
+/// Public trade tick ingested from exchange WebSockets.
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
+pub struct PublicTradeEvent {
+    pub timestamp: DateTime<Utc>,
+    pub venue: VenueId,
+    pub symbol: String,
+    pub side: crate::types::Side,
+    pub price: Decimal,
+    pub size: Decimal,
+    pub is_liquidation: bool,
+}
+
+/// Event dispatched across the Market Data Bus whenever an orderbook, funding rate, or trade arrives.
 #[derive(Clone, Serialize, Deserialize, Debug)]
 pub struct MarketUpdateEvent {
     pub timestamp: DateTime<Utc>,
@@ -23,6 +35,7 @@ pub struct MarketUpdateEvent {
     pub mid_price: Option<Decimal>,
     pub spread_bps: Option<Decimal>,
     pub funding_rate_8h: Option<Decimal>,
+    pub trade_event: Option<PublicTradeEvent>,
 }
 
 /// Provenance of a cached orderbook: which ingestion path fed the hub.
@@ -161,6 +174,7 @@ impl MarketDataHub {
             mid_price,
             spread_bps,
             funding_rate_8h: None,
+            trade_event: None,
         };
 
         // Write to thread-safe synchronized cache — keyed on the
@@ -207,6 +221,35 @@ impl MarketDataHub {
                 funding,
             },
         );
+    }
+
+    /// Dispatches a newly ingested public trade tick and broadcasts the update to all subscribed strategies.
+    pub fn update_public_trade(&self, trade: PublicTradeEvent) -> MarketUpdateEvent {
+        let seq = self.sequence_counter.fetch_add(1, Ordering::SeqCst);
+        let event = MarketUpdateEvent {
+            timestamp: trade.timestamp,
+            sequence: seq,
+            venue_id: trade.venue.clone(),
+            symbol: trade.symbol.clone(),
+            best_bid: None,
+            best_ask: None,
+            mid_price: Some(trade.price),
+            spread_bps: None,
+            funding_rate_8h: None,
+            trade_event: Some(trade),
+        };
+
+        let _ = self.broadcaster.send(event.clone());
+        trace!(
+            "MarketDataHub: trade {:?} {} seq={} px={:?} sz={:?}",
+            event.venue_id,
+            event.symbol,
+            seq,
+            event.mid_price,
+            event.trade_event.as_ref().map(|t| t.size)
+        );
+
+        event
     }
 
     /// Retrieve the latest cached orderbook for a specific venue and symbol.

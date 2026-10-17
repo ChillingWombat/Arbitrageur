@@ -30,14 +30,14 @@ Audit and unify all dashboard gadgets and modal windows (e.g., `*Gadget.tsx`, `*
 Investigate why automated trading bots (Radar, Spatial Arbitrage, Triangular Arbitrage, StatArb, Basis) are not achieving positive returns, and optimize their execution on testnet:
 - Re-evaluate hurdle rates, slippage modeling, fee structures, and gas/network transaction costs to ensure bots only trigger trades with positive net expected value.
 - Inspect and fix quote freshness, funding accrual attribution, and qualification criteria.
-- Test against live testnet venues using vault unlock password `<redacted>` to verify reliable, profitable paper/testnet trade execution.
+- Test against live testnet venues using vault unlock password `<redacted — see SECURITY.md>` to verify reliable, profitable paper/testnet trade execution.
 
 ## Verification Resources
 - Desktop backend test suite: `cargo test -p arbitrageur-desktop`
 - Frontend test suite: `cd frontend && npm test`
 - Rust linting & formatting: `cargo clippy --all-targets` and `cargo fmt --check`
 - Local dev RPC socket: `/tmp/arb-dev.sock` for live status inspection (`open_positions`, `external_positions`, `system_status`)
-- Testnet environment credentials unlocked via password: `<redacted>`
+- Testnet environment credentials unlocked via password: `<redacted — see SECURITY.md>`
 
 ## Acceptance Criteria
 

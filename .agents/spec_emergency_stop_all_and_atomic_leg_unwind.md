@@ -130,4 +130,4 @@ Tests verify observable external behavior and mathematical invariants rather tha
 - The fix for the shared-symbol dust evaluation was verified in `execution.rs` and compiled into the live release binary.
 - All 605 backend tests and all frontend unit tests pass cleanly.
 - The release binary runs as a transient user service managed via `systemctl --user restart arbitrageur-testnet.service`.
-- In testnet mode, the credential vault master password is set to `<redacted>`.
+- In testnet mode, the credential vault master password is set to `<redacted — see SECURITY.md>`.
