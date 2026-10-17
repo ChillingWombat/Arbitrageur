@@ -19,6 +19,7 @@ import {
   evaluateSpreadTollGate,
   calculateOneWayExitFriction,
   classifyOptionsPremiumCashflow,
+  devRpcEndpoint,
   type ToggleSwitchProps,
 } from "./test_helpers.ts";
 
@@ -99,7 +100,7 @@ describe("Tier 1: Feature Coverage — Isolated Happy-Path Validation", () => {
   // =========================================================================
   describe("Feature R2: 'Stop All' Emergency Shutdown & Flatten Overhaul", () => {
     let mockServer: MockDevRpcServer;
-    const testSocket = "/tmp/test-arb-stop-all-t1.sock";
+    const testSocket = devRpcEndpoint("stop-all-t1");
 
     before(async () => {
       mockServer = new MockDevRpcServer(testSocket);
@@ -333,7 +334,7 @@ describe("Tier 1: Feature Coverage — Isolated Happy-Path Validation", () => {
     });
 
     it("T1.R4.6: Testnet Vault Authentication — Accepts password 'test-only-vault-pw' for testnet operations", async () => {
-      const testSocket = "/tmp/test-arb-vault-t1.sock";
+      const testSocket = devRpcEndpoint("vault-t1");
       const server = new MockDevRpcServer(testSocket);
       await server.start();
       try {

@@ -17,11 +17,12 @@ import {
   MockDevRpcServer,
   sendDevRpc,
   evaluateSpreadTollGate,
+  devRpcEndpoint,
 } from "./test_helpers.ts";
 
 describe("Tier 3: Cross-Feature Combinations — Pairwise Subsystem Interactions", () => {
   let mockServer: MockDevRpcServer;
-  const testSocket = "/tmp/test-arb-cross-t3.sock";
+  const testSocket = devRpcEndpoint("cross-t3");
 
   before(async () => {
     mockServer = new MockDevRpcServer(testSocket);

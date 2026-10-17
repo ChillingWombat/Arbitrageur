@@ -172,6 +172,20 @@ fn verify_signer_digest(
 /// The flag marks the explicit `LIGHTER_SIGNER_LIB` override, which
 /// `load_library` verifies against `LIGHTER_SIGNER_SHA256` instead of the
 /// approved constant and never falls back from.
+/// Platform-native file name for the vendored signer library. The digest
+/// check makes the name cosmetic for *which* bytes load, but a wrong
+/// extension means the sidecar candidate never resolves on non-Linux
+/// targets, so the loader must look for the file the OS actually uses.
+fn signer_lib_filename() -> &'static str {
+    if cfg!(target_os = "macos") {
+        "liblighter_signer.dylib"
+    } else if cfg!(target_os = "windows") {
+        "lighter_signer.dll"
+    } else {
+        "liblighter_signer.so"
+    }
+}
+
 fn candidate_lib_paths() -> Vec<(PathBuf, bool)> {
     let mut out = Vec::new();
     if let Ok(p) = std::env::var("LIGHTER_SIGNER_LIB") {
@@ -181,11 +195,13 @@ fn candidate_lib_paths() -> Vec<(PathBuf, bool)> {
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            out.push((dir.join("liblighter_signer.so"), false));
+            out.push((dir.join(signer_lib_filename()), false));
         }
     }
     out.push((
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("native/lighter/liblighter_signer.so"),
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("native/lighter")
+            .join(signer_lib_filename()),
         false,
     ));
     out
@@ -231,8 +247,9 @@ fn load_library() -> anyhow::Result<libloading::Library> {
         }
     }
     anyhow::bail!(
-        "Lighter signer library not found; tried {}. Set LIGHTER_SIGNER_LIB or ship liblighter_signer.so next to the binary",
-        tried.join(", ")
+        "Lighter signer library not found; tried {}. Set LIGHTER_SIGNER_LIB or ship {} next to the binary",
+        tried.join(", "),
+        signer_lib_filename()
     )
 }
 
@@ -563,6 +580,11 @@ fn shared_lib() -> anyhow::Result<&'static LoadedLib> {
         .map_err(|e| anyhow::anyhow!("{e:#}"))
 }
 
+// Every test here loads or hashes the vendored Linux `.so`, which is the
+// only platform the signer is published for. Gate the module so a
+// `cargo test` on macOS/Windows stays green instead of failing to find a
+// library that was never shipped for those targets.
+#[cfg(target_os = "linux")]
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -6,6 +6,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import net from "node:net";
+import os from "node:os";
 
 export interface EmergencyShutdownReportDto {
   circuit_breaker_tripped: boolean;
@@ -130,6 +131,35 @@ export function parseAuditReport(filePath: string): {
 }
 
 /**
+ * True when a dev-RPC endpoint names a filesystem socket file (POSIX) as
+ * opposed to a Windows named pipe. Only filesystem endpoints need the
+ * `unlink` bookkeeping in the mock server.
+ */
+export function isFilesystemSocket(endpoint: string): boolean {
+  return !endpoint.startsWith("\\\\.\\pipe\\");
+}
+
+/**
+ * Cross-platform dev-RPC endpoint address for the mock server.
+ *
+ * Node's `net` serves Unix domain sockets on POSIX and named pipes on
+ * Windows, so `createServer`/`createConnection` work unchanged on both —
+ * only the address form differs. The suite previously hard-coded
+ * `/tmp/test-arb-*.sock`, which fails with EACCES on Windows and turned
+ * the whole E2E run red; derive the endpoint per platform instead.
+ */
+export function devRpcEndpoint(name: string): string {
+  if (process.platform === "win32") {
+    // Windows named pipe `\\.\pipe\<name>`. Pipe names accept alphanumerics
+    // plus a few punctuation marks — sanitise defensively.
+    return `\\\\.\\pipe\\arb-e2e-${name.replace(/[^A-Za-z0-9_-]/g, "-")}`;
+  }
+  // os.tmpdir() rather than a literal /tmp: TMPDIR-respecting on macOS and
+  // correct under Windows-style temp roots on POSIX.
+  return path.join(os.tmpdir(), `test-arb-${name}.sock`);
+}
+
+/**
  * Mock Dev RPC Server for isolated, self-contained E2E testing
  */
 export class MockDevRpcServer {
@@ -157,7 +187,7 @@ export class MockDevRpcServer {
       external_positions: [],
     };
 
-    if (fs.existsSync(socketPath)) {
+    if (isFilesystemSocket(socketPath) && fs.existsSync(socketPath)) {
       try {
         fs.unlinkSync(socketPath);
       } catch {}
@@ -195,7 +225,9 @@ export class MockDevRpcServer {
   public stop(): Promise<void> {
     return new Promise((resolve) => {
       this.server.close(() => {
-        if (fs.existsSync(this.socketPath)) {
+        // A Windows named pipe dies with the server handle — there is no
+        // file to remove, and `fs.existsSync` on a pipe path is meaningless.
+        if (isFilesystemSocket(this.socketPath) && fs.existsSync(this.socketPath)) {
           try {
             fs.unlinkSync(this.socketPath);
           } catch {}

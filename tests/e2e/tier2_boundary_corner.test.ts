@@ -11,6 +11,7 @@ import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
+import os from "node:os";
 import {
   parseAuditReport,
   MockDevRpcServer,
@@ -19,6 +20,7 @@ import {
   evaluateSpreadTollGate,
   calculateOneWayExitFriction,
   classifyOptionsPremiumCashflow,
+  devRpcEndpoint,
 } from "./test_helpers.ts";
 
 const REPO_ROOT = path.resolve(".");
@@ -75,7 +77,9 @@ describe("Tier 2: Boundary & Corner Cases", () => {
     });
 
     it("T2.R1.5: Malformed Document Resilience — Parser handles empty or truncated files without crash", () => {
-      const tempAudit = path.join("/tmp", `test-audit-${Date.now()}.md`);
+      // os.tmpdir() — a literal /tmp does not exist on Windows and the
+      // write below fails with ENOENT, taking the tier down with it.
+      const tempAudit = path.join(os.tmpdir(), `test-audit-${Date.now()}.md`);
       try {
         fs.writeFileSync(tempAudit, "# Incomplete Audit\n\nSome introductory text with no table.");
         const result = parseAuditReport(tempAudit);
@@ -92,7 +96,7 @@ describe("Tier 2: Boundary & Corner Cases", () => {
   // =========================================================================
   describe("Feature R2: 'Stop All' Boundary & Corner Cases", () => {
     let mockServer: MockDevRpcServer;
-    const testSocket = "/tmp/test-arb-stop-all-t2.sock";
+    const testSocket = devRpcEndpoint("stop-all-t2");
 
     before(async () => {
       mockServer = new MockDevRpcServer(testSocket);

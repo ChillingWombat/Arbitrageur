@@ -1,12 +1,18 @@
 name: release
 
 # Tag-triggered release pipeline (review §M-9): pushing a `v*` tag builds
-# the actual trading binary (arbitrageur-desktop with the custom-protocol
-# feature — the same artifact AGENTS.md prescribes for production), the
-# headless CLI, and the digest-pinned Lighter signer sidecar; packages
-# them with SHA-256 checksums and a CycloneDX SBOM; and publishes a
-# GitHub release. All inputs are pinned (toolchain, --locked deps,
-# actions) so the artifacts are reproducible by re-running the job.
+# the desktop app as a real installer on every supported desktop OS, the
+# headless CLI, and the digest-pinned Lighter signer sidecar; packages them
+# with SHA-256 checksums and a CycloneDX SBOM; and publishes a GitHub
+# release. All inputs are pinned (toolchain, --locked deps, actions) so the
+# artifacts are reproducible by re-running the job.
+#
+# Cross-platform scope: the desktop matrix runs on Linux, Windows and macOS
+# because `bundle.active` is on and `bundle.targets` is "all" — each host
+# emits every installer format it supports (nsis/msi on Windows, dmg/app on
+# macOS, deb/rpm/appimage on Linux). The Lighter signer is a Linux-only
+# `.so`, so its digest gate and the systemd/ops headless tarball stay on the
+# Linux job.
 on:
   push:
     tags:
@@ -18,11 +24,28 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_TOOLCHAIN: "1.96.0"
+  # The signer digest is asserted in two jobs — keep one source of truth.
+  LIGHTER_SIGNER_SHA256: "8cb2fbcadab0b9b3fed4a524998b825818b677fcf9c49bc1f18b4ca02a233753"
 
 jobs:
-  build-release:
-    name: Build + publish release artifacts
-    runs-on: ubuntu-latest
+  desktop:
+    name: Desktop installer (${{ matrix.asset_name }})
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        # Git Bash is present on every runner image; one shell for all three
+        # OSes keeps the staging logic identical instead of forking it per OS.
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset_name: linux-x86_64
+          - os: windows-latest
+            asset_name: windows-x86_64
+          - os: macos-latest
+            asset_name: macos-aarch64
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -37,78 +60,187 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Install Tauri/Linux build dependencies
+      - name: Install Tauri Linux build dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev libdbus-1-dev
 
-      - name: Build frontend bundle (embedded by the desktop binary)
-        run: npm ci && npm run build
+      - name: Install frontend dependencies
         working-directory: frontend
+        run: npm ci
 
-      - name: Build trading binary (custom-protocol)
-        run: cargo build --release --locked -p arbitrageur-desktop --features custom-protocol
+      - name: Build desktop bundles
+        # `tauri build` runs beforeBuildCommand (tsc && vite build), compiles
+        # the desktop crate with custom-protocol, then packages every format
+        # the host supports. Output lands in frontend/src-tauri/target/release/bundle/.
+        working-directory: frontend
+        run: npm run tauri build
+
+      - name: Verify Lighter signer sidecar digest (Linux only)
+        # The build script copies the vendored signer beside the binary; a
+        # missing or non-approved sidecar silently drops Lighter out of
+        # deployed builds, so refuse to ship rather than discover it on a host.
+        if: runner.os == 'Linux'
+        run: |
+          test -f frontend/src-tauri/target/release/liblighter_signer.so
+          echo "$LIGHTER_SIGNER_SHA256  frontend/src-tauri/target/release/liblighter_signer.so" \
+            | sha256sum --check --status
+
+      - name: Stage desktop installers
+        run: |
+          set -euo pipefail
+          bundle="frontend/src-tauri/target/release/bundle"
+          mkdir -p "$GITHUB_WORKSPACE/pkg"
+          # Only the packaged installers — never the exploded `macos/*.app`
+          # tree, which would otherwise upload hundreds of loose files as
+          # individual release assets.
+          found=0
+          for f in "$bundle"/*/*.AppImage "$bundle"/*/*.deb "$bundle"/*/*.rpm \
+                   "$bundle"/*/*.dmg "$bundle"/*/*.exe "$bundle"/*/*.msi; do
+            [ -f "$f" ] || continue
+            cp -a "$f" "$GITHUB_WORKSPACE/pkg/"
+            found=1
+          done
+          if [ "$found" -ne 1 ]; then
+            echo "::error::no installer produced under $bundle"
+            find "$bundle" -maxdepth 2 2>/dev/null | head -50
+            exit 1
+          fi
+          ls -la "$GITHUB_WORKSPACE/pkg"
+
+      - name: Upload desktop installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: desktop-${{ matrix.asset_name }}
+          path: pkg/
+          if-no-files-found: error
+
+  headless:
+    name: Headless CLI + ops tree (linux-x86_64)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
 
       - name: Build headless CLI
         run: cargo build --release --locked --bin arbitrageur
 
       - name: Verify Lighter signer sidecar digest
-        # The build scripts copy the vendored signer beside each binary;
-        # refuse to ship if the sidecar is missing or not the approved
-        # byte stream.
         run: |
           test -f target/release/liblighter_signer.so
-          echo "8cb2fbcadab0b9b3fed4a524998b825818b677fcf9c49bc1f18b4ca02a233753  target/release/liblighter_signer.so" \
+          echo "$LIGHTER_SIGNER_SHA256  target/release/liblighter_signer.so" \
             | sha256sum --check --status
+
+      - name: Stage headless tarball
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          stage="$GITHUB_WORKSPACE/stage-headless"
+          mkdir -p "$stage/bin" "$stage/opt"
+          install -m 0755 target/release/arbitrageur "$stage/bin/"
+          install -m 0755 target/release/liblighter_signer.so "$stage/bin/"
+          # Deploy recipe resolves scripts under /opt/arbitrageur/ops.
+          cp -a ops "$stage/opt/"
+          mkdir -p "$GITHUB_WORKSPACE/pkg"
+          tar -C "$stage" -czf "$GITHUB_WORKSPACE/pkg/arbitrageur-headless-${TAG}-linux-x86_64.tar.gz" bin opt
+
+      - name: Upload headless tarball
+        uses: actions/upload-artifact@v4
+        with:
+          name: headless-linux-x86_64
+          path: pkg/
+          if-no-files-found: error
+
+  sbom:
+    name: CycloneDX SBOM
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
 
       - name: Install cargo-sbom (pinned)
         run: cargo install cargo-sbom --locked --version 0.9.1
 
       - name: Generate SBOM
         run: |
-          mkdir -p "$GITHUB_WORKSPACE/dist"
-          cargo sbom --output-format=cyclone_dx_json_1_6 > "$GITHUB_WORKSPACE/dist/sbom.cdx.json"
+          mkdir -p "$GITHUB_WORKSPACE/pkg"
+          cargo sbom --output-format=cyclone_dx_json_1_6 > "$GITHUB_WORKSPACE/pkg/sbom.cdx.json"
 
-      - name: Stage artifacts
-        env:
-          TAG: ${{ github.ref_name }}
+      - name: Upload SBOM
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbom
+          path: pkg/sbom.cdx.json
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub release
+    needs: [desktop, headless, sbom]
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Flatten and checksum
         run: |
           set -euo pipefail
-          dist="$GITHUB_WORKSPACE/dist"
-          mkdir -p "$dist/pkg"
-
-          # Trading binary + its mandatory signer sidecar.
-          stage="$dist/stage-desktop"
-          mkdir -p "$stage"
-          install -m 0755 target/release/arbitrageur-desktop "$stage/"
-          install -m 0755 target/release/liblighter_signer.so "$stage/"
-          tar -C "$stage" -czf "$dist/pkg/arbitrageur-desktop-${TAG}-linux-x86_64.tar.gz" .
-
-          # Headless CLI + sidecar + ops tree (deploy recipe resolves
-          # scripts under /opt/arbitrageur/ops).
-          stage="$dist/stage-headless"
-          mkdir -p "$stage/bin" "$stage/opt"
-          install -m 0755 target/release/arbitrageur "$stage/bin/"
-          install -m 0755 target/release/liblighter_signer.so "$stage/bin/"
-          cp -a ops "$stage/opt/"
-          tar -C "$stage" -czf "$dist/pkg/arbitrageur-headless-${TAG}-linux-x86_64.tar.gz" bin opt
-
-      - name: Checksums
-        run: |
-          cd dist/pkg
-          sha256sum *.tar.gz | tee SHA256SUMS.txt
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          # SBOM first, at its canonical name — the checksum step depends on it.
+          cp -a artifacts/sbom/sbom.cdx.json "$GITHUB_WORKSPACE/dist/sbom.cdx.json"
+          # Prefix every installer with its platform so a release page holding
+          # three OSes is unambiguous (e.g. desktop-windows-x86_64__Arbitrageur_0.1.0_x64-setup.exe).
+          for d in artifacts/desktop-* artifacts/headless-*; do
+            [ -d "$d" ] || continue
+            platform="$(basename "$d")"
+            while IFS= read -r -d '' f; do
+              rel="${f#"$d"/}"
+              flat="$(printf '%s' "$rel" | tr '/' '__')"
+              cp -a "$f" "$GITHUB_WORKSPACE/dist/${platform}__${flat}"
+            done < <(find "$d" -type f -print0)
+          done
           cd "$GITHUB_WORKSPACE/dist"
+          sha256sum * > SHA256SUMS.txt
           sha256sum sbom.cdx.json > sbom.cdx.json.sha256
+          ls -la
 
       - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
+          # Kept as a YAML block scalar instead of an inline multi-line shell
+          # string: the latter breaks the `run:` block-scalar indentation and
+          # makes the whole workflow unparseable.
+          RELEASE_NOTES: |
+            Automated cross-platform release build.
+
+            - **Desktop installers** — Windows (NSIS), macOS (dmg), Linux (AppImage / .deb / .rpm), each built natively on its own host OS.
+            - **arbitrageur-headless** — CLI + ops tree + the digest-pinned Lighter signer sidecar (Linux). Deploy per `ops/deploy/README.md`.
+
+            The Lighter signer is a Linux-only `.so`: it is shipped and digest-verified in the Linux artifacts only. Verify every download against `SHA256SUMS.txt`.
         run: |
+          # dist/* rather than per-extension globs: an unmatched glob would be
+          # passed through literally and fail the upload on any OS whose
+          # format set changes.
           gh release create "$TAG" \
             --title "Arbitrageur $TAG" \
-            --notes "Automated release build. Artifacts: arbitrageur-desktop (Tauri trading binary, custom-protocol) and arbitrageur-headless (CLI + ops tree). Both tarballs include the digest-pinned Lighter signer sidecar; verify with SHA256SUMS.txt. Deploy per ops/deploy/README.md." \
-            dist/pkg/*.tar.gz \
-            dist/pkg/SHA256SUMS.txt \
-            dist/sbom.cdx.json \
-            dist/sbom.cdx.json.sha256
+            --notes "$RELEASE_NOTES" \
+            dist/*

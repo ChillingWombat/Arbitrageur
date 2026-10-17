@@ -18,11 +18,12 @@ import {
   evaluateConvergenceExit,
   evaluateSpreadTollGate,
   calculateOneWayExitFriction,
+  devRpcEndpoint,
 } from "./test_helpers.ts";
 
 describe("Tier 4: Real-World Application Scenarios", () => {
   let mockServer: MockDevRpcServer;
-  const testSocket = "/tmp/test-arb-scenarios-t4.sock";
+  const testSocket = devRpcEndpoint("scenarios-t4");
 
   before(async () => {
     mockServer = new MockDevRpcServer(testSocket);

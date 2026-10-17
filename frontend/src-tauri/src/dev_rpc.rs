@@ -1,4 +1,5 @@
-//! Dev-only JSON bridge over a Unix socket for hands-on testing.
+//! Dev-only JSON bridge for hands-on testing: a Unix domain socket on unix
+//! targets, an ephemeral loopback TCP port elsewhere.
 //!
 //! Enabled only when `ARBITRAGEUR_DEV_SOCK` names a socket path — a complete
 //! no-op otherwise (no listener, no surface in production launches). Each
@@ -8,98 +9,161 @@
 //! the UI paths bit-for-bit.
 //!
 //! Security posture: this bridge carries full execution authority (order
-//! submission, flatten, circuit-breaker reset, env switch). The socket file
-//! is chmod 0600 immediately after bind, and on Linux every accepted
-//! connection is additionally checked against the socket owner's uid via
-//! SO_PEERCRED — connections from other local users are rejected even if
-//! they win the bind→chmod race. It is a single-operator tool, never an
-//! open local IPC surface.
+//! submission, flatten, circuit-breaker reset, env switch). On unix the
+//! socket file is chmod 0600 immediately after bind, and on Linux every
+//! accepted connection is additionally checked against the socket owner's
+//! uid via SO_PEERCRED — connections from other local users are rejected
+//! even if they win the bind→chmod race. Non-unix targets have no
+//! filesystem sockets, so the same line protocol is served over an
+//! ephemeral 127.0.0.1 TCP port (see `serve_loopback`), which is
+//! loopback-only by construction but has no peer-identity equivalent —
+//! keep `ARBITRAGEUR_DEV_SOCK` unset outside single-operator dev boxes. It
+//! is a single-operator tool, never an open local IPC surface.
 
 use crate::state::AppEngineState;
 use serde_json::{json, Value};
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::{UnixListener, UnixStream};
+
+/// Accepted connection type. Unix keeps the filesystem socket; elsewhere
+/// (Windows) the bridge falls back to loopback TCP — see module docs.
+#[cfg(unix)]
+type DevStream = tokio::net::UnixStream;
+#[cfg(not(unix))]
+type DevStream = tokio::net::TcpStream;
 
 pub fn maybe_spawn(state: Arc<AppEngineState>) {
     let Some(path) = std::env::var_os("ARBITRAGEUR_DEV_SOCK") else {
         return;
     };
     let path = std::path::PathBuf::from(path);
-    let _ = std::fs::remove_file(&path);
     tauri::async_runtime::spawn(async move {
-        match UnixListener::bind(&path) {
-            Ok(listener) => {
-                // Execution-authority surface: restrict the socket to the
-                // launching user. The chmod narrows the bind→serve race
-                // window; the per-connection peer-uid check below closes it.
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    if let Err(e) =
-                        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
-                    {
-                        tracing::error!(
-                            "dev rpc: cannot restrict {} to 0600 ({e}) — refusing to serve",
-                            path.display()
-                        );
-                        return;
-                    }
-                }
-                #[cfg(target_os = "linux")]
-                let owner_uid: u32 = {
-                    use std::os::unix::fs::MetadataExt;
-                    match std::fs::metadata(&path) {
-                        Ok(m) => m.uid(),
-                        // Fail closed: u32::MAX matches no real uid, so every
-                        // peer-uid check below rejects rather than admits.
-                        Err(_) => u32::MAX,
-                    }
-                };
-                tracing::info!("dev rpc: listening on {}", path.display());
-                loop {
-                    match listener.accept().await {
-                        Ok((stream, _)) => {
-                            #[cfg(target_os = "linux")]
-                            {
-                                match stream.peer_cred() {
-                                    Ok(cred) if cred.uid() == owner_uid => {}
-                                    Ok(cred) => {
-                                        tracing::warn!(
-                                            "dev rpc: rejected connection from uid {} (socket owner uid {})",
-                                            cred.uid(),
-                                            owner_uid
-                                        );
-                                        continue;
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!(
-                                            "dev rpc: peer credential check failed ({e}) — connection rejected"
-                                        );
-                                        continue;
-                                    }
-                                }
-                            }
-                            let st = state.clone();
-                            tauri::async_runtime::spawn(async move {
-                                if let Err(e) = handle_conn(stream, st).await {
-                                    tracing::warn!("dev rpc: connection error: {e}");
-                                }
-                            });
-                        }
-                        Err(e) => {
-                            tracing::warn!("dev rpc: accept failed: {e}");
-                            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
-                        }
-                    }
-                }
-            }
-            Err(e) => tracing::warn!("dev rpc: bind {} failed: {e}", path.display()),
+        #[cfg(unix)]
+        serve_unix(path, state).await;
+        #[cfg(not(unix))]
+        serve_loopback(path, state).await;
+    });
+}
+
+fn spawn_conn(stream: DevStream, state: Arc<AppEngineState>) {
+    tauri::async_runtime::spawn(async move {
+        if let Err(e) = handle_conn(stream, state).await {
+            tracing::warn!("dev rpc: connection error: {e}");
         }
     });
 }
 
-async fn handle_conn(stream: UnixStream, state: Arc<AppEngineState>) -> std::io::Result<()> {
+#[cfg(unix)]
+async fn serve_unix(path: std::path::PathBuf, state: Arc<AppEngineState>) {
+    use tokio::net::UnixListener;
+    let _ = std::fs::remove_file(&path);
+    match UnixListener::bind(&path) {
+        Ok(listener) => {
+            // Execution-authority surface: restrict the socket to the
+            // launching user. The chmod narrows the bind→serve race
+            // window; the per-connection peer-uid check below closes it.
+            use std::os::unix::fs::PermissionsExt;
+            if let Err(e) = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            {
+                tracing::error!(
+                    "dev rpc: cannot restrict {} to 0600 ({e}) — refusing to serve",
+                    path.display()
+                );
+                return;
+            }
+            #[cfg(target_os = "linux")]
+            let owner_uid: u32 = {
+                use std::os::unix::fs::MetadataExt;
+                match std::fs::metadata(&path) {
+                    Ok(m) => m.uid(),
+                    // Fail closed: u32::MAX matches no real uid, so every
+                    // peer-uid check below rejects rather than admits.
+                    Err(_) => u32::MAX,
+                }
+            };
+            tracing::info!("dev rpc: listening on {}", path.display());
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _)) => {
+                        #[cfg(target_os = "linux")]
+                        {
+                            match stream.peer_cred() {
+                                Ok(cred) if cred.uid() == owner_uid => {}
+                                Ok(cred) => {
+                                    tracing::warn!(
+                                        "dev rpc: rejected connection from uid {} (socket owner uid {})",
+                                        cred.uid(),
+                                        owner_uid
+                                    );
+                                    continue;
+                                }
+                                Err(e) => {
+                                    tracing::warn!(
+                                        "dev rpc: peer credential check failed ({e}) — connection rejected"
+                                    );
+                                    continue;
+                                }
+                            }
+                        }
+                        spawn_conn(stream, state.clone());
+                    }
+                    Err(e) => {
+                        tracing::warn!("dev rpc: accept failed: {e}");
+                        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                    }
+                }
+            }
+        }
+        Err(e) => tracing::warn!("dev rpc: bind {} failed: {e}", path.display()),
+    }
+}
+
+/// Non-unix transport: an ephemeral loopback TCP port. `path` is only used
+/// as the anchor for the port file (`<path>.port`), which the client reads
+/// to discover the port — there is no socket file to create.
+#[cfg(not(unix))]
+async fn serve_loopback(path: std::path::PathBuf, state: Arc<AppEngineState>) {
+    use tokio::net::TcpListener;
+    // Fail closed on every ambiguity: no port published → nothing can
+    // connect, rather than a bridge serving on an unknown port.
+    let listener = match TcpListener::bind("127.0.0.1:0").await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::warn!("dev rpc: loopback bind failed: {e}");
+            return;
+        }
+    };
+    let port = match listener.local_addr() {
+        Ok(a) => a.port(),
+        Err(e) => {
+            tracing::warn!("dev rpc: cannot resolve loopback port ({e}) — refusing to serve");
+            return;
+        }
+    };
+    let port_file = path.with_extension("port");
+    if let Err(e) = std::fs::write(&port_file, port.to_string()) {
+        tracing::warn!(
+            "dev rpc: cannot publish port to {} ({e}) — refusing to serve",
+            port_file.display()
+        );
+        return;
+    }
+    tracing::warn!(
+        "dev rpc: listening on 127.0.0.1:{port} (port published at {}) — loopback only, no peer-identity check",
+        port_file.display()
+    );
+    loop {
+        match listener.accept().await {
+            Ok((stream, _peer)) => spawn_conn(stream, state.clone()),
+            Err(e) => {
+                tracing::warn!("dev rpc: accept failed: {e}");
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+        }
+    }
+}
+
+async fn handle_conn(stream: DevStream, state: Arc<AppEngineState>) -> std::io::Result<()> {
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
     while let Some(line) = lines.next_line().await? {

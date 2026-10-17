@@ -2020,41 +2020,44 @@ pub async fn execute_options_package_impl(
     }
 
     if !cycle_complete {
-        record_execution_log(state, ExecutionLogEntry {
-            id: format!("exec-opkg-{cycle}"),
-            timestamp: Utc::now().to_rfc3339(),
-            trade_type: format!("OptionsPackage:{}", params.substrategy_id),
-            strategy_id: attributed.clone(),
-            symbol: direction.clone(),
-            venue_a: "deribit".into(),
-            venue_b: "deribit".into(),
-            leg_a_status: format!("{}/{} legs filled", fills.len(), n_legs),
-            leg_b_status: leg_error.clone().unwrap_or_default(),
-            success: false,
-            gross_profit: 0.0,
-            fees: fee_total_f,
-            net_profit: -fee_total_f,
-            latency_us,
-            note: format!(
-                "Options package {tag} PARTIAL: {}. {}",
-                leg_error.clone().unwrap_or_default(),
-                if leg_signal_ids.is_empty() {
-                    // Blocked combo path: nothing was recorded, so there is no
-                    // ledger residue to flatten — but the venue side may hold
-                    // fills nobody priced.
-                    "No per-leg signals were recorded — verify venue-side orders/positions for these instruments before retrying."
-                } else {
-                    "Residual legs recorded as imbalanced '{strategy_id}' signals — flatten each instrument to unwind."
-                }
-            ),
-            direction: Some(direction.clone()),
-            trigger_spread_bps: Some(opp.edge_bps),
-            baseline_mean_spread_bps: None,
-            position_step: None,
-            max_units: None,
-            nominal_hurdle_bps: params.min_edge_bps,
-            is_live: state.is_live(),
-        });
+        record_execution_log(
+            state,
+            ExecutionLogEntry {
+                id: format!("exec-opkg-{cycle}"),
+                timestamp: Utc::now().to_rfc3339(),
+                trade_type: format!("OptionsPackage:{}", params.substrategy_id),
+                strategy_id: attributed.clone(),
+                symbol: direction.clone(),
+                venue_a: "deribit".into(),
+                venue_b: "deribit".into(),
+                leg_a_status: format!("{}/{} legs filled", fills.len(), n_legs),
+                leg_b_status: leg_error.clone().unwrap_or_default(),
+                success: false,
+                gross_profit: 0.0,
+                fees: fee_total_f,
+                net_profit: -fee_total_f,
+                latency_us,
+                note: format!(
+                    "Options package {tag} PARTIAL: {}. {}",
+                    leg_error.clone().unwrap_or_default(),
+                    if leg_signal_ids.is_empty() {
+                        // Blocked combo path: nothing was recorded, so there is no
+                        // ledger residue to flatten — but the venue side may hold
+                        // fills nobody priced.
+                        "No per-leg signals were recorded — verify venue-side orders/positions for these instruments before retrying."
+                    } else {
+                        "Residual legs recorded as imbalanced '{strategy_id}' signals — flatten each instrument to unwind."
+                    }
+                ),
+                direction: Some(direction.clone()),
+                trigger_spread_bps: Some(opp.edge_bps),
+                baseline_mean_spread_bps: None,
+                position_step: None,
+                max_units: None,
+                nominal_hurdle_bps: params.min_edge_bps,
+                is_live: state.is_live(),
+            },
+        );
         return Err(format!(
             "Options package {tag} PARTIAL ({}/{} legs): {}; {}",
             fills.len(),
