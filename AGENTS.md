@@ -82,6 +82,12 @@
 - Ledger: `sqlite3 ~/.arbitrageur/state.sqlite3` — `signal_executions`,
   `signal_legs`, `monitor_signal_events` (bot_decision `economics_json`
   carries `skipReason`), `exchange_accounts`, `account_equity_events`.
+- **Testnet vault password: never commit it.** It is supplied out-of-band by
+  the operator (on the dev host it lives in `.workbuddy/memory/`, which is
+  gitignored). Do not write it into specs, reports, issue bodies, commit
+  messages, or logs. A 2026-10-17 history rewrite removed an earlier leak —
+  do not recreate it. Test fixtures must use a clearly-fake password
+  (`test-only-vault-pw`), never the operational one.
 - Lighter testnet reaps accounts silently — an account index that worked
   yesterday can `400 not found` today. A disabled or non-default
   `exchange_accounts` row means the adapter binds no credentials: the
