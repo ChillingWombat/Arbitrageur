@@ -36,7 +36,15 @@ jobs:
 
       - name: Install pinned Rust toolchain
         run: |
-          rustup toolchain install 1.96.0 --profile minimal --component rustfmt --component clippy
+          # rustup's download is a plain curl under the hood: a slow mirror
+          # fails the whole job with exit 101 after a 30 s stall. Retry it
+          # here rather than re-running the job by hand.
+          for attempt in 1 2 3; do
+            rustup toolchain install 1.96.0 --profile minimal --component rustfmt --component clippy && break
+            echo "rustup install attempt $attempt failed; retrying in 10s" >&2
+            sleep 10
+          done
+          rustup run 1.96.0 rustc --version
           rustup default 1.96.0
 
       - name: Install Tauri system dependencies
@@ -95,7 +103,15 @@ jobs:
 
       - name: Install pinned Rust toolchain
         run: |
-          rustup toolchain install 1.96.0 --profile minimal
+          # rustup's download is a plain curl under the hood: a slow mirror
+          # fails the whole job with exit 101 after a 30 s stall. Retry it
+          # here rather than re-running the job by hand.
+          for attempt in 1 2 3; do
+            rustup toolchain install 1.96.0 --profile minimal && break
+            echo "rustup install attempt $attempt failed; retrying in 10s" >&2
+            sleep 10
+          done
+          rustup run 1.96.0 rustc --version
           rustup default 1.96.0
 
       - name: Install Tauri system dependencies
@@ -129,7 +145,15 @@ jobs:
 
       - name: Install pinned Rust toolchain
         run: |
-          rustup toolchain install 1.96.0 --profile minimal
+          # rustup's download is a plain curl under the hood: a slow mirror
+          # fails the whole job with exit 101 after a 30 s stall. Retry it
+          # here rather than re-running the job by hand.
+          for attempt in 1 2 3; do
+            rustup toolchain install 1.96.0 --profile minimal && break
+            echo "rustup install attempt $attempt failed; retrying in 10s" >&2
+            sleep 10
+          done
+          rustup run 1.96.0 rustc --version
           rustup default 1.96.0
 
       - name: Install Tauri Linux build dependencies
@@ -209,7 +233,16 @@ jobs:
           fetch-depth: 0
 
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.96.0 --profile minimal
+        run: |
+          # rustup's download is a plain curl under the hood: a slow mirror
+          # fails the whole job with exit 101 after a 30 s stall. Retry it
+          # here rather than re-running the job by hand.
+          for attempt in 1 2 3; do
+            rustup toolchain install 1.96.0 --profile minimal && break
+            echo "rustup install attempt $attempt failed; retrying in 10s" >&2
+            sleep 10
+          done
+          rustup run 1.96.0 rustc --version
 
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked --version 0.22.2
@@ -230,7 +263,16 @@ jobs:
         uses: actions/checkout@v7
 
       - name: Install pinned Rust toolchain
-        run: rustup toolchain install 1.96.0 --profile minimal
+        run: |
+          # rustup's download is a plain curl under the hood: a slow mirror
+          # fails the whole job with exit 101 after a 30 s stall. Retry it
+          # here rather than re-running the job by hand.
+          for attempt in 1 2 3; do
+            rustup toolchain install 1.96.0 --profile minimal && break
+            echo "rustup install attempt $attempt failed; retrying in 10s" >&2
+            sleep 10
+          done
+          rustup run 1.96.0 rustc --version
 
       - name: Build headless binary
         run: cargo build --release --locked --bin arbitrageur
