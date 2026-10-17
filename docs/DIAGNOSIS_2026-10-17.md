@@ -94,7 +94,7 @@ Cross-target compile check (`--target x86_64-pc-windows-msvc`): blocked at
 
 | ID | File | Change |
 |----|------|--------|
-| C-1 | `.agents/**`, `docs/**`, `ORIGINAL_REQUEST.md`, `.gitleaks.toml` | Redacted the vault master password in 47 places / 21 files; anchored the two dangerous gitleaks allowlist entries (`^…$`) so a real PEM block can never be exempted. **Operator action still required: rotate the vault password and every credential in it.** |
+| C-1 | `.agents/**`, `docs/**`, `ORIGINAL_REQUEST.md`, `.gitleaks.toml` | Redacted the vault master password in 47 places / 21 files; anchored the two dangerous gitleaks allowlist entries (`^…$`) so a real PEM block can never be exempted. **History rewritten** with `git filter-repo` (438 commits; four literal rules scoped to password contexts so timestamps/decimal noise were untouched) and force-pushed — `main` and every branch no longer contain the literal; the old commit is reachable only by known-SHA until GitHub GC. |
 | C-2 | `dev_rpc.rs` | Socket `chmod 0600` immediately after bind; Linux per-connection `SO_PEERCRED` UID check (owner UID resolved from the socket file, fail-closed to `u32::MAX`). |
 | C-3 | `options_bot.rs` | Removed hardcoded fallback spots; rehedge now runs under `execution_lock` + breaker + pause + `live_entry_gate`; persists leg intent and client order id before submit; advances `last_hedged_spot` only on accepted submission; retires failed intents so they cannot wedge the symbol. |
 | C-4 | `execution.rs`, `reconciliation.rs` | New shared `protective_option_ioc_order` (±2% collar, refuse when no reference) and `is_options_leg` predicate; the reconciler's residual flatten no longer sends market orders for options. |
@@ -143,8 +143,13 @@ and #103 (Oct 2–3 specs). Filed:
 
 ## 6. Known remaining risks (not fixed in this pass)
 
-1. **Credential rotation (C-1)** — redaction is not remediation; the password
-   is in git history. Rotate the vault password and every exchange key.
+1. **Vault password scope (C-1)** — the operator clarified the `<redacted>`
+   master password is a **testnet dev password**, deliberately set so agents
+   can unlock the vault and test strategies on testnet. History has been
+   scrubbed (see C-1 row). Remaining caveat: if any vault using that password
+   ever holds **live/mainnet** keys, rotate immediately — history cleanup does
+   not protect a password that is still in use. The password now lives only in
+   the untracked `.workbuddy/memory/` (gitignored) for future agent test runs.
 2. **ST-HIGH-1** (#116) — convergence exit mixes entry-frame and
    baseline-frame deviations; `TrackedPosition.baseline_bps` is never read.
 3. **TG-H1** — a filled native combo still books estimated per-leg prices
