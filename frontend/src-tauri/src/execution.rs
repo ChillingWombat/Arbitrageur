@@ -8838,3 +8838,87 @@ mod traded_opportunity_tests {
         assert_eq!(rows[0].realized_pnl_usd, Some(0.0));
     }
 }
+
+/// Regression cover for issue #111: an options leg must never be closed with
+/// an unconstrained market order, and the close must be *refused* when no
+/// reference price resolves. Both the manual flatten path and the
+/// reconciler's residual auto-flatten route through
+/// `protective_option_ioc_order`, so asserting it here covers both.
+#[cfg(test)]
+mod options_exit_tests {
+    use super::*;
+    use arbitrageur_core::quote::BookLevel;
+    use arbitrageur_core::types::OrderType;
+
+    fn seed_book(state: &AppEngineState, venue: &str, symbol: &str, bid: Decimal, ask: Decimal) {
+        let mut book = OrderBook::new(
+            arbitrageur_core::types::VenueId::new(venue),
+            symbol.to_string(),
+        );
+        book.bids.push(BookLevel::new(bid, dec!(10.0)));
+        book.asks.push(BookLevel::new(ask, dec!(10.0)));
+        book.timestamp = Utc::now();
+        if let Some(sim) = state
+            .test_sims
+            .read()
+            .ok()
+            .and_then(|m| m.get(venue).cloned())
+        {
+            let _ = sim.replace_orderbook(book.clone());
+        }
+        state.market_data_hub.update_orderbook(book);
+    }
+
+    #[tokio::test]
+    async fn options_leg_close_is_never_an_unconstrained_market_order() {
+        let state = AppEngineState::new();
+        let sim = state
+            .install_test_sim("hyperliquid")
+            .expect("sim installed");
+        let adapter: Arc<dyn ExchangeAdapter> = sim.clone();
+        seed_book(&state, "hyperliquid", "ETH-USD", dec!(3000), dec!(3002));
+
+        // Selling into the bid: the collar is 2% under the best bid.
+        let sell = protective_option_ioc_order(&state, &adapter, "ETH-USD", Side::Sell, dec!(1))
+            .await
+            .expect("a seeded book must yield a protective order");
+        assert!(
+            !matches!(sell.order_type, OrderType::Market),
+            "an options leg must never be closed with a market order, got {:?}",
+            sell.order_type
+        );
+        assert_eq!(sell.side, Side::Sell);
+        assert_eq!(sell.price, Some(dec!(3000) * dec!(0.98)));
+
+        // Buying against the ask: the collar is 2% over the best ask.
+        let buy = protective_option_ioc_order(&state, &adapter, "ETH-USD", Side::Buy, dec!(1))
+            .await
+            .expect("a seeded book must yield a protective order");
+        assert!(
+            !matches!(buy.order_type, OrderType::Market),
+            "got {:?}",
+            buy.order_type
+        );
+        assert_eq!(buy.price, Some(dec!(3002) * dec!(1.02)));
+    }
+
+    #[tokio::test]
+    async fn options_leg_close_is_refused_without_a_reference_price() {
+        let state = AppEngineState::new();
+        let sim = state
+            .install_test_sim("hyperliquid")
+            .expect("sim installed");
+        let adapter: Arc<dyn ExchangeAdapter> = sim.clone();
+        // No book, no ticker for this symbol on either side of the collar.
+        for side in [Side::Buy, Side::Sell] {
+            let err =
+                protective_option_ioc_order(&state, &adapter, "NO-REFERENCE-SYMBOL", side, dec!(1))
+                    .await
+                    .expect_err("an unpriceable options leg must be refused, not sent unbounded");
+            assert!(
+                err.contains("refusing"),
+                "refusal must be explicit, got: {err}"
+            );
+        }
+    }
+}
