@@ -27,6 +27,7 @@ untouched when this pass began (verified: no `crates/**` or
 | CI feedback | one 30-minute job hid lint failures behind the test suite | **lint split from a per-crate test matrix (§8.3)** |
 | Lint gate, first real run | clippy `-D warnings` had never been enforced | **caught 2 `dead_code` errors on its first run; both fixed, no `#[allow]` (§8.6)** |
 | Combo leg pricing (#119) | per-leg rows stamped with the pre-trade bound; legs don't sum to the premium paid | **net fill attributed across legs, reconciled by construction; `fill_price_estimated` flag through schema→store→DTO→UI (§8.7)** |
+| Dev RPC auth on Windows (#109) | loopback-only, no identity check at all | **per-launch bearer token required as the first line; peer re-checked as loopback (§8.8)** |
 
 ---
 
@@ -483,3 +484,32 @@ was paid.
 Open follow-up (venue capability, not app logic): query the venue for the
 combo's per-instrument child fills and book those when available, downgrading
 the flag to venue truth — issue #119 step 1.
+
+### 8.8 Dev RPC had no authentication at all on Windows (#109)
+
+The bridge carries full execution authority — order submission, flatten,
+circuit-breaker reset, environment switch — behind `ARBITRAGEUR_DEV_SOCK`.
+On unix that is gated twice: the socket file is chmod 0600, and on Linux
+every accepted connection is additionally checked against the socket owner's
+uid via `SO_PEERCRED`. On Windows there is no filesystem socket, so the
+transport serves the identical line protocol over an ephemeral
+`127.0.0.1` TCP port — and loopback-only is **not** authentication: any local
+process, including one running as another user, could connect and trade.
+
+Closed by giving the loopback transport an identity check of its own:
+
+* a random 128-bit bearer token is minted per launch and published in the
+  port file (line 1 = port, line 2 = token — a reader that only wants the
+  port still reads one line);
+* every connection must open with `{"token":"…"}` or it receives one error
+  line and a closed socket — it never reaches `dispatch`;
+* the peer address is re-checked as loopback on accept, so a socket that is
+  not the one we bound cannot be served.
+
+The token is now the transport's only identity check there, so the port file
+is the credential; that is spelled out in the module docs and in the
+launch-time warning. `handshake_token` is gated `any(not(unix), test)` so the
+parsing that could silently admit a connection — non-string token, missing
+field, bad JSON — is asserted on Linux and macOS CI too, not only on the OS
+that needs it. Windows CI type-checks this path via
+`cargo check --workspace --all-targets` on `windows-latest`.

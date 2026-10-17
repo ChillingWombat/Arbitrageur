@@ -13,12 +13,18 @@
 //! socket file is chmod 0600 immediately after bind, and on Linux every
 //! accepted connection is additionally checked against the socket owner's
 //! uid via SO_PEERCRED — connections from other local users are rejected
-//! even if they win the bind→chmod race. Non-unix targets have no
-//! filesystem sockets, so the same line protocol is served over an
-//! ephemeral 127.0.0.1 TCP port (see `serve_loopback`), which is
-//! loopback-only by construction but has no peer-identity equivalent —
-//! keep `ARBITRAGEUR_DEV_SOCK` unset outside single-operator dev boxes. It
-//! is a single-operator tool, never an open local IPC surface.
+//! even if they win the bind→chmod race.
+//!
+//! Non-unix targets have no filesystem sockets, so the same line protocol is
+//! served over an ephemeral 127.0.0.1 TCP port (see `serve_loopback`).
+//! Loopback-only is not authentication: any process on the box — including
+//! one running as another user — can connect, so the transport mints a
+//! random per-launch bearer token, publishes it in the port file, and
+//! requires it as the first line of every connection. The token is the
+//! bridge's only identity check there, so the port file is the secret: treat
+//! it like a credential, and keep `ARBITRAGEUR_DEV_SOCK` unset outside
+//! single-operator dev boxes. It is a single-operator tool, never an open
+//! local IPC surface.
 
 use crate::state::AppEngineState;
 use serde_json::{json, Value};
@@ -45,9 +51,13 @@ pub fn maybe_spawn(state: Arc<AppEngineState>) {
     });
 }
 
-fn spawn_conn(stream: DevStream, state: Arc<AppEngineState>) {
+/// Bearer token the non-unix transport requires, or `None` on unix, where
+/// filesystem permissions plus `SO_PEERCRED` already identify the peer.
+type DevToken = Option<String>;
+
+fn spawn_conn(stream: DevStream, state: Arc<AppEngineState>, token: DevToken) {
     tauri::async_runtime::spawn(async move {
-        if let Err(e) = handle_conn(stream, state).await {
+        if let Err(e) = handle_conn(stream, state, token).await {
             tracing::warn!("dev rpc: connection error: {e}");
         }
     });
@@ -105,7 +115,7 @@ async fn serve_unix(path: std::path::PathBuf, state: Arc<AppEngineState>) {
                                 }
                             }
                         }
-                        spawn_conn(stream, state.clone());
+                        spawn_conn(stream, state.clone(), None);
                     }
                     Err(e) => {
                         tracing::warn!("dev rpc: accept failed: {e}");
@@ -118,9 +128,10 @@ async fn serve_unix(path: std::path::PathBuf, state: Arc<AppEngineState>) {
     }
 }
 
-/// Non-unix transport: an ephemeral loopback TCP port. `path` is only used
-/// as the anchor for the port file (`<path>.port`), which the client reads
-/// to discover the port — there is no socket file to create.
+/// Non-unix transport: an ephemeral loopback TCP port guarded by a
+/// per-launch bearer token. `path` is only used as the anchor for the port
+/// file (`<path>.port`) — line 1 is the port, line 2 the token — which the
+/// client reads to discover both; there is no socket file to create.
 #[cfg(not(unix))]
 async fn serve_loopback(path: std::path::PathBuf, state: Arc<AppEngineState>) {
     use tokio::net::TcpListener;
@@ -140,21 +151,36 @@ async fn serve_loopback(path: std::path::PathBuf, state: Arc<AppEngineState>) {
             return;
         }
     };
+    // Loopback-only is not authentication: any local process — including one
+    // running as another user — can connect. Mint a secret and require it;
+    // the port file is what discloses it, so it is the credential.
+    let token = format!("{:032x}", rand::random::<u128>());
     let port_file = path.with_extension("port");
-    if let Err(e) = std::fs::write(&port_file, port.to_string()) {
+    // Port first, token second, so a reader that only wants the port can keep
+    // reading just line 1.
+    if let Err(e) = std::fs::write(&port_file, format!("{port}\n{token}\n")) {
         tracing::warn!(
-            "dev rpc: cannot publish port to {} ({e}) — refusing to serve",
+            "dev rpc: cannot publish port/token to {} ({e}) — refusing to serve",
             port_file.display()
         );
         return;
     }
     tracing::warn!(
-        "dev rpc: listening on 127.0.0.1:{port} (port published at {}) — loopback only, no peer-identity check",
+        "dev rpc: listening on 127.0.0.1:{port} (port + bearer token published at {}) — \
+         the token is required as the first line of every connection; treat that file as a credential",
         port_file.display()
     );
     loop {
         match listener.accept().await {
-            Ok((stream, _peer)) => spawn_conn(stream, state.clone()),
+            Ok((stream, peer)) => {
+                // Belt and braces: the listener is bound to loopback, so a
+                // non-loopback peer means the socket is not the one we bound.
+                if !peer.ip().is_loopback() {
+                    tracing::warn!("dev rpc: rejected non-loopback peer {peer}");
+                    continue;
+                }
+                spawn_conn(stream, state.clone(), Some(token.clone()));
+            }
             Err(e) => {
                 tracing::warn!("dev rpc: accept failed: {e}");
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
@@ -163,9 +189,48 @@ async fn serve_loopback(path: std::path::PathBuf, state: Arc<AppEngineState>) {
     }
 }
 
-async fn handle_conn(stream: DevStream, state: Arc<AppEngineState>) -> std::io::Result<()> {
+/// The bearer token presented by a handshake line, if the line parses and
+/// carries a string `token`. Anything else — bad JSON, a missing field, a
+/// non-string value — yields `None`, which never matches. Exists as a named
+/// function so the parsing that could silently admit a connection is tested
+/// on every platform, not just the ones that need the gate. Gated on
+/// `any(not(unix), test)` for exactly that reason — it is live code only
+/// where the transport needs it, and test code everywhere else.
+#[cfg(any(not(unix), test))]
+fn handshake_token(line: &str) -> Option<String> {
+    serde_json::from_str::<Value>(line)
+        .ok()
+        .and_then(|v| v.get("token").and_then(Value::as_str).map(str::to_string))
+}
+
+async fn handle_conn(
+    stream: DevStream,
+    state: Arc<AppEngineState>,
+    expect_token: DevToken,
+) -> std::io::Result<()> {
     let (read, mut write) = stream.into_split();
     let mut lines = BufReader::new(read).lines();
+    // Non-unix transports have no peer identity, so the connection must open
+    // with the bearer token published in the port file. Anything else gets
+    // one error line and a closed socket — never a dispatch.
+    #[cfg(not(unix))]
+    if let Some(want) = expect_token.as_deref() {
+        let presented = match lines.next_line().await? {
+            Some(l) => handshake_token(&l),
+            None => return Ok(()),
+        };
+        if presented.as_deref() != Some(want) {
+            tracing::warn!("dev rpc: rejected connection with a bad or missing bearer token");
+            let _ = write
+                .write_all(b"{\"err\":\"dev rpc: missing or invalid token\"}\n")
+                .await;
+            return Ok(());
+        }
+    }
+    // Silence the unused-binding warning on unix, where the transport needs
+    // no token because filesystem permissions already identify the peer.
+    #[cfg(unix)]
+    let _ = &expect_token;
     while let Some(line) = lines.next_line().await? {
         let resp = dispatch(&line, &state).await;
         let mut buf =
@@ -1034,5 +1099,33 @@ mod tests {
         assert_eq!(res_trig["id"], 105);
         assert_eq!(res_trig["ok"]["accounts_evaluated"], 0);
         assert!(res_trig["ok"]["planned_transfer"].is_null());
+    }
+
+    /// The non-unix transport's only identity check is a bearer token in the
+    /// first line. These cases are what could silently ADMIT a connection, so
+    /// they are asserted here and run on every platform — not only the ones
+    /// that need the gate (#109).
+    #[test]
+    fn handshake_token_only_accepts_a_well_formed_string() {
+        assert_eq!(
+            handshake_token(r#"{"token":"abc123"}"#).as_deref(),
+            Some("abc123")
+        );
+        // Present alongside the rest of a handshake frame.
+        assert_eq!(
+            handshake_token(r#"{"id":1,"token":"abc123"}"#).as_deref(),
+            Some("abc123")
+        );
+        // Every way to fail must read as "no token", never as a match.
+        assert_eq!(handshake_token(r#"{"cmd":"stop_all"}"#), None);
+        assert_eq!(handshake_token("not json"), None);
+        assert_eq!(handshake_token(""), None);
+        // A numeric token is not a string — a loose read here would let a
+        // client present anything JSON-shaped and be admitted.
+        assert_eq!(handshake_token(r#"{"token":123}"#), None);
+        assert_eq!(handshake_token(r#"{"token":null}"#), None);
+        assert_eq!(handshake_token(r#"{"token":""}"#).as_deref(), Some(""));
+        // An empty presented token must not equal a minted one.
+        assert_ne!(handshake_token(r#"{"token":""}"#).as_deref(), Some("x"));
     }
 }
