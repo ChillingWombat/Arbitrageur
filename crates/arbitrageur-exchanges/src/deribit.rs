@@ -155,6 +155,70 @@ fn dec_from_json(v: Option<&serde_json::Value>) -> Option<Decimal> {
     }
 }
 
+/// Aggregate the `legs` arrays of `private/get_user_trades_by_order` into one
+/// VWAP row per instrument (#119).
+///
+/// Deribit attaches `legs` to each trade when the order was a combo: every
+/// entry is a real per-instrument fill with its own `price`, `amount` and
+/// `direction`, tied back to the parent through `combo_id`/`combo_trade_id`.
+/// Partial fills appear as several trades, so the legs are size-weighted
+/// rather than taken from the first trade. An empty result is an error: the
+/// caller must know it has to fall back to attribution.
+fn combo_leg_fills_from_response(
+    v: &serde_json::Value,
+    order_id: &str,
+) -> anyhow::Result<Vec<arbitrageur_core::exchange::ComboLegFill>> {
+    let trades = v
+        .get("trades")
+        .and_then(|t| t.as_array())
+        .or_else(|| v.as_array())
+        .ok_or_else(|| anyhow::anyhow!("Deribit trades response for '{order_id}' has no array"))?;
+    // instrument -> (Σ price·amount, Σ amount)
+    let mut agg: std::collections::HashMap<String, (Decimal, Decimal)> =
+        std::collections::HashMap::new();
+    for trade in trades {
+        let Some(legs) = trade.get("legs").and_then(|l| l.as_array()) else {
+            continue;
+        };
+        for leg in legs {
+            let Some(inst) = leg.get("instrument_name").and_then(|s| s.as_str()) else {
+                continue;
+            };
+            let Some(px) = dec_from_json(leg.get("price")) else {
+                continue;
+            };
+            // A leg's amount is always positive; direction carries the side.
+            let amount = dec_from_json(leg.get("amount"))
+                .map(|a| a.abs())
+                .unwrap_or(dec!(0));
+            if px <= dec!(0) || amount <= dec!(0) {
+                continue;
+            }
+            let e = agg.entry(inst.to_string()).or_insert((dec!(0), dec!(0)));
+            e.0 += px * amount;
+            e.1 += amount;
+        }
+    }
+    if agg.is_empty() {
+        anyhow::bail!(
+            "Deribit returned no per-leg fills for combo order '{order_id}' (not a combo, or trades not yet visible)"
+        );
+    }
+    let mut out: Vec<arbitrageur_core::exchange::ComboLegFill> = agg
+        .into_iter()
+        .filter(|(_, (_, amount))| *amount > dec!(0))
+        .map(
+            |(instrument, (notional, amount))| arbitrageur_core::exchange::ComboLegFill {
+                instrument,
+                price: notional / amount,
+                amount,
+            },
+        )
+        .collect();
+    out.sort_by(|a, b| a.instrument.cmp(&b.instrument));
+    Ok(out)
+}
+
 fn parse_pair(level: &serde_json::Value) -> Option<(Decimal, Decimal)> {
     let arr = level.as_array()?;
     if arr.len() < 2 {
@@ -772,6 +836,35 @@ impl DeribitAdapter {
         let combo = self.create_combo(&deribit_trades).await?;
         self.place_combo_instrument_order(&combo.id, side, amount, price, time_in_force, label)
             .await
+    }
+
+    /// Per-instrument fills Deribit recorded for a combo order (#119).
+    ///
+    /// A combo order acknowledges with one `average_price` for the whole
+    /// structure, but `private/get_user_trades_by_order` returns the trades
+    /// with a `legs` array — one entry per instrument, each carrying its own
+    /// `price`, `amount` and `direction` plus the `combo_id`/`combo_trade_id`
+    /// that tie it back to the parent. This aggregates those legs into a VWAP
+    /// per instrument across every partial fill of the order.
+    ///
+    /// Returns an error (never a silently empty result) when the response has
+    /// no legs, e.g. the order was not a combo or the trades are not yet
+    /// visible; the caller then books its derived attribution instead.
+    pub async fn combo_leg_fills(
+        &self,
+        order_id: &str,
+    ) -> anyhow::Result<Vec<arbitrageur_core::exchange::ComboLegFill>> {
+        let id = order_id.trim();
+        if id.is_empty() {
+            anyhow::bail!("Deribit combo_leg_fills needs an order id");
+        }
+        let v = self
+            .private_get(&format!(
+                "/private/get_user_trades_by_order?order_id={}",
+                urlencoding(id)
+            ))
+            .await?;
+        combo_leg_fills_from_response(&v, id)
     }
 
     /// Retrieve active combos for a currency.
@@ -1938,6 +2031,15 @@ impl ExchangeAdapter for DeribitAdapter {
         self.place_combo_order(trades, side, amount, price, time_in_force, label)
             .await
     }
+
+    async fn combo_leg_fills(
+        &self,
+        order_id: &str,
+    ) -> anyhow::Result<Vec<arbitrageur_core::exchange::ComboLegFill>> {
+        // Fully qualified: the inherent method has the same name, and a
+        // mistyped delegation here would recurse through the trait instead.
+        DeribitAdapter::combo_leg_fills(self, order_id).await
+    }
 }
 
 #[cfg(test)]
@@ -2253,5 +2355,70 @@ mod tests {
             })
             .collect();
         assert!(a.create_combo(&eight).await.is_err());
+    }
+
+    /// The per-leg fills of a combo trade are the only venue-documented
+    /// per-instrument prices a combo produces (#119); partial fills must be
+    /// size-weighted, not overwritten.
+    #[test]
+    fn combo_leg_fills_vwap_across_partial_trades() {
+        let resp = serde_json::json!({
+            "trades": [
+                {
+                    "order_id": "X1",
+                    "combo_id": "BTC-CS-1",
+                    "legs": [
+                        {"instrument_name": "BTC-25DEC26-100000-C", "price": 0.050, "amount": 1, "direction": "buy"},
+                        {"instrument_name": "BTC-25DEC26-110000-C", "price": 0.030, "amount": 1, "direction": "sell"}
+                    ]
+                },
+                {
+                    // Second partial: 3 contracts at a better price.
+                    "order_id": "X1",
+                    "combo_id": "BTC-CS-1",
+                    "legs": [
+                        {"instrument_name": "BTC-25DEC26-100000-C", "price": 0.040, "amount": 3, "direction": "buy"},
+                        {"instrument_name": "BTC-25DEC26-110000-C", "price": 0.020, "amount": -3, "direction": "sell"}
+                    ]
+                }
+            ]
+        });
+        let fills = combo_leg_fills_from_response(&resp, "X1").expect("legs parse");
+        assert_eq!(fills.len(), 2);
+        let c100 = fills
+            .iter()
+            .find(|f| f.instrument == "BTC-25DEC26-100000-C")
+            .expect("call leg");
+        // (0.05·1 + 0.04·3) / 4 = 0.0425 — a first-trade-only read would say 0.05.
+        assert_eq!(c100.price, dec!(0.0425));
+        assert_eq!(c100.amount, dec!(4));
+        let c110 = fills
+            .iter()
+            .find(|f| f.instrument == "BTC-25DEC26-110000-C")
+            .expect("call leg");
+        // Negative amounts (the sell side) are normalised to size.
+        assert_eq!(c110.price, dec!(0.0225));
+        assert_eq!(c110.amount, dec!(4));
+    }
+
+    /// A response without a legs array (a plain single-instrument order) must
+    /// be an error so the caller attributes the net instead of booking nothing.
+    #[test]
+    fn combo_leg_fills_reject_a_response_without_legs() {
+        let plain = serde_json::json!({
+            "trades": [{"order_id": "X2", "instrument_name": "BTC-PERPETUAL", "price": 100.0, "amount": 1}]
+        });
+        assert!(combo_leg_fills_from_response(&plain, "X2").is_err());
+
+        // Legs with no usable price/size are not fills either.
+        let broken = serde_json::json!({
+            "trades": [{"legs": [{"instrument_name": "BTC-25DEC26-100000-C", "price": 0, "amount": 0}]}]
+        });
+        assert!(combo_leg_fills_from_response(&broken, "X3").is_err());
+
+        // A non-array payload is a client error, not an empty success.
+        assert!(
+            combo_leg_fills_from_response(&serde_json::json!({"trades": "nope"}), "X4").is_err()
+        );
     }
 }

@@ -17,6 +17,18 @@ pub struct ComboLegTrade {
     pub direction: String, // "buy" or "sell"
 }
 
+/// A per-instrument fill the venue itself reported for one leg of a native
+/// combo order. `amount` is the leg size in the instrument's own units (the
+/// combo's `amount` multiplied by the leg ratio), `price` the price the venue
+/// recorded for that instrument — not a derived share of the combo's net
+/// price (#119).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ComboLegFill {
+    pub instrument: String,
+    pub price: Decimal,
+    pub amount: Decimal,
+}
+
 /// Unified async exchange connector interface.
 #[async_trait]
 pub trait ExchangeAdapter: Send + Sync {
@@ -347,6 +359,25 @@ pub trait ExchangeAdapter: Send + Sync {
     ) -> anyhow::Result<OrderResponse> {
         anyhow::bail!(
             "Venue {} does not support native multi-leg combo orders",
+            self.name()
+        )
+    }
+
+    /// Per-instrument fills the venue recorded for a previously submitted
+    /// native combo order, keyed by instrument with the leg's own price.
+    ///
+    /// A combo ack carries ONE net price for the whole structure, so without
+    /// this query every per-leg booking is an attribution derived from that
+    /// net (#119). Venues that publish the `legs` array of a combo trade
+    /// (Deribit does) return it here; the caller books these prices verbatim
+    /// and only falls back to attribution when this errors or returns nothing.
+    ///
+    /// Implementations must fail (not return an empty-but-ok vector) when the
+    /// venue would have exposed legs but the response was unusable, so the
+    /// caller can log why the estimate path was taken.
+    async fn combo_leg_fills(&self, _order_id: &str) -> anyhow::Result<Vec<ComboLegFill>> {
+        anyhow::bail!(
+            "Venue {} does not expose per-leg fills for combo orders",
             self.name()
         )
     }

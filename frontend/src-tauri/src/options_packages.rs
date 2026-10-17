@@ -1483,6 +1483,9 @@ pub async fn execute_options_package_impl(
     let mut leg_error: Option<String> = None;
 
     let mut native_combo_executed = false;
+    // Per-leg provenance: `true` when the booked price is the pre-trade bound
+    // rather than a venue fill or a net-reconciled attribution (#119).
+    let mut leg_price_estimated: Vec<bool> = Vec::new();
     // Set when a native combo ack is neither a clean fill nor a terminal
     // no-fill: the sequential fallback must then be refused (a second
     // full-size dispatch would stack on top of whatever the combo filled).
@@ -1533,12 +1536,13 @@ pub async fn execute_options_package_impl(
                     combo_resp.order_id
                 );
                 // The venue reports ONE net price for the whole combo, so
-                // every per-leg price below is an attribution, never a
-                // venue-reported fill for that instrument (#119). Price the
-                // whole leg set first, then rescale the shape onto the net
-                // actually paid — the legs then reconcile by construction
-                // instead of carrying the pre-trade bound as if it were a
-                // fill.
+                // every per-leg price below is either a venue-reported leg
+                // fill (when the venue publishes the combo trade's `legs`
+                // array — #119 step 1) or an attribution derived from that
+                // net. Price the whole leg set first, then rescale the shape
+                // onto the net actually paid — the legs then reconcile by
+                // construction instead of carrying the pre-trade bound as if
+                // it were a fill.
                 let combo_bounds: Vec<Option<Decimal>> = opp
                     .legs
                     .iter()
@@ -1552,10 +1556,92 @@ pub async fn execute_options_package_impl(
                         options_leg_bound_px(&books[i], s, qty_dec * Decimal::from(leg.qty_mult))
                     })
                     .collect();
-                let attributed = combo_resp
-                    .avg_fill_price
-                    .and_then(|net| attribute_combo_net_price(&opp.legs, &combo_bounds, net));
-                if attributed.is_none() {
+                let venue_leg_px = match adapter.combo_leg_fills(&combo_resp.order_id).await {
+                    Ok(fills) if !fills.is_empty() => {
+                        let mut by_inst: std::collections::HashMap<String, Decimal> =
+                            std::collections::HashMap::new();
+                        for f in &fills {
+                            // Contract: one VWAP row per instrument. Keep the
+                            // first and ignore repeats rather than inventing
+                            // an average of averages.
+                            by_inst
+                                .entry(f.instrument.to_ascii_uppercase())
+                                .or_insert(f.price);
+                        }
+                        let mut ordered = Vec::with_capacity(opp.legs.len());
+                        for leg in &opp.legs {
+                            match by_inst.get(&leg.instrument.to_ascii_uppercase()) {
+                                Some(px) => ordered.push(Some(*px)),
+                                // A leg the venue did not report makes the
+                                // whole set untrustworthy: booking a mix of
+                                // real fills and derived prices would hide
+                                // which rows are estimates.
+                                None => {
+                                    ordered.clear();
+                                    break;
+                                }
+                            }
+                        }
+                        if ordered.is_empty() {
+                            tracing::warn!(
+                                "combo {} leg fills from venue {} do not cover every leg — \
+                                 falling back to attribution",
+                                combo_resp.order_id,
+                                vid.as_str()
+                            );
+                            None
+                        } else {
+                            if let Some(net) = combo_resp.avg_fill_price {
+                                let venue_net: Decimal = opp
+                                    .legs
+                                    .iter()
+                                    .zip(ordered.iter())
+                                    .map(|(leg, px)| {
+                                        let sign =
+                                            if leg.side == "buy" { dec!(1) } else { dec!(-1) };
+                                        sign * px.unwrap_or(dec!(0)) * Decimal::from(leg.qty_mult)
+                                    })
+                                    .sum();
+                                // Venue legs are the source of truth; a
+                                // divergence here means the package shape
+                                // drifted from what was submitted. Surface it
+                                // for audit instead of overriding the venue.
+                                if (venue_net - net).abs() > dec!(0.000_3) {
+                                    tracing::warn!(
+                                        "combo {} venue leg prices sum to {} but the combo \
+                                         filled at net {} — booking the venue legs, check the \
+                                         submitted shape",
+                                        combo_resp.order_id,
+                                        venue_net,
+                                        net
+                                    );
+                                }
+                            }
+                            Some(ordered)
+                        }
+                    }
+                    Ok(_) => {
+                        tracing::warn!(
+                            "venue reported no per-leg fills for combo {} — attributing the net",
+                            combo_resp.order_id
+                        );
+                        None
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            "per-leg fills for combo {} unavailable ({e}) — attributing the net",
+                            combo_resp.order_id
+                        );
+                        None
+                    }
+                };
+                let attributed = match &venue_leg_px {
+                    Some(_) => None,
+                    None => combo_resp
+                        .avg_fill_price
+                        .and_then(|net| attribute_combo_net_price(&opp.legs, &combo_bounds, net)),
+                };
+                if attributed.is_none() && venue_leg_px.is_none() {
                     tracing::warn!(
                         "options combo {} filled at net {:?} but the per-leg prices could not be \
                          reconciled to it — booking the pre-trade bound and marking the rows \
@@ -1607,15 +1693,19 @@ pub async fn execute_options_package_impl(
                     leg_resp.original_qty = leg_qty;
                     leg_resp.filled_qty = leg_qty;
                     leg_resp.remaining_qty = dec!(0);
-                    // Reconciled attribution where it could be computed, the
-                    // pre-trade bound where it could not. Never leave the
-                    // combo's NET price sitting on a leg row as if the venue
-                    // had filled that instrument at it — that overstates each
-                    // leg by the whole package premium.
-                    let leg_px = attributed
-                        .as_ref()
-                        .and_then(|v| v.get(idx).copied())
+                    // Preference order: the venue's own per-leg fill, the
+                    // reconciled attribution of the net, then the pre-trade
+                    // bound. Never leave the combo's NET price sitting on a
+                    // leg row as if the venue had filled that instrument at
+                    // it — that overstates each leg by the whole package
+                    // premium.
+                    let venue_px = venue_leg_px.as_ref().and_then(|v| v[idx]);
+                    let leg_px = venue_px
+                        .or_else(|| attributed.as_ref().and_then(|v| v.get(idx).copied()))
                         .or(combo_bounds[idx]);
+                    // `true` only for the value taken from the bound, which is
+                    // the one case the venue did not document.
+                    leg_price_estimated.push(venue_px.is_none() && attributed.is_none());
                     if let Some(px) = leg_px {
                         leg_resp.avg_fill_price = Some(px);
                     } else {
@@ -1945,10 +2035,14 @@ pub async fn execute_options_package_impl(
             .fee
             .map(|f| crate::execution::dec_to_f64(f, "options package fill fee").unwrap_or(0.0))
             .unwrap_or(0.0);
-        if let Err(e) = if native_combo_executed {
-            // Every price in a combo fill is an attribution out of one
-            // venue-reported net, so the row is flagged as such even when the
-            // attribution reconciles exactly (#119).
+        let estimated = leg_price_estimated
+            .get(*idx)
+            .copied()
+            .unwrap_or(native_combo_executed);
+        if let Err(e) = if estimated {
+            // The price on this row was derived (a bound or an attributed
+            // share of the net), never a venue fill for the instrument, so
+            // the persisted row must say so (#119).
             state.state_store.apply_leg_fill_attributed(
                 sid,
                 *side,
