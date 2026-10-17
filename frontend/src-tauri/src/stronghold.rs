@@ -478,6 +478,14 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// Rotating the snapshot key must re-encrypt under the new key without
+    /// touching the stored wallet key.
+    ///
+    /// Expensive by nature: every open, save and rekey runs a full Argon2 KDF
+    /// over the snapshot, and in a debug build each one costs tens of seconds
+    /// (231 s for this test locally, 503 s on CI — issue #117). The assertions
+    /// that do not need a decryption use the file bytes instead, so no KDF is
+    /// spent proving that a rejected rekey left the file alone.
     #[test]
     fn rekey_snapshot_rotates_password_and_preserves_key() {
         let dir =
@@ -494,12 +502,14 @@ mod tests {
         drop(sh);
         assert!(hold.exists());
 
-        // A wrong "old" key must leave the file untouched.
+        // A wrong "old" key must leave the file untouched. Compare the bytes
+        // rather than re-opening under the right key: this is the same
+        // guarantee, and it costs no KDF.
+        let before = std::fs::read(&hold).expect("snapshot readable");
         let wrong: [u8; 32] = [0xCC; 32];
         assert!(EvmStronghold::rekey_snapshot_file(&hold, &wrong, &key_b).is_err());
-        let still_a = EvmStronghold::open(&hold, &key_a).expect("still opens under A");
-        assert!(still_a.has_key());
-        drop(still_a);
+        let after = std::fs::read(&hold).expect("snapshot still readable");
+        assert_eq!(before, after, "a rejected rekey must not rewrite the file");
 
         // Rotate A → B: new key opens it, old key must not.
         EvmStronghold::rekey_snapshot_file(&hold, &key_a, &key_b).expect("rekey A→B");
