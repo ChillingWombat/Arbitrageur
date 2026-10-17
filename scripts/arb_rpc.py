@@ -8,7 +8,7 @@ def rpc_call(cmd, args={}, timeout=30.0):
     s.connect('/tmp/arb-dev.sock')
     req = json.dumps({"cmd": cmd, "args": args}) + "\n"
     s.sendall(req.encode('utf-8'))
-    
+
     buf = ""
     start = time.time()
     while time.time() - start < timeout:

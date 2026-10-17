@@ -1635,4 +1635,3 @@ corrections recorded in §7 are the only places where the lead overrode an area 
 independently confirmed by a second reviewer.*
 
 ---
-
