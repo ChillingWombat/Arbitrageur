@@ -547,3 +547,40 @@ job-level `timeout-minutes: 45` — not by the concurrency rule this time
 (no newer push existed). The suite legitimately needs ~46 min on a cold
 runner (the stronghold KDF test alone is ~229 s, #117). Ceiling raised
 to 90 minutes in c46662b.
+
+### 8.11 Combo legs are now the venue's own fills (#119 step 1)
+
+Deribit attaches a `legs` array to every trade of a combo order — one entry
+per instrument with its own `price`, `amount` and `direction`, tied to the
+parent by `combo_id`/`combo_trade_id`. That is the venue-reported
+per-instrument fill the earlier fix could only estimate from the net
+premium, so `ExchangeAdapter::combo_leg_fills` now exposes it and the combo
+path prefers, in order:
+
+1. the venue's per-leg price,
+2. the attribute-the-net result (which reconciles by construction),
+3. the pre-trade bound — the only case that sets `fill_price_estimated`.
+
+Two details that are easy to get wrong:
+
+- *Partial fills.* One order can produce several trades. The parser
+  size-weights the legs across all of them; reading only the first trade
+  would report the first partial's price as the whole fill (a test pins
+  0.05 on one contract + 0.04 on three contracts = 0.0425).
+- *Trust.* Venue legs are the source of truth, so a divergence between
+  their signed sum and the combo's net is logged as an audit warning, not
+  "corrected". The attribution path is reserved for venues that publish no
+  legs, and it still verifies its own identity before returning.
+
+### 8.12 The "hung" stronghold test was 7 Argon2 passes, not a lock spin (#117)
+
+Phase timing settles it: opening a *nonexistent* snapshot costs 12.8 ms,
+while save/reopen/wrong-key-open each cost ~29 s and a full rekey 86.5 s.
+That is one Argon2 derivation per encrypt/decrypt, seven of them in the
+test — 231 s here, 503 s on the slower CI runner, where it **passes**. The
+old "CPU busy-spin on a bind mount" reading was the KDF, not `flock`.
+
+One KDF was removable: "a rejected rekey must not rewrite the file" is now
+asserted on the snapshot bytes instead of re-opening under the original key
+(231 s → 200 s). Optimising the KDF crate was tried and had no effect;
+optimising the whole test profile OOMs the build container.
