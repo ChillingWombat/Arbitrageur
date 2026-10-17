@@ -19,8 +19,12 @@ untouched when this pass began (verified: no `crates/**` or
 | CRITICAL findings | 6 open | **6 fixed** |
 | GitHub tracking | ~190 findings untracked | **10 issues filed (#108–#117)** |
 | CI red job | `deployment` job references missing unit | **fixed** |
-| Cross-platform | never verified, never compiled off Linux | **compiles + E2E green on Linux; Windows/macOS gated by a new CI matrix (§7)** |
+| Cross-platform | never verified, never compiled off Linux | **compiles + E2E green on all three OSes in CI (§7)** |
 | Desktop packaging | `bundle.active = false`, no installer | **bundling on; per-OS release matrix (nsis / dmg / deb-rpm-appimage)** |
+| Windows bundling | `icon.ico`/`icon.icns` were PNGs with renamed extensions → `RC2175` | **regenerated as real ICO/ICNS containers (§7.6)** |
+| Convergence exit (#116) | entry-frame edge compared against baseline-frame deviation | **entry edge re-based onto the live baseline (§8.1)** |
+| Breaker baseline (H-3) | only a paper↔live switch re-anchored | **supervised-account-set changes re-anchor too (§8.2)** |
+| CI feedback | one 30-minute job hid lint failures behind the test suite | **lint split from a per-crate test matrix (§8.3)** |
 
 ---
 
@@ -151,16 +155,19 @@ and #103 (Oct 2–3 specs). Filed:
    ever holds **live/mainnet** keys, rotate immediately — history cleanup does
    not protect a password that is still in use. The password now lives only in
    the untracked `.workbuddy/memory/` (gitignored) for future agent test runs.
-2. **ST-HIGH-1** (#116) — convergence exit mixes entry-frame and
-   baseline-frame deviations; `TrackedPosition.baseline_bps` is never read.
+2. **ST-HIGH-1** (#116) — **fixed in §8.1.** Convergence exit now re-bases
+   the entry edge onto the live baseline; `TrackedPosition.baseline_bps` is
+   read instead of only persisted.
 3. **TG-H1** — a filled native combo still books estimated per-leg prices
    (issue #111 notes the fix path).
 4. **Phantom code** (#114) — ~35k unreachable lines plus 48 fabricated
    "verified green" reports; deletion is a repo-owner decision.
-5. **Breaker baseline reset** (`H-3` in `.review/tauri-security.md`) — the
-   drawdown baseline is not reset when the supervised account set changes.
-6. **Full-suite runtime** — the desktop tests are slow enough that a workspace
-   run takes tens of minutes; CI should split or parallelise them.
+5. **Breaker baseline reset** (`H-3` in `.review/tauri-security.md`) — **fixed
+   in §8.2**: the drawdown baseline is now re-anchored when the supervised
+   account set changes, not only on a paper↔live switch.
+6. **Full-suite runtime** — **mitigated in §8.3**: the desktop tests are slow
+   enough that a workspace run takes tens of minutes; CI now runs one job per
+   crate in parallel and reports lint separately.
 7. **Lighter signer is Linux-only** — only `liblighter_signer.so` is vendored
    and digest-pinned. The loader now asks for the platform-native file name
    (`lighter_signer.dll` / `liblighter_signer.dylib`), but no such artifact is
@@ -171,6 +178,8 @@ and #103 (Oct 2–3 specs). Filed:
    while `ARBITRAGEUR_DEV_SOCK` is set. Loopback-only by construction and
    dev-gated; a named-pipe transport with an ACL would restore peer identity.
    Tracked as part of #115.
+9. **Stronghold rekey test is slow, not deadlocked** (#117) — measured in
+   §8.5: 229 s on the container's overlay fs, not a hang.
 
 ---
 
@@ -278,3 +287,114 @@ This is the second class of defect the static audit could not see: the files
 *existed* and were the right size to look plausible, so every existence-based
 check passed. Only a real Windows toolchain reading the bytes could catch it —
 which is precisely what the matrix job is for.
+
+---
+
+## 8. Logic fixes found once the gate existed (third pass)
+
+With the three-OS gate green, the remaining open items in §6 were the real
+queue. Two are now fixed.
+
+### 8.1 Convergence exit mixed two baseline frames (#116)
+
+`evaluate_exit` compared `TrackedPosition.entry_dev_bps` — measured against
+the pair's baseline **at entry** — with `MonitorRowDto.deviation_bps`, which
+the monitor recomputes against its **current rolling** baseline every tick.
+`TrackedPosition.baseline_bps` was persisted and never read back, so the two
+sides of every comparison lived in different frames.
+
+Fix: thread the entry baseline into `evaluate_exit` and re-base the entry edge
+onto the live baseline before comparing:
+
+```text
+drift      = live_baseline − entry_baseline
+entry_edge = entry_dev − drift       // entry edge expressed in the live frame
+captured   = entry_edge − live_dev   // identically raw_entry − raw_now
+```
+
+The live frame is the right one because the pair mean-reverts around its
+*current* baseline: the edge that is still capturable is
+`raw_entry − live_baseline`, not `raw_entry − entry_baseline`. Two concrete
+failure modes disappear:
+
+- **baseline drifts up** — the capturable edge shrinks, so an unreverted
+  spread is no longer mistaken for a reverted one and closed at breakeven.
+- **baseline drifts down** — the capturable edge grows, so a genuinely
+  reverted spread is no longer held past its edge, and the stop band
+  (`stop_mult × |entry_edge|`) stops being set too tight.
+
+`LiveSpreadView` gained `baseline_bps`; `auto_exec.rs` now passes
+`pos.baseline_bps` (restored from the persisted row, so it survives restarts)
+and the monitor's live `r.baseline_bps`. If either side is unknown the
+correction is skipped rather than guessed, which reproduces the previous
+behaviour exactly.
+
+Regression tests (all in `convergence_auto.rs`): drift up, drift down, no
+drift, stop-band re-basing, and the unknown-baseline fallback. The pre-existing
+`exit_on_dynamic_baseline_shift_convergence` test — which encodes "after a
+permanent baseline shift you exit when the spread returns to the *new* mean" —
+now feeds real baselines (20 → 25 bps) and still passes unchanged, which is
+the strongest evidence the chosen frame matches the intended semantics.
+
+### 8.2 Breaker baseline did not follow the supervised account set (H-3)
+
+`feed_breaker_equity` re-anchored the drawdown baseline only when the
+paper↔live universe flipped (`last_risk_live_universe`). Any *other* change to
+which accounts are supervised — an operator disabling a venue, credentials
+being revoked, an account dropping out of the admitted set — left the baseline
+pinned to the old total, so the equity step was read as a real loss. At
+5% / $1 000 limits, disabling one venue out of five is a 20% step: it tripped
+the breaker and halted *all* trading off an administrative action.
+
+Fix: `AppEngineState.last_risk_account_set` remembers the admitted key set the
+baseline was anchored for; both feed paths re-anchor when that set changes
+instead of measuring. A genuine loss inside an unchanged universe still trips.
+
+New test `test_account_set_change_reanchors_breaker_baseline` covers
+disable → re-enable → real drawdown, asserting the first two do not trip and
+the third does.
+
+### 8.3 CI: lint was hidden behind a 30-minute test run
+
+`rust` ran fmt → clippy → `cargo test --workspace` in one job. The desktop
+crate dominates the suite, so a one-line clippy failure surfaced after ~30
+minutes. Split into:
+
+- `rust-lint` — whitespace gate, signer digest, `cargo fmt --check`,
+  `cargo clippy --workspace --all-targets -- -D warnings`. Reports in minutes.
+- `rust-tests` — one parallel job per workspace crate
+  (`fail-fast: false`), so the fast crates are not held behind the desktop
+  suite and a per-crate failure names itself.
+
+### 8.4 Verification (third pass)
+
+| Check | Result |
+|---|---|
+| `cargo fmt --all -- --check` | clean |
+| `cargo clippy --workspace --all-targets --locked -- -D warnings` | 0 warnings |
+| `cargo test -p arbitrageur-strategy` | 261 passed, 0 failed |
+| `cargo test -p arbitrageur-desktop` (breaker/risk/equity subset) | 29 passed, 0 failed |
+| CI `Cross-platform` (ubuntu / windows / macos) | all three **success** |
+| CI `Rust advisories and secret scan` | **success** (10 → 0 after §7 fixes) |
+
+### 8.5 `stronghold::tests::rekey_snapshot…` is slow, not deadlocked (#117)
+
+Issue #117 step 1 asked whether the test passes on a native Linux filesystem
+or whether it is a product-level deadlock in the vault rekey path (which would
+have been the highest-priority finding in the whole pass). Measured:
+
+| Filesystem | Result |
+|---|---|
+| container overlay (`/tmp`, `TMPDIR` unset) | **passes in 228.91 s** |
+| Docker bind mount of a Windows path (9p/DrvFs) | previously killed at 120 s, ~1805 % CPU over 21 min |
+
+So it is not a deadlock and the product path is clear: the test does real
+Stronghold KDF work and is simply expensive, and the Windows bind mount makes
+its filesystem syscalls far slower still. The "spin" was CPU-bound Argon2 work
+across threads, not a lock acquisition loop.
+
+Consequences: the test stays (the issue explicitly says do not `#[ignore]` it
+until the product path is cleared — it now is), and the CI job that runs it
+gets an explicit `timeout-minutes` so a genuine future hang fails loudly
+instead of burning a runner for hours. If it must be fast, the lever is
+lowering the KDF parameters for the test snapshot, not skipping it.

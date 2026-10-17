@@ -19,8 +19,12 @@ env:
   CARGO_NET_RETRY: "5"
 
 jobs:
-  rust:
-    name: Rust format, lint, and tests
+  # Format and lint are cheap (minutes); the workspace test suite is not
+  # (tens of minutes — the desktop crate alone dominates). Splitting them
+  # means a clippy or rustfmt failure reports in ~5 minutes instead of
+  # hiding behind a 30-minute test run, and the two run in parallel.
+  rust-lint:
+    name: Rust format and lint
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -62,8 +66,44 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      - name: Test workspace
-        run: cargo test --workspace --locked
+  rust-tests:
+    name: Rust workspace tests (${{ matrix.crate }})
+    runs-on: ubuntu-latest
+    # Explicit ceiling rather than the 6 h default. The desktop crate is the
+    # long pole — `stronghold::tests::rekey_snapshot…` alone measures ~229 s
+    # of real KDF work (issue #117) — but a genuine hang must fail the build
+    # instead of occupying a runner overnight.
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # One job per crate: the desktop suite is the long pole and no
+        # longer blocks the fast crates from reporting.
+        crate:
+          - arbitrageur-core
+          - arbitrageur-math
+          - arbitrageur-risk
+          - arbitrageur-exchanges
+          - arbitrageur-execution
+          - arbitrageur-strategy
+          - arbitrageur-app
+          - arbitrageur-desktop
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.96.0 --profile minimal
+          rustup default 1.96.0
+
+      - name: Install Tauri system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev librsvg2-dev libdbus-1-dev
+
+      - name: Test ${{ matrix.crate }}
+        run: cargo test -p ${{ matrix.crate }} --locked
 
   # The `rust` job above only ever compiled on Linux, so every Windows and
   # macOS build break was invisible until someone tried to package. This is
