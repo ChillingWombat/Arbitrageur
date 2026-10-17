@@ -4537,13 +4537,31 @@ pub(crate) fn is_options_leg(strategy_id: &str, venue: &str, symbol: &str) -> bo
         || (venue == "deribit" && (symbol.contains("-C") || symbol.contains("-P")))
 }
 
+/// The limit price for an options leg close: the validated reference price
+/// moved 15% in the closing direction (#103).
+///
+/// The collar has to be 15%, not the tighter band one might prefer. An
+/// option's tick can be a tenth of its premium — Deribit quotes a 0.001 BTC
+/// option on a 0.0001 grid — so a ±2% collar lands *inside* the spread,
+/// rounds to a price the venue cannot cross, and the leg never closes at all.
+/// The collar's actual job is to bound a catastrophic fill against a stale or
+/// empty book (the observed $14k fill on a $10 option), and an IOC limit 15%
+/// through a book/mark reference does that without making the exit
+/// unreachable. Unfilled quantity cancels: this is never a sweep.
+fn option_close_collar(reference: Decimal, side: Side) -> Decimal {
+    match side {
+        Side::Buy => reference * dec!(1.15),
+        Side::Sell => reference * dec!(0.85),
+    }
+}
+
 /// Build the protective IOC limit order every options leg-close must use.
 ///
 /// Options legs are never liquidated with unconstrained market orders:
 /// illiquid books produce catastrophic crossing slippage (observed: a
 /// $14k fill on $10 OTM calls). The reference price is the side-aware
-/// book / mark / ticker with a ±2% collar; when no valid reference
-/// resolves, the close is refused (fail-closed) rather than sent
+/// book / mark / ticker moved by [`option_close_collar`]; when no valid
+/// reference resolves, the close is refused (fail-closed) rather than sent
 /// unbounded. Shared by the manual flatten path and the reconciler's
 /// residual auto-flatten so both obey one rule.
 pub(crate) async fn protective_option_ioc_order(
@@ -4570,10 +4588,7 @@ pub(crate) async fn protective_option_ioc_order(
                 .or(book.mark_price)
                 .or_else(|| book.best_ask_price()),
         };
-        target_px.map(|p| match side {
-            Side::Buy => p * dec!(1.02),
-            Side::Sell => p * dec!(0.98),
-        })
+        target_px.map(|p| option_close_collar(p, side))
     } else if let Ok(ticker) = adapter.fetch_ticker(symbol).await {
         let ref_px = match side {
             Side::Buy => {
@@ -4595,10 +4610,9 @@ pub(crate) async fn protective_option_ioc_order(
                 }
             }
         };
-        ref_px.filter(|p| *p > dec!(0)).map(|p| match side {
-            Side::Buy => p * dec!(1.02),
-            Side::Sell => p * dec!(0.98),
-        })
+        ref_px
+            .filter(|p| *p > dec!(0))
+            .map(|p| option_close_collar(p, side))
     } else {
         None
     };
@@ -8891,7 +8905,7 @@ mod options_exit_tests {
         let adapter: Arc<dyn ExchangeAdapter> = sim.clone();
         seed_book(&state, "hyperliquid", "ETH-USD", dec!(3000), dec!(3002));
 
-        // Selling into the bid: the collar is 2% under the best bid.
+        // Selling into the bid: the collar is 15% under the best bid.
         let sell = protective_option_ioc_order(&state, &adapter, "ETH-USD", Side::Sell, dec!(1))
             .await
             .expect("a seeded book must yield a protective order");
@@ -8901,9 +8915,9 @@ mod options_exit_tests {
             sell.order_type
         );
         assert_eq!(sell.side, Side::Sell);
-        assert_eq!(sell.price, Some(dec!(3000) * dec!(0.98)));
+        assert_eq!(sell.price, Some(dec!(3000) * dec!(0.85)));
 
-        // Buying against the ask: the collar is 2% over the best ask.
+        // Buying against the ask: the collar is 15% over the best ask.
         let buy = protective_option_ioc_order(&state, &adapter, "ETH-USD", Side::Buy, dec!(1))
             .await
             .expect("a seeded book must yield a protective order");
@@ -8912,7 +8926,7 @@ mod options_exit_tests {
             "got {:?}",
             buy.order_type
         );
-        assert_eq!(buy.price, Some(dec!(3002) * dec!(1.02)));
+        assert_eq!(buy.price, Some(dec!(3002) * dec!(1.15)));
     }
 
     #[tokio::test]
