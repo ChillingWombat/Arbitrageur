@@ -3162,6 +3162,9 @@ pub async fn reset_transaction_history_impl(
     }
     state.circuit_breaker.reset();
     *state.last_risk_live_universe.write() = None;
+    // Force a re-anchor on the next risk snapshot: the account universe for
+    // a freshly-reset environment is unknown until it is observed.
+    *state.last_risk_account_set.write() = None;
     state
         .execution_logs
         .write()
@@ -15933,7 +15936,7 @@ mod tests {
         // Mark the equity universe as already anchored so the snapshot measures
         // drawdown against the 1M baseline instead of re-anchoring (universe
         // switches re-anchor; steady-state snapshots measure).
-        *state.last_risk_live_universe.write() = Some(state.is_live());
+        state.mark_risk_universe_anchored();
 
         let risk = get_risk_overview_impl(&state).await.expect("risk");
         // Equity universe = 5 testnet venues @ 100k → 500k vs 1M baseline.
@@ -15946,6 +15949,45 @@ mod tests {
             .await
             .expect("risk zero start");
         assert_eq!(risk.drawdown_pct, 0.0);
+    }
+
+    /// Adding or removing a supervised account changes the equity total
+    /// without any trading loss. The baseline must re-anchor, otherwise an
+    /// operator disabling a venue reads as a real dollar drawdown and halts
+    /// all trading (H-3).
+    #[tokio::test]
+    async fn test_account_set_change_reanchors_breaker_baseline() {
+        let state = setup_test_state_with_venues();
+        // Anchor on the full five-venue universe: 5 × 100k = 500k.
+        let risk = get_risk_overview_impl(&state).await.expect("risk");
+        assert_eq!(risk.current_drawdown_usd, 0.0);
+        let anchored = state.circuit_breaker.day_start_equity();
+        assert_eq!(anchored, dec!(500000.0));
+
+        // Operator disables one venue: 100k leaves the accounted total, a
+        // -20% step that is pure administration, not a loss.
+        state.settings.write().hyperliquid_enabled = false;
+        let risk = get_risk_overview_impl(&state).await.expect("risk");
+        assert!(
+            !state.circuit_breaker.is_tripped(),
+            "breaker tripped on an account-set change: {:?}",
+            state.circuit_breaker.trip_reason()
+        );
+        assert_eq!(risk.current_drawdown_usd, 0.0);
+        assert_eq!(state.circuit_breaker.day_start_equity(), dec!(400000.0));
+
+        // Re-enabling it is likewise not a gain that should mask a later
+        // loss: the baseline follows the universe again.
+        state.settings.write().hyperliquid_enabled = true;
+        let _ = get_risk_overview_impl(&state).await.expect("risk");
+        assert_eq!(state.circuit_breaker.day_start_equity(), dec!(500000.0));
+
+        // A genuine loss inside an unchanged universe still trips.
+        state.circuit_breaker.update_equity(dec!(400000.0));
+        assert!(
+            state.circuit_breaker.is_tripped(),
+            "a real 20% drawdown must still halt trading"
+        );
     }
 
     /// Two venue adapters backed by one economic account (e.g. AMM venues

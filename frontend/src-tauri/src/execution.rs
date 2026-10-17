@@ -3375,7 +3375,7 @@ pub(crate) fn breaker_account_key(state: &AppEngineState, vid: &str) -> String {
 /// Economic-account keys for every currently-admitted venue — the set the
 /// breaker map prunes to, so a disabled venue's stale equity (or a
 /// re-keyed adapter's abandoned bucket) cannot ghost the portfolio total.
-fn admitted_account_keys(state: &AppEngineState, env_prefix: &str) -> HashSet<String> {
+pub(crate) fn admitted_account_keys(state: &AppEngineState, env_prefix: &str) -> HashSet<String> {
     state
         .get_venues()
         .iter()
@@ -3388,6 +3388,12 @@ fn admitted_account_keys(state: &AppEngineState, env_prefix: &str) -> HashSet<St
             )
         })
         .collect()
+}
+
+/// The admitted account keys for the breaker's current environment — the
+/// identity of the equity universe the drawdown baseline is anchored to.
+pub fn admitted_risk_account_keys(state: &AppEngineState) -> HashSet<String> {
+    admitted_account_keys(state, &format!("{}-", state.env().as_str()))
 }
 
 /// Feed the drawdown breaker from one venue's freshly-observed USD-basis
@@ -3413,10 +3419,10 @@ pub(crate) fn feed_breaker_equity_usd(
     let key = format!("{prefix}{}", breaker_account_key(state, vid));
     let frozen = breaker_frozen_equity_usd(state, &key, equity_usd, balances);
     let is_live = state.is_live();
+    let admitted = admitted_account_keys(state, &prefix);
     let total: Decimal = {
         let mut map = state.breaker_venue_equity.lock();
         map.insert(key.clone(), frozen);
-        let admitted = admitted_account_keys(state, &prefix);
         map.retain(|k, _| admitted.contains(k));
         state
             .breaker_fx_adj
@@ -3425,9 +3431,20 @@ pub(crate) fn feed_breaker_equity_usd(
         map.values().sum()
     };
     let mut universe = state.last_risk_live_universe.write();
-    if *universe != Some(is_live) {
-        state.circuit_breaker.reanchor_baseline(total);
+    let mut anchored_set = state.last_risk_account_set.write();
+    // Two things legitimately change the accounted total without any
+    // trading loss: switching environment, and changing WHICH accounts are
+    // supervised (venue enabled/disabled, credentials revoked, an account
+    // dropping out of the admitted set). Both re-anchor; only a same-universe
+    // move is measured as drawdown. Previously only the environment switch
+    // was detected, so disabling a venue read as a real dollar loss and
+    // could trip the breaker off an operator action.
+    let universe_changed = *universe != Some(is_live);
+    let account_set_changed = anchored_set.as_ref() != Some(&admitted);
+    if universe_changed || account_set_changed {
         *universe = Some(is_live);
+        *anchored_set = Some(admitted);
+        state.circuit_breaker.reanchor_baseline(total);
     } else {
         state.circuit_breaker.update_equity(total);
     }
@@ -3443,6 +3460,7 @@ pub(crate) fn feed_breaker_equity(
     let env_str = state.env().as_str();
     let prefix = format!("{env_str}-");
     let is_live = state.is_live();
+    let admitted = admitted_account_keys(state, &prefix);
     let total: Decimal = {
         let mut map = state.breaker_venue_equity.lock();
         for (key, equity, balances) in entries {
@@ -3450,7 +3468,6 @@ pub(crate) fn feed_breaker_equity(
             let frozen = breaker_frozen_equity_usd(state, &fkey, *equity, balances);
             map.insert(fkey, frozen);
         }
-        let admitted = admitted_account_keys(state, &prefix);
         map.retain(|k, _| admitted.contains(k));
         state
             .breaker_fx_adj
@@ -3459,9 +3476,13 @@ pub(crate) fn feed_breaker_equity(
         map.values().sum()
     };
     let mut universe = state.last_risk_live_universe.write();
-    if *universe != Some(is_live) {
-        state.circuit_breaker.reanchor_baseline(total);
+    let mut anchored_set = state.last_risk_account_set.write();
+    let universe_changed = *universe != Some(is_live);
+    let account_set_changed = anchored_set.as_ref() != Some(&admitted);
+    if universe_changed || account_set_changed {
         *universe = Some(is_live);
+        *anchored_set = Some(admitted);
+        state.circuit_breaker.reanchor_baseline(total);
     } else {
         state.circuit_breaker.update_equity(total);
     }

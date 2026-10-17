@@ -576,6 +576,10 @@ pub struct LiveSpreadView {
     /// Monitor lifecycle status of the pair ("ready", "no-data", …).
     pub status: String,
     pub deviation_bps: Option<f64>,
+    /// The monitor's *current* rolling historical mean spread, bps. Required
+    /// to re-frame `deviation_bps` against the baseline that was in force at
+    /// entry — see `evaluate_exit`.
+    pub baseline_bps: Option<f64>,
     /// Live estimated win or reversion probability (0..1).
     pub p_win: Option<f64>,
 }
@@ -626,8 +630,30 @@ impl ExitTrigger {
 /// Band edges are inclusive and disjoint by construction (the stop threshold
 /// is floored at the friction band), so converged and stopped can never fire
 /// on the same tick. Order: convergence, stop, timeout.
+///
+/// `entry_baseline_bps` is the monitor's historical mean spread at the moment
+/// the position was opened; `row.baseline_bps` is the same quantity *now*.
+/// Both matter because the monitor publishes `deviation_bps = raw_spread −
+/// baseline_bps`, i.e. every deviation is expressed relative to the baseline
+/// in force when it was computed. Comparing an entry deviation to a live
+/// deviation without re-basing silently mixes two frames:
+///
+/// ```text
+/// drift       = live_baseline − entry_baseline
+/// entry_edge  = entry_dev − drift        // entry edge, live frame
+/// captured    = entry_edge − live_dev    // = raw_entry − raw_now
+/// ```
+///
+/// A baseline that drifted *up* therefore shrinks the edge that remains
+/// capturable — an unreverted spread can look converged and be closed at
+/// breakeven — while a downward drift inflates it, holding a reverted spread
+/// past its edge and setting the stop band too tight. Passing `None` for
+/// either baseline disables the correction and reproduces the pre-#116
+/// behaviour rather than guessing.
+#[allow(clippy::too_many_arguments)]
 pub fn evaluate_exit(
     entry_dev_bps: f64,
+    entry_baseline_bps: Option<f64>,
     friction_band_bps: f64,
     deadline_ms: i64,
     unwatched_for_secs: Option<f64>,
@@ -657,34 +683,57 @@ pub fn evaluate_exit(
     let Some(dev) = row.deviation_bps.filter(|d| d.is_finite()) else {
         return stale_exit("live deviation unknown");
     };
+    // Re-base the ENTRY edge into the live frame (issue #116). The pair
+    // mean-reverts around its *current* baseline, so the edge that is still
+    // capturable is `raw_entry − live_baseline`, not `raw_entry −
+    // entry_baseline`. Re-expressing the entry edge that way preserves the
+    // realised-P&L identity:
+    //
+    //   captured_bps = raw_entry − raw_now = entry_dev − live_dev
+    //
+    // Leaving the entry edge in its own frame mis-states it whenever the
+    // baseline drifts: an upward drift silently shrinks the edge (a spread
+    // that only *looks* reverted gets closed at breakeven or worse), a
+    // downward drift silently inflates it (a reverted spread is held past
+    // its edge, and the stop band is set too tight).
+    let drift_bps = match (entry_baseline_bps, row.baseline_bps) {
+        (Some(entry), Some(live)) if entry.is_finite() && live.is_finite() => live - entry,
+        _ => 0.0,
+    };
+    let entry_dev = entry_dev_bps - drift_bps;
+    let drift_note = if drift_bps.abs() > 1e-9 {
+        format!(" [entry edge re-based {entry_dev_bps:.1} → {entry_dev:.1} bps for baseline drift {drift_bps:+.1} bps]")
+    } else {
+        String::new()
+    };
     // Require spread to revert past a profit-retention threshold so that at least
     // ~60% of the initial net edge is banked, preventing 0-profit breakeven exits
     // when entry_dev is close to friction_band.
-    let profitable_band = (entry_dev_bps.abs() - friction_band_bps).max(0.0);
+    let profitable_band = (entry_dev.abs() - friction_band_bps).max(0.0);
     let conv_band = (profitable_band * 0.67).min(friction_band_bps);
-    let crossed_zero = entry_dev_bps != 0.0 && dev.signum() != entry_dev_bps.signum();
+    let crossed_zero = entry_dev != 0.0 && dev.signum() != entry_dev.signum();
     if dev.abs() <= conv_band || crossed_zero {
         return ExitEval::Exit {
             trigger: ExitTrigger::Converged,
             reason: if crossed_zero {
                 format!(
-                    "spread overshot past baseline into favorable territory (dev {dev:.1} bps vs entry {entry_dev_bps:.1} bps)"
+                    "spread overshot past baseline into favorable territory (dev {dev:.1} bps vs entry {entry_dev:.1} bps){drift_note}"
                 )
             } else {
                 format!(
-                    "spread reverted into convergence band (|dev| {dev:.1} <= {conv_band:.1} bps)"
+                    "spread reverted into convergence band (|dev| {dev:.1} <= {conv_band:.1} bps){drift_note}"
                 )
             },
         };
     }
     // Adverse = the deviation keeps growing on the ENTRY'S side of zero.
     // A deviation that crossed zero is favorable overshoot: handled above as Converged.
-    let stop_at = (cfg.stop_mult * entry_dev_bps.abs()).max(friction_band_bps);
-    if entry_dev_bps != 0.0 && dev.signum() == entry_dev_bps.signum() && dev.abs() >= stop_at {
+    let stop_at = (cfg.stop_mult * entry_dev.abs()).max(friction_band_bps);
+    if entry_dev != 0.0 && dev.signum() == entry_dev.signum() && dev.abs() >= stop_at {
         return ExitEval::Exit {
             trigger: ExitTrigger::Stopped,
             reason: format!(
-                "deviation widened past stop band (dev {dev:.1} on entry side, |dev| >= {stop_at:.1} bps)"
+                "deviation widened past stop band (dev {dev:.1} on entry side, |dev| >= {stop_at:.1} bps){drift_note}"
             ),
         };
     }
@@ -1059,6 +1108,7 @@ mod tests {
         LiveSpreadView {
             status: status.into(),
             deviation_bps: dev,
+            baseline_bps: None,
             p_win: None,
         }
     }
@@ -1067,7 +1117,19 @@ mod tests {
         LiveSpreadView {
             status: status.into(),
             deviation_bps: dev,
+            baseline_bps: None,
             p_win,
+        }
+    }
+
+    /// Live row that also carries the monitor's *current* baseline, so exit
+    /// evaluation can re-base the deviation into the entry frame.
+    fn live_with_baseline(status: &str, dev: Option<f64>, baseline: Option<f64>) -> LiveSpreadView {
+        LiveSpreadView {
+            status: status.into(),
+            deviation_bps: dev,
+            baseline_bps: baseline,
+            p_win: None,
         }
     }
 
@@ -1077,6 +1139,7 @@ mod tests {
                               // Outside friction band, not stopped, but win probability collapsed to 30% -> exit
         let e = evaluate_exit(
             10.0,
+            None,
             4.0,
             999_999,
             None,
@@ -1098,6 +1161,7 @@ mod tests {
         // Win probability above floor (65%) holds
         let e = evaluate_exit(
             10.0,
+            None,
             4.0,
             999_999,
             None,
@@ -1110,6 +1174,7 @@ mod tests {
         // Convergence into friction band takes profit even if probability is degraded
         let e = evaluate_exit(
             10.0,
+            None,
             4.0,
             999_999,
             None,
@@ -1136,6 +1201,7 @@ mod tests {
         for dev in [0.0, 3.9, 4.0, -4.0] {
             let e = evaluate_exit(
                 10.0,
+                None,
                 4.0,
                 999_999,
                 None,
@@ -1158,6 +1224,7 @@ mod tests {
         assert_eq!(
             evaluate_exit(
                 10.0,
+                None,
                 4.0,
                 999_999,
                 None,
@@ -1175,6 +1242,7 @@ mod tests {
         assert_eq!(
             evaluate_exit(
                 15.0,
+                None,
                 12.0,
                 999_999,
                 None,
@@ -1189,6 +1257,7 @@ mod tests {
         assert_eq!(
             evaluate_exit(
                 15.0,
+                None,
                 12.0,
                 999_999,
                 None,
@@ -1201,6 +1270,7 @@ mod tests {
         // At live dev 2.0 bps, gross capture is 13.0 bps, net profit is +1.0 bps -> Converges!
         let e_prof = evaluate_exit(
             15.0,
+            None,
             12.0,
             999_999,
             None,
@@ -1224,6 +1294,7 @@ mod tests {
         assert_eq!(
             evaluate_exit(
                 10.0,
+                None,
                 12.0,
                 999_999,
                 None,
@@ -1236,6 +1307,7 @@ mod tests {
         assert_eq!(
             evaluate_exit(
                 10.0,
+                None,
                 12.0,
                 999_999,
                 None,
@@ -1247,11 +1319,156 @@ mod tests {
         );
     }
 
+    // ── Baseline-drift re-basing (issue #116) ──────────────────────────────
+    // Framing: the monitor publishes dev = raw_spread − baseline. A position
+    // opened at raw 12 bps when the baseline was 2 bps carries an entry
+    // deviation of 10 bps. Captured P&L is raw_entry − raw_now, so the entry
+    // edge has to be re-expressed against the *live* baseline before it can
+    // be compared with the live deviation:
+    //     entry_edge = entry_dev − (live_baseline − entry_baseline)
+    //     captured   = entry_edge − live_dev
+
+    /// Exit evaluation with a configurable friction band, so the convergence
+    /// band is not always pinned at its `friction_band_bps` cap.
+    /// `exit_cfg()` contributes stop_mult 1.5 and invalidation_p_win 0.50.
+    fn drift_eval(
+        entry_dev: f64,
+        entry_baseline: Option<f64>,
+        friction_band: f64,
+        live_dev: f64,
+        live_baseline: Option<f64>,
+    ) -> ExitEval {
+        evaluate_exit(
+            entry_dev,
+            entry_baseline,
+            friction_band,
+            999_999,
+            None,
+            Some(&live_with_baseline("ready", Some(live_dev), live_baseline)),
+            0,
+            &exit_cfg(),
+        )
+    }
+
+    #[test]
+    fn convergence_rebases_entry_edge_for_baseline_drift() {
+        // (a) Baseline drifts UP +7 (2 → 9) while the spread has not moved:
+        //     raw stays 12 bps, so the live deviation reads 3 bps and sits
+        //     inside the 4 bps convergence band — the un-re-based comparison
+        //     closes a position that has captured exactly 0 bps. Re-based,
+        //     the entry edge is 10 − 7 = 3 bps, so all 3 bps are still
+        //     outstanding and the band collapses to zero: hold.
+        assert_eq!(
+            drift_eval(10.0, Some(2.0), 4.0, 3.0, Some(9.0)),
+            ExitEval::Hold,
+            "a widening baseline must not fake a convergence"
+        );
+        // Same live row, no drift: 3 bps is inside the band → converged.
+        let e = drift_eval(10.0, Some(9.0), 4.0, 3.0, Some(9.0));
+        assert!(
+            matches!(
+                e,
+                ExitEval::Exit {
+                    trigger: ExitTrigger::Converged,
+                    ..
+                }
+            ),
+            "got {e:?}"
+        );
+
+        // (b) Baseline drifts DOWN −5 (2 → −3): the entry edge is really
+        //     10 + 5 = 15 bps, so with an 8 bps friction band the retention
+        //     band is 0.67 × (15 − 8) = 4.69 bps and a 3 bps live deviation
+        //     is a genuine convergence with 12 of 15 bps banked. Un-re-based,
+        //     the band is only 0.67 × (10 − 8) = 1.34 bps and the position is
+        //     held past its edge.
+        let e = drift_eval(10.0, Some(2.0), 8.0, 3.0, Some(-3.0));
+        assert!(
+            matches!(
+                e,
+                ExitEval::Exit {
+                    trigger: ExitTrigger::Converged,
+                    ..
+                }
+            ),
+            "a falling baseline must not block a genuine convergence, got {e:?}"
+        );
+        assert_eq!(
+            drift_eval(10.0, Some(-3.0), 8.0, 3.0, Some(-3.0)),
+            ExitEval::Hold
+        );
+
+        // (c) No drift: re-basing is the identity, so behaviour is unchanged.
+        let e = drift_eval(10.0, Some(2.0), 4.0, 0.0, Some(2.0));
+        assert!(
+            matches!(
+                e,
+                ExitEval::Exit {
+                    trigger: ExitTrigger::Converged,
+                    ..
+                }
+            ),
+            "got {e:?}"
+        );
+        assert_eq!(
+            drift_eval(10.0, Some(2.0), 4.0, 8.0, Some(2.0)),
+            ExitEval::Hold
+        );
+    }
+
+    #[test]
+    fn stop_band_rebases_for_baseline_drift() {
+        // Baseline drifts up +7: the entry edge is only 3 bps, so the stop
+        // sits at max(1.5 × 3, 4) = 4.5 bps and a 5 bps adverse deviation
+        // stops out. Un-re-based the stop would sit at 15 bps and the loss
+        // would be allowed to run.
+        let e = drift_eval(10.0, Some(2.0), 4.0, 5.0, Some(9.0));
+        assert!(
+            matches!(
+                e,
+                ExitEval::Exit {
+                    trigger: ExitTrigger::Stopped,
+                    ..
+                }
+            ),
+            "got {e:?}"
+        );
+
+        // Mirror image: the baseline drifts down −5, so the entry edge is 15
+        // bps and the stop sits at 22.5 bps. An 18 bps adverse deviation is
+        // still inside the modeled loss bound: hold.
+        assert_eq!(
+            drift_eval(10.0, Some(2.0), 8.0, 18.0, Some(-3.0)),
+            ExitEval::Hold
+        );
+    }
+
+    #[test]
+    fn unknown_baseline_falls_back_to_unrebased_deviation() {
+        // Either side missing → no correction is applied rather than guessed.
+        // A 3 bps live deviation sits inside the band in every case, exactly
+        // as it did before the re-basing existed.
+        for (entry_base, live_base) in [(None, Some(9.0)), (Some(2.0), None), (None, None)] {
+            let e = drift_eval(10.0, entry_base, 4.0, 3.0, live_base);
+            assert!(
+                matches!(
+                    e,
+                    ExitEval::Exit {
+                        trigger: ExitTrigger::Converged,
+                        ..
+                    }
+                ),
+                "entry {entry_base:?} live {live_base:?} → {e:?}"
+            );
+        }
+    }
+
     #[test]
     fn exit_on_stop_band_breach() {
         let cfg = exit_cfg(); // stop 1.5 x |10| = 15
         let e = evaluate_exit(
             10.0,
+            None,
             4.0,
             999_999,
             None,
@@ -1273,6 +1490,7 @@ mod tests {
         // the reversion past the band, which is profit: immediately exits as Converged.
         let overshoot_eval = evaluate_exit(
             10.0,
+            None,
             4.0,
             999_999,
             None,
@@ -1291,6 +1509,7 @@ mod tests {
         // further downside, and its overshoot through zero holds too.
         let e = evaluate_exit(
             -10.0,
+            None,
             4.0,
             999_999,
             None,
@@ -1307,6 +1526,7 @@ mod tests {
         ));
         let neg_overshoot = evaluate_exit(
             -10.0,
+            None,
             4.0,
             999_999,
             None,
@@ -1325,6 +1545,7 @@ mod tests {
         assert_eq!(
             evaluate_exit(
                 10.0,
+                None,
                 4.0,
                 999_999,
                 None,
@@ -1343,6 +1564,7 @@ mod tests {
         // Adverse widening to 4.0 stops out.
         let e_stop = evaluate_exit(
             1.0,
+            None,
             4.0,
             999_999,
             None,
@@ -1360,6 +1582,7 @@ mod tests {
         // True reversion to 0 converges.
         let e_conv = evaluate_exit(
             1.0,
+            None,
             4.0,
             999_999,
             None,
@@ -1382,6 +1605,7 @@ mod tests {
         // Mid-band dev, deadline reached -> timeout.
         let e = evaluate_exit(
             10.0,
+            None,
             4.0,
             1000,
             None,
@@ -1400,6 +1624,7 @@ mod tests {
         assert_eq!(
             evaluate_exit(
                 10.0,
+                None,
                 4.0,
                 1000,
                 None,
@@ -1415,10 +1640,10 @@ mod tests {
     fn missing_or_stale_rows_hold_then_unwind() {
         let cfg = exit_cfg(); // stale grace 600s
                               // Gone entirely: unwatched inside grace…
-        let e = evaluate_exit(10.0, 4.0, 9_999_999, Some(60.0), None, 0, &cfg);
+        let e = evaluate_exit(10.0, None, 4.0, 9_999_999, Some(60.0), None, 0, &cfg);
         assert!(matches!(e, ExitEval::Unwatched { .. }), "got {e:?}");
         // …reduce-only unwind past it.
-        let e = evaluate_exit(10.0, 4.0, 9_999_999, Some(600.0), None, 0, &cfg);
+        let e = evaluate_exit(10.0, None, 4.0, 9_999_999, Some(600.0), None, 0, &cfg);
         assert!(matches!(
             e,
             ExitEval::Exit {
@@ -1429,6 +1654,7 @@ mod tests {
         // Explicit stale status behaves the same.
         let e = evaluate_exit(
             10.0,
+            None,
             4.0,
             9_999_999,
             Some(601.0),
@@ -1446,6 +1672,7 @@ mod tests {
         // Unknown live deviation (but fresh row) holds unwatched.
         let e = evaluate_exit(
             10.0,
+            None,
             4.0,
             9_999_999,
             Some(1.0),
@@ -1505,15 +1732,19 @@ mod tests {
         let cfg = exit_cfg();
         // Entry: spread 35 bps, baseline 20 bps -> entry_dev = 15 bps. Friction band = 4 bps.
         let entry_dev = 15.0;
+        let entry_baseline = 20.0;
         let friction_band = 4.0;
         let deadline = 100_000;
 
         // Days later: baseline shifted permanently to 25 bps.
         // Live spread is now 25.5 bps -> live_dev = 25.5 - 25.0 = 0.5 bps.
-        // Live dev is well within the friction band (0.5 <= 4.0).
-        let live_row = live("ready", Some(0.5));
+        // The entry edge re-based onto the new baseline is 35 - 25 = 10 bps,
+        // of which 9.5 bps are banked, so the retention band
+        // (0.67 x (10 - 4) = 4.02, capped at 4.0) is met: converged.
+        let live_row = live_with_baseline("ready", Some(0.5), Some(25.0));
         let e = evaluate_exit(
             entry_dev,
+            Some(entry_baseline),
             friction_band,
             deadline,
             None,
@@ -1534,9 +1765,10 @@ mod tests {
 
         // Conversely, if spread never converges (e.g. stays at 32 bps on a 25 bps baseline -> live_dev = 7.0 bps),
         // it holds until deadline expires, then exits on timeout:
-        let live_unconverged = live("ready", Some(7.0));
+        let live_unconverged = live_with_baseline("ready", Some(7.0), Some(25.0));
         let e_hold = evaluate_exit(
             entry_dev,
+            Some(entry_baseline),
             friction_band,
             deadline,
             None,
@@ -1548,6 +1780,7 @@ mod tests {
 
         let e_timeout = evaluate_exit(
             entry_dev,
+            Some(entry_baseline),
             friction_band,
             deadline,
             None,

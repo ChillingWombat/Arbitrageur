@@ -951,6 +951,11 @@ impl OpportunityExecutor {
                 let live = rows.get(&key).map(|r| LiveSpreadView {
                     status: r.status.clone(),
                     deviation_bps: r.deviation_bps,
+                    // The monitor's *current* rolling baseline. Paired with
+                    // the baseline captured at entry it lets the exit policy
+                    // re-base the live deviation into the entry frame
+                    // (issue #116) instead of comparing across two frames.
+                    baseline_bps: r.baseline_bps,
                     p_win: r.win_probability.or(r.reversion_probability).or(r.p_win),
                 });
                 let watched = live.as_ref().is_some_and(|l| {
@@ -967,6 +972,7 @@ impl OpportunityExecutor {
                     .map(|t| (now_ms - t).max(0) as f64 / 1000.0);
                 match evaluate_exit(
                     pos.entry_dev_bps,
+                    pos.baseline_bps,
                     pos.friction_band_bps,
                     pos.deadline_ms,
                     unwatched_for,

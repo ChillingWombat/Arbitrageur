@@ -1440,6 +1440,12 @@ pub struct AppEngineState {
     /// tripping. Prevents the classic false halt: $200k baseline vs $3.5k
     /// live funds reading as a -$196k "drawdown".
     pub last_risk_live_universe: RwLock<Option<bool>>,
+    /// Which set of supervised accounts the breaker baseline was anchored
+    /// for (None = not yet anchored). Enabling/disabling a venue, or a
+    /// venue losing its credentials, changes the accounted equity total
+    /// without any trading loss: the next risk snapshot must re-anchor
+    /// rather than read the step as drawdown and halt everything.
+    pub last_risk_account_set: RwLock<Option<std::collections::HashSet<String>>>,
     /// Last known-good live account snapshot per venue, with read timestamp.
     /// A transiently-unreadable venue keeps contributing its cached figures
     /// to totals/drawdown (a blip is not a loss) until the Safety-tab grace
@@ -2591,6 +2597,7 @@ impl AppEngineState {
             kalman_filter,
             environment,
             last_risk_live_universe: RwLock::new(None),
+            last_risk_account_set: RwLock::new(None),
             last_good_accounts: Mutex::new(std::collections::HashMap::new()),
             breaker_venue_equity: Mutex::new(std::collections::HashMap::new()),
             breaker_fx_anchor: Mutex::new(initial_fx_anchor),
@@ -3401,6 +3408,18 @@ impl AppEngineState {
 
     pub fn set_environment(&self, env: TradingEnvironment) {
         *self.environment.write() = env;
+    }
+
+    /// Mark the breaker's equity universe as already anchored, so the next
+    /// risk snapshot *measures* drawdown against the current baseline instead
+    /// of re-anchoring. Callers that set a baseline by hand (tests, operators
+    /// resetting after review) use this to opt out of the automatic re-anchor
+    /// that a paper<->live switch or an account-set change would otherwise
+    /// trigger.
+    pub fn mark_risk_universe_anchored(&self) {
+        *self.last_risk_live_universe.write() = Some(self.is_live());
+        *self.last_risk_account_set.write() =
+            Some(crate::execution::admitted_risk_account_keys(self));
     }
 
     /// Admitted venue adapters for one environment. Hyperliquid, Lighter,
