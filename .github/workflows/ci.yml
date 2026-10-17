@@ -71,9 +71,10 @@ jobs:
     runs-on: ubuntu-latest
     # Explicit ceiling rather than the 6 h default. The desktop crate is the
     # long pole — `stronghold::tests::rekey_snapshot…` alone measures ~229 s
-    # of real KDF work (issue #117) — but a genuine hang must fail the build
-    # instead of occupying a runner overnight.
-    timeout-minutes: 45
+    # of real KDF work (issue #117) and the full desktop suite measured ~46 min
+    # on a cold runner, over the old 45 min ceiling — but a genuine hang must
+    # fail the build instead of occupying a runner overnight.
+    timeout-minutes: 90
     strategy:
       fail-fast: false
       matrix:
