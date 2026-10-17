@@ -349,6 +349,11 @@ impl StateStore {
     }
 
     /// Record an actual fill on one leg of a signal (matched by side).
+    ///
+    /// The price is venue-reported for this instrument. A fill whose price is
+    /// derived from a parent order's net price must use
+    /// `apply_leg_fill_attributed` instead, so downstream P&L can tell the two
+    /// apart (#119).
     pub fn apply_leg_fill(
         &self,
         signal_id: &str,
@@ -357,6 +362,58 @@ impl StateStore {
         fill_price: f64,
         fee_usd: f64,
         venue_order_id: Option<&str>,
+    ) -> anyhow::Result<()> {
+        self.write_leg_fill(
+            signal_id,
+            side,
+            filled_qty,
+            fill_price,
+            fee_usd,
+            venue_order_id,
+            false,
+        )
+    }
+
+    /// Same as `apply_leg_fill`, but marks the recorded price as an
+    /// attribution rather than a venue-reported fill for this instrument.
+    ///
+    /// Used for native combo legs: the venue reports ONE net price for the
+    /// whole package, so each leg's price is split out of that net (#119).
+    /// The split is engineered to reconcile to the premium actually paid, but
+    /// it is not venue truth and P&L must be able to say so.
+    pub fn apply_leg_fill_attributed(
+        &self,
+        signal_id: &str,
+        side: LegSide,
+        filled_qty: f64,
+        fill_price: f64,
+        fee_usd: f64,
+        venue_order_id: Option<&str>,
+    ) -> anyhow::Result<()> {
+        self.write_leg_fill(
+            signal_id,
+            side,
+            filled_qty,
+            fill_price,
+            fee_usd,
+            venue_order_id,
+            true,
+        )
+    }
+
+    // One flag past clippy's 7-argument comfort zone, but splitting the
+    // write across two statements would break the leg/fee atomicity the SQL
+    // is built around — a tuple param would only rename the same data.
+    #[allow(clippy::too_many_arguments)]
+    fn write_leg_fill(
+        &self,
+        signal_id: &str,
+        side: LegSide,
+        filled_qty: f64,
+        fill_price: f64,
+        fee_usd: f64,
+        venue_order_id: Option<&str>,
+        fill_price_estimated: bool,
     ) -> anyhow::Result<()> {
         let signal_id = normalize_id(signal_id)?;
         if !filled_qty.is_finite() || filled_qty < 0.0 {
@@ -380,6 +437,7 @@ impl StateStore {
         let changed = tx.execute(
             "UPDATE signal_legs
              SET fill_price = CASE WHEN ?3 >= filled_qty THEN ?4 ELSE fill_price END,
+                 fill_price_estimated = CASE WHEN ?3 >= filled_qty THEN ?8 ELSE fill_price_estimated END,
                  fee_usd = CASE WHEN ?3 >= filled_qty THEN MAX(fee_usd, ?5) ELSE fee_usd END,
                  filled_qty = MAX(filled_qty, ?3),
                  venue_order_id = COALESCE(?6, venue_order_id), updated_at = ?7
@@ -391,7 +449,8 @@ impl StateStore {
                 fill_price,
                 fee_usd,
                 venue_order_id,
-                now
+                now,
+                fill_price_estimated as i64
             ],
         )?;
         if changed == 0 {
@@ -1327,7 +1386,7 @@ impl StateStore {
             "SELECT id, signal_id, account_id, venue, side, intended_qty,
                     filled_qty, fill_price, fee_usd, venue_order_id,
                     created_at, updated_at, symbol, client_order_id, intended_price,
-                    unit_scale
+                    unit_scale, fill_price_estimated
              FROM signal_legs WHERE signal_id = ?1
              ORDER BY CASE side WHEN 'long' THEN 0 ELSE 1 END",
         )?;

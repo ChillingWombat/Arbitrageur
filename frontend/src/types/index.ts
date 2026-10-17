@@ -1298,6 +1298,11 @@ export interface AtomicTransactionDto {
   filledQty: number;
   intendedPrice: number | null;
   fillPrice: number | null;
+  /** `true` when `fillPrice` is an attribution split out of a parent combo
+   *  order's net premium rather than a venue-reported fill for this
+   *  instrument. Reconciled to the premium actually paid, but not venue
+   *  truth — the UI must not present it as one (issue #119). */
+  fillPriceEstimated: boolean;
   feeUsd: number;
   /** Leg venue-units per unit of the parent symbol. */
   unitScale: number;

@@ -5471,6 +5471,7 @@ mod tests {
             intended_qty: 0.0,
             filled_qty: 0.0,
             fill_price: None,
+            fill_price_estimated: false,
             fee_usd: 0.0,
             venue_order_id: None,
             client_order_id: None,

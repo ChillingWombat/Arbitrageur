@@ -33,6 +33,7 @@ const tx = (
   filledQty: filled,
   intendedPrice: 100,
   fillPrice,
+  fillPriceEstimated: false,
   feeUsd: 0.5,
   unitScale: 1,
   venueOrderId: `oid-${id}`,

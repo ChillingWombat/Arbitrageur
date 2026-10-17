@@ -1874,6 +1874,7 @@ mod tests {
             intended_qty: 1.0,
             filled_qty: filled,
             fill_price: Some(100.0),
+            fill_price_estimated: false,
             fee_usd: 0.0,
             venue_order_id: Some("o".into()),
             client_order_id: None,

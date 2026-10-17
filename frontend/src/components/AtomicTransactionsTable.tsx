@@ -200,6 +200,14 @@ export const AtomicTransactionsTable: React.FC<{ transactions: AtomicTransaction
               </td>
               <td className="py-2 px-3 text-right text-slate-700 whitespace-nowrap">
                 {fmtPx(tx.fillPrice)} / {fmtPx(tx.intendedPrice)}
+                {tx.fillPriceEstimated && (
+                  <span
+                    className="ml-1 px-1 py-0.5 rounded text-[9px] font-bold text-amber-700 bg-amber-50 border border-amber-200"
+                    title="Attributed from the parent combo order's NET fill price — the venue reports one price for the whole package, so this leg's price is split out of it and reconciles to the premium paid, but it is not a venue-reported fill for this instrument."
+                  >
+                    est
+                  </span>
+                )}
               </td>
               <td className="py-2 px-3 text-right text-slate-700 whitespace-nowrap">
                 {tx.feeUsd > 0 ? `-$${tx.feeUsd.toFixed(3)}` : "$0"}

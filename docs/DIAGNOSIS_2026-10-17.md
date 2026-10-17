@@ -17,7 +17,7 @@ untouched when this pass began (verified: no `crates/**` or
 | Frontend tests | 175/175 units passed, component suite unrunnable (Linux `node_modules` on a Windows host) | **419/419 pass** (Linux container, node 24) |
 | E2E 4-tier suite | not in CI, red when run | **52/52 pass on Linux *and* Windows** (macOS via CI) |
 | CRITICAL findings | 6 open | **6 fixed** |
-| GitHub tracking | ~190 findings untracked | **10 issues filed (#108–#117)** |
+| GitHub tracking | ~190 findings untracked | **12 issues filed (#108–#119)** |
 | CI red job | `deployment` job references missing unit | **fixed** |
 | Cross-platform | never verified, never compiled off Linux | **compiles + E2E green on all three OSes in CI (§7)** |
 | Desktop packaging | `bundle.active = false`, no installer | **bundling on; per-OS release matrix (nsis / dmg / deb-rpm-appimage)** |
@@ -25,6 +25,8 @@ untouched when this pass began (verified: no `crates/**` or
 | Convergence exit (#116) | entry-frame edge compared against baseline-frame deviation | **entry edge re-based onto the live baseline (§8.1)** |
 | Breaker baseline (H-3) | only a paper↔live switch re-anchored | **supervised-account-set changes re-anchor too (§8.2)** |
 | CI feedback | one 30-minute job hid lint failures behind the test suite | **lint split from a per-crate test matrix (§8.3)** |
+| Lint gate, first real run | clippy `-D warnings` had never been enforced | **caught 2 `dead_code` errors on its first run; both fixed, no `#[allow]` (§8.6)** |
+| Combo leg pricing (#119) | per-leg rows stamped with the pre-trade bound; legs don't sum to the premium paid | **net fill attributed across legs, reconciled by construction; `fill_price_estimated` flag through schema→store→DTO→UI (§8.7)** |
 
 ---
 
@@ -377,6 +379,13 @@ minutes. Split into:
 | CI `Cross-platform` (ubuntu / windows / macos) | all three **success** |
 | CI `Rust advisories and secret scan` | **success** (10 → 0 after §7 fixes) |
 
+> Correction, see §8.6: the `cargo clippy` row above was measured on a
+> checkout that predated the H-3 helper functions. The `rust-lint` job that
+> the new gate added then caught two `dead_code` errors in the same code on
+> the very next push. That is the gate doing its job — and it is the reason
+> §8.3 exists at all, since under the old combined job those two errors would
+> have surfaced after ~30 minutes instead of ~5.
+
 ### 8.5 `stronghold::tests::rekey_snapshot…` is slow, not deadlocked (#117)
 
 Issue #117 step 1 asked whether the test passes on a native Linux filesystem
@@ -398,3 +407,79 @@ until the product path is cleared — it now is), and the CI job that runs it
 gets an explicit `timeout-minutes` so a genuine future hang fails loudly
 instead of burning a runner for hours. If it must be fast, the lever is
 lowering the KDF parameters for the test snapshot, not skipping it.
+
+### 8.6 The new lint gate immediately caught two `dead_code` errors (8ff67ff)
+
+Run `39019514771`, job `Rust format and lint`, step 8:
+
+```
+error: function `admitted_risk_account_keys` is never used
+error: method `mark_risk_universe_anchored` is never used
+```
+
+Both came in with the H-3 fix (§8.2). `mark_risk_universe_anchored` had
+exactly one caller — `commands::tests` — and `admitted_risk_account_keys` had
+exactly one caller, that method. With `--all-targets`, clippy also builds the
+non-test binary, where neither is reachable, so `-D dead-code` fires.
+
+Fixed by gating both with `#[cfg(test)]`, **not** `#[allow(dead_code)]`. The
+distinction matters: production genuinely never needs them. Every production
+path that changes the equity universe — environment switch, account
+enable/disable, environment reset — *wants* the re-anchor and clears the
+anchor instead (`reset_transaction_history_impl`), which is the opposite of
+what this helper does. An `#[allow]` would have shipped a live-only helper
+inside the release binary to hide a design fact the gate correctly surfaced.
+
+Re-verified after the fix: `cargo fmt --all -- --check` clean, `cargo clippy
+--workspace --all-targets --locked -- -D warnings` clean, and the four tests
+on this path pass (`test_risk_overview_drawdown_pct_uses_day_start`,
+`test_account_set_change_reanchors_breaker_baseline`, both
+`options_exit_tests`).
+
+Process note worth keeping: the failure was pushed to `main` before it was
+caught. Local `cargo clippy` was run at an earlier revision, so the fix
+commit and the lint run covered different trees. The gate is what made that
+cheap — 5 minutes and a one-line-per-site fix rather than a red `main` for
+half an hour.
+
+### 8.7 Native combo legs were priced from a pre-trade bound, not the fill (#119)
+
+A native combo is submitted as ONE order at a net limit price, and the venue
+reports back ONE `avg_fill_price` — the net premium per combo unit. The
+per-leg rows were then built by cloning that ack and stamping each leg with
+`options_leg_bound_px` — a pre-trade *worst-case execution bound*. So the
+persisted per-leg prices were estimates, the legs did not sum to the premium
+actually paid, and the same estimate seeded hedge/reval bases and delta
+sizing.
+
+Fixed in two parts:
+
+1. **Reconciliation.** New `attribute_combo_net_price` rescales the
+   bound-shaped prices by one common factor so the signed leg sum equals the
+   venue-reported net by construction (`Σ sign·p·mult == net_actual`,
+   verified at runtime rather than trusted — the `!(x <= eps)` form also
+   rejects NaN). Scaling keeps each leg's relative price structure; a pure
+   `qty_mult` split would flatten a 0.05 BTC leg and a 0.0005 BTC leg onto
+   one number. It refuses — and the caller falls back to the bound, flagged —
+   when the identity cannot be forced safely: a degenerate (zero) shape net,
+   or a factor that would drive any leg price non-positive (a debit package
+   filling as a credit), which the fill recorder would reject and abort a
+   package the venue genuinely filled. Also fixed a latent variant: a leg
+   with no book previously kept the combo's *net* price as its own — it now
+   gets `None` instead of a guaranteed-wrong number.
+2. **Honesty.** Every combo-derived leg price is an attribution, never a
+   venue fill for that instrument, so it is marked: schema v43 adds
+   `signal_legs.fill_price_estimated`, `apply_leg_fill_attributed` writes it,
+   `AtomicTransactionDto.fillPriceEstimated` carries it to the UI, and the
+   atomic-transactions table renders an `est` badge with a tooltip instead of
+   presenting the number as venue truth.
+
+Tests: 6 new — reconciliation to the paid premium, relative-structure
+preservation, sign-flip refusal, degenerate-shape refusal, scan-price
+fallback, and unusable-input rejection. The old behaviour is pinned in the
+first test: booking the raw bound leaves the legs 0.002 BTC short of what
+was paid.
+
+Open follow-up (venue capability, not app logic): query the venue for the
+combo's per-instrument child fills and book those when available, downgrading
+the flag to venue truth — issue #119 step 1.

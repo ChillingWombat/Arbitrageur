@@ -253,6 +253,13 @@ pub struct SignalLeg {
     pub intended_qty: f64,
     pub filled_qty: f64,
     pub fill_price: Option<f64>,
+    /// `true` when `fill_price` is NOT a venue-reported fill for this
+    /// instrument but an attribution derived from a parent order's net price
+    /// — a native combo, whose only reported price is the combo-level net
+    /// premium. Downstream P&L must never present that attribution as venue
+    /// truth (issue #119). Default `false` for every row written before v43
+    /// and for every ordinary single-instrument fill.
+    pub fill_price_estimated: bool,
     pub fee_usd: f64,
     pub venue_order_id: Option<String>,
     /// Engine-generated client order id, persisted alongside the venue
@@ -1081,6 +1088,12 @@ ON CONFLICT(id) DO UPDATE SET
     account_a_id = excluded.account_a_id,
     account_b_id = excluded.account_b_id,
     updated_at = excluded.updated_at";
+
+/// Current schema version — the last migration `migrate` applies. The
+/// version guard and the tests both read this instead of hard-coding the
+/// number, so adding a migration no longer breaks every assertion that pins
+/// it (v43 alone broke seven).
+pub(crate) const SCHEMA_VERSION: i64 = 43;
 
 const MIGRATION_V1_SQL: &str = "\
 BEGIN IMMEDIATE;
@@ -2004,6 +2017,13 @@ PRAGMA user_version = 42;
 COMMIT;
 PRAGMA foreign_keys = ON;";
 
+/// v43 records whether a leg's persisted `fill_price` is a venue-reported
+/// fill or an attribution. A native combo order reports ONE net price for the
+/// whole package, so its per-leg rows are derived from that net (issue #119);
+/// without this column P&L cannot tell a real fill from a split of the net
+/// premium and silently presents the attribution as venue truth.
+const MIGRATION_V43_SQL: &str = "BEGIN IMMEDIATE; ALTER TABLE signal_legs ADD COLUMN fill_price_estimated INTEGER NOT NULL DEFAULT 0 CHECK(fill_price_estimated IN (0, 1)); PRAGMA user_version = 43; COMMIT;";
+
 const MIGRATION_V38_SQL: &str = "\
 PRAGMA foreign_keys = OFF;
 BEGIN IMMEDIATE;
@@ -2591,6 +2611,9 @@ fn leg_from_row(row: &Row<'_>) -> rusqlite::Result<SignalLeg> {
         intended_qty: row.get(5)?,
         filled_qty: row.get(6)?,
         fill_price: row.get(7)?,
+        // Column 16 (v43). Absent on any older SELECT, in which case the row
+        // predates the flag and a venue-reported fill is the safe default.
+        fill_price_estimated: row.get::<_, i64>(16).ok().map(|v| v != 0).unwrap_or(false),
         fee_usd: row.get(8)?,
         venue_order_id: row.get(9)?,
         client_order_id: row
@@ -2871,7 +2894,7 @@ impl StateStore {
 
     fn migrate(conn: &Connection) -> anyhow::Result<()> {
         let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-        if version > 42 {
+        if version > SCHEMA_VERSION {
             anyhow::bail!("unsupported state store schema version: {version}");
         }
         if version == 0 {
@@ -3122,6 +3145,12 @@ impl StateStore {
         }
         if version <= 41 {
             if let Err(err) = conn.execute_batch(MIGRATION_V42_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 42 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V43_SQL) {
                 let _ = conn.execute_batch("ROLLBACK;");
                 return Err(err.into());
             }

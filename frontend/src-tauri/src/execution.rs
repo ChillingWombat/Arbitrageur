@@ -2656,6 +2656,11 @@ pub struct AtomicTransactionDto {
     pub filled_qty: f64,
     pub intended_price: Option<f64>,
     pub fill_price: Option<f64>,
+    /// `true` when `fill_price` is an attribution derived from a parent
+    /// order's net price (a native combo leg) rather than a venue-reported
+    /// fill for this instrument. P&L computed from it is arithmetically
+    /// reconciled to the premium actually paid but is not venue truth (#119).
+    pub fill_price_estimated: bool,
     pub fee_usd: f64,
     /// Leg venue-units per unit of the parent symbol (tracked-group scale).
     pub unit_scale: f64,
@@ -2823,6 +2828,7 @@ pub(crate) fn build_traded_opportunities(
                     filled_qty: filled,
                     intended_price: leg.intended_price,
                     fill_price: leg.fill_price,
+                    fill_price_estimated: leg.fill_price_estimated,
                     fee_usd: fee,
                     unit_scale: if leg.unit_scale.is_finite() && leg.unit_scale > 0.0 {
                         leg.unit_scale
@@ -7442,6 +7448,7 @@ mod account_read_tests {
             intended_qty: 1.0,
             filled_qty: 1.0,
             fill_price: Some(px),
+            fill_price_estimated: false,
             fee_usd: 0.0,
             venue_order_id: Some(format!("oid-{id}")),
             client_order_id: Some(format!("cid-{id}")),
@@ -8300,6 +8307,7 @@ mod traded_opportunity_tests {
             intended_qty: intended,
             filled_qty: filled,
             fill_price: price,
+            fill_price_estimated: false,
             fee_usd: fee,
             venue_order_id: Some(format!("oid-{id}")),
             client_order_id: Some(format!("cid-{id}")),

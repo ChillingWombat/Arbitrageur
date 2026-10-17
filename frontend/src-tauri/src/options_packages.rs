@@ -1108,6 +1108,102 @@ pub fn package_strategy_id(substrategy_id: &str) -> String {
     format!("options_{}", substrategy_id.trim().to_lowercase())
 }
 
+/// Σ sign_i · px_i · qty_mult_i — the signed net premium a price vector
+/// implies for one combo unit. The number the venue reports back.
+fn signed_combo_net(legs: &[OptionsPackageLegDto], prices: &[Decimal]) -> Decimal {
+    legs.iter()
+        .zip(prices)
+        .map(|(l, p)| {
+            let sign = if l.side == "buy" { dec!(1) } else { dec!(-1) };
+            sign * *p * Decimal::from(l.qty_mult)
+        })
+        .sum()
+}
+
+/// Split a native combo's venue-reported NET fill price across its legs.
+///
+/// A combo order is submitted as one order at a net limit price and the venue
+/// reports back ONE `avg_fill_price`: the net premium per combo unit. The
+/// per-leg rows still each need a price, and `options_leg_bound_px` is a
+/// pre-trade worst-case execution bound — booking it directly makes the legs
+/// fail to reconcile to the premium actually paid, and that error then
+/// propagates into per-leg P&L, the traded-opportunities trail, and the
+/// hedge/reval bases that seed delta sizing (#119).
+///
+/// This rescales the bound-shaped prices by one common factor, so the signed
+/// leg sum equals the venue-reported net **by construction**:
+///
+/// ```text
+/// net = Σ sign_i · p_i · qty_mult_i,   p_i = shape_i · (net_actual / net_shape)
+/// ```
+///
+/// Scaling (rather than distributing the residual by `qty_mult` alone) keeps
+/// each leg's relative pre-trade price structure — a 0.05 BTC leg and a
+/// 0.0005 BTC leg stay an order of magnitude apart — while still forcing the
+/// accounting identity.
+///
+/// `bounds[i]` is the book-derived worst-case price for leg `i` (`None` when
+/// that leg has no usable book); the scan's `venue_price` stands in as the
+/// shape when the bound is unavailable.
+///
+/// Returns `None` — caller keeps the raw bound and marks the row estimated —
+/// whenever the identity cannot be forced safely:
+///
+/// * the shape's own net is zero (scaling a zero cannot produce a non-zero
+///   net, so the factor is undefined), or
+/// * the factor would drive any leg price to zero or negative, which happens
+///   when the venue filled on the opposite side of the pre-trade shape (a
+///   package booked as a debit filling as a credit). A non-positive price is
+///   rejected by the fill recorder and would abort a genuinely filled
+///   package, so an unreconciled positive bound is the safer output.
+pub(crate) fn attribute_combo_net_price(
+    legs: &[OptionsPackageLegDto],
+    bounds: &[Option<Decimal>],
+    net_actual: Decimal,
+) -> Option<Vec<Decimal>> {
+    if legs.len() != bounds.len() || legs.is_empty() {
+        return None;
+    }
+    // Pre-trade shape: book bound where the book can price the leg, else the
+    // scan price. Both are estimates; only their relative structure is used.
+    let mut shape: Vec<Decimal> = Vec::with_capacity(legs.len());
+    for (leg, bound) in legs.iter().zip(bounds) {
+        let px = match bound {
+            Some(b) if *b > dec!(0) => *b,
+            _ => Decimal::from_f64_retain(leg.venue_price).filter(|p| *p > dec!(0))?,
+        };
+        shape.push(px);
+    }
+    let net_shape = signed_combo_net(legs, &shape);
+    // A zero (or unusable) shape net cannot carry a non-zero premium by
+    // scaling — the factor is undefined, and dividing here would panic.
+    if net_shape.abs() < dec!(0.000_000_01) {
+        return None;
+    }
+    let scaled: Vec<Decimal> = shape
+        .iter()
+        .map(|p| *p * (net_actual / net_shape))
+        .collect();
+    // Verify the identity instead of trusting the algebra. Two things can
+    // break it and both must fall back rather than book a wrong number:
+    //   1. a non-positive leg price — the venue filled on the opposite side
+    //      of the pre-trade shape, and the fill recorder rejects a
+    //      non-positive price, which would abort a genuinely filled package;
+    //   2. any rounding or non-numeric residue. The `!(x <= eps)` form is
+    //      deliberate: a NaN compares false against everything, including
+    //      itself, so the negated form is what actually rejects it. Clippy's
+    //      `nonminimal_bool` would flip it to `x > eps`, which silently
+    //      ADMITS NaN — do not take that suggestion.
+    if scaled.iter().any(|p| *p <= dec!(0)) {
+        return None;
+    }
+    #[allow(clippy::nonminimal_bool)]
+    if !((signed_combo_net(legs, &scaled) - net_actual).abs() <= dec!(0.000_000_01)) {
+        return None;
+    }
+    Some(scaled)
+}
+
 /// Execute one scanned package — every leg re-validated against a fresh
 /// scan, then N bounded IOC dispatches with the parity cycle's discipline:
 /// per-leg signal intents, settle polling, cancel-on-linger, per-leg
@@ -1436,6 +1532,38 @@ pub async fn execute_options_package_impl(
                     vid.as_str(),
                     combo_resp.order_id
                 );
+                // The venue reports ONE net price for the whole combo, so
+                // every per-leg price below is an attribution, never a
+                // venue-reported fill for that instrument (#119). Price the
+                // whole leg set first, then rescale the shape onto the net
+                // actually paid — the legs then reconcile by construction
+                // instead of carrying the pre-trade bound as if it were a
+                // fill.
+                let combo_bounds: Vec<Option<Decimal>> = opp
+                    .legs
+                    .iter()
+                    .enumerate()
+                    .map(|(i, leg)| {
+                        let s = if leg.side == "buy" {
+                            Side::Buy
+                        } else {
+                            Side::Sell
+                        };
+                        options_leg_bound_px(&books[i], s, qty_dec * Decimal::from(leg.qty_mult))
+                    })
+                    .collect();
+                let attributed = combo_resp
+                    .avg_fill_price
+                    .and_then(|net| attribute_combo_net_price(&opp.legs, &combo_bounds, net));
+                if attributed.is_none() {
+                    tracing::warn!(
+                        "options combo {} filled at net {:?} but the per-leg prices could not be \
+                         reconciled to it — booking the pre-trade bound and marking the rows \
+                         estimated; per-leg P&L will not sum to the premium paid",
+                        combo_resp.order_id,
+                        combo_resp.avg_fill_price
+                    );
+                }
                 for (idx, leg) in opp.legs.iter().enumerate() {
                     let sym = &leg.instrument;
                     let side = if leg.side == "buy" {
@@ -1479,8 +1607,19 @@ pub async fn execute_options_package_impl(
                     leg_resp.original_qty = leg_qty;
                     leg_resp.filled_qty = leg_qty;
                     leg_resp.remaining_qty = dec!(0);
-                    if let Some(bound_px) = options_leg_bound_px(&books[idx], side, leg_qty) {
-                        leg_resp.avg_fill_price = Some(bound_px);
+                    // Reconciled attribution where it could be computed, the
+                    // pre-trade bound where it could not. Never leave the
+                    // combo's NET price sitting on a leg row as if the venue
+                    // had filled that instrument at it — that overstates each
+                    // leg by the whole package premium.
+                    let leg_px = attributed
+                        .as_ref()
+                        .and_then(|v| v.get(idx).copied())
+                        .or(combo_bounds[idx]);
+                    if let Some(px) = leg_px {
+                        leg_resp.avg_fill_price = Some(px);
+                    } else {
+                        leg_resp.avg_fill_price = None;
                     }
                     fills.push((idx, leg_resp));
                 }
@@ -1806,14 +1945,28 @@ pub async fn execute_options_package_impl(
             .fee
             .map(|f| crate::execution::dec_to_f64(f, "options package fill fee").unwrap_or(0.0))
             .unwrap_or(0.0);
-        if let Err(e) = state.state_store.apply_leg_fill(
-            sid,
-            *side,
-            qty_f64,
-            px_f64,
-            fee_f,
-            Some(resp.order_id.as_str()),
-        ) {
+        if let Err(e) = if native_combo_executed {
+            // Every price in a combo fill is an attribution out of one
+            // venue-reported net, so the row is flagged as such even when the
+            // attribution reconciles exactly (#119).
+            state.state_store.apply_leg_fill_attributed(
+                sid,
+                *side,
+                qty_f64,
+                px_f64,
+                fee_f,
+                Some(resp.order_id.as_str()),
+            )
+        } else {
+            state.state_store.apply_leg_fill(
+                sid,
+                *side,
+                qty_f64,
+                px_f64,
+                fee_f,
+                Some(resp.order_id.as_str()),
+            )
+        } {
             record_errors.push(format!("leg {} fill persist failed: {e}", idx + 1));
         }
     }
@@ -2460,5 +2613,144 @@ mod tests {
         assert!(is_combo_eligible(convexity_legs));
         assert!(is_combo_eligible(box_spread_legs));
         assert!(!is_combo_eligible(jelly_roll_legs));
+    }
+
+    /// A 4-leg box: buy K1 call, sell K2 call, sell K1 put, buy K2 put.
+    /// `net = +b0 − b1 − b2 + b3`.
+    fn box_legs() -> Vec<OptionsPackageLegDto> {
+        vec![
+            OptionsPackageLegDto {
+                instrument: "C-K1".into(),
+                side: "buy".into(),
+                qty_mult: 1,
+                venue_price: 0.05,
+                usd_price: 5_000.0,
+            },
+            OptionsPackageLegDto {
+                instrument: "C-K2".into(),
+                side: "sell".into(),
+                qty_mult: 1,
+                venue_price: 0.03,
+                usd_price: 3_000.0,
+            },
+            OptionsPackageLegDto {
+                instrument: "P-K1".into(),
+                side: "sell".into(),
+                qty_mult: 1,
+                venue_price: 0.02,
+                usd_price: 2_000.0,
+            },
+            OptionsPackageLegDto {
+                instrument: "P-K2".into(),
+                side: "buy".into(),
+                qty_mult: 1,
+                venue_price: 0.04,
+                usd_price: 4_000.0,
+            },
+        ]
+    }
+
+    fn bounds_of(px: [f64; 4]) -> Vec<Option<Decimal>> {
+        px.iter().map(|p| Decimal::from_f64_retain(*p)).collect()
+    }
+
+    /// Signed net of a set of attributed leg prices — the quantity that must
+    /// equal the premium the venue actually charged.
+    fn signed_net(legs: &[OptionsPackageLegDto], prices: &[Decimal]) -> Decimal {
+        signed_combo_net(legs, prices)
+    }
+
+    fn assert_close(got: Decimal, want: Decimal, what: &str) {
+        // rust_decimal division rounds to 28 significant digits, so a scaled
+        // price carries ~1e-28 of relative residue — far below the 1e-8 BTC
+        // (1 satoshi) the identity check already tolerates.
+        assert!(
+            (got - want).abs() <= dec!(0.000_000_01),
+            "{what}: got {got}, want {want}"
+        );
+    }
+
+    #[test]
+    fn combo_attribution_reconciles_to_the_paid_net_premium() {
+        let legs = box_legs();
+        let bounds = bounds_of([0.05, 0.03, 0.02, 0.04]); // shape net = 0.04
+        let got = attribute_combo_net_price(&legs, &bounds, dec!(0.042))
+            .expect("attribute a 0.042 net fill");
+        assert_eq!(got.len(), 4);
+        assert_close(signed_net(&legs, &got), dec!(0.042), "attributed net");
+        // Pre-trade shape was 0.04; the venue charged 0.042 → +5% on every leg.
+        assert_close(got[0], dec!(0.0525), "leg 1");
+        assert_close(got[1], dec!(0.0315), "leg 2");
+        assert_close(got[2], dec!(0.021), "leg 3");
+        assert_close(got[3], dec!(0.042), "leg 4");
+        // The old behaviour — booking the raw pre-trade bound — is exactly
+        // the defect: it leaves the legs 0.002 BTC short of what was paid.
+        assert_close(
+            signed_net(
+                &legs,
+                &bounds.iter().map(|b| b.unwrap()).collect::<Vec<_>>(),
+            ),
+            dec!(0.04),
+            "unreconciled bound",
+        );
+    }
+
+    #[test]
+    fn combo_attribution_keeps_the_relative_price_structure() {
+        let legs = box_legs();
+        let bounds = bounds_of([0.05, 0.03, 0.02, 0.04]);
+        let got = attribute_combo_net_price(&legs, &bounds, dec!(0.042)).expect("attribute");
+        // A 0.05 leg and a 0.0005 leg must stay two orders of magnitude
+        // apart — a pure qty_mult split would flatten them onto one number.
+        let ratio_before = bounds[0].unwrap() / bounds[1].unwrap();
+        let ratio_after = got[0] / got[1];
+        assert!(
+            (ratio_before - ratio_after).abs() < dec!(0.000_000_001),
+            "attribution distorted the leg structure: {ratio_before} -> {ratio_after}"
+        );
+    }
+
+    #[test]
+    fn combo_attribution_refuses_a_sign_flip() {
+        let legs = box_legs();
+        let bounds = bounds_of([0.05, 0.03, 0.02, 0.04]);
+        // A package priced as a 0.04 debit that filled as a -0.01 credit:
+        // scaling would drive every leg price negative, and a non-positive
+        // price is rejected by the fill recorder — which would abort a
+        // package the venue genuinely filled.
+        assert!(attribute_combo_net_price(&legs, &bounds, dec!(-0.01)).is_none());
+    }
+
+    #[test]
+    fn combo_attribution_refuses_a_degenerate_shape() {
+        let legs = box_legs();
+        // Buy and sell the same price: shape net is zero, so no scaling can
+        // produce a non-zero net premium.
+        let bounds = bounds_of([0.03, 0.03, 0.02, 0.02]);
+        assert!(attribute_combo_net_price(&legs, &bounds, dec!(0.01)).is_none());
+    }
+
+    #[test]
+    fn combo_attribution_falls_back_to_the_scan_price_without_a_book() {
+        let legs = box_legs();
+        let bounds = vec![None, None, None, None];
+        let got = attribute_combo_net_price(&legs, &bounds, dec!(0.042))
+            .expect("scan prices carry the shape when the book cannot price a leg");
+        assert_eq!(signed_net(&legs, &got), dec!(0.042));
+    }
+
+    #[test]
+    fn combo_attribution_rejects_unusable_inputs() {
+        let legs = box_legs();
+        let bounds = bounds_of([0.05, 0.03, 0.02, 0.04]);
+        // Shape/bounds length mismatch and an empty leg set.
+        assert!(attribute_combo_net_price(&legs, &bounds[..3], dec!(0.042)).is_none());
+        assert!(attribute_combo_net_price(&[], &[], dec!(0.042)).is_none());
+        // A leg with neither a book bound nor a usable scan price.
+        let mut unpriced = box_legs();
+        unpriced[0].venue_price = 0.0;
+        assert!(
+            attribute_combo_net_price(&unpriced, &[None, None, None, None], dec!(0.042)).is_none()
+        );
     }
 }
