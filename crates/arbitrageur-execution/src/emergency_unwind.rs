@@ -107,8 +107,8 @@ impl EmergencyUnwindHandler {
                 let qty_satisfied = cur.filled_qty == unhedged_qty
                     || (cur.filled_qty == cur.original_qty
                         && cur.remaining_qty == Decimal::ZERO
-                        && (residual_notional_usd < rust_decimal_macros::dec!(5.0)
-                            || residual_qty < rust_decimal_macros::dec!(1.0)));
+                        && residual_notional_usd < rust_decimal_macros::dec!(5.0)
+                        && residual_qty < rust_decimal_macros::dec!(1.0));
 
                 let valid = cur.status == OrderStatus::Filled
                     && qty_satisfied
@@ -482,5 +482,93 @@ mod tests {
         );
         assert_eq!(resp.status, OrderStatus::Filled);
         assert_eq!(resp.filled_qty, arbitrageur_core::types::dec!(50.0));
+    }
+
+    #[tokio::test]
+    async fn test_unwind_leg_rejects_large_notional_residual_even_if_sub_unit() {
+        struct LargeNotionalExchange;
+        #[async_trait]
+        impl ExchangeAdapter for LargeNotionalExchange {
+            fn venue_id(&self) -> arbitrageur_core::types::VenueId {
+                "binance".into()
+            }
+            fn name(&self) -> &str {
+                "Binance"
+            }
+            async fn fetch_markets(
+                &self,
+            ) -> anyhow::Result<Vec<arbitrageur_core::market::MarketMetadata>> {
+                anyhow::bail!("not used")
+            }
+            async fn fetch_orderbook(
+                &self,
+                _s: &str,
+            ) -> anyhow::Result<arbitrageur_core::quote::OrderBook> {
+                anyhow::bail!("not used")
+            }
+            async fn fetch_ticker(
+                &self,
+                _s: &str,
+            ) -> anyhow::Result<arbitrageur_core::quote::Ticker> {
+                anyhow::bail!("not used")
+            }
+            async fn fetch_funding_rate(
+                &self,
+                _s: &str,
+            ) -> anyhow::Result<arbitrageur_core::quote::FundingRate> {
+                anyhow::bail!("not used")
+            }
+            async fn fetch_account(
+                &self,
+            ) -> anyhow::Result<arbitrageur_core::position::AccountSnapshot> {
+                anyhow::bail!("not used")
+            }
+            async fn cancel_order(
+                &self,
+                _r: arbitrageur_core::order::CancelRequest,
+            ) -> anyhow::Result<()> {
+                anyhow::bail!("not used")
+            }
+            async fn place_order(&self, req: OrderRequest) -> anyhow::Result<OrderResponse> {
+                let wire_qty = req.quantity.floor();
+                Ok(OrderResponse {
+                    order_id: "unw-large".into(),
+                    client_order_id: req.client_order_id,
+                    venue: req.venue,
+                    symbol: req.symbol,
+                    status: OrderStatus::Filled,
+                    original_qty: wire_qty,
+                    filled_qty: wire_qty,
+                    remaining_qty: Decimal::ZERO,
+                    avg_fill_price: Some(arbitrageur_core::types::dec!(60000.0)),
+                    fee: Some(arbitrageur_core::types::dec!(10.0)),
+                    fee_currency: "USDC".into(),
+                    raw_response: None,
+                    timestamp: chrono::Utc::now(),
+                })
+            }
+            async fn fetch_order(
+                &self,
+                _s: &str,
+                _id: &str,
+                _cid: Option<&str>,
+            ) -> anyhow::Result<OrderResponse> {
+                anyhow::bail!("not used")
+            }
+        }
+        let exchange: Arc<dyn ExchangeAdapter> = Arc::new(LargeNotionalExchange);
+        // 1.4 BTC unhedged, wire truncated to 1.0, residual 0.4 BTC @ $60k = $24,000 residual notional.
+        // Must fail closed because residual is not dust.
+        let res = EmergencyUnwindHandler::unwind_leg(
+            &exchange,
+            "BTC-USDC",
+            Side::Buy,
+            arbitrageur_core::types::dec!(1.4),
+        )
+        .await;
+        assert!(
+            res.is_err(),
+            "must refuse large notional residual even if < 1.0 unit"
+        );
     }
 }

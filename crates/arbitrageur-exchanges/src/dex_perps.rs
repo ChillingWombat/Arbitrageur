@@ -1206,7 +1206,7 @@ impl DexPerpAdapter {
         }
         let val: serde_json::Value = serde_json::from_str(&text)
             .map_err(|e| anyhow::anyhow!("{} unparseable JSON for {}: {e}", self.name, path))?;
-        self.rate_limiter.record_success(text);
+        self.rate_limiter.record_success_path(path, text);
         Ok(val)
     }
 

@@ -5858,6 +5858,11 @@ mod tests {
                 .await
                 .is_err()
         );
+        assert!(
+            super::open_external_url("https://popdex.xyz/test\"injection".to_string())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -18633,6 +18638,9 @@ pub async fn check_popdex_agent(
 #[tauri::command]
 pub async fn open_external_url(url: String) -> Result<(), String> {
     let u = url.trim();
+    if u.contains(['\0', '\r', '\n', '"']) {
+        return Err("refusing to open URL with control or quote characters".to_string());
+    }
     let host = u
         .strip_prefix("https://")
         .and_then(|rest| rest.split(['/', '?', '#']).next())
@@ -18656,8 +18664,8 @@ pub async fn open_external_url(url: String) -> Result<(), String> {
         .status()
         .map_err(|e| format!("cannot open browser: {e}"))?;
     #[cfg(target_os = "windows")]
-    let status = std::process::Command::new("cmd")
-        .args(["/c", "start", "", u])
+    let status = std::process::Command::new("rundll32")
+        .args(["url.dll,FileProtocolHandler", u])
         .status()
         .map_err(|e| format!("cannot open browser: {e}"))?;
     if !status.success() {
