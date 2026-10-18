@@ -79,3 +79,15 @@ arbitrageur-strategy = { path = "crates/arbitrageur-strategy" }
 opt-level = 3
 lto = "thin"
 codegen-units = 1
+
+# `injective-std` is machine-generated CosmWasm types — tens of megabytes of
+# rustc IR with no hand-written code worth stepping through. Its DWARF is the
+# single largest allocation peak in a dev build, and on a machine that has to
+# live inside a memory-sized commit limit that peak is what surfaces as
+# "rustc-LLVM ERROR: out of memory" (exit 0xC0000409 on Windows). Compiling it
+# without debug info costs nothing and leaves every other crate debuggable.
+[profile.dev.package.injective-std]
+debug = false
+
+[profile.test.package.injective-std]
+debug = false

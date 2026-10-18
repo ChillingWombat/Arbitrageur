@@ -37,6 +37,36 @@ use state::AppEngineState;
 use std::sync::Arc;
 use tauri::Manager;
 
+/// Outcome of taking the single-instance lock.
+enum InstanceLock {
+    Acquired(std::fs::File),
+    /// Another process already holds it (or the lock call failed): either
+    /// way this process must not run a second engine.
+    Busy,
+}
+
+/// Take the process-lifetime single-instance lock beside the state store.
+///
+/// The parent directory is created first. `StateStore::open` does the same,
+/// but the lock is taken *before* the store exists, and on a fresh install
+/// that directory is absent — the open then failed with NotFound and the
+/// application refused to start (first seen on a clean Windows machine).
+fn open_instance_lock(lock_path: &std::path::Path) -> std::io::Result<InstanceLock> {
+    use fs2::FileExt;
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(lock_path)?;
+    match file.try_lock_exclusive() {
+        Ok(()) => Ok(InstanceLock::Acquired(file)),
+        Err(_) => Ok(InstanceLock::Busy),
+    }
+}
+
 fn main() {
     // Deterministic TLS: install ring as the process-wide rustls provider
     // before any HTTPS client builds (alloy + reqwest otherwise disagree).
@@ -66,26 +96,20 @@ fn main() {
     // order the monitor and bots emit. The kernel-held flock lives for the
     // process lifetime, so a dead instance's lock releases automatically.
     let _instance_lock = {
-        use fs2::FileExt;
         let lock_path = crate::state_store::StateStore::default_path()
             .parent()
             .map(|d| d.join("arbitrageur.lock"))
             .unwrap_or_else(|| std::path::PathBuf::from("arbitrageur.lock"));
-        let file = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(&lock_path)
-            .expect("failed to open instance lock file");
-        match file.try_lock_exclusive() {
-            Ok(()) => file,
-            Err(_) => {
+        match open_instance_lock(&lock_path) {
+            Ok(InstanceLock::Acquired(file)) => file,
+            Ok(InstanceLock::Busy) => {
                 eprintln!(
                     "another arbitrageur-desktop instance is already running (lock: {})",
                     lock_path.display()
                 );
                 std::process::exit(1);
             }
+            Err(e) => panic!("failed to open instance lock {}: {e}", lock_path.display()),
         }
     };
 
@@ -365,4 +389,48 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running Arbitrageur Tauri desktop application");
+}
+
+#[cfg(test)]
+mod instance_lock_tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    fn unique_dir(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("arbitrageur_lock_{tag}_{}", rand::random::<u64>()))
+    }
+
+    /// A first launch has no data directory yet; taking the lock must create
+    /// it instead of aborting the process (the clean-Windows first-run bug).
+    #[test]
+    fn instance_lock_creates_a_missing_parent_directory() {
+        let dir = unique_dir("fresh");
+        let lock_path = dir.join(".arbitrageur").join("arbitrageur.lock");
+        assert!(!lock_path.parent().unwrap().exists());
+
+        let held = open_instance_lock(&lock_path).expect("lock must be creatable");
+        assert!(matches!(held, InstanceLock::Acquired(_)));
+        assert!(lock_path.exists());
+
+        drop(held);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two engines double-dispatch every order, so a second holder must be
+    /// refused rather than queued.
+    #[test]
+    fn instance_lock_refuses_a_second_holder() {
+        let dir = unique_dir("busy");
+        std::fs::create_dir_all(&dir).unwrap();
+        let lock_path = dir.join("arbitrageur.lock");
+
+        let first = open_instance_lock(&lock_path).expect("first lock");
+        assert!(matches!(first, InstanceLock::Acquired(_)));
+        let second = open_instance_lock(&lock_path).expect("second call");
+        assert!(matches!(second, InstanceLock::Busy));
+
+        drop(second);
+        drop(first);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
