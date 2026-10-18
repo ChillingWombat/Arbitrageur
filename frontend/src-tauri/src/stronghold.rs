@@ -60,8 +60,11 @@ fn key_location() -> Location {
 /// Backend storage for the wallet stronghold: a password-encrypted
 /// snapshot file in production, in-memory only for tests. The snapshot
 /// variant carries its own path because the plugin type does not expose it.
+/// The stronghold is boxed so the enum stays the size of its smallest
+/// variant (clippy::large_enum_variant); it is opened once per app run,
+/// so the extra allocation is irrelevant.
 enum Backend {
-    Snapshot(Stronghold, PathBuf),
+    Snapshot(Box<Stronghold>, PathBuf),
     #[cfg(test)]
     InMemory(iota_stronghold::Stronghold),
 }
@@ -96,7 +99,7 @@ impl EvmStronghold {
         let client = load_or_create_client(&sh)?;
         Self::harden_snapshot_permissions(path);
         Ok(Self {
-            backend: Backend::Snapshot(sh, path.to_path_buf()),
+            backend: Backend::Snapshot(Box::new(sh), path.to_path_buf()),
             client,
         })
     }
