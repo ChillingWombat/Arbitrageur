@@ -55,7 +55,7 @@ hmac = "0.13"
 config = "0.14"
 crossterm = "0.27"
 ratatui = "0.27"
-rand = "0.8"
+rand = "0.10"
 aes-gcm = "0.10"
 argon2 = "0.6"
 zeroize = { version = "1.8", features = ["derive"] }
