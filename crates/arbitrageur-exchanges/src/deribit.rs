@@ -1805,14 +1805,10 @@ impl ExchangeAdapter for DeribitAdapter {
                     if let Some(collar_px) = Self::parse_collar_price(&err_str) {
                         let can_clamp = match order.side {
                             Side::Buy => {
-                                order.price.is_some_and(|p| collar_px <= p)
-                                    || order.reduce_only
-                                    || is_ioc
+                                order.price.is_some_and(|p| collar_px <= p) || order.reduce_only
                             }
                             Side::Sell => {
-                                order.price.is_some_and(|p| collar_px >= p)
-                                    || order.reduce_only
-                                    || is_ioc
+                                order.price.is_some_and(|p| collar_px >= p) || order.reduce_only
                             }
                         };
                         if can_clamp {

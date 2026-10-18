@@ -41,6 +41,15 @@ fn webhook_url() -> Option<&'static str> {
     .as_deref()
 }
 
+fn redact_webhook_url(raw: &str) -> String {
+    if let Some((scheme, rest)) = raw.split_once("://") {
+        let host = rest.split(['/', '?', '#']).next().unwrap_or("");
+        format!("{scheme}://{host}/<redacted>")
+    } else {
+        "<configured>".to_string()
+    }
+}
+
 fn client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
     CLIENT.get_or_init(|| {
@@ -62,7 +71,7 @@ pub fn init(
             target: "alerting",
             "operator alert channel configured ({}); breaker trips and unresolved \
              escalations will POST out-of-band",
-            url
+            redact_webhook_url(url)
         ),
         None => tracing::warn!(
             target: "alerting",
@@ -188,5 +197,18 @@ mod tests {
             std::time::Duration::from_secs(60),
             "detail 3".into(),
         );
+    }
+
+    #[test]
+    fn test_redact_webhook_url() {
+        assert_eq!(
+            redact_webhook_url("https://hooks.slack.com/services/T00/B00/SECRET_TOKEN"),
+            "https://hooks.slack.com/<redacted>"
+        );
+        assert_eq!(
+            redact_webhook_url("https://discord.com/api/webhooks/123/XYZ_SECRET?query=1"),
+            "https://discord.com/<redacted>"
+        );
+        assert_eq!(redact_webhook_url("not-a-url"), "<configured>");
     }
 }

@@ -7,7 +7,7 @@ import { globSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { mkdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { dirname, join } from "node:path";
+import { dirname, join, basename } from "node:path";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const tests = globSync("src/components/*.test.ts", { cwd: root });
@@ -28,7 +28,7 @@ await build({
 
 let failed = false;
 for (const t of tests) {
-  const name = t.replace(/^src\/components\//, "").replace(/\.test\.ts$/, ".test.cjs");
+  const name = basename(t, ".test.ts") + ".test.cjs";
   try {
     execFileSync(process.execPath, [join(outdir, name)], { stdio: "inherit" });
   } catch {

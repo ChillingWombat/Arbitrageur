@@ -460,7 +460,10 @@ impl LiveVolSurfaceCache {
     pub fn latest_forward(&self, asset: &str) -> Option<f64> {
         let map = self.slices.read();
         let asset_slices = map.get(&asset.to_ascii_uppercase())?;
-        asset_slices.values().next().map(|s| s.forward_price)
+        asset_slices
+            .values()
+            .max_by_key(|s| s.last_updated_ms)
+            .map(|s| s.forward_price)
     }
 
     /// Returns the total number of active expiry slices across all assets.
@@ -1108,6 +1111,32 @@ mod tests {
         // Evaluate via VolatilitySmileProvider interface
         let iv_provider = cache.get_implied_volatility("BTC", expiry, 65000.0);
         assert!(iv_provider.is_some());
+
+        // Ingest older quote for another expiry, then newer quote for the first expiry
+        cache.ingest_quote(
+            "BTC",
+            "31DEC26",
+            expiry_ms + 86400000,
+            tenor,
+            66000.0,
+            66000.0,
+            0.55,
+        );
+        // Manually adjust timestamps to test determinism
+        {
+            let mut map = cache.slices.write();
+            let slices = map.get_mut("BTC").unwrap();
+            slices.get_mut("25DEC26").unwrap().last_updated_ms = 2000;
+            slices.get_mut("31DEC26").unwrap().last_updated_ms = 1000;
+        }
+        assert_eq!(cache.latest_forward("BTC"), Some(65000.0));
+
+        {
+            let mut map = cache.slices.write();
+            let slices = map.get_mut("BTC").unwrap();
+            slices.get_mut("31DEC26").unwrap().last_updated_ms = 3000;
+        }
+        assert_eq!(cache.latest_forward("BTC"), Some(66000.0));
         let iv = iv_provider.unwrap();
         assert!(iv > 0.40 && iv < 0.80);
 

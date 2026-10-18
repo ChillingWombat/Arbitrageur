@@ -1340,7 +1340,9 @@ impl ExchangeAdapter for HyperliquidAdapter {
 
         let resp_json = self.post_exchange(body).await?;
 
-        parse_hl_order_response(&resp_json, &order, &self.venue_id, price)
+        let mut wire_order = order.clone();
+        wire_order.quantity = quantity;
+        parse_hl_order_response(&resp_json, &wire_order, &self.venue_id, price)
     }
 
     async fn wire_base_qty(&self, symbol: &str, qty: Decimal) -> anyhow::Result<Decimal> {
@@ -1905,6 +1907,20 @@ mod tests {
             "status": "ok",
             "response": { "type": "order", "data": { "statuses": statuses } }
         })
+    }
+
+    #[test]
+    fn parse_wire_truncated_fill_is_complete_fill() {
+        let mut order = test_order_fixture();
+        // Truncated wire order sent to venue was 1.0 (original was 1.0005)
+        order.quantity = dec!(1.0);
+        let resp =
+            hl_resp(json!([{"filled": {"oid": 12345, "avgPx": "50001.5", "totalSz": "1.0"}}]));
+        let out =
+            parse_hl_order_response(&resp, &order, &test_venue_fixture(), dec!(50000)).unwrap();
+        assert_eq!(out.status, OrderStatus::Filled);
+        assert_eq!(out.filled_qty, dec!(1.0));
+        assert_eq!(out.remaining_qty, dec!(0));
     }
 
     #[test]

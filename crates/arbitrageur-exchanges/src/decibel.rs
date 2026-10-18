@@ -1183,11 +1183,7 @@ impl ExchangeAdapter for DecibelAdapter {
     }
 
     async fn ping(&self) -> anyhow::Result<()> {
-        let resp = self
-            .client
-            .get("https://fullnode.mainnet.aptoslabs.com/v1")
-            .send()
-            .await?;
+        let resp = self.client.get(self.fullnode_url()).send().await?;
         if resp.status().is_success() {
             Ok(())
         } else {
