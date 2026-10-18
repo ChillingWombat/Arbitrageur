@@ -65,6 +65,18 @@ CARGO_PROFILE_DEV_DEBUG=0 cargo build -p arbitrageur-desktop -j 1
 dev profile without touching the repository; `injective-std` already has
 `debug = false` in the workspace profile because its debug info is worthless.
 
+`cargo clippy` needs **more** headroom than `cargo build`: clippy-driver is a
+full compiler plus the lint machinery, and it compiles dependencies too (with
+their lints capped). With ~4 GB of headroom
+`cargo clippy -p arbitrageur-desktop --all-targets` dies inside
+`injective-std`'s metadata phase with the same `0xC0000409`. Closing a
+memory-hungry browser (dozens of tabs can hold >10 GB of commit) is usually
+enough; the same recipe then works:
+
+```bash
+CARGO_TARGET_DIR=target-win CARGO_PROFILE_DEV_DEBUG=0 cargo clippy -p arbitrageur-desktop --all-targets -j 1 -- -D warnings
+```
+
 Use a separate target dir so MSVC artifacts never mix with the Linux
 container's (`target/`):
 
@@ -87,3 +99,10 @@ CARGO_TARGET_DIR=target-win CARGO_PROFILE_DEV_DEBUG=0 cargo test -p arbitrageur-
 
 The `stronghold` rekey test alone runs seven Argon2 derivations (minutes); it
 is not hung, see `docs/DIAGNOSIS_2026-10-17.md` §8.12.
+
+For a quick smoke pass, filter to the state and stronghold suites (~4 min,
+dominated by the rekey test):
+
+```bash
+CARGO_TARGET_DIR=target-win CARGO_PROFILE_DEV_DEBUG=0 cargo test -p arbitrageur-desktop --bin arbitrageur-desktop -j 1 -- stronghold::tests state::tests
+```
