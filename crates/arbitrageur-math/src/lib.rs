@@ -1,9 +1,7 @@
-pub mod arakelov_geometry_arb;
-pub mod atomic_mev;
+﻿pub mod atomic_mev;
 pub mod autotune;
 pub mod basis_pca;
 pub mod basis_term_structure;
-pub mod berkovich_analytic_arb;
 pub mod binomial;
 pub mod black_scholes;
 pub mod book_gradient;
@@ -13,41 +11,27 @@ pub mod cointegration;
 pub mod collateral_barrier;
 pub mod collateral_dag;
 pub mod concentrated_liquidity;
-pub mod condensed_liquid_arb;
-pub mod condensed_solid_arb;
 pub mod cross_chain_intent_dag;
 pub mod cross_hawkes;
 pub mod debiased_ou;
 pub mod delta_gamma_rehedge;
-pub mod derived_artin_stack_arb;
-pub mod derived_chow_steenrod_arb;
-pub mod derived_critical_locus_arb;
-pub mod derived_siegel_modular_arb;
 pub mod dislocation;
-pub mod dmrg_portfolio;
-pub mod donaldson_thomas_arb;
 pub mod epoch_jump;
 pub mod factor_stat_arb;
 pub mod fast_basis_harvest;
 pub mod fixed_yield;
-pub mod floer_novikov_arb;
-pub mod fontaine_fargues_arb;
 pub mod forecast_calibration;
 pub mod funding_carry;
 pub mod funding_epoch_countdown;
 pub mod funding_spline;
 pub mod funding_velocity;
-pub mod geometric_langlands_arb;
-pub mod grothendieck_six_operations_arb;
 pub mod gueant_mm;
 pub mod hawkes;
 pub mod hf_vecm;
 pub mod hmm_liquidity;
-pub mod hyperbolic_poincare_arb;
 pub mod intent_bridge;
 pub mod inventory_skew;
 pub mod kalman_filter;
-pub mod koszul_tate_poisson_arb;
 pub mod l3_hazard;
 pub mod l3_orderbook;
 pub mod l3_tensor_ofi;
@@ -59,15 +43,9 @@ pub mod micro_price_surface;
 pub mod multi_asset_avellaneda;
 pub mod multi_asset_impact;
 pub mod multi_commodity_flow;
-pub mod non_abelian_gauge_arb;
-pub mod noncommutative_hodge_arb;
 pub mod optimal_thresholds;
 pub mod ou_process;
-pub mod padic_simpson_arb;
 pub mod pair_monitor;
-pub mod perfectoid_shimura_arb;
-pub mod perfectoid_tilting_arb;
-pub mod perverse_sheaves_arb;
 pub mod portfolio_greeks_opt;
 pub mod power_law_propagator;
 pub mod prediction_synthetic;
@@ -80,30 +58,25 @@ pub mod resilience_pacer;
 pub mod risk_math;
 pub mod rolling_stats;
 pub mod rough_ou;
-pub mod rough_path_signature;
 pub mod seasonality;
 pub mod session;
 pub mod spatial_spread;
 pub mod stochastic_depth;
 pub mod svi_arbitrage_free;
 pub mod tail_copula;
-pub mod tannakian_frobenius_arb;
 pub mod triangular;
 pub mod triangular_surface;
 pub mod tropical_arbitrage;
 pub mod tsrv_volatility;
 pub mod unified_margin_warning;
 pub mod variance_swap;
-pub mod voevodsky_motives_arb;
 pub mod volatility_jump;
 pub mod vpin;
 
-pub use arakelov_geometry_arb::*;
 pub use atomic_mev::*;
 pub use autotune::*;
 pub use basis_pca::*;
 pub use basis_term_structure::*;
-pub use berkovich_analytic_arb::*;
 pub use binomial::*;
 pub mod black_scholes_reexport {
     pub use super::black_scholes::*;
@@ -115,39 +88,27 @@ pub use cointegration::*;
 pub use collateral_barrier::*;
 pub use collateral_dag::*;
 pub use concentrated_liquidity::*;
-pub use condensed_liquid_arb::*;
-pub use condensed_solid_arb::*;
 pub use cross_chain_intent_dag::*;
 pub use cross_hawkes::*;
 pub use debiased_ou::*;
 pub use delta_gamma_rehedge::*;
-pub use derived_artin_stack_arb::*;
-pub use derived_critical_locus_arb::*;
 pub use dislocation::*;
-pub use dmrg_portfolio::*;
-pub use donaldson_thomas_arb::*;
 pub use epoch_jump::*;
 pub use factor_stat_arb::*;
 pub use fast_basis_harvest::*;
 pub use fixed_yield::*;
-pub use floer_novikov_arb::*;
-pub use fontaine_fargues_arb::*;
 pub use forecast_calibration::*;
 pub use funding_carry::*;
 pub use funding_epoch_countdown::*;
 pub use funding_spline::*;
 pub use funding_velocity::*;
-pub use geometric_langlands_arb::*;
-pub use grothendieck_six_operations_arb::*;
 pub use gueant_mm::*;
 pub use hawkes::*;
 pub use hf_vecm::*;
 pub use hmm_liquidity::*;
-pub use hyperbolic_poincare_arb::*;
 pub use intent_bridge::*;
 pub use inventory_skew::*;
 pub use kalman_filter::*;
-pub use koszul_tate_poisson_arb::*;
 pub use l3_hazard::*;
 pub use l3_orderbook::*;
 pub use l3_tensor_ofi::*;
@@ -162,14 +123,9 @@ pub use micro_price_surface::*;
 pub use multi_asset_avellaneda::*;
 pub use multi_asset_impact::*;
 pub use multi_commodity_flow::*;
-pub use non_abelian_gauge_arb::*;
 pub use optimal_thresholds::*;
 pub use ou_process::*;
-pub use padic_simpson_arb::*;
 pub use pair_monitor::*;
-pub use perfectoid_shimura_arb::*;
-pub use perfectoid_tilting_arb::*;
-pub use perverse_sheaves_arb::*;
 pub use portfolio_greeks_opt::*;
 pub use power_law_propagator::*;
 pub use prediction_synthetic::*;
@@ -182,21 +138,18 @@ pub use resilience_pacer::*;
 pub use risk_math::*;
 pub use rolling_stats::*;
 pub use rough_ou::*;
-pub use rough_path_signature::*;
 pub use seasonality::*;
 pub use session::*;
 pub use spatial_spread::*;
 pub use stochastic_depth::*;
 pub use svi_arbitrage_free::*;
 pub use tail_copula::*;
-pub use tannakian_frobenius_arb::*;
 pub use triangular::*;
 pub use triangular_surface::*;
 pub use tropical_arbitrage::*;
 pub use tsrv_volatility::*;
 pub use unified_margin_warning::*;
 pub use variance_swap::*;
-pub use voevodsky_motives_arb::*;
 pub use volatility_jump::*;
 pub use vpin::*;
 
@@ -279,7 +232,7 @@ mod tests {
     }
 
     /// Regression (#46): extreme hourly rates must not produce a clamped
-    /// "100000x" APY — the compounded figure overflows f64 and is reported
+    /// "100000x" APY â€” the compounded figure overflows f64 and is reported
     /// as unavailable (None) while APR stays truthful.
     #[test]
     fn test_funding_carry_extreme_rate_apy_is_unavailable() {
@@ -287,7 +240,7 @@ mod tests {
         let rate_a = FundingRate {
             venue: "hyperliquid".into(),
             symbol: "ETH-PERP".into(),
-            rate: dec!(0.05), // 5% per hour — pathological
+            rate: dec!(0.05), // 5% per hour â€” pathological
             predicted_rate: None,
             interval_hours: 1,
             next_funding_time: now,
