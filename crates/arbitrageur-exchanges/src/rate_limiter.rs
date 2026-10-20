@@ -30,6 +30,17 @@ struct CoordinatorState {
     cached_paths: HashMap<String, (Instant, String)>,
 }
 
+/// Reserves the next slot while the caller holds the coordinator mutex.
+/// Reserving before sleeping is what makes concurrent callers queue on
+/// distinct timestamps instead of all waking against the same old `last`.
+fn reserve_next_slot(last: &mut Option<Instant>, now: Instant, min_interval: Duration) -> Duration {
+    let target = last
+        .map(|previous| (previous + min_interval).max(now))
+        .unwrap_or(now);
+    *last = Some(target);
+    target.saturating_duration_since(now)
+}
+
 impl AccountRequestCoordinator {
     pub fn new(
         venue_name: impl Into<String>,
@@ -67,7 +78,6 @@ impl AccountRequestCoordinator {
         allow_cache: bool,
     ) -> Result<Option<String>, anyhow::Error> {
         let now = Instant::now();
-        let wait_dur;
         let mut backoff_wait = None;
 
         {
@@ -117,8 +127,8 @@ impl AccountRequestCoordinator {
             }
         }
 
-        {
-            let state = self.state.lock();
+        let wait_dur = {
+            let mut state = self.state.lock();
             let now = Instant::now();
             // 2. Check fresh cache for this exact path
             if allow_cache {
@@ -129,26 +139,14 @@ impl AccountRequestCoordinator {
                 }
             }
 
-            // 3. Throttle to min_interval
-            wait_dur = if let Some(last) = state.last_request_time {
-                let elapsed = now.duration_since(last);
-                if elapsed < self.min_interval {
-                    Some(self.min_interval - elapsed)
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-        }
+            // 3. Throttle to min_interval, reserving the slot before the
+            // lock is released so concurrent callers cannot race the same
+            // timestamp.
+            reserve_next_slot(&mut state.last_request_time, now, self.min_interval)
+        };
 
-        if let Some(wait) = wait_dur {
-            sleep(wait).await;
-        }
-
-        {
-            let mut state = self.state.lock();
-            state.last_request_time = Some(Instant::now());
+        if !wait_dur.is_zero() {
+            sleep(wait_dur).await;
         }
 
         Ok(None)
@@ -212,15 +210,16 @@ impl AccountRequestCoordinator {
             }
         }
         let wait_dur = {
-            let state = self.state.lock();
-            state
-                .last_signed_request_time
-                .and_then(|last| self.min_interval.checked_sub(last.elapsed()))
+            let mut state = self.state.lock();
+            reserve_next_slot(
+                &mut state.last_signed_request_time,
+                Instant::now(),
+                self.min_interval,
+            )
         };
-        if let Some(wait) = wait_dur {
-            sleep(wait).await;
+        if !wait_dur.is_zero() {
+            sleep(wait_dur).await;
         }
-        self.state.lock().last_signed_request_time = Some(Instant::now());
         Ok(())
     }
 
@@ -357,5 +356,22 @@ mod tests {
         let state = c.state.lock();
         let until = state.backoff_until.expect("cooldown set");
         assert!(until > Instant::now() + Duration::from_secs(29 * 60));
+    }
+
+    #[test]
+    fn reserved_slots_are_strictly_sequenced() {
+        let now = Instant::now();
+        let interval = Duration::from_millis(50);
+        let mut last = None;
+
+        assert_eq!(reserve_next_slot(&mut last, now, interval), Duration::ZERO);
+        assert_eq!(
+            reserve_next_slot(&mut last, now, interval),
+            Duration::from_millis(50)
+        );
+        assert_eq!(
+            reserve_next_slot(&mut last, now, interval),
+            Duration::from_millis(100)
+        );
     }
 }

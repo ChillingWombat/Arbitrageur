@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use arbitrageur_math::black_scholes::sabr_implied_volatility;
+use arbitrageur_math::svi_arbitrage_free::SviSliceParameters;
 use arbitrageur_risk::delta_guard::VolatilitySmileProvider;
 
 /// Point on the cross-asset implied correlation smile.
@@ -408,7 +409,198 @@ impl OnlineRecursiveSabrCalibrator {
     }
 }
 
-/// Single expiry slice with calibrated SABR parameters and raw strike quotes.
+fn svi_fit_score(params: &SviSliceParameters, observations: &[(f64, f64)]) -> Option<f64> {
+    if !params.is_arbitrage_free() {
+        return None;
+    }
+    let mut sse = 0.0;
+    for (k, target_w) in observations {
+        let model_w = params.total_variance(*k);
+        if !model_w.is_finite() || model_w <= 0.0 {
+            return None;
+        }
+        let residual = model_w - target_w;
+        sse += residual * residual;
+    }
+    sse.is_finite().then_some(sse)
+}
+
+/// Fit an arbitrage-free Gatheral SVI slice by deterministic least squares.
+/// The four shape parameters are searched coarsely, then refined
+/// coordinate-wise; `a` is solved analytically as the least-squares level
+/// for each shape candidate.
+fn calibrate_svi_slice(
+    forward_price: f64,
+    time_to_expiry_years: f64,
+    quotes: &[(f64, f64)],
+) -> Option<SviSliceParameters> {
+    if forward_price <= 0.0 || time_to_expiry_years <= 1e-6 {
+        return None;
+    }
+    let mut observations: Vec<(f64, f64)> = quotes
+        .iter()
+        .filter_map(|(strike, iv)| {
+            if !strike.is_finite() || !iv.is_finite() || *strike <= 0.0 || *iv <= 0.0 {
+                return None;
+            }
+            let k = (*strike / forward_price).ln();
+            let w = iv * iv * time_to_expiry_years;
+            (k.is_finite() && w.is_finite() && w > 0.0).then_some((k, w))
+        })
+        .collect();
+    observations.sort_by(|a, b| a.0.total_cmp(&b.0));
+    observations.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-12);
+    if observations.len() < 3 {
+        return None;
+    }
+
+    let k_min = observations.first()?.0;
+    let k_max = observations.last()?.0;
+    let k_span = (k_max - k_min).max(0.05);
+    let mean_k = observations.iter().map(|(k, _)| *k).sum::<f64>() / observations.len() as f64;
+    let mean_w = observations.iter().map(|(_, w)| *w).sum::<f64>() / observations.len() as f64;
+    let max_w = observations
+        .iter()
+        .map(|(_, w)| *w)
+        .fold(mean_w, f64::max)
+        .max(1e-6);
+
+    let b_grid = [0.02, 0.05, 0.10, 0.20, 0.35, 0.60, 1.0]
+        .into_iter()
+        .map(|scale| (max_w * scale).max(1e-5))
+        .collect::<Vec<_>>();
+    let rho_grid = [-0.90, -0.65, -0.40, -0.15, 0.0, 0.15, 0.40, 0.65, 0.90];
+    let m_grid = [
+        mean_k,
+        0.0,
+        k_min + k_span * 0.25,
+        k_min + k_span * 0.50,
+        k_min + k_span * 0.75,
+    ];
+    let sigma_grid = [
+        0.01,
+        0.03,
+        0.06,
+        0.10,
+        (k_span * 0.15).max(0.01),
+        (k_span * 0.30).max(0.02),
+    ];
+
+    let mut best: Option<(SviSliceParameters, f64)> = None;
+    for &b in &b_grid {
+        for &rho in &rho_grid {
+            for &m in &m_grid {
+                for &sigma in &sigma_grid {
+                    let shape_at = |k: f64| {
+                        let diff = k - m;
+                        let root = (diff * diff + sigma * sigma).sqrt();
+                        b * (rho * diff + root)
+                    };
+                    let mean_shape = observations.iter().map(|(k, _)| shape_at(*k)).sum::<f64>()
+                        / observations.len() as f64;
+                    let a = mean_w - mean_shape;
+                    let params = SviSliceParameters::new(a, b, rho, m, sigma);
+                    let Some(score) = svi_fit_score(&params, &observations) else {
+                        continue;
+                    };
+                    if best
+                        .as_ref()
+                        .is_none_or(|(_, best_score)| score < *best_score)
+                    {
+                        best = Some((params, score));
+                    }
+                }
+            }
+        }
+    }
+
+    let (mut params, mut best_score) = best?;
+    // Coordinate refinement around the coarse optimum. Each stage re-solves
+    // the variance level `a` so a shape-only move cannot be rejected merely
+    // because the slice was shifted up or down.
+    for _ in 0..4 {
+        let iteration_score = best_score;
+        {
+            let b_step = (params.b * 0.45).max(max_w * 0.02).max(1e-5);
+            for delta in [-2.0, -1.0, -0.5, 0.5, 1.0, 2.0] {
+                let b = (params.b + delta * b_step).max(0.0);
+                if let Some((candidate, score)) =
+                    refit_svi_level(params, observations.as_slice(), |p| p.b = b)
+                {
+                    if score + 1e-15 < best_score {
+                        params = candidate;
+                        best_score = score;
+                    }
+                }
+            }
+
+            for delta in [-0.30, -0.15, -0.075, 0.075, 0.15, 0.30] {
+                let rho = (params.rho + delta).clamp(-0.95, 0.95);
+                if let Some((candidate, score)) =
+                    refit_svi_level(params, observations.as_slice(), |p| p.rho = rho)
+                {
+                    if score + 1e-15 < best_score {
+                        params = candidate;
+                        best_score = score;
+                    }
+                }
+            }
+
+            let m_step = (k_span * 0.10).max(0.002);
+            for delta in [-2.0, -1.0, -0.5, 0.5, 1.0, 2.0] {
+                let m = params.m + delta * m_step;
+                if let Some((candidate, score)) =
+                    refit_svi_level(params, observations.as_slice(), |p| p.m = m)
+                {
+                    if score + 1e-15 < best_score {
+                        params = candidate;
+                        best_score = score;
+                    }
+                }
+            }
+
+            let sigma_step = (params.sigma * 0.45).max(k_span * 0.02).max(0.002);
+            for delta in [-2.0, -1.0, -0.5, 0.5, 1.0, 2.0] {
+                let sigma = (params.sigma + delta * sigma_step).max(1e-4);
+                if let Some((candidate, score)) =
+                    refit_svi_level(params, observations.as_slice(), |p| p.sigma = sigma)
+                {
+                    if score + 1e-15 < best_score {
+                        params = candidate;
+                        best_score = score;
+                    }
+                }
+            }
+        }
+        if best_score >= iteration_score {
+            break;
+        }
+    }
+
+    Some(params)
+}
+
+fn refit_svi_level(
+    mut params: SviSliceParameters,
+    observations: &[(f64, f64)],
+    mutate: impl FnOnce(&mut SviSliceParameters),
+) -> Option<(SviSliceParameters, f64)> {
+    mutate(&mut params);
+    let mean_w = observations.iter().map(|(_, w)| *w).sum::<f64>() / observations.len() as f64;
+    let mean_shape = observations
+        .iter()
+        .map(|(k, _)| {
+            params.a = 0.0;
+            params.total_variance(*k)
+        })
+        .sum::<f64>()
+        / observations.len() as f64;
+    params.a = mean_w - mean_shape;
+    let score = svi_fit_score(&params, observations)?;
+    Some((params, score))
+}
+
+/// Single expiry slice with calibrated SABR/SVI parameters and raw strike quotes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LiveVolSurfaceSlice {
     pub expiry: String,
@@ -416,9 +608,22 @@ pub struct LiveVolSurfaceSlice {
     pub tenor_years: f64,
     pub forward_price: f64,
     pub sabr_calibrator: OnlineRecursiveSabrCalibrator,
+    /// Arbitrage-free Gatheral SVI fit for smile-adjusted Greeks.
+    #[serde(default)]
+    pub svi_params: Option<SviSliceParameters>,
     /// Exact market IVs by strike (strike in USD -> IV fraction)
     pub observed_strikes: HashMap<u64, f64>,
     pub last_updated_ms: i64,
+}
+
+fn recalibrate_slice_svi(slice: &mut LiveVolSurfaceSlice) {
+    let mut quotes: Vec<(f64, f64)> = slice
+        .observed_strikes
+        .iter()
+        .map(|(strike_key, iv)| (*strike_key as f64 / 100.0, *iv))
+        .collect();
+    quotes.sort_by(|a, b| a.0.total_cmp(&b.0));
+    slice.svi_params = calibrate_svi_slice(slice.forward_price, slice.tenor_years, &quotes);
 }
 
 /// Thread-safe in-memory cache of live SABR volatility surfaces.
@@ -515,6 +720,7 @@ impl LiveVolSurfaceCache {
                     tenor_years,
                     market_iv,
                 ),
+                svi_params: None,
                 observed_strikes: HashMap::new(),
                 last_updated_ms: chrono::Utc::now().timestamp_millis(),
             });
@@ -528,6 +734,69 @@ impl LiveVolSurfaceCache {
         let strike_key = (strike * 100.0).round() as u64;
         slice.observed_strikes.insert(strike_key, market_iv);
         slice.last_updated_ms = chrono::Utc::now().timestamp_millis();
+        recalibrate_slice_svi(slice);
+    }
+
+    /// Ingests a complete expiry chain and calibrates one arbitrage-free SVI
+    /// slice from the resulting quote set.
+    #[allow(clippy::too_many_arguments)]
+    pub fn ingest_chain_slice(
+        &self,
+        asset: &str,
+        expiry: &str,
+        expiry_ms: i64,
+        tenor_years: f64,
+        forward_price: f64,
+        quotes: &[(f64, f64)],
+    ) {
+        for &(strike, market_iv) in quotes {
+            self.ingest_quote(
+                asset,
+                expiry,
+                expiry_ms,
+                tenor_years,
+                forward_price,
+                strike,
+                market_iv,
+            );
+        }
+        let mut map = self.slices.write();
+        let Some(slice) = map
+            .get_mut(&asset.to_ascii_uppercase())
+            .and_then(|slices| slices.get_mut(expiry))
+        else {
+            return;
+        };
+        recalibrate_slice_svi(slice);
+    }
+
+    /// Computes the SVI smile-adjusted delta for an option expiry.
+    pub fn get_smile_adjusted_delta(
+        &self,
+        asset: &str,
+        expiry_ts_ms: i64,
+        strike: f64,
+        spot: f64,
+        bs_delta: f64,
+        bs_vega_raw: f64,
+    ) -> Option<f64> {
+        if spot <= 0.0 || strike <= 0.0 {
+            return None;
+        }
+        let map = self.slices.read();
+        let slice = map
+            .get(&asset.to_ascii_uppercase())?
+            .values()
+            .find(|slice| slice.expiry_ms == expiry_ts_ms)?;
+        let svi = slice.svi_params.as_ref()?;
+        let adjusted = svi.smile_adjusted_delta(
+            bs_delta,
+            bs_vega_raw,
+            slice.forward_price,
+            strike,
+            slice.tenor_years,
+        );
+        adjusted.is_finite().then_some(adjusted)
     }
 
     /// Evaluates model implied volatility for (asset, expiry, strike).
@@ -536,14 +805,28 @@ impl LiveVolSurfaceCache {
         let asset_slices = map.get(&asset.to_ascii_uppercase())?;
         let slice = asset_slices.get(expiry)?;
 
-        // 1. Try calibrated SABR model:
+        // 1. Prefer the arbitrage-free SVI slice.
+        if let Some(svi) = slice.svi_params.as_ref() {
+            let k = (strike / slice.forward_price).ln();
+            if k.is_finite() && slice.tenor_years > 1e-6 {
+                let variance = svi.total_variance(k);
+                if variance.is_finite() && variance > 0.0 {
+                    let iv = (variance / slice.tenor_years).sqrt();
+                    if iv > 0.05 && iv < 4.0 {
+                        return Some(iv);
+                    }
+                }
+            }
+        }
+
+        // 2. Try calibrated SABR model:
         if let Some(iv) = slice.sabr_calibrator.model_volatility(strike) {
             if iv > 0.05 && iv < 4.0 {
                 return Some(iv);
             }
         }
 
-        // 2. Direct lookup in observed strikes:
+        // 3. Direct lookup in observed strikes:
         let strike_key = (strike * 100.0).round() as u64;
         slice.observed_strikes.get(&strike_key).copied()
     }
@@ -1147,6 +1430,40 @@ mod tests {
         assert!(cache
             .get_implied_volatility("BTC", "31DEC99", 65000.0)
             .is_none());
+    }
+
+    #[test]
+    fn live_vol_surface_calibrates_arbitrage_free_svi_and_smile_delta() {
+        let cache = LiveVolSurfaceCache::new();
+        let forward = 100.0;
+        let tenor = 0.25;
+        let expiry_ms = 1_900_000_000_000;
+        let truth = SviSliceParameters::new(0.04, 0.10, -0.40, 0.0, 0.15);
+        let quotes = [-0.30, -0.20, -0.10, 0.0, 0.10, 0.20, 0.30]
+            .into_iter()
+            .map(|k| {
+                let iv = (truth.total_variance(k) / tenor).sqrt();
+                ((forward * k.exp() * 100.0).round() / 100.0, iv)
+            })
+            .collect::<Vec<_>>();
+
+        cache.ingest_chain_slice("BTC", "SVI-TEST", expiry_ms, tenor, forward, &quotes);
+        let fitted = {
+            let map = cache.slices.read();
+            map["BTC"]["SVI-TEST"]
+                .svi_params
+                .expect("SVI slice should calibrate")
+        };
+        assert!(fitted.is_arbitrage_free());
+        let adjusted = cache
+            .get_smile_adjusted_delta("BTC", expiry_ms, 95.0, forward, 0.35, 18.0)
+            .expect("smile-adjusted delta");
+        assert!(adjusted.is_finite());
+        assert!((adjusted - 0.35).abs() > 1e-8);
+        assert_eq!(
+            cache.get_smile_adjusted_delta("BTC", expiry_ms + 1, 95.0, forward, 0.35, 18.0),
+            None
+        );
     }
 
     #[test]

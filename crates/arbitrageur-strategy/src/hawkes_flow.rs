@@ -68,18 +68,11 @@ impl HawkesFlowOrchestrator {
         is_buy: bool,
         timestamp_sec: f64,
     ) {
-        let asset_idx = match self
-            .engine
-            .asset_symbols
-            .iter()
-            .position(|s| s == asset_symbol)
-        {
-            Some(idx) => idx,
-            None => return,
+        let Some(asset_idx) = self.resolve_asset_idx(asset_symbol) else {
+            return;
         };
-        let venue_idx = match self.engine.venue_names.iter().position(|v| v == &venue.0) {
-            Some(idx) => idx,
-            None => return,
+        let Some(venue_idx) = self.resolve_venue_idx(&venue.0) else {
+            return;
         };
 
         let stream_idx = MultiAssetCrossHawkesEngine::encode_stream(
@@ -90,6 +83,24 @@ impl HawkesFlowOrchestrator {
         );
 
         self.engine.record_event(stream_idx, timestamp_sec);
+    }
+
+    /// Resolve a configured asset without ever aliasing an unknown symbol to
+    /// matrix index zero. The engine has fixed capacity from construction;
+    /// unseen identifiers fail closed.
+    fn resolve_asset_idx(&self, asset_symbol: &str) -> Option<usize> {
+        self.engine
+            .asset_symbols
+            .iter()
+            .position(|candidate| candidate.eq_ignore_ascii_case(asset_symbol))
+    }
+
+    /// Resolve a configured venue, never falling back to another venue.
+    fn resolve_venue_idx(&self, venue: &str) -> Option<usize> {
+        self.engine
+            .venue_names
+            .iter()
+            .position(|candidate| candidate.eq_ignore_ascii_case(venue))
     }
 
     /// Ingests a public trade event tick directly from the MarketDataHub.
@@ -109,18 +120,28 @@ impl HawkesFlowOrchestrator {
         let regime = self.engine.classify_regime();
         let is_supercritical = regime == CrossHawkesRegime::Supercritical;
 
-        let asset_idx = self
-            .engine
-            .asset_symbols
-            .iter()
-            .position(|s| s == asset_symbol)
-            .unwrap_or(0);
-        let venue_idx = self
-            .engine
-            .venue_names
-            .iter()
-            .position(|v| v == &venue.0)
-            .unwrap_or(0);
+        let Some(asset_idx) = self.resolve_asset_idx(asset_symbol) else {
+            return HawkesFlowVerdict {
+                regime,
+                is_supercritical: false,
+                toxic_drift_bps: 0.0,
+                is_toxic_burst: false,
+                cojump_withdrawal_recommended: false,
+                penalty_hurdle_bps: 0.0,
+                is_entry_allowed: false,
+            };
+        };
+        let Some(venue_idx) = self.resolve_venue_idx(&venue.0) else {
+            return HawkesFlowVerdict {
+                regime,
+                is_supercritical: false,
+                toxic_drift_bps: 0.0,
+                is_toxic_burst: false,
+                cojump_withdrawal_recommended: false,
+                penalty_hurdle_bps: 0.0,
+                is_entry_allowed: false,
+            };
+        };
 
         let stream_idx = MultiAssetCrossHawkesEngine::encode_stream(
             asset_idx,
@@ -186,6 +207,80 @@ impl HawkesFlowOrchestrator {
             is_entry_allowed,
         }
     }
+
+    /// Evaluates both legs of a buy-A/sell-B route. Either leg may veto the
+    /// route; the hurdle expands by the larger directional flow penalty so a
+    /// single adverse venue cannot be diluted by a quiet sibling.
+    pub fn evaluate_pair_gate(
+        &self,
+        asset: &str,
+        venue_a: &str,
+        venue_b: &str,
+        current_time_sec: f64,
+        base_hurdle_bps: f64,
+    ) -> (bool, Option<String>, f64) {
+        if self.resolve_asset_idx(asset).is_none() {
+            return (
+                false,
+                Some(format!(
+                    "asset '{asset}' is not configured in the Hawkes matrix"
+                )),
+                base_hurdle_bps.max(0.0),
+            );
+        }
+        if self.resolve_venue_idx(venue_a).is_none() {
+            return (
+                false,
+                Some(format!(
+                    "venue '{venue_a}' is not configured in the Hawkes matrix"
+                )),
+                base_hurdle_bps.max(0.0),
+            );
+        }
+        if self.resolve_venue_idx(venue_b).is_none() {
+            return (
+                false,
+                Some(format!(
+                    "venue '{venue_b}' is not configured in the Hawkes matrix"
+                )),
+                base_hurdle_bps.max(0.0),
+            );
+        }
+
+        let buy_a = self.evaluate_flow_conditions(
+            asset,
+            &VenueId(venue_a.to_string()),
+            true,
+            current_time_sec,
+        );
+        let sell_b = self.evaluate_flow_conditions(
+            asset,
+            &VenueId(venue_b.to_string()),
+            false,
+            current_time_sec,
+        );
+        let flow_ok = buy_a.is_entry_allowed && sell_b.is_entry_allowed;
+        let reason = if !flow_ok {
+            let mut blockers = Vec::new();
+            if !buy_a.is_entry_allowed {
+                blockers.push(format!("{venue_a} buy leg"));
+            }
+            if !sell_b.is_entry_allowed {
+                blockers.push(format!("{venue_b} sell leg"));
+            }
+            Some(format!(
+                "Hawkes pair gate blocked {}",
+                blockers.join(" and ")
+            ))
+        } else {
+            None
+        };
+        let penalty = buy_a
+            .penalty_hurdle_bps
+            .max(sell_b.penalty_hurdle_bps)
+            .max(0.0);
+        (flow_ok, reason, base_hurdle_bps.max(0.0) + penalty)
+    }
 }
 
 #[cfg(test)]
@@ -212,6 +307,24 @@ mod tests {
         assert!(!verdict.is_toxic_burst);
         assert!(verdict.is_entry_allowed);
         assert_eq!(verdict.penalty_hurdle_bps, 0.0);
+    }
+
+    #[test]
+    fn unknown_venue_or_asset_never_aliases_index_zero() {
+        let orch = make_test_orchestrator();
+        let unknown_venue =
+            orch.evaluate_flow_conditions("BTC", &VenueId("unknown".into()), true, 1.0);
+        assert!(!unknown_venue.is_entry_allowed);
+
+        let unknown_asset =
+            orch.evaluate_flow_conditions("SOL", &VenueId("binance".into()), true, 1.0);
+        assert!(!unknown_asset.is_entry_allowed);
+
+        let (allowed, reason, hurdle) =
+            orch.evaluate_pair_gate("BTC", "binance", "unknown", 1.0, 5.0);
+        assert!(!allowed);
+        assert_eq!(hurdle, 5.0);
+        assert!(reason.expect("reason").contains("unknown"));
     }
 
     #[test]

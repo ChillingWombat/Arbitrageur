@@ -28,6 +28,19 @@ pub struct BinanceAdapter {
 
 const ORDERBOOK_LIMIT: u32 = 100;
 
+/// Local pre-submit validation error, preserved as a concrete source type so
+/// callers can distinguish a fail-closed client rejection from a venue error.
+#[derive(Debug)]
+struct ValidationError(String);
+
+impl std::fmt::Display for ValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ValidationError {}
+
 fn dec_from_json(v: Option<&serde_json::Value>) -> Option<Decimal> {
     match v? {
         serde_json::Value::String(s) => Decimal::from_str_exact(s).ok(),
@@ -56,6 +69,27 @@ fn binance_wire_price(price: Decimal, side: Side, tick: Decimal) -> Decimal {
         Side::Buy => (price / tick).floor() * tick,
         Side::Sell => (price / tick).ceil() * tick,
     }
+}
+
+fn validate_min_notional(
+    venue_symbol: &str,
+    quantity: Decimal,
+    price: Decimal,
+    min_notional: Decimal,
+) -> anyhow::Result<()> {
+    if price <= dec!(0) {
+        return Err(anyhow::Error::new(ValidationError(format!(
+            "Binance {venue_symbol} cannot verify min_notional without a positive reference price"
+        ))));
+    }
+    let notional = quantity * price;
+    if min_notional > dec!(0) && notional < min_notional {
+        return Err(anyhow::Error::new(ValidationError(format!(
+            "Binance {venue_symbol} notional {notional} below minimum {min_notional} \
+             (qty {quantity} × price {price})"
+        ))));
+    }
+    Ok(())
 }
 
 fn parse_pair(level: &serde_json::Value) -> Option<(Decimal, Decimal)> {
@@ -111,12 +145,12 @@ impl BinanceAdapter {
     }
 
     /// Venue order filters for one symbol — (PRICE_FILTER.tickSize,
-    /// LOT_SIZE.stepSize, LOT_SIZE.minQty). exchangeInfo is cached by the
+    /// LOT_SIZE.stepSize, LOT_SIZE.minQty, and notional floor). exchangeInfo is cached by the
     /// request coordinator, so this is cheap on the order path.
     async fn symbol_filters(
         &self,
         venue_symbol: &str,
-    ) -> anyhow::Result<(Decimal, Decimal, Decimal)> {
+    ) -> anyhow::Result<(Decimal, Decimal, Decimal, Decimal)> {
         let val = self.get_json("/fapi/v1/exchangeInfo").await?;
         let symbols = val
             .get("symbols")
@@ -129,6 +163,7 @@ impl BinanceAdapter {
         let mut tick = dec!(0);
         let mut step = dec!(0);
         let mut min_qty = dec!(0);
+        let mut min_notional = dec!(0);
         if let Some(filters) = item.get("filters").and_then(|f| f.as_array()) {
             for f in filters {
                 match f.get("filterType").and_then(|t| t.as_str()) {
@@ -137,11 +172,14 @@ impl BinanceAdapter {
                         step = dec_from_json(f.get("stepSize")).unwrap_or(step);
                         min_qty = dec_from_json(f.get("minQty")).unwrap_or(min_qty);
                     }
+                    Some("MIN_NOTIONAL") | Some("NOTIONAL") => {
+                        min_notional = dec_from_json(f.get("notional")).unwrap_or(min_notional);
+                    }
                     _ => {}
                 }
             }
         }
-        Ok((tick, step, min_qty))
+        Ok((tick, step, min_qty, min_notional))
     }
 
     async fn get_json(&self, path: &str) -> anyhow::Result<serde_json::Value> {
@@ -872,7 +910,8 @@ impl ExchangeAdapter for BinanceAdapter {
         let venue_symbol = Self::to_venue_symbol(&order.symbol)?;
         // Binance enforces PRICE_FILTER.tickSize and LOT_SIZE.stepSize —
         // resolved before the params map consumes the symbol.
-        let (tick_size, step_size, min_qty) = self.symbol_filters(&venue_symbol).await?;
+        let (tick_size, step_size, min_qty, min_notional) =
+            self.symbol_filters(&venue_symbol).await?;
         let mut params = BTreeMap::new();
         params.insert("symbol", venue_symbol.clone());
         let side_str = match order.side {
@@ -919,6 +958,7 @@ impl ExchangeAdapter for BinanceAdapter {
             );
         }
         params.insert("quantity", qty_wire.normalize().to_string());
+        let mut wire_price = None;
         if let Some(p) = order.price {
             if p <= dec!(0) {
                 anyhow::bail!("Binance order limit price must be positive");
@@ -930,7 +970,21 @@ impl ExchangeAdapter for BinanceAdapter {
                     venue_symbol
                 );
             }
+            wire_price = Some(pw);
             params.insert("price", pw.normalize().to_string());
+        }
+        if min_notional > dec!(0) {
+            let reference_price = match wire_price {
+                Some(price) => price,
+                None => {
+                    let ticker = self.fetch_ticker(&order.symbol).await?;
+                    match order.side {
+                        Side::Buy => ticker.ask,
+                        Side::Sell => ticker.bid,
+                    }
+                }
+            };
+            validate_min_notional(&venue_symbol, qty_wire, reference_price, min_notional)?;
         }
         if order.reduce_only {
             params.insert("reduceOnly", "true".to_string());
@@ -951,7 +1005,7 @@ impl ExchangeAdapter for BinanceAdapter {
 
     async fn wire_base_qty(&self, symbol: &str, qty: Decimal) -> anyhow::Result<Decimal> {
         let venue_symbol = Self::to_venue_symbol(symbol)?;
-        let (_tick, step_size, min_qty) = self.symbol_filters(&venue_symbol).await?;
+        let (_tick, step_size, min_qty, _min_notional) = self.symbol_filters(&venue_symbol).await?;
         let wire = binance_wire_qty(qty, step_size);
         if wire <= dec!(0) || wire < min_qty {
             anyhow::bail!(
@@ -1306,5 +1360,17 @@ mod tests {
             binance_wire_price(dec!(1.234), Side::Buy, dec!(0)),
             dec!(1.234)
         );
+    }
+
+    #[test]
+    fn min_notional_validation_fails_closed_locally() {
+        let err = validate_min_notional("BTCUSDT", dec!(0.001), dec!(100), dec!(5.0))
+            .expect_err("sub-minimum notional must fail");
+        assert!(
+            err.downcast_ref::<ValidationError>().is_some(),
+            "expected typed ValidationError, got {err:#}"
+        );
+        validate_min_notional("BTCUSDT", dec!(0.1), dec!(100), dec!(5.0))
+            .expect("notional above floor");
     }
 }
