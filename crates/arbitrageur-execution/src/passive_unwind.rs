@@ -190,9 +190,9 @@ impl PassiveUnwindConfig {
                 self.spread_percentile
             ));
         }
-        if self.timeout_secs == 0 || self.timeout_secs > 300 {
+        if self.timeout_secs > 300 {
             return Err(format!(
-                "timeout_secs {} must be within 1..=300",
+                "timeout_secs {} must be within 0..=300",
                 self.timeout_secs
             ));
         }
@@ -1828,7 +1828,6 @@ mod tests {
             |c: &mut PassiveUnwindConfig| c.spread_percentile = -1.0,
             |c: &mut PassiveUnwindConfig| c.spread_percentile = 101.0,
             |c: &mut PassiveUnwindConfig| c.spread_percentile = f64::NAN,
-            |c: &mut PassiveUnwindConfig| c.timeout_secs = 0,
             |c: &mut PassiveUnwindConfig| c.timeout_secs = 301,
             |c: &mut PassiveUnwindConfig| c.max_tries = 0,
             |c: &mut PassiveUnwindConfig| c.max_tries = 11,
