@@ -2179,15 +2179,20 @@ pub async fn scan_spatial_opportunities_impl(
                 }
             }
         }
-        let book = match crate::ws_primary::resolve_book_ws_first(
-            &state.market_data_hub,
-            &state.orderbook_flights,
-            adapter,
-            &fetch_sym,
-            std::time::Duration::from_millis(350),
+        let resolved = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            crate::ws_primary::resolve_book_ws_first(
+                &state.market_data_hub,
+                &state.orderbook_flights,
+                adapter,
+                &fetch_sym,
+                std::time::Duration::from_millis(350),
+            ),
         )
         .await
-        {
+        .ok()
+        .flatten();
+        let book = match resolved {
             Some(crate::ws_primary::ResolvedBook::Ws(b))
             | Some(crate::ws_primary::ResolvedBook::Cached(b)) => b,
             Some(crate::ws_primary::ResolvedBook::Fresh(b)) => {

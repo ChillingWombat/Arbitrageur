@@ -1626,6 +1626,14 @@ fn test_spatial_baseline_roundtrip_and_validation() {
     assert_eq!(got.entry_net_bps, 18.0);
 }
 
+#[test]
+fn normalize_strategy_accepts_options_portfolio() {
+    assert_eq!(
+        normalize_strategy_id(" Options_Portfolio ").unwrap(),
+        "options_portfolio"
+    );
+}
+
 fn sample(venue_id: &str, mid: f64) -> VenueSampleEntry {
     VenueSampleEntry {
         venue_id: venue_id.into(),

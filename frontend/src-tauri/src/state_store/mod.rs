@@ -9,7 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub const ALLOWED_STRATEGY_IDS: [&str; 12] = [
+pub const ALLOWED_STRATEGY_IDS: [&str; 13] = [
     "futures",
     "radar",
     "funding",
@@ -21,6 +21,7 @@ pub const ALLOWED_STRATEGY_IDS: [&str; 12] = [
     "options_box_spread",
     "options_jelly_roll",
     "options_convexity",
+    "options_portfolio",
     "external",
 ];
 
@@ -605,7 +606,7 @@ pub struct OpenPositionDto {
 /// signals collapse into one trade card; every other signal is its own
 /// trade. The `-leg` tail must be numeric so a coincidental `-leg` inside
 /// an id cannot forge a shared prefix.
-fn signal_trade_id(id: &str) -> &str {
+pub(crate) fn signal_trade_id(id: &str) -> &str {
     match id.rsplit_once("-leg") {
         Some((prefix, tail))
             if !prefix.is_empty()
@@ -1100,7 +1101,7 @@ ON CONFLICT(id) DO UPDATE SET
 /// version guard and the tests both read this instead of hard-coding the
 /// number, so adding a migration no longer breaks every assertion that pins
 /// it (v43 alone broke seven).
-pub(crate) const SCHEMA_VERSION: i64 = 43;
+pub(crate) const SCHEMA_VERSION: i64 = 44;
 
 const MIGRATION_V1_SQL: &str = "\
 BEGIN IMMEDIATE;
@@ -2030,6 +2031,45 @@ PRAGMA foreign_keys = ON;";
 /// without this column P&L cannot tell a real fill from a split of the net
 /// premium and silently presents the attribution as venue truth.
 const MIGRATION_V43_SQL: &str = "BEGIN IMMEDIATE; ALTER TABLE signal_legs ADD COLUMN fill_price_estimated INTEGER NOT NULL DEFAULT 0 CHECK(fill_price_estimated IN (0, 1)); PRAGMA user_version = 43; COMMIT;";
+
+/// v44 admits 'options_portfolio' into the signal_executions strategy CHECK.
+/// Autonomous portfolio delta rehedges persist under this strategy id, so the
+/// runtime allowlist and the durable schema must agree.
+const MIGRATION_V44_SQL: &str = "\
+PRAGMA foreign_keys = OFF;
+BEGIN IMMEDIATE;
+CREATE TABLE signal_executions_v44 (
+    id TEXT PRIMARY KEY NOT NULL CHECK(length(id) BETWEEN 1 AND 128),
+    strategy_id TEXT NOT NULL COLLATE NOCASE CHECK(strategy_id IN ('futures', 'radar', 'funding', 'spot', 'prediction', 'stat_arb', 'triangle', 'options_parity', 'options_box_spread', 'options_jelly_roll', 'options_convexity', 'options_portfolio', 'external')),
+    symbol TEXT NOT NULL COLLATE NOCASE CHECK(length(symbol) BETWEEN 1 AND 64),
+    status TEXT NOT NULL CHECK(status IN ('in_flight', 'balanced', 'imbalanced', 'unresolved', 'closed', 'failed')),
+    route_id TEXT REFERENCES strategy_account_routes(id) ON DELETE SET NULL,
+    account_long_id TEXT REFERENCES exchange_accounts(id) ON DELETE RESTRICT,
+    account_short_id TEXT REFERENCES exchange_accounts(id) ON DELETE RESTRICT,
+    expected_net_usd REAL,
+    fees_usd REAL NOT NULL DEFAULT 0 CHECK(fees_usd >= 0),
+    note TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    closed_at TEXT,
+    environment TEXT NOT NULL DEFAULT 'unknown' CHECK(environment IN ('unknown', 'testnet', 'live'))
+);
+INSERT INTO signal_executions_v44
+    (id, strategy_id, symbol, status, route_id, account_long_id,
+     account_short_id, expected_net_usd, fees_usd, note,
+     created_at, updated_at, closed_at, environment)
+    SELECT id, strategy_id, symbol, status, route_id, account_long_id,
+           account_short_id, expected_net_usd, fees_usd, note,
+           created_at, updated_at, closed_at, environment
+    FROM signal_executions;
+DROP TABLE signal_executions;
+ALTER TABLE signal_executions_v44 RENAME TO signal_executions;
+CREATE INDEX ix_signal_executions_symbol_status
+    ON signal_executions(symbol, status);
+CREATE INDEX ix_signal_executions_env ON signal_executions(environment);
+PRAGMA user_version = 44;
+COMMIT;
+PRAGMA foreign_keys = ON;";
 
 const MIGRATION_V38_SQL: &str = "\
 PRAGMA foreign_keys = OFF;
@@ -3158,6 +3198,12 @@ impl StateStore {
         }
         if version <= 42 {
             if let Err(err) = conn.execute_batch(MIGRATION_V43_SQL) {
+                let _ = conn.execute_batch("ROLLBACK;");
+                return Err(err.into());
+            }
+        }
+        if version <= 43 {
+            if let Err(err) = conn.execute_batch(MIGRATION_V44_SQL) {
                 let _ = conn.execute_batch("ROLLBACK;");
                 return Err(err.into());
             }

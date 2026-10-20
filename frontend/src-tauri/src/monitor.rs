@@ -1936,8 +1936,8 @@ impl SpreadMonitorEngine {
             fast_vol: Mutex::new(HashMap::new()),
             vol_halt: Mutex::new(HashMap::new()),
             last_funding_exit_check: Mutex::new(None),
-            last_rollup_at: Mutex::new(None),
-            last_promotion_at: Mutex::new(None),
+            last_rollup_at: Mutex::new(Some(Instant::now())),
+            last_promotion_at: Mutex::new(Some(Instant::now())),
             last_maturity_check: Mutex::new(None),
             persisted: Mutex::new(HashMap::new()),
             shutdown: Mutex::new(false),
@@ -2159,15 +2159,14 @@ impl SpreadMonitorEngine {
             self.maybe_refresh_watchlist(&state).await;
             self.poll_due_books(&state).await;
             self.poll_funding(&state).await;
-            self.maybe_rollup_sessions(&state);
-            self.maybe_promote_sessions(&state);
-            self.maybe_check_fixed_yield_maturities(&state).await;
-
             if eval_at <= Instant::now() {
                 self.evaluate(&state).await;
                 // Eval cadence tracks the fastest lane's fair-share tick.
                 eval_at = Instant::now() + Duration::from_secs(5);
             }
+            self.maybe_rollup_sessions(&state);
+            self.maybe_promote_sessions(&state);
+            self.maybe_check_fixed_yield_maturities(&state).await;
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
     }
@@ -2584,6 +2583,21 @@ impl SpreadMonitorEngine {
             .collect();
         watch.sort();
 
+        if !watch.is_empty() {
+            let watch_set: HashSet<&str> = watch.iter().map(String::as_str).collect();
+            let group_members = self.group_member.lock();
+            for lane in &mut new_lanes {
+                let held = lane.held.clone();
+                let members = group_members.get(&lane.venue);
+                lane.symbols.retain(|s| {
+                    watch_set.contains(s.as_str())
+                        || held.contains(s)
+                        || arbitrageur_core::tracking::track_group(s).is_some()
+                        || members.is_some_and(|m| m.values().any(|g| &g.key == s || &g.base == s))
+                });
+            }
+        }
+
         *self.venue_symbols.lock() = venue_bases;
         *self.watchlist.lock() = watch;
         *self.lanes.lock() = new_lanes;
@@ -2615,17 +2629,24 @@ impl SpreadMonitorEngine {
         let from_ms = now_ms - 7 * 86_400_000;
         let merge_usd = state.usd_merge_quotes();
         let env = state.env().as_str();
-        let symbols = match state
-            .state_store
-            .distinct_sample_symbols_mode(merge_usd, env)
-        {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!("session rollup: symbol scan failed: {e}");
-                return;
-            }
+        let watchlist = self.watchlist.lock().clone();
+        let symbols = if watchlist.is_empty() {
+            let mut historical = match state
+                .state_store
+                .distinct_sample_symbols_mode(merge_usd, env)
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("session rollup: symbol scan failed: {e}");
+                    return;
+                }
+            };
+            historical.truncate(500);
+            historical
+        } else {
+            watchlist
         };
-        for symbol in symbols.iter().take(500) {
+        for symbol in &symbols {
             if let Err(e) = state
                 .state_store
                 .rollup_session_profiles_mode(symbol, merge_usd, from_ms, now_ms, now_ms, env)
@@ -3165,6 +3186,9 @@ impl SpreadMonitorEngine {
                                 .unwrap_or_default()
                         };
                         for sym in syms {
+                            if crate::state_store::symbol_is_fixed_contract(&sym) {
+                                continue;
+                            }
                             let budgeted = {
                                 let mut lanes = self.lanes.lock();
                                 match lanes.iter_mut().find(|l| l.venue == venue) {

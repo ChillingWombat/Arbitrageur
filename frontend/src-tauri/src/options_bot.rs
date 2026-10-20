@@ -34,7 +34,7 @@ use crate::options_packages::{
 };
 use crate::options_parity::{
     execute_options_parity_impl, scan_options_parity_impl, OptionsParityExecutionParams,
-    OptionsParityScanParams,
+    OptionsParityScanParams, OPTION_FEE_PREMIUM_CAP, OPTION_TAKER_FEE_RATE,
 };
 use crate::state::AppEngineState;
 use crate::state_store::SignalStatus;
@@ -223,21 +223,93 @@ pub(crate) fn parse_option_expiry_ms(token: &str) -> Option<i64> {
     None
 }
 
-/// Fresh executable value of the package's option legs, using bid for a
-/// long close and ask for a short close. `None` means at least one option
-/// mark is unavailable, so elapsed-time synthesis must not authorize an
-/// early harvest.
+#[derive(Debug, Clone, Copy)]
+struct OptionChainCloseEstimate {
+    option_proceeds_usd: f64,
+    executable_pnl_usd: f64,
+}
+
+fn trade_entry_signals<'a>(
+    signals: &'a [crate::state_store::SignalExecution],
+    trade_id: &'a str,
+) -> impl Iterator<Item = &'a crate::state_store::SignalExecution> {
+    signals.iter().filter(move |signal| {
+        !signal.id.starts_with("flat-")
+            && !signal.id.starts_with("trim-")
+            && crate::state_store::signal_trade_id(&signal.id) == trade_id
+    })
+}
+
+fn entry_fill_px_usd(
+    signals: &[crate::state_store::SignalExecution],
+    trade_id: &str,
+    venue: &str,
+    symbol: &str,
+    net_qty: f64,
+) -> Option<f64> {
+    let (notional, qty) = trade_entry_signals(signals, trade_id)
+        .flat_map(|signal| signal.legs.iter())
+        .filter(|leg| {
+            leg.venue.eq_ignore_ascii_case(venue)
+                && leg.symbol.eq_ignore_ascii_case(symbol)
+                && leg.fill_price.is_some()
+                && leg.filled_qty.abs() > 1e-9
+                && match leg.side {
+                    crate::state_store::LegSide::Long => net_qty > 0.0,
+                    crate::state_store::LegSide::Short => net_qty < 0.0,
+                }
+        })
+        .fold((0.0f64, 0.0f64), |(notional, qty), leg| {
+            let fill_qty = leg.filled_qty.abs();
+            (
+                notional + leg.fill_price.unwrap_or(0.0) * fill_qty,
+                qty + fill_qty,
+            )
+        });
+    (qty > 1e-9 && notional.is_finite()).then_some(notional / qty)
+}
+
+fn option_underlying_usd(state: &AppEngineState, venue: &str, symbol: &str) -> Option<f64> {
+    let asset = symbol.split('-').next()?;
+    if venue.eq_ignore_ascii_case("deribit") {
+        let perp = format!("{asset}-PERPETUAL");
+        if let Some(mid) = state
+            .market_data_hub
+            .get_valid_orderbook(
+                &arbitrageur_core::types::VenueId::new(venue),
+                &perp,
+                Some(Duration::from_secs(30)),
+            )
+            .and_then(|book| book.mid_price())
+            .and_then(|price| price.to_string().parse::<f64>().ok())
+            .filter(|price| price.is_finite() && *price > 0.0)
+        {
+            return Some(mid);
+        }
+    }
+    live_linear_mid(state, asset)
+        .and_then(|price| price.to_string().parse::<f64>().ok())
+        .filter(|price| price.is_finite() && *price > 0.0)
+}
+
+/// Fresh executable value and close PnL for the position, using bid for a
+/// long close and ask for a short close. `None` means at least one mark,
+/// entry fill, or fee input is unavailable, so elapsed-time synthesis must
+/// not authorize an early harvest.
 fn option_chain_close_proceeds(
     state: &AppEngineState,
     position: &crate::state_store::OpenPositionDto,
-) -> Option<f64> {
-    let mut total = 0.0f64;
-    let mut option_legs = 0usize;
+    signals: &[crate::state_store::SignalExecution],
+) -> Option<OptionChainCloseEstimate> {
+    let mut option_proceeds = 0.0f64;
+    let mut executable_pnl = 0.0f64;
+    let mut estimated_exit_fees = 0.0f64;
+    let mut legs = 0usize;
     for leg in &position.venues {
-        if !crate::state_store::symbol_is_fixed_contract(&leg.symbol) || leg.net_qty.abs() <= 1e-9 {
+        if leg.net_qty.abs() <= 1e-9 {
             continue;
         }
-        option_legs += 1;
+        legs += 1;
         let book = state.market_data_hub.get_valid_orderbook(
             &arbitrageur_core::types::VenueId::new(&leg.venue),
             &leg.symbol,
@@ -252,14 +324,52 @@ fn option_chain_close_proceeds(
         if !price.is_finite() || price <= 0.0 {
             return None;
         }
-        let signed_proceeds = if leg.net_qty > 0.0 {
-            leg.net_qty.abs() * price
+        let executable_px_usd =
+            crate::execution::ledger_px_usd(state, &leg.venue, &leg.symbol, price)?;
+        if !executable_px_usd.is_finite() || executable_px_usd <= 0.0 {
+            return None;
+        }
+        let entry_px_usd = entry_fill_px_usd(
+            signals,
+            &position.trade_id,
+            &leg.venue,
+            &leg.symbol,
+            leg.net_qty,
+        )?;
+        executable_pnl += (executable_px_usd - entry_px_usd) * leg.net_qty;
+
+        let notional_usd = leg.net_qty.abs() * executable_px_usd;
+        let exit_fee_usd = if crate::state_store::symbol_is_fixed_contract(&leg.symbol) {
+            let underlying_usd = option_underlying_usd(state, &leg.venue, &leg.symbol)?;
+            (OPTION_TAKER_FEE_RATE * underlying_usd).min(OPTION_FEE_PREMIUM_CAP * executable_px_usd)
+                * leg.net_qty.abs()
         } else {
-            -leg.net_qty.abs() * price
+            notional_usd * crate::commands::effective_venue_fee_bps(state, &leg.venue) / 10_000.0
         };
-        total += signed_proceeds;
+        estimated_exit_fees += exit_fee_usd;
+
+        if crate::state_store::symbol_is_fixed_contract(&leg.symbol) {
+            option_proceeds += if leg.net_qty > 0.0 {
+                notional_usd
+            } else {
+                -notional_usd
+            };
+        }
     }
-    (option_legs > 0 && total.is_finite()).then_some(total)
+    if legs == 0 {
+        return None;
+    }
+    let recorded_entry_fees = trade_entry_signals(signals, &position.trade_id)
+        .map(|signal| signal.fees_usd.max(0.0))
+        .sum::<f64>();
+    let executable_pnl_usd = executable_pnl - recorded_entry_fees - estimated_exit_fees;
+    (option_proceeds.is_finite()
+        && estimated_exit_fees.is_finite()
+        && executable_pnl_usd.is_finite())
+    .then_some(OptionChainCloseEstimate {
+        option_proceeds_usd: option_proceeds,
+        executable_pnl_usd,
+    })
 }
 
 fn option_symbol_parts(symbol: &str) -> Option<(String, String, f64)> {
@@ -336,7 +446,7 @@ fn realized_vol_30d(
                 .push((sample.ts_ms, sample.mid));
         }
     }
-    let mut best: Option<f64> = None;
+    let mut venue_vols = Vec::new();
     for points in by_venue.values_mut() {
         if points.len() < 30 {
             continue;
@@ -344,13 +454,21 @@ fn realized_vol_30d(
         points.sort_by_key(|(ts, _)| *ts);
         let mut returns = Vec::with_capacity(points.len().saturating_sub(1));
         let mut deltas = Vec::with_capacity(points.len().saturating_sub(1));
-        for pair in points.windows(2) {
-            let dt_secs = (pair[1].0 - pair[0].0) as f64 / 1000.0;
-            if dt_secs <= 0.0 {
+        let mut last_ts = points[0].0;
+        let mut last_mid = points[0].1;
+        for &(ts, mid) in points.iter().skip(1) {
+            let dt_secs = (ts - last_ts) as f64 / 1000.0;
+            if dt_secs < 300.0 {
                 continue;
             }
-            returns.push((pair[1].1 / pair[0].1).ln());
+            let ret = (mid / last_mid).ln();
+            if ret.abs() > 0.25 {
+                continue;
+            }
+            returns.push(ret);
             deltas.push(dt_secs);
+            last_ts = ts;
+            last_mid = mid;
         }
         if returns.len() < 20 {
             continue;
@@ -360,11 +478,21 @@ fn realized_vol_30d(
         let variance_per_step =
             returns.iter().map(|ret| ret * ret).sum::<f64>() / returns.len() as f64;
         let annualized = (variance_per_step * (365.25 * 24.0 * 60.0 * 60.0) / median_dt).sqrt();
-        if annualized.is_finite() {
-            best = Some(best.map_or(annualized, |prior| prior.max(annualized)));
+        if annualized.is_finite() && annualized > 0.0 {
+            venue_vols.push(annualized);
         }
     }
-    best
+    if venue_vols.is_empty() {
+        return None;
+    }
+    venue_vols.sort_by(f64::total_cmp);
+    let mid = venue_vols.len() / 2;
+    let median = if venue_vols.len() % 2 == 0 {
+        (venue_vols[mid - 1] + venue_vols[mid]) / 2.0
+    } else {
+        venue_vols[mid]
+    };
+    median.is_finite().then_some(median.clamp(0.05, 2.50))
 }
 
 fn cached_variance_strip(
@@ -740,6 +868,18 @@ impl OptionsBotExecutor {
         else {
             return;
         };
+        let open_signals = match state
+            .state_store
+            .list_open_signals(Some(state.env().as_str()))
+        {
+            Ok(signals) => signals,
+            Err(error) => {
+                tracing::warn!(
+                    "options bot {substrategy}: open-signal lookup failed; early harvest disabled: {error}"
+                );
+                Vec::new()
+            }
+        };
 
         let now_ms = chrono::Utc::now().timestamp_millis();
         let mut portfolio_all_positions = Vec::new();
@@ -790,18 +930,24 @@ impl OptionsBotExecutor {
                 _ => 0.0,
             };
 
-            let option_close_proceeds = option_chain_close_proceeds(state, &pos);
-            let is_edge_harvest_ready =
-                option_close_proceeds.is_some() && edge_harvest_ratio >= 0.88;
+            let close_estimate = option_chain_close_proceeds(state, &pos, &open_signals);
+            let option_close_proceeds = close_estimate.map(|estimate| estimate.option_proceeds_usd);
+            let executable_close_pnl = close_estimate.map(|estimate| estimate.executable_pnl_usd);
+            let is_edge_harvest_ready = pos.expected_net_usd.is_some_and(|expected| {
+                expected > 0.0
+                    && edge_harvest_ratio >= 0.88
+                    && executable_close_pnl.is_some_and(|pnl| pnl > 0.0 && pnl >= 0.88 * expected)
+            });
             let is_pin_risk_imminent = hours_to_expiry.is_some_and(|h| h <= 3.0 && h > 0.0);
 
             if is_edge_harvest_ready || is_pin_risk_imminent {
                 let reason = if is_edge_harvest_ready {
                     format!(
-                        "early harvest triggered: {:.1}% of target edge captured (+${:.2} USD; option-chain close value ${:.2}) — avoiding Deribit expiration delivery fees",
+                        "early harvest triggered: {:.1}% of target edge captured (+${:.2} USD; option-chain close value ${:.2}; executable close PnL ${:.2}) — avoiding Deribit expiration delivery fees",
                         edge_harvest_ratio * 100.0,
                         pos.unrealized_pnl_usd.unwrap_or(0.0),
-                        option_close_proceeds.unwrap_or(0.0)
+                        option_close_proceeds.unwrap_or(0.0),
+                        executable_close_pnl.unwrap_or(0.0)
                     )
                 } else {
                     format!(
@@ -1686,8 +1832,10 @@ pub fn spawn_volatility_surface_worker(
                                         (Some(bid), Some(ask))
                                             if bid.is_finite()
                                                 && ask.is_finite()
-                                                && bid >= 0.0
-                                                && ask >= bid =>
+                                                && bid > 0.0
+                                                && ask >= bid
+                                                && (ask - bid)
+                                                    <= 0.50 * ((ask + bid) * 0.5) =>
                                         {
                                             Some(
                                                 arbitrageur_math::variance_swap::DiscreteOptionQuote::new(
@@ -1914,9 +2062,64 @@ pub fn spawn_volatility_surface_worker(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arbitrageur_core::quote::{BookLevel, OrderBook};
+    use arbitrageur_core::types::VenueId;
+
+    use crate::state_store::{
+        NewSignalExecution, NewSignalLeg, OpenPositionDto, PositionVenueDto, StateStore,
+        VenueSampleEntry,
+    };
 
     fn state() -> AppEngineState {
         AppEngineState::new()
+    }
+
+    fn book(venue: &str, symbol: &str, bid: f64, ask: f64) -> OrderBook {
+        let mut book = OrderBook::new(VenueId::new(venue), symbol.to_string());
+        book.bids.push(BookLevel::new(
+            Decimal::from_f64_retain(bid).unwrap(),
+            Decimal::ONE,
+        ));
+        book.asks.push(BookLevel::new(
+            Decimal::from_f64_retain(ask).unwrap(),
+            Decimal::ONE,
+        ));
+        book
+    }
+
+    fn record_option_signal(
+        store: &StateStore,
+        id: &str,
+        symbol: &str,
+        side: crate::state_store::LegSide,
+        fill_price_usd: f64,
+        fee_usd: f64,
+    ) {
+        store
+            .record_signal_execution(
+                &NewSignalExecution {
+                    id: id.to_string(),
+                    strategy_id: "options_box_spread".into(),
+                    symbol: symbol.to_string(),
+                    route_id: None,
+                    expected_net_usd: Some(3_000.0),
+                    note: None,
+                    legs: vec![NewSignalLeg {
+                        account_id: None,
+                        venue: "deribit".into(),
+                        side,
+                        symbol: Some(symbol.to_string()),
+                        intended_qty: 1.0,
+                        intended_price: Some(fill_price_usd),
+                        unit_scale: None,
+                    }],
+                },
+                "testnet",
+            )
+            .unwrap();
+        store
+            .apply_leg_fill(id, side, 1.0, fill_price_usd, fee_usd, None)
+            .unwrap();
     }
 
     fn armed(substrategy: &str) -> OptionsBotConfigDto {
@@ -2035,6 +2238,173 @@ mod tests {
         // Non-option tickers fail cleanly
         assert_eq!(parse_option_expiry_ms("BTC-PERPETUAL"), None);
         assert_eq!(parse_option_expiry_ms("ETH-USDC"), None);
+    }
+
+    #[test]
+    fn executable_close_pnl_uses_fills_costs_and_usd_option_prices() {
+        let st = state();
+        let long_symbol = "BTC-25DEC26-100000-C";
+        let short_symbol = "BTC-25DEC26-110000-C";
+        let trade_id = "opbox-btc-123";
+        record_option_signal(
+            &st.state_store,
+            &format!("{trade_id}-leg1"),
+            long_symbol,
+            crate::state_store::LegSide::Long,
+            8_000.0,
+            10.0,
+        );
+        record_option_signal(
+            &st.state_store,
+            &format!("{trade_id}-leg2"),
+            short_symbol,
+            crate::state_store::LegSide::Short,
+            6_000.0,
+            10.0,
+        );
+
+        st.market_data_hub
+            .update_orderbook(book("deribit", long_symbol, 0.10, 0.11));
+        st.market_data_hub
+            .update_orderbook(book("deribit", short_symbol, 0.04, 0.05));
+        st.market_data_hub
+            .update_orderbook(book("deribit", "BTC-PERPETUAL", 99_999.0, 100_001.0));
+
+        let position = OpenPositionDto {
+            key: format!("options_box_spread|{trade_id}"),
+            trade_id: trade_id.into(),
+            strategy_id: "options_box_spread".into(),
+            symbol: "BTC-25DEC26".into(),
+            leg_symbols: vec![long_symbol.into(), short_symbol.into()],
+            signal_count: 2,
+            venues: vec![
+                PositionVenueDto {
+                    venue: "deribit".into(),
+                    symbol: long_symbol.into(),
+                    net_qty: 1.0,
+                },
+                PositionVenueDto {
+                    venue: "deribit".into(),
+                    symbol: short_symbol.into(),
+                    net_qty: -1.0,
+                },
+            ],
+            expected_net_usd: Some(3_000.0),
+            unrealized_pnl_usd: Some(3_000.0),
+            fees_usd: 20.0,
+            notional_usd: Some(14_000.0),
+            opened_at: chrono::Utc::now().to_rfc3339(),
+            reduce_only: false,
+        };
+        let signals = st.state_store.list_open_signals(Some("testnet")).unwrap();
+        assert_eq!(signals.len(), 2);
+        assert!(entry_fill_px_usd(&signals, trade_id, "deribit", long_symbol, 1.0).is_some());
+        assert!(st
+            .market_data_hub
+            .get_valid_orderbook(
+                &VenueId::new("deribit"),
+                "BTC-PERPETUAL",
+                Some(Duration::from_secs(30)),
+            )
+            .is_some());
+        let estimate = option_chain_close_proceeds(&st, &position, &signals).unwrap();
+
+        assert!((estimate.option_proceeds_usd - 5_000.0).abs() < 1e-6);
+        assert!((estimate.executable_pnl_usd - 2_920.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn realized_vol_samples_at_five_minutes_and_takes_venue_median() {
+        let store = StateStore::open_in_memory().unwrap();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let mut fast = 100.0f64;
+        let mut slow = 100.0f64;
+        for i in 0..121 {
+            if i > 0 {
+                let fast_return: f64 = if i % 2 == 0 { -0.001 } else { 0.001 };
+                let slow_return: f64 = if i % 2 == 0 { -0.003 } else { 0.003 };
+                fast *= fast_return.exp();
+                slow *= slow_return.exp();
+            }
+            let ts_ms = now_ms - (120 - i) * 300_000;
+            store
+                .record_spread_samples(
+                    "BTC",
+                    ts_ms,
+                    &[
+                        VenueSampleEntry {
+                            venue_id: "fast".into(),
+                            mid: fast,
+                            best_bid: fast - 0.01,
+                            best_ask: fast + 0.01,
+                            bid_depth: None,
+                            ask_depth: None,
+                        },
+                        VenueSampleEntry {
+                            venue_id: "slow".into(),
+                            mid: slow,
+                            best_bid: slow - 0.01,
+                            best_ask: slow + 0.01,
+                            bid_depth: None,
+                            ask_depth: None,
+                        },
+                    ],
+                    "testnet",
+                )
+                .unwrap();
+        }
+
+        let rv = realized_vol_30d(&store, "BTC", "testnet").unwrap();
+        assert!((rv - 0.6484).abs() < 0.02, "unexpected median RV: {rv}");
+    }
+
+    #[test]
+    fn realized_vol_ignores_one_second_bid_ask_bounce() {
+        let store = StateStore::open_in_memory().unwrap();
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let mut price = 100.0f64;
+        for i in 0..121 {
+            if i > 0 {
+                price *= 0.001f64.exp();
+            }
+            let ts_ms = now_ms - (120 - i) * 301_000;
+            store
+                .record_spread_samples(
+                    "BTC",
+                    ts_ms,
+                    &[VenueSampleEntry {
+                        venue_id: "fast".into(),
+                        mid: price,
+                        best_bid: price - 0.01,
+                        best_ask: price + 0.01,
+                        bid_depth: None,
+                        ask_depth: None,
+                    }],
+                    "testnet",
+                )
+                .unwrap();
+            store
+                .record_spread_samples(
+                    "BTC",
+                    ts_ms + 1_000,
+                    &[VenueSampleEntry {
+                        venue_id: "fast".into(),
+                        mid: price * 1.03,
+                        best_bid: price * 1.03 - 0.01,
+                        best_ask: price * 1.03 + 0.01,
+                        bid_depth: None,
+                        ask_depth: None,
+                    }],
+                    "testnet",
+                )
+                .unwrap();
+        }
+
+        let rv = realized_vol_30d(&store, "BTC", "testnet").unwrap();
+        assert!(
+            (rv - 0.3242).abs() < 0.02,
+            "unexpected bounce-filtered RV: {rv}"
+        );
     }
 
     #[tokio::test]
