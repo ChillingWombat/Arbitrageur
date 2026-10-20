@@ -190,9 +190,9 @@ impl PassiveUnwindConfig {
                 self.spread_percentile
             ));
         }
-        if self.timeout_secs > 300 {
+        if self.timeout_secs == 0 || self.timeout_secs > 300 {
             return Err(format!(
-                "timeout_secs {} must be within 0..=300",
+                "timeout_secs {} must be within 1..=300",
                 self.timeout_secs
             ));
         }
@@ -234,6 +234,38 @@ fn f64_to_dec_opt(value: f64) -> Option<Decimal> {
         return None;
     }
     value.to_string().parse().ok()
+}
+
+/// Volume at and ahead of our resting price for queue-position accounting.
+fn queue_depth_at_price(book: &OrderBook, side: Side, price: Decimal) -> (Decimal, Decimal) {
+    match side {
+        Side::Buy => {
+            let mut ahead = Decimal::ZERO;
+            let mut total = Decimal::ZERO;
+            for level in &book.bids {
+                if level.price > price {
+                    ahead += level.size;
+                }
+                if level.price >= price {
+                    total += level.size;
+                }
+            }
+            (ahead, total.max(Decimal::ONE))
+        }
+        Side::Sell => {
+            let mut ahead = Decimal::ZERO;
+            let mut total = Decimal::ZERO;
+            for level in &book.asks {
+                if level.price < price {
+                    ahead += level.size;
+                }
+                if level.price <= price {
+                    total += level.size;
+                }
+            }
+            (ahead, total.max(Decimal::ONE))
+        }
+    }
 }
 
 /// Live top-of-book spread in bps. `None` when the book is uncrossable
@@ -931,6 +963,29 @@ pub async fn execute_passive_reduce_live(
                 .await;
             }
         };
+        let mut queue_tracker = if cfg.enable_queue_priority_tracking {
+            let initial_book = refresher.fresh_book().await.ok();
+            let (ahead, total, mid) = initial_book
+                .as_ref()
+                .map(|book| {
+                    let (ahead, total) = queue_depth_at_price(book, side, price);
+                    (ahead, total, book.mid_price().unwrap_or(price))
+                })
+                .unwrap_or((Decimal::ZERO, Decimal::ZERO, price));
+            let mut tracker = crate::queue_priority::QueuePriorityTracker::new(
+                cur.order_id.clone(),
+                price,
+                side,
+                total,
+                qty - filled_total,
+                mid,
+            );
+            tracker.q_ahead = ahead;
+            tracker.total_depth = total;
+            Some(tracker)
+        } else {
+            None
+        };
 
         // Poll authoritative order state until terminal, fully filled, or
         // the attempt's timeout expires. Missed polls are tolerated (the
@@ -963,22 +1018,30 @@ pub async fn execute_passive_reduce_live(
                 }
             }
 
-            // Microstructure Latency Racing & Limit Cancellation Drift Check:
-            // If live market mid drifts adversely by more than the threshold (default 5.0 bps),
-            // immediately break out of the resting loop to trigger priority cancellation before
-            // HFT taker snipers sweep the stale quote.
+            // Fetch one authoritative snapshot per poll and share it across
+            // every microstructure guard. This keeps all checks on the same
+            // book state and avoids three redundant venue round-trips.
             if !cur.status.is_final() && cur.filled_qty < cur.original_qty {
+                let book_snapshot = refresher.fresh_book().await.ok();
+                let book_mid = book_snapshot
+                    .as_ref()
+                    .and_then(arbitrageur_core::quote::OrderBook::mid_price);
+
+                // Microstructure Latency Racing & Limit Cancellation Drift Check:
+                // If live market mid drifts adversely by more than the threshold
+                // (default 5.0 bps), cancel before HFT snipers sweep the stale quote.
                 if let Some(drift_threshold_bps) = cfg.max_adverse_drift_bps {
-                    let maybe_mid = if let Ok(book) = refresher.fresh_book().await {
-                        book.mid_price()
-                    } else if let Ok(ticker) = adapter.fetch_ticker(symbol).await {
-                        if ticker.ask > Decimal::ZERO && ticker.bid > Decimal::ZERO {
-                            Some((ticker.ask + ticker.bid) / Decimal::from(2))
-                        } else {
-                            Some(ticker.last)
-                        }
-                    } else {
-                        None
+                    let maybe_mid = match book_mid {
+                        Some(mid) => Some(mid),
+                        None => match adapter.fetch_ticker(symbol).await {
+                            Ok(ticker)
+                                if ticker.ask > Decimal::ZERO && ticker.bid > Decimal::ZERO =>
+                            {
+                                Some((ticker.ask + ticker.bid) / Decimal::from(2))
+                            }
+                            Ok(ticker) => Some(ticker.last),
+                            Err(_) => None,
+                        },
                     };
 
                     if let Some(current_mid) = maybe_mid {
@@ -1016,95 +1079,43 @@ pub async fn execute_passive_reduce_live(
                             break;
                         }
                     }
+                }
+
+                if let Some(book) = book_snapshot.as_ref() {
+                    let (vol_ahead, total_vol) = queue_depth_at_price(book, side, price);
 
                     // Level-3 MBO Queue Drain Hazard Protection
                     if cfg.enable_l3_queue_drain_evacuation {
-                        if let Ok(book) = adapter.fetch_orderbook(symbol).await {
-                            let forecaster = cfg.l3_drain_forecaster.unwrap_or_default();
-                            let (vol_ahead, total_vol) = match side {
-                                Side::Buy => {
-                                    let mut ahead = Decimal::ZERO;
-                                    let mut total = Decimal::ZERO;
-                                    for lvl in &book.bids {
-                                        if lvl.price > price {
-                                            ahead += lvl.size;
-                                        }
-                                        if lvl.price >= price {
-                                            total += lvl.size;
-                                        }
-                                    }
-                                    (ahead, total.max(Decimal::ONE))
-                                }
-                                Side::Sell => {
-                                    let mut ahead = Decimal::ZERO;
-                                    let mut total = Decimal::ZERO;
-                                    for lvl in &book.asks {
-                                        if lvl.price < price {
-                                            ahead += lvl.size;
-                                        }
-                                        if lvl.price <= price {
-                                            total += lvl.size;
-                                        }
-                                    }
-                                    (ahead, total.max(Decimal::ONE))
-                                }
-                            };
-                            let (decision, metrics) =
-                                forecaster.evaluate_hazard(vol_ahead, total_vol, false);
-                            if let arbitrageur_math::l3_hazard::QueueHazardDecision::EvacuatePickoff { ref reason, .. } = decision {
-                                tracing::warn!(
-                                    "passive unwind {venue} {symbol}: L3 queue drain hazard evacuation triggered: {reason} (tau_drain={:.3}s, hazard={:.2}); aborting resting quote",
-                                    metrics.tau_drain_sec, metrics.hazard_index
-                                );
-                                break;
-                            }
+                        let forecaster = cfg.l3_drain_forecaster.unwrap_or_default();
+                        let (decision, metrics) =
+                            forecaster.evaluate_hazard(vol_ahead, total_vol, false);
+                        if let arbitrageur_math::l3_hazard::QueueHazardDecision::EvacuatePickoff {
+                            ref reason,
+                            ..
+                        } = decision
+                        {
+                            tracing::warn!(
+                                "passive unwind {venue} {symbol}: L3 queue drain hazard evacuation triggered: {reason} (tau_drain={:.3}s, hazard={:.2}); aborting resting quote",
+                                metrics.tau_drain_sec, metrics.hazard_index
+                            );
+                            break;
                         }
                     }
 
                     // Deep Order Book Queue Priority Tracking & Microstructure Hazard Protection
                     if cfg.enable_queue_priority_tracking {
-                        if let Ok(book) = adapter.fetch_orderbook(symbol).await {
-                            let (vol_ahead, total_vol) = match side {
-                                Side::Buy => {
-                                    let mut ahead = Decimal::ZERO;
-                                    let mut total = Decimal::ZERO;
-                                    for lvl in &book.bids {
-                                        if lvl.price > price {
-                                            ahead += lvl.size;
-                                        }
-                                        if lvl.price >= price {
-                                            total += lvl.size;
-                                        }
-                                    }
-                                    (ahead, total.max(Decimal::ONE))
-                                }
-                                Side::Sell => {
-                                    let mut ahead = Decimal::ZERO;
-                                    let mut total = Decimal::ZERO;
-                                    for lvl in &book.asks {
-                                        if lvl.price < price {
-                                            ahead += lvl.size;
-                                        }
-                                        if lvl.price <= price {
-                                            total += lvl.size;
-                                        }
-                                    }
-                                    (ahead, total.max(Decimal::ONE))
-                                }
-                            };
+                        if let Some(tracker) = queue_tracker.as_mut() {
                             let current_mid = book.mid_price().unwrap_or(price);
+                            if tracker.total_depth <= Decimal::ZERO {
+                                tracker.q_ahead = vol_ahead;
+                                tracker.total_depth = total_vol;
+                                tracker.current_mid = current_mid;
+                                tracker.last_update_ms = chrono::Utc::now().timestamp_millis();
+                            } else {
+                                tracker.update_from_book(total_vol, Decimal::ZERO, current_mid);
+                            }
                             let hazard_engine =
                                 cfg.queue_priority_hazard_engine.unwrap_or_default();
-                            let mut tracker = crate::queue_priority::QueuePriorityTracker::new(
-                                cur.order_id.clone(),
-                                price,
-                                side,
-                                total_vol,
-                                qty - filled_total,
-                                current_mid,
-                            );
-                            tracker.q_ahead = vol_ahead;
-                            tracker.total_depth = total_vol;
                             let (rec, snapshot) = tracker.evaluate_action(&hazard_engine);
                             match rec {
                                 arbitrageur_math::queue_priority::QueueHazardRecommendation::ProactiveQuoteWithdrawal { ref reason, pickoff_hazard, .. } => {
@@ -1123,38 +1134,43 @@ pub async fn execute_passive_reduce_live(
                                 }
                                 arbitrageur_math::queue_priority::QueueHazardRecommendation::MaintainRestingQuote { .. } => {}
                             }
-                            if cfg.enable_ofi_toxicity_shading {
-                                if let Some(mut engine) = cfg.ofi_toxicity_engine {
-                                    let levels: Vec<arbitrageur_math::micro_price_surface::DepthLevelQuote> = (0..5)
-                                        .filter_map(|i| {
-                                            let b = book.bids.get(i)?;
-                                            let a = book.asks.get(i)?;
-                                            Some(arbitrageur_math::micro_price_surface::DepthLevelQuote::new(
-                                                b.price.to_string().parse().ok()?,
-                                                b.size.to_string().parse().ok()?,
-                                                a.price.to_string().parse().ok()?,
-                                                a.size.to_string().parse().ok()?,
-                                            ))
-                                        })
-                                        .collect();
-                                    if !levels.is_empty() {
-                                        let mid_f64 =
-                                            current_mid.to_string().parse::<f64>().unwrap_or(0.0);
-                                        let eval = engine.update(&levels, mid_f64, 0.0, 0.50, 1.0);
-                                        if eval.should_evacuate_passive_quotes {
-                                            let toxic_side = match eval.regime {
-                                                arbitrageur_math::micro_price_surface::OfiToxicityRegime::ToxicBidSurge => Side::Sell,
-                                                arbitrageur_math::micro_price_surface::OfiToxicityRegime::ToxicAskSurge => Side::Buy,
-                                                _ => side,
-                                            };
-                                            if side == toxic_side {
-                                                tracing::warn!(
-                                                    "passive unwind {venue} {symbol}: OFI toxic adverse flow surge ({:?}, metric={:.4}); evacuating resting quote",
-                                                    eval.regime, eval.toxicity_metric
-                                                );
-                                                break;
-                                            }
-                                        }
+                        }
+                    }
+
+                    if cfg.enable_ofi_toxicity_shading {
+                        if let Some(mut engine) = cfg.ofi_toxicity_engine {
+                            let levels: Vec<
+                                arbitrageur_math::micro_price_surface::DepthLevelQuote,
+                            > = (0..5)
+                                .filter_map(|i| {
+                                    let b = book.bids.get(i)?;
+                                    let a = book.asks.get(i)?;
+                                    Some(
+                                        arbitrageur_math::micro_price_surface::DepthLevelQuote::new(
+                                            b.price.to_string().parse().ok()?,
+                                            b.size.to_string().parse().ok()?,
+                                            a.price.to_string().parse().ok()?,
+                                            a.size.to_string().parse().ok()?,
+                                        ),
+                                    )
+                                })
+                                .collect();
+                            if !levels.is_empty() {
+                                let current_mid = book.mid_price().unwrap_or(price);
+                                let mid_f64 = current_mid.to_string().parse::<f64>().unwrap_or(0.0);
+                                let eval = engine.update(&levels, mid_f64, 0.0, 0.50, 1.0);
+                                if eval.should_evacuate_passive_quotes {
+                                    let toxic_side = match eval.regime {
+                                        arbitrageur_math::micro_price_surface::OfiToxicityRegime::ToxicBidSurge => Side::Sell,
+                                        arbitrageur_math::micro_price_surface::OfiToxicityRegime::ToxicAskSurge => Side::Buy,
+                                        _ => side,
+                                    };
+                                    if side == toxic_side {
+                                        tracing::warn!(
+                                            "passive unwind {venue} {symbol}: OFI toxic adverse flow surge ({:?}, metric={:.4}); evacuating resting quote",
+                                            eval.regime, eval.toxicity_metric
+                                        );
+                                        break;
                                     }
                                 }
                             }
@@ -1163,48 +1179,18 @@ pub async fn execute_passive_reduce_live(
 
                     // Multi-Level Hawkes Queue Drain Hazard Evacuation
                     if cfg.enable_hawkes_queue_drain_evacuation {
-                        if let Ok(book) = adapter.fetch_orderbook(symbol).await {
-                            let (vol_ahead, total_vol) = match side {
-                                Side::Buy => {
-                                    let mut ahead = Decimal::ZERO;
-                                    let mut total = Decimal::ZERO;
-                                    for lvl in &book.bids {
-                                        if lvl.price > price {
-                                            ahead += lvl.size;
-                                        }
-                                        if lvl.price >= price {
-                                            total += lvl.size;
-                                        }
-                                    }
-                                    (ahead, total.max(Decimal::ONE))
-                                }
-                                Side::Sell => {
-                                    let mut ahead = Decimal::ZERO;
-                                    let mut total = Decimal::ZERO;
-                                    for lvl in &book.asks {
-                                        if lvl.price < price {
-                                            ahead += lvl.size;
-                                        }
-                                        if lvl.price <= price {
-                                            total += lvl.size;
-                                        }
-                                    }
-                                    (ahead, total.max(Decimal::ONE))
-                                }
-                            };
-                            let forecaster = cfg.hawkes_drain_forecaster.unwrap_or_default();
-                            let ahead_f = vol_ahead.to_string().parse::<f64>().unwrap_or(0.0);
-                            let total_f = total_vol.to_string().parse::<f64>().unwrap_or(1.0);
-                            let verdict = forecaster.evaluate_drain_hazard(ahead_f, total_f, 0.05);
-                            if verdict.should_evacuate_passive_quote {
-                                tracing::warn!(
-                                    "passive unwind {venue} {symbol}: Hawkes multi-level queue drain hazard evacuation triggered: {} (pickoff_prob={:.2}, drain_add_ratio={:.2}); aborting resting quote",
-                                    verdict.reason,
-                                    verdict.pickoff_probability,
-                                    verdict.drain_to_add_ratio
-                                );
-                                break;
-                            }
+                        let forecaster = cfg.hawkes_drain_forecaster.unwrap_or_default();
+                        let ahead_f = vol_ahead.to_string().parse::<f64>().unwrap_or(0.0);
+                        let total_f = total_vol.to_string().parse::<f64>().unwrap_or(1.0);
+                        let verdict = forecaster.evaluate_drain_hazard(ahead_f, total_f, 0.05);
+                        if verdict.should_evacuate_passive_quote {
+                            tracing::warn!(
+                                "passive unwind {venue} {symbol}: Hawkes multi-level queue drain hazard evacuation triggered: {} (pickoff_prob={:.2}, drain_add_ratio={:.2}); aborting resting quote",
+                                verdict.reason,
+                                verdict.pickoff_probability,
+                                verdict.drain_to_add_ratio
+                            );
+                            break;
                         }
                     }
                 }
@@ -1762,6 +1748,7 @@ mod tests {
     struct ScriptedRefresh {
         books: Mutex<VecDeque<OrderBook>>,
         last: OrderBook,
+        fetches: std::sync::atomic::AtomicUsize,
     }
 
     impl ScriptedRefresh {
@@ -1773,13 +1760,20 @@ mod tests {
             Self {
                 books: Mutex::new(books.into()),
                 last,
+                fetches: std::sync::atomic::AtomicUsize::new(0),
             }
+        }
+
+        fn fetch_count(&self) -> usize {
+            self.fetches.load(std::sync::atomic::Ordering::SeqCst)
         }
     }
 
     #[async_trait::async_trait]
     impl PassiveBookRefresh for ScriptedRefresh {
         async fn fresh_book(&self) -> anyhow::Result<OrderBook> {
+            self.fetches
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let next = self
                 .books
                 .lock()
@@ -1794,7 +1788,7 @@ mod tests {
         PassiveUnwindConfig {
             enabled: true,
             spread_percentile: 50.0,
-            timeout_secs: 0,
+            timeout_secs: 1,
             max_tries: 3,
             // Fixture books use a wide 100/101 touch for exact-decimal mids;
             // the production default (15.0) is covered by the gate unit tests.
@@ -1834,6 +1828,7 @@ mod tests {
             |c: &mut PassiveUnwindConfig| c.spread_percentile = -1.0,
             |c: &mut PassiveUnwindConfig| c.spread_percentile = 101.0,
             |c: &mut PassiveUnwindConfig| c.spread_percentile = f64::NAN,
+            |c: &mut PassiveUnwindConfig| c.timeout_secs = 0,
             |c: &mut PassiveUnwindConfig| c.timeout_secs = 301,
             |c: &mut PassiveUnwindConfig| c.max_tries = 0,
             |c: &mut PassiveUnwindConfig| c.max_tries = 11,
@@ -2256,7 +2251,6 @@ mod tests {
         /// Order still working; payload is the cumulative fill so far.
         Working(Decimal),
         Filled,
-        Cancelled,
         /// fetch_order transport failure.
         Error,
     }
@@ -2274,6 +2268,7 @@ mod tests {
         order_scripts: Mutex<VecDeque<VecDeque<Poll>>>,
         orders: Mutex<Vec<Arc<LiveOrder>>>,
         cancels: Mutex<usize>,
+        book_fetches: std::sync::atomic::AtomicUsize,
     }
 
     impl ScriptedLive {
@@ -2283,11 +2278,16 @@ mod tests {
                 order_scripts: Mutex::new(order_scripts.into_iter().map(Into::into).collect()),
                 orders: Mutex::new(Vec::new()),
                 cancels: Mutex::new(0),
+                book_fetches: std::sync::atomic::AtomicUsize::new(0),
             }
         }
 
         fn cancel_count(&self) -> usize {
             *self.cancels.lock().expect("test mutex")
+        }
+
+        fn book_fetch_count(&self) -> usize {
+            self.book_fetches.load(std::sync::atomic::Ordering::SeqCst)
         }
     }
 
@@ -2327,6 +2327,8 @@ mod tests {
             Ok(vec![])
         }
         async fn fetch_orderbook(&self, _symbol: &str) -> anyhow::Result<OrderBook> {
+            self.book_fetches
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             Ok(test_book(dec!(100), dec!(101)))
         }
         async fn fetch_ticker(
@@ -2434,10 +2436,7 @@ mod tests {
                     f,
                 ),
                 Some(Poll::Filled) => live_resp(&order, OrderStatus::Filled, order.req.quantity),
-                Some(Poll::Cancelled) | None if cancelled => {
-                    live_resp(&order, OrderStatus::Cancelled, Decimal::ZERO)
-                }
-                Some(Poll::Cancelled) => live_resp(&order, OrderStatus::Cancelled, Decimal::ZERO),
+                None if cancelled => live_resp(&order, OrderStatus::Cancelled, Decimal::ZERO),
                 None => live_resp(&order, OrderStatus::New, Decimal::ZERO),
             })
         }
@@ -2455,8 +2454,7 @@ mod tests {
         }
     }
 
-    /// Attempt-timeout=0 exercises the cancel+reprice edge instantly; the
-    /// working-poll path is covered by the 1s-timeout fill test.
+    /// The shortest valid timeout exercises the poll then cancel+reprice path.
     fn live_cfg(timeout_secs: u64, max_tries: u32) -> PassiveUnwindConfig {
         PassiveUnwindConfig {
             enabled: true,
@@ -2504,9 +2502,8 @@ mod tests {
 
     #[tokio::test]
     async fn live_unfilled_attempt_cancels_before_reprice() {
-        // timeout=0: no poll window — the attempt is cancelled, confirmed
-        // terminal via fetch_order, then re-pegged. Attempt 2's confirm
-        // fetch reports a late fill (venue raced the cancel).
+        // The first attempt is cancelled after its poll window, confirmed
+        // terminal via fetch_order, then re-pegged. Attempt 2 fills.
         let adapter = Arc::new(ScriptedLive::new(vec![
             vec![Poll::Working(dec!(0))],
             vec![Poll::Filled],
@@ -2519,7 +2516,7 @@ mod tests {
             "BTC-USDC",
             Side::Sell,
             dec!(1),
-            &live_cfg(0, 3),
+            &live_cfg(1, 3),
             None,
         )
         .await
@@ -2528,8 +2525,9 @@ mod tests {
         assert_eq!(report.limit_tries, 2);
         assert_eq!(report.limit_prices.len(), 2);
         assert_eq!(report.response.filled_qty, dec!(1));
-        // Every working attempt was cancelled before the next peg.
-        assert_eq!(adapter.cancel_count(), 2);
+        // The working attempt was cancelled before the next peg; the filled
+        // attempt required no cancellation.
+        assert_eq!(adapter.cancel_count(), 1);
     }
 
     #[tokio::test]
@@ -2549,7 +2547,7 @@ mod tests {
             "BTC-USDC",
             Side::Sell,
             dec!(1),
-            &live_cfg(0, 3),
+            &live_cfg(1, 3),
             None,
         )
         .await
@@ -2583,7 +2581,7 @@ mod tests {
             "BTC-USDC",
             Side::Sell,
             dec!(1),
-            &live_cfg(0, 3),
+            &live_cfg(1, 3),
             None,
         )
         .await
@@ -2604,7 +2602,7 @@ mod tests {
         // qty, weighted average price, summed fees.
         let adapter = Arc::new(ScriptedLive::new(vec![vec![
             Poll::Working(dec!(0.4)),
-            Poll::Cancelled,
+            Poll::Working(dec!(0.4)),
         ]]));
         let live: Arc<dyn ExchangeAdapter> = adapter.clone();
         let refresh = ScriptedRefresh::new(vec![test_book(dec!(100), dec!(101))]);
@@ -2614,7 +2612,7 @@ mod tests {
             "BTC-USDC",
             Side::Sell,
             dec!(1),
-            &live_cfg(0, 3),
+            &live_cfg(1, 3),
             None,
         )
         .await
@@ -2624,6 +2622,8 @@ mod tests {
         // limit 0.4 @ 100.5 + market 0.6 @ 100.5 → vwap 100.5
         assert_eq!(report.response.avg_fill_price, Some(dec!(100.5)));
         assert_eq!(report.response.fee, Some(dec!(0.02)));
+        assert!(refresh.fetch_count() >= 3);
+        assert_eq!(adapter.book_fetch_count(), 0);
     }
 
     #[test]

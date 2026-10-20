@@ -4,6 +4,15 @@ use arbitrageur_math::black_scholes::{black_scholes_greeks, OptionType};
 use std::collections::HashMap;
 use tracing::warn;
 
+/// f64 -> Decimal through shortest string rendering. `None` on non-finite values.
+pub(crate) fn f64_to_dec_opt(value: f64) -> Option<Decimal> {
+    if value.is_finite() {
+        value.to_string().parse().ok()
+    } else {
+        None
+    }
+}
+
 /// Portfolio delta and multi-Greek neutrality tracker.
 #[derive(Debug, Clone)]
 pub struct DeltaGuard {
@@ -37,6 +46,20 @@ pub enum GreekLimitBreach {
 /// Provider interface for dynamic volatility surface / SABR smile lookups.
 pub trait VolatilitySmileProvider: Send + Sync {
     fn get_implied_volatility(&self, asset: &str, expiry: &str, strike: f64) -> Option<f64>;
+
+    /// Returns the SVI smile-adjusted Black-Scholes delta when a calibrated
+    /// slice is available for the option.
+    fn get_svi_smile_adjusted_delta(
+        &self,
+        _underlying: &str,
+        _strike: f64,
+        _time_to_expiry_years: f64,
+        _spot: f64,
+        _bs_delta: f64,
+        _bs_vega_raw: f64,
+    ) -> Option<f64> {
+        None
+    }
 }
 
 /// Aggregated multi-asset portfolio risk report with cross-asset correlation & beta.
@@ -352,7 +375,7 @@ impl DeltaGuard {
 
         let port_delta = if total_variance > dec!(0) {
             let f = total_variance.to_string().parse::<f64>().unwrap_or(0.0);
-            Decimal::from_f64_retain(f.sqrt()).unwrap_or(dec!(0))
+            f64_to_dec_opt(f.sqrt()).unwrap_or(dec!(0))
         } else {
             dec!(0)
         };
@@ -397,12 +420,7 @@ impl DeltaGuard {
         let cfg = config.unwrap_or(&default_cfg);
 
         let s_f64 = spot_price.to_string().parse::<f64>().ok()?;
-        let gamma_f64 = portfolio_gamma
-            .abs()
-            .to_string()
-            .parse::<f64>()
-            .ok()?
-            .max(1e-9);
+        let gamma_abs = portfolio_gamma.abs().to_string().parse::<f64>().ok()?;
         let c_f64 = cfg.taker_fee_rate.to_string().parse::<f64>().ok()?;
         let risk_f64 = cfg.risk_aversion.to_string().parse::<f64>().ok()?.max(1e-6);
         let lambda_f64 = cfg.jump_intensity.to_string().parse::<f64>().ok()?;
@@ -417,14 +435,27 @@ impl DeltaGuard {
         let jump_ratio = (lambda_f64 * ej2_f64) / (sigma_f64 * sigma_f64);
         let jump_correction = (1.0 + jump_ratio).powf(-1.0 / 6.0);
 
-        let s_term = (3.0 * c_f64) / (2.0 * risk_f64 * s_f64 * s_f64 * gamma_f64);
-        let delta_s_star_f64 = s_f64 * s_term.cbrt() * jump_correction;
+        let (delta_s_star, delta_band_width) = if gamma_abs < 1e-6 {
+            let max_unhedged_delta_f64 = self
+                .max_unhedged_usd_per_asset
+                .to_string()
+                .parse::<f64>()
+                .ok()?
+                .max(0.0);
+            let fallback = (0.05 * s_f64.max(1.0)).min(max_unhedged_delta_f64);
+            let fallback_delta = f64_to_dec_opt(fallback)?;
+            (fallback_delta, fallback_delta)
+        } else {
+            let s_term = (3.0 * c_f64) / (2.0 * risk_f64 * s_f64 * s_f64 * gamma_abs);
+            let delta_s_star_f64 = s_f64 * s_term.cbrt() * jump_correction;
 
-        let delta_term = (3.0 * c_f64 * s_f64 * gamma_f64 * gamma_f64) / (2.0 * risk_f64);
-        let delta_delta_star_f64 = delta_term.cbrt() * jump_correction;
-
-        let delta_s_star = Decimal::from_f64_retain(delta_s_star_f64)?;
-        let delta_band_width = Decimal::from_f64_retain(delta_delta_star_f64)?;
+            let delta_term = (3.0 * c_f64 * s_f64 * gamma_abs * gamma_abs) / (2.0 * risk_f64);
+            let delta_delta_star_f64 = delta_term.cbrt() * jump_correction;
+            (
+                f64_to_dec_opt(delta_s_star_f64)?,
+                f64_to_dec_opt(delta_delta_star_f64)?,
+            )
+        };
 
         Some(RehedgeBandwidth {
             delta_s_star,
@@ -883,16 +914,23 @@ impl DeltaGuard {
                         .unwrap_or(fallback_iv);
 
                     if let Some(g) = black_scholes_greeks(opt_type, spot, strike, t, 0.0, iv) {
-                        if let Some(d) = Decimal::from_f64_retain(g.delta) {
+                        let adjusted_delta = vol_provider
+                            .and_then(|provider| {
+                                provider.get_svi_smile_adjusted_delta(
+                                    &base, strike, t, spot, g.delta, g.vega,
+                                )
+                            })
+                            .unwrap_or(g.delta);
+                        if let Some(d) = f64_to_dec_opt(adjusted_delta) {
                             entry.net_delta += signed_qty * d;
                         }
-                        if let Some(gamma) = Decimal::from_f64_retain(g.gamma) {
+                        if let Some(gamma) = f64_to_dec_opt(g.gamma) {
                             entry.net_gamma += signed_qty * gamma;
                         }
-                        if let Some(v) = Decimal::from_f64_retain(g.vega) {
+                        if let Some(v) = f64_to_dec_opt(g.vega) {
                             entry.net_vega += signed_qty * v;
                         }
-                        if let Some(th) = Decimal::from_f64_retain(g.theta) {
+                        if let Some(th) = f64_to_dec_opt(g.theta) {
                             entry.net_theta += signed_qty * th;
                         }
                         continue;
@@ -1744,6 +1782,19 @@ mod tests {
     }
 
     #[test]
+    fn test_whalley_wilmott_zero_gamma_uses_bounded_fallback() {
+        let guard = DeltaGuard::new(dec!(5000.0));
+        let bands = guard
+            .compute_whalley_wilmott_bandwidth(dec!(60000.0), dec!(0), None)
+            .expect("zero-gamma bandwidth must be finite");
+
+        assert_eq!(bands.delta_s_star, dec!(3000.0));
+        assert_eq!(bands.delta_band_width, dec!(3000.0));
+        assert_eq!(bands.upper_price_trigger, dec!(63000.0));
+        assert_eq!(bands.lower_price_trigger, dec!(57000.0));
+    }
+
+    #[test]
     fn test_calculate_analytical_greeks_option_butterfly() {
         let guard = DeltaGuard::new(dec!(1000.0));
         let pos = |sym: &str, side: Side, qty: Decimal, mark: Decimal| Position {
@@ -2006,6 +2057,53 @@ mod tests {
 
         // Higher IV (0.85 vs 0.60) yields significantly higher OTM call delta
         assert!(delta_smile > delta_flat);
+    }
+
+    struct MockSviProvider;
+    impl VolatilitySmileProvider for MockSviProvider {
+        fn get_implied_volatility(&self, _asset: &str, _expiry: &str, _strike: f64) -> Option<f64> {
+            Some(0.60)
+        }
+
+        fn get_svi_smile_adjusted_delta(
+            &self,
+            underlying: &str,
+            strike: f64,
+            _time_to_expiry_years: f64,
+            _spot: f64,
+            _bs_delta: f64,
+            _bs_vega_raw: f64,
+        ) -> Option<f64> {
+            (underlying == "BTC" && (strike - 70_000.0).abs() < 1e-6).then_some(0.90)
+        }
+    }
+
+    #[test]
+    fn test_svi_smile_adjusted_delta_overrides_black_scholes_delta() {
+        let guard = DeltaGuard::new(dec!(5000.0));
+        let pos = Position {
+            venue: "deribit".into(),
+            symbol: "BTC-25DEC26-70000-C".into(),
+            side: Side::Buy,
+            quantity: dec!(1.0),
+            entry_price: dec!(2000.0),
+            mark_price: dec!(60000.0),
+            unrealized_pnl: dec!(0),
+            realized_pnl: dec!(0),
+            liquidation_price: None,
+            leverage: dec!(1),
+            initial_margin: dec!(0),
+            maintenance_margin: dec!(0),
+            updated_at: chrono::Utc::now(),
+        };
+
+        let greeks = guard.calculate_analytical_greeks_with_smile(
+            &[pos],
+            Some(&MockSviProvider),
+            None,
+            None,
+        );
+        assert_eq!(greeks.get("BTC").unwrap().net_delta, dec!(0.90));
     }
 
     #[test]

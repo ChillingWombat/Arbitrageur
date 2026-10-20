@@ -48,6 +48,7 @@ pub enum ShieldVerdict {
 }
 
 /// Real-time Conformal CVaR Shield Engine.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConformalCvarShieldEngine {
     pub config: ConformalCvarConfig,
     pub loss_history: Vec<f64>,

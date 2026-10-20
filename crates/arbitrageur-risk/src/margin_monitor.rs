@@ -1,6 +1,7 @@
 use arbitrageur_core::position::{AccountSnapshot, Position};
 use arbitrageur_core::types::{dec, Decimal, VenueId};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use tracing::{debug, warn};
 
 /// Health status of an account or position margin.
@@ -52,6 +53,15 @@ impl Default for MarginMonitorConfig {
             min_liquidation_distance_pct: dec!(15.0),
         }
     }
+}
+
+/// Portfolio-level summary of lower- and upper-tail copula stress.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TailCopulaStressReport {
+    pub stressed_venues: Vec<String>,
+    pub lower_tail_lambda: f64,
+    pub upper_tail_lambda: f64,
+    pub max_required_buffer_pct: Decimal,
 }
 
 pub struct MarginMonitor {
@@ -236,7 +246,8 @@ impl MarginMonitor {
 
     /// Evaluates joint tail copula liquidation stress across segregated accounts.
     /// Incorporates heavy-tailed Expected Shortfall (ES_0.999) under GPD and
-    /// lower-tail dependence penalty (Clayton copula lambda_L) over transfer latency tau.
+    /// joint lower- and upper-tail dependence (Clayton lambda_L and Gumbel
+    /// lambda_U) over transfer latency tau.
     pub fn evaluate_tail_copula_safety(
         &self,
         accounts: &[AccountSnapshot],
@@ -275,11 +286,96 @@ impl MarginMonitor {
                     0.0
                 };
                 let equity_usd = acc.equity.to_string().parse::<f64>().unwrap_or(0.0);
-                let report =
+                let mut report =
                     model.evaluate_account_safety(equity_usd, notional, unwind_latency_sec);
+                if notional > 0.0 {
+                    let multiplier = Self::joint_tail_stress_multiplier(model);
+                    let tau_sqrt = (unwind_latency_sec / 3600.0).max(1e-4).sqrt();
+                    let es_reserve = report.expected_shortfall_999 * tau_sqrt;
+                    let joint_tail_penalty =
+                        model.tail_scale_sigma * tau_sqrt * multiplier;
+                    let required_buffer =
+                        model.maintenance_margin_ratio + es_reserve + joint_tail_penalty;
+
+                    report.required_margin_buffer = required_buffer;
+                    report.joint_tail_penalty = joint_tail_penalty;
+                    report.is_safe =
+                        report.current_liquidation_distance >= report.required_margin_buffer;
+                    report.warning_message = (!report.is_safe).then(|| {
+                        format!(
+                            "Margin distance {:.2}% below required joint EVT copula buffer {:.2}% (ES_0.999={:.2}%, lambda_L={:.2}, lambda_U={:.2}, joint multiplier={:.2}). Trigger defensive rebalancing or trim.",
+                            report.current_liquidation_distance * 100.0,
+                            report.required_margin_buffer * 100.0,
+                            report.expected_shortfall_999 * 100.0,
+                            model.clayton_lower_tail_dependence(),
+                            model.gumbel_upper_tail_dependence(),
+                            multiplier
+                        )
+                    });
+                }
                 (acc.venue.clone(), report)
             })
             .collect()
+    }
+
+    fn joint_tail_stress_multiplier(
+        model: &arbitrageur_math::tail_copula::CrossMarginTailEvtCopula,
+    ) -> f64 {
+        let lower = model.clayton_lower_tail_dependence();
+        let upper = model.gumbel_upper_tail_dependence();
+        1.0 + lower + upper
+    }
+
+    /// Summarises copula stress from position-level liquidation distances.
+    /// Missing liquidation prices are treated as stressed because their safety
+    /// cannot be verified.
+    pub fn evaluate_tail_copula_report(&self, positions: &[Position]) -> TailCopulaStressReport {
+        let model = arbitrageur_math::tail_copula::CrossMarginTailEvtCopula::default();
+        let lower_tail_lambda = model.clayton_lower_tail_dependence();
+        let upper_tail_lambda = model.gumbel_upper_tail_dependence();
+        let multiplier = Self::joint_tail_stress_multiplier(&model);
+        let tau_sqrt = 1e-4_f64.sqrt();
+        let required_buffer = model.maintenance_margin_ratio
+            + model.expected_shortfall_gpd(0.999) * tau_sqrt
+            + model.tail_scale_sigma * tau_sqrt * multiplier;
+
+        let mut venue_distances: HashMap<String, Option<f64>> = HashMap::new();
+        for position in positions {
+            let distance = position.liquidation_distance_pct().and_then(|value| {
+                value
+                    .to_string()
+                    .parse::<f64>()
+                    .ok()
+                    .filter(|distance| distance.is_finite())
+            });
+            let entry = venue_distances
+                .entry(position.venue.0.clone())
+                .or_insert(None);
+            *entry = match (*entry, distance) {
+                (Some(current), Some(candidate)) => Some(current.min(candidate)),
+                (None, Some(candidate)) => Some(candidate),
+                (current, None) => current,
+            };
+        }
+
+        let mut stressed_venues: Vec<String> = venue_distances
+            .into_iter()
+            .filter_map(|(venue, distance)| {
+                distance
+                    .map(|distance| distance < required_buffer)
+                    .unwrap_or(true)
+                    .then_some(venue)
+            })
+            .collect();
+        stressed_venues.sort();
+
+        TailCopulaStressReport {
+            stressed_venues,
+            lower_tail_lambda,
+            upper_tail_lambda,
+            max_required_buffer_pct: crate::delta_guard::f64_to_dec_opt(required_buffer * 100.0)
+                .unwrap_or(Decimal::ZERO),
+        }
     }
 
     /// Returns true if any active segregated venue violates the dynamic tail copula buffer.
@@ -843,7 +939,8 @@ mod tests {
             updated_at: chrono::Utc::now(),
         }];
 
-        let reports = monitor.evaluate_tail_copula_safety(&[safe_acc, unsafe_acc], None, 300.0);
+        let reports =
+            monitor.evaluate_tail_copula_safety(&[safe_acc, unsafe_acc.clone()], None, 300.0);
         assert_eq!(reports.len(), 2);
         assert!(reports[0].1.is_safe, "Hyperliquid should be safe");
         assert!(
@@ -851,6 +948,47 @@ mod tests {
             "Lighter should fail EVT copula buffer"
         );
         assert!(reports[1].1.warning_message.is_some());
+
+        let low_upper = arbitrageur_math::tail_copula::CrossMarginTailEvtCopula::new(
+            0.05, 0.025, 0.36, 0.015, 0.05, 1.5, 1.0,
+        );
+        let high_upper = arbitrageur_math::tail_copula::CrossMarginTailEvtCopula::new(
+            0.05, 0.025, 0.36, 0.015, 0.05, 1.5, 4.0,
+        );
+        let low_report =
+            monitor.evaluate_tail_copula_safety(&[unsafe_acc.clone()], Some(&low_upper), 300.0);
+        let high_report =
+            monitor.evaluate_tail_copula_safety(&[unsafe_acc], Some(&high_upper), 300.0);
+        assert!(
+            high_report[0].1.required_margin_buffer > low_report[0].1.required_margin_buffer,
+            "Gumbel upper-tail dependence must increase the required buffer"
+        );
+    }
+
+    #[test]
+    fn test_tail_copula_stress_report_exposes_both_tails() {
+        let monitor = MarginMonitor::new(MarginMonitorConfig::default());
+        let positions = vec![Position {
+            venue: VenueId("lighter".into()),
+            symbol: "ETH-PERP".into(),
+            side: arbitrageur_core::types::Side::Sell,
+            quantity: dec!(5.0),
+            entry_price: dec!(2000.0),
+            mark_price: dec!(2000.0),
+            liquidation_price: Some(dec!(2050.0)),
+            leverage: dec!(20),
+            unrealized_pnl: dec!(0),
+            realized_pnl: dec!(0),
+            initial_margin: dec!(500),
+            maintenance_margin: dec!(500),
+            updated_at: chrono::Utc::now(),
+        }];
+
+        let report = monitor.evaluate_tail_copula_report(&positions);
+        assert_eq!(report.stressed_venues, vec!["lighter".to_string()]);
+        assert!(report.lower_tail_lambda > 0.0);
+        assert!(report.upper_tail_lambda > 0.0);
+        assert!(report.max_required_buffer_pct > dec!(5.0));
     }
 
     #[test]

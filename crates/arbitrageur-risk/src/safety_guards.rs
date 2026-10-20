@@ -53,6 +53,57 @@ pub struct SlippageViolation {
     pub max_allowed_bps: Decimal,
 }
 
+/// Risk-control rejection raised by synchronous safety guards.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RiskError {
+    #[error(
+        "directional divergence stop: entry {entry_spread_bps} bps, current {current_spread_bps} bps, max excursion {max_adverse_excursion_bps} bps"
+    )]
+    DirectionalDivergenceStop {
+        entry_spread_bps: Decimal,
+        current_spread_bps: Decimal,
+        max_adverse_excursion_bps: Decimal,
+    },
+}
+
+/// Decimal-native catastrophic stop for divergence trades.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectionalDivergenceStopGuard {
+    pub max_adverse_excursion_bps: Decimal,
+}
+
+impl DirectionalDivergenceStopGuard {
+    pub fn new(max_adverse_excursion_bps: Decimal) -> Self {
+        Self {
+            max_adverse_excursion_bps: max_adverse_excursion_bps.max(Decimal::ZERO),
+        }
+    }
+
+    pub fn check_directional_divergence_stop(
+        &self,
+        entry_spread_bps: Decimal,
+        current_spread_bps: Decimal,
+    ) -> Result<(), RiskError> {
+        let entry_abs = entry_spread_bps.abs();
+        let current_abs = current_spread_bps.abs();
+        let limit = self.max_adverse_excursion_bps;
+        let adverse_widening = current_abs > entry_abs + limit;
+        let sign_flip = entry_spread_bps != Decimal::ZERO
+            && current_spread_bps != Decimal::ZERO
+            && entry_spread_bps.is_sign_negative() != current_spread_bps.is_sign_negative();
+
+        if adverse_widening || (sign_flip && current_abs > limit) {
+            Err(RiskError::DirectionalDivergenceStop {
+                entry_spread_bps,
+                current_spread_bps,
+                max_adverse_excursion_bps: limit,
+            })
+        } else {
+            Ok(())
+        }
+    }
+}
+
 /// Verifies whether the order can be filled within the allowed maximum slippage (Requirement 11).
 /// Traverses actual book levels to simulate fill price before dispatching atomic legs.
 pub fn verify_pre_execution_slippage(
@@ -147,15 +198,17 @@ pub fn check_time_decay_exit(
 pub fn check_divergence_catastrophic_stop(
     entry_spread_bps: f64,
     current_spread_bps: f64,
-    baseline_mean_bps: f64,
+    _baseline_mean_bps: f64,
     max_adverse_divergence_bps: f64,
 ) -> bool {
-    // If our trade expected convergence toward baseline, but spread blew out even further:
-    let adverse_move = (current_spread_bps - entry_spread_bps).abs();
-    let distance_from_baseline = (current_spread_bps - baseline_mean_bps).abs();
+    let entry_abs = entry_spread_bps.abs();
+    let current_abs = current_spread_bps.abs();
+    let adverse_widening = current_abs > entry_abs + max_adverse_divergence_bps;
+    let sign_flip = entry_spread_bps != 0.0
+        && current_spread_bps != 0.0
+        && entry_spread_bps.is_sign_negative() != current_spread_bps.is_sign_negative();
 
-    adverse_move >= max_adverse_divergence_bps
-        || distance_from_baseline >= (max_adverse_divergence_bps * 1.5)
+    adverse_widening || (sign_flip && current_abs > max_adverse_divergence_bps)
 }
 
 /// Recommendation for manual balance rebalancing across exchanges (Requirement 9).
@@ -331,6 +384,23 @@ mod tests {
         assert!(check_divergence_catastrophic_stop(15.0, 68.0, 10.0, 45.0));
         // Normal small noise (15 -> 18 BPS) should not trigger stop:
         assert!(!check_divergence_catastrophic_stop(15.0, 18.0, 10.0, 45.0));
+        // Convergence from a wide entry is favourable, not catastrophic:
+        assert!(!check_divergence_catastrophic_stop(100.0, 20.0, 10.0, 45.0));
+    }
+
+    #[test]
+    fn test_directional_divergence_stop_ignores_convergence_and_flags_flips() {
+        let guard = DirectionalDivergenceStopGuard::new(dec!(45.0));
+
+        assert!(guard
+            .check_directional_divergence_stop(dec!(15.0), dec!(68.0))
+            .is_err());
+        assert!(guard
+            .check_directional_divergence_stop(dec!(100.0), dec!(20.0))
+            .is_ok());
+        assert!(guard
+            .check_directional_divergence_stop(dec!(100.0), dec!(-60.0))
+            .is_err());
     }
 
     #[test]
