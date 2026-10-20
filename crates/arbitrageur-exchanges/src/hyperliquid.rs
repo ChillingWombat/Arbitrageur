@@ -14,6 +14,7 @@ use serde_json::json;
 use sha3::{Digest, Keccak256};
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use zeroize::Zeroizing;
 
@@ -287,6 +288,9 @@ pub struct HyperliquidAdapter {
     is_mainnet: bool,
     rate_limiter: AccountRequestCoordinator,
     asset_meta_cache: RwLock<HashMap<String, (u32, u32, u32)>>,
+    /// Hyperliquid requires strictly increasing action nonces, including
+    /// concurrent order and cancel submissions minted in the same millisecond.
+    last_nonce_ms: AtomicU64,
 }
 
 impl HyperliquidAdapter {
@@ -309,6 +313,26 @@ impl HyperliquidAdapter {
             verified_signer: RwLock::new(None),
             rate_limiter: AccountRequestCoordinator::new("hyperliquid", 100, 2000, 500, 10000),
             asset_meta_cache: RwLock::new(HashMap::new()),
+            last_nonce_ms: AtomicU64::new(0),
+        }
+    }
+
+    /// Returns a strictly increasing millisecond nonce across all concurrent
+    /// order and cancel submissions.
+    pub fn next_nonce_ms(&self) -> u64 {
+        let now = Utc::now().timestamp_millis().max(0) as u64;
+        let mut previous = self.last_nonce_ms.load(Ordering::SeqCst);
+        loop {
+            let next = now.max(previous.saturating_add(1));
+            match self.last_nonce_ms.compare_exchange_weak(
+                previous,
+                next,
+                Ordering::SeqCst,
+                Ordering::SeqCst,
+            ) {
+                Ok(_) => return next,
+                Err(observed) => previous = observed,
+            }
         }
     }
 
@@ -559,15 +583,25 @@ fn hl_wire_decimal(d: Decimal) -> String {
     d.normalize().to_string()
 }
 
+/// Number of digits in the integer part, using the same convention as
+/// `floor(log10(x)) + 1` without a lossy f64 round-trip.
+fn decimal_integer_digits_before_point(price: Decimal) -> i32 {
+    let text = price.abs().normalize().to_string();
+    let (whole, fraction) = text.split_once('.').unwrap_or((text.as_str(), ""));
+    let whole = whole.trim_start_matches('0');
+    if !whole.is_empty() {
+        return whole.len() as i32;
+    }
+
+    let leading_fractional_zeros = fraction.chars().take_while(|digit| *digit == '0').count();
+    -(leading_fractional_zeros as i32)
+}
+
 fn hl_wire_price(price: Decimal, sz_decimals: u32, side: Side) -> Decimal {
     if price <= dec!(0) || price.fract().is_zero() {
         return price; // invalid or already integral — pass through
     }
-    let f: f64 = price.to_string().parse().unwrap_or(0.0);
-    if !f.is_finite() || f <= 0.0 {
-        return price;
-    }
-    let digits_before = f.log10().floor() as i32 + 1;
+    let digits_before = decimal_integer_digits_before_point(price);
     let sig_decimals = (5 - digits_before).max(0) as u32;
     let decimals = sig_decimals.min(6u32.saturating_sub(sz_decimals));
     let truncated = price.trunc_with_scale(decimals);
@@ -1318,7 +1352,7 @@ impl ExchangeAdapter for HyperliquidAdapter {
             order.side, price, quantity
         );
 
-        let nonce = Utc::now().timestamp_millis() as u64;
+        let nonce = self.next_nonce_ms();
         let (r, s, v) = sign_hyperliquid_l1_action(
             &action,
             nonce,
@@ -1387,7 +1421,7 @@ impl ExchangeAdapter for HyperliquidAdapter {
                 o: oid,
             }],
         };
-        let nonce = Utc::now().timestamp_millis() as u64;
+        let nonce = self.next_nonce_ms();
         let (r, s, v) =
             sign_hyperliquid_l1_action(&action, nonce, None, self.is_mainnet, &private_key)?;
 
@@ -1627,7 +1661,7 @@ impl ExchangeAdapter for HyperliquidAdapter {
             is_cross: true,
             leverage: effective_leverage,
         };
-        let nonce = Utc::now().timestamp_millis() as u64;
+        let nonce = self.next_nonce_ms();
         let (r, s, v) =
             sign_hyperliquid_l1_action(&action, nonce, None, self.is_mainnet, &private_key)?;
 
@@ -1705,6 +1739,31 @@ mod tests {
             hl_wire_price(dec!(0.000012345678), 0, Side::Buy),
             dec!(0.000012)
         );
+    }
+
+    #[test]
+    fn nonce_generation_is_strictly_monotonic_under_concurrency() {
+        let adapter = std::sync::Arc::new(HyperliquidAdapter::new(None, None, None));
+        let mut handles = Vec::new();
+        for _ in 0..32 {
+            let adapter = adapter.clone();
+            handles.push(std::thread::spawn(move || adapter.next_nonce_ms()));
+        }
+        let mut nonces: Vec<u64> = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("nonce worker"))
+            .collect();
+        nonces.sort_unstable();
+        nonces.dedup();
+        assert_eq!(nonces.len(), 32, "nonce collision under concurrent calls");
+    }
+
+    #[test]
+    fn decimal_digit_count_handles_integers_and_sub_unit_prices() {
+        assert_eq!(decimal_integer_digits_before_point(dec!(97123.456)), 5);
+        assert_eq!(decimal_integer_digits_before_point(dec!(1.5)), 1);
+        assert_eq!(decimal_integer_digits_before_point(dec!(0.0123)), -1);
+        assert_eq!(decimal_integer_digits_before_point(dec!(0.0000123)), -4);
     }
 
     #[tokio::test]

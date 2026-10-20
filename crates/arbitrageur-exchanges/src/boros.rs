@@ -132,6 +132,17 @@ fn f64_from_json(v: Option<&serde_json::Value>) -> Option<f64> {
     dec_from_json(v).and_then(|d| d.to_string().parse::<f64>().ok())
 }
 
+fn boros_string_id(v: Option<&serde_json::Value>) -> Option<String> {
+    match v? {
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        }
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
 /// `tokenId → (collateral symbol, USD price)` from `/v1/assets`. Only
 /// `isCollateral` rows matter; a missing token fails closed by leaving
 /// the market's collateral price at 0 (callers must not divide by it).
@@ -1118,7 +1129,7 @@ impl ExchangeAdapter for BorosAdapter {
         &self,
         symbol: &str,
         order_id: &str,
-        _client_order_id: Option<&str>,
+        client_order_id: Option<&str>,
     ) -> anyhow::Result<OrderResponse> {
         let creds = self.creds()?;
         let market = self.resolve_market(symbol).await?;
@@ -1136,14 +1147,13 @@ impl ExchangeAdapter for BorosAdapter {
         let row = rows
             .iter()
             .find(|o| {
-                o.get("orderId")
-                    .and_then(|v| {
-                        v.as_str()
-                            .map(str::to_string)
-                            .or_else(|| v.as_u64().map(|n| n.to_string()))
-                    })
-                    .map(|id| id == order_id)
-                    .unwrap_or(false)
+                let venue_order_id = boros_string_id(o.get("orderId"));
+                let venue_client_id = boros_string_id(o.get("clientOrderId"));
+                let id_matches = venue_order_id.as_deref() == Some(order_id);
+                let cid_matches = client_order_id
+                    .zip(venue_client_id.as_deref())
+                    .is_some_and(|(expected, actual)| expected == actual);
+                id_matches || cid_matches
             })
             .ok_or_else(|| {
                 anyhow::anyhow!(
@@ -1157,9 +1167,14 @@ impl ExchangeAdapter for BorosAdapter {
             .get("status")
             .and_then(|v| v.as_u64())
             .ok_or_else(|| anyhow::anyhow!("Boros order row has no status"))?;
+        let resolved_order_id =
+            boros_string_id(row.get("orderId")).unwrap_or_else(|| order_id.to_string());
+        let resolved_client_id = boros_string_id(row.get("clientOrderId"))
+            .or_else(|| client_order_id.map(str::to_string))
+            .unwrap_or_default();
         Ok(OrderResponse {
-            order_id: order_id.to_string(),
-            client_order_id: String::new(),
+            order_id: resolved_order_id,
+            client_order_id: resolved_client_id,
             venue: self.venue_id(),
             symbol: symbol.to_string(),
             status: self.map_order_status(status, placed, unfilled)?,
@@ -1206,6 +1221,19 @@ impl ExchangeAdapter for BorosAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_string_and_numeric_client_order_ids() {
+        assert_eq!(
+            boros_string_id(Some(&serde_json::json!("client-1"))).as_deref(),
+            Some("client-1")
+        );
+        assert_eq!(
+            boros_string_id(Some(&serde_json::json!(42))).as_deref(),
+            Some("42")
+        );
+        assert_eq!(boros_string_id(Some(&serde_json::json!("  "))), None);
+    }
 
     #[test]
     fn market_acc_packing_matches_sdk() {

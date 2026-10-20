@@ -2,7 +2,9 @@ use arbitrageur_core::exchange::ExchangeAdapter;
 use arbitrageur_core::order::OrderRequest;
 use arbitrageur_core::types::{dec, Decimal, Side};
 use arbitrageur_execution::coordinator::{ArbitrageExecutionResult, AtomicArbitrageCoordinator};
-use arbitrageur_math::funding_carry::{evaluate_funding_carry, FundingCarryOpportunity};
+use arbitrageur_math::funding_carry::{
+    evaluate_funding_carry, evaluate_funding_carry_with_countdown, FundingCarryOpportunity,
+};
 use std::sync::Arc;
 use tracing::info;
 
@@ -57,6 +59,14 @@ pub struct TermStructureButterflyOpportunity {
     pub roll_down_yield_bps: f64,
     pub is_actionable: bool,
     pub action: String,
+}
+
+fn entry_cross_bps(ask_long: Decimal, bid_short: Decimal) -> Option<Decimal> {
+    if ask_long <= dec!(0) || bid_short <= dec!(0) {
+        return None;
+    }
+    let mid = (ask_long + bid_short) / dec!(2);
+    (mid > dec!(0)).then(|| ((ask_long - bid_short) / mid) * dec!(10000))
 }
 
 impl FundingRateArbStrategy {
@@ -464,12 +474,28 @@ impl FundingRateArbStrategy {
             self.exchange_b.fetch_funding_rate(&self.symbol)
         )?;
 
-        if let Some(opp) = evaluate_funding_carry(
-            &rate_a,
-            &rate_b,
-            self.round_trip_fee_bps,
-            self.trade_size_usd,
-        ) {
+        let now = chrono::Utc::now();
+        let has_settlement_timestamps = rate_a.next_funding_time.timestamp_millis() > 0
+            && rate_b.next_funding_time.timestamp_millis() > 0;
+        let opportunity = if has_settlement_timestamps {
+            evaluate_funding_carry_with_countdown(
+                &rate_a,
+                &rate_b,
+                self.round_trip_fee_bps,
+                self.trade_size_usd,
+                now,
+            )
+            .map(|countdown| countdown.carry)
+        } else {
+            evaluate_funding_carry(
+                &rate_a,
+                &rate_b,
+                self.round_trip_fee_bps,
+                self.trade_size_usd,
+            )
+        };
+
+        if let Some(opp) = opportunity {
             // Guard against entering into an imminent funding rate inversion / collapse
             if let Some(detector_lock) = &self.regime_detector {
                 let rate_f64 = opp.net_rate_8h.to_string().parse::<f64>().unwrap_or(0.0);
@@ -668,17 +694,15 @@ impl FundingRateArbStrategy {
         }
 
         if let Some(max_spread) = self.max_entry_spread_bps {
-            let mid = (ask_long + bid_short) / dec!(2);
-            if mid > dec!(0) && ask_long > bid_short {
-                let spread_bps = ((ask_long - bid_short) / mid) * dec!(10000);
-                if spread_bps > max_spread {
-                    anyhow::bail!(
-                        "funding entry spread {:.2} bps on {} exceeds maximum allowed {:.2} bps",
-                        spread_bps,
-                        self.symbol,
-                        max_spread
-                    );
-                }
+            let spread_bps = entry_cross_bps(ask_long, bid_short)
+                .ok_or_else(|| anyhow::anyhow!("cannot compute funding entry cross"))?;
+            if spread_bps.abs() > max_spread {
+                anyhow::bail!(
+                    "funding entry cross |{:.2}| bps on {} exceeds maximum allowed {:.2} bps",
+                    spread_bps.abs(),
+                    self.symbol,
+                    max_spread
+                );
             }
         }
 
@@ -735,6 +759,15 @@ mod tests {
     use super::*;
     use arbitrageur_exchanges::simulated::SimulatedExchange;
     use arbitrageur_math::funding_velocity::FundingVelocityKalmanHawkes;
+
+    #[test]
+    fn entry_cross_is_signed_for_favourable_and_adverse_crosses() {
+        let adverse = entry_cross_bps(dec!(101), dec!(100)).expect("cross");
+        let favourable = entry_cross_bps(dec!(100), dec!(101)).expect("cross");
+        assert!(adverse > dec!(0));
+        assert!(favourable < dec!(0));
+        assert_eq!(adverse.abs(), favourable.abs());
+    }
 
     #[test]
     fn test_funding_rate_arb_kinematic_velocity_tracker() {
