@@ -877,6 +877,43 @@ impl StateStore {
         Ok(out)
     }
 
+    /// List signals in one environment, optionally filtered by status.
+    /// Historical rows without an environment tag stay visible so
+    /// unattributable exposure remains fail-closed under both environments.
+    pub fn list_signals_for_env(
+        &self,
+        status: Option<SignalStatus>,
+        environment: &str,
+    ) -> anyhow::Result<Vec<SignalExecution>> {
+        let environment = normalize_environment(environment.trim())?;
+        let conn = self.conn.lock();
+        let mut sql = String::from(
+            "SELECT id, strategy_id, symbol, status, route_id, account_long_id,
+                    account_short_id, expected_net_usd, fees_usd, note,
+                    created_at, updated_at, closed_at, environment
+             FROM signal_executions
+             WHERE environment IN ('unknown', ?1)",
+        );
+        let mut binds: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(environment)];
+        if let Some(st) = status {
+            sql.push_str(" AND status = ?2");
+            binds.push(Box::new(st.as_str().to_string()));
+        }
+        sql.push_str(" ORDER BY created_at DESC, id");
+        let refs: Vec<&dyn rusqlite::types::ToSql> = binds.iter().map(|b| b.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(refs.as_slice(), signal_exec_from_row)?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        drop(stmt);
+        let mut out = Vec::with_capacity(rows.len());
+        for mut e in rows {
+            e.legs = Self::legs_for(&conn, &e.id)?;
+            out.push(e);
+        }
+        Ok(out)
+    }
+
     /// Signals whose fills still count as open exposure (`counts_as_open`):
     /// in-flight, balanced, imbalanced, unresolved — everything not closed
     /// or failed. Boot reconciliation and lifecycle gates use this to avoid

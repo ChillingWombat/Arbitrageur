@@ -747,12 +747,10 @@ impl StateStore {
                     OR symbol = ?2 || '-USDT'
                     OR symbol = ?2 || '-PERPETUAL'
                     OR symbol = ?2 || 'USDT'
-                    OR symbol = 'PERP_' || ?2 || '_USDC'
-                    OR (INSTR(?2, '-') > 0 AND symbol = SUBSTR(?2, 1, INSTR(?2, '-') - 1))
-                    OR (INSTR(?2, '-') > 0 AND symbol LIKE SUBSTR(?2, 1, INSTR(?2, '-') - 1) || '-%'))
+                    OR symbol = 'PERP_' || ?2 || '_USDC')
                AND ts_ms >= ?3 AND ts_ms <= ?4 AND environment = ?5
-             GROUP BY ts_ms
-             ORDER BY ts_ms ASC",
+             GROUP BY ts_ms, symbol
+             ORDER BY ts_ms ASC, symbol ASC",
         )?;
         let rows = stmt.query_map(
             rusqlite::params![venue, symbol, from_ts_ms, to_ts_ms, environment],

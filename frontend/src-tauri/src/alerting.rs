@@ -134,7 +134,8 @@ pub fn dispatch(environment: &'static str, event: &'static str, detail: String) 
             ),
             Err(e) => tracing::warn!(
                 target: "alerting",
-                "alert webhook delivery failed for {event}: {e}"
+                "alert webhook delivery failed for {event}: {}",
+                e.without_url()
             ),
         }
     });

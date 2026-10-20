@@ -14,7 +14,10 @@
 //! password is not enough to unlock the workspace through the app.
 
 use hmac::{digest::KeyInit, Hmac, Mac};
+use parking_lot::Mutex;
 use sha1::Sha1;
+use std::collections::HashMap;
+use std::sync::OnceLock;
 use zeroize::Zeroizing;
 
 type HmacSha1 = Hmac<Sha1>;
@@ -84,23 +87,96 @@ pub fn code_at(secret: &[u8], unix_secs: u64) -> String {
     format!("{:0>6}", hotp(secret, unix_secs / TOTP_STEP_SECS))
 }
 
-/// Verify a user-entered code at `unix_secs` with ±`SKEW_STEPS` tolerance
-/// for device clock drift. Rejects anything that isn't exactly 6 digits.
-pub fn verify(secret: &[u8], code: &str, unix_secs: u64) -> bool {
+/// Constant-time comparison for equal-length digit strings. Length is
+/// already validated before this function is called.
+fn constant_time_code_eq(expected: &str, presented: &str) -> bool {
+    let a = expected.as_bytes();
+    let b = presented.as_bytes();
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Verify a code for a named account/scope. The first accepted step for a
+/// scope is recorded; that step and every earlier skew step are rejected on
+/// subsequent attempts, preventing replay inside the 90-second tolerance
+/// window. State is process-local and intentionally small.
+pub fn verify_for_scope(secret: &[u8], code: &str, unix_secs: u64, scope: &str) -> bool {
     let code = code.trim();
     if code.len() != TOTP_DIGITS as usize || !code.chars().all(|c| c.is_ascii_digit()) {
         return false;
+    }
+    let current_step = (unix_secs / TOTP_STEP_SECS) as i64;
+    let mut accepted_step = None;
+    for offset in -SKEW_STEPS..=SKEW_STEPS {
+        if current_step + offset < 0 {
+            continue;
+        }
+        let step = (current_step + offset) as u64;
+        let expected = code_at(secret, step * TOTP_STEP_SECS);
+        if constant_time_code_eq(&expected, code) {
+            accepted_step = Some(step);
+        }
+    }
+    let Some(step) = accepted_step else {
+        return false;
+    };
+
+    static USED_STEPS: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+    let used_steps = USED_STEPS.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut used = used_steps.lock();
+    if used.get(scope).is_some_and(|last_step| step <= *last_step) {
+        return false;
+    }
+    used.insert(scope.to_string(), step);
+    true
+}
+
+/// Return the accepted TOTP time step without consuming it. Used by callers
+/// that persist replay state in the encrypted vault payload so it survives
+/// process restarts and multiple vault handles.
+pub fn accepted_step_for(secret: &[u8], code: &str, unix_secs: u64) -> Option<u64> {
+    let code = code.trim();
+    if code.len() != TOTP_DIGITS as usize || !code.chars().all(|c| c.is_ascii_digit()) {
+        return None;
     }
     let current_step = (unix_secs / TOTP_STEP_SECS) as i64;
     for offset in -SKEW_STEPS..=SKEW_STEPS {
         if current_step + offset < 0 {
             continue;
         }
-        if code_at(secret, (current_step + offset) as u64 * TOTP_STEP_SECS) == code {
-            return true;
+        let step = (current_step + offset) as u64;
+        let expected = code_at(secret, step * TOTP_STEP_SECS);
+        if constant_time_code_eq(&expected, code) {
+            return Some(step);
         }
     }
-    false
+    None
+}
+
+/// Verify a code against a durable high-water mark.
+pub fn verify_after_step(
+    secret: &[u8],
+    code: &str,
+    unix_secs: u64,
+    last_accepted_step: Option<u64>,
+) -> bool {
+    let Some(step) = accepted_step_for(secret, code, unix_secs) else {
+        return false;
+    };
+    last_accepted_step.is_none_or(|last| step > last)
+}
+
+/// Verify a user-entered code at `unix_secs` with ±`SKEW_STEPS` tolerance
+/// for device clock drift. Rejects anything that isn't exactly 6 digits.
+#[cfg(test)]
+pub fn verify(secret: &[u8], code: &str, unix_secs: u64) -> bool {
+    verify_for_scope(secret, code, unix_secs, "default")
 }
 
 /// `otpauth://` enrollment URI — scanned or pasted into authenticator apps.
@@ -165,15 +241,47 @@ mod tests {
     fn verify_accepts_current_and_skew_steps() {
         let now = 1_700_000_000u64;
         let current = code_at(RFC_SECRET, now);
-        assert!(verify(RFC_SECRET, &current, now));
+        assert!(verify_for_scope(RFC_SECRET, &current, now, "current"));
         // Codes one step either side of "now" are accepted.
         let prev = code_at(RFC_SECRET, now - TOTP_STEP_SECS);
         let next = code_at(RFC_SECRET, now + TOTP_STEP_SECS);
-        assert!(verify(RFC_SECRET, &prev, now));
-        assert!(verify(RFC_SECRET, &next, now));
+        assert!(verify_for_scope(RFC_SECRET, &prev, now, "prev"));
+        assert!(verify_for_scope(RFC_SECRET, &next, now, "next"));
         // Two steps out is rejected.
         let stale = code_at(RFC_SECRET, now - 2 * TOTP_STEP_SECS);
-        assert!(!verify(RFC_SECRET, &stale, now));
+        assert!(!verify_for_scope(RFC_SECRET, &stale, now, "stale"));
+    }
+
+    #[test]
+    fn verify_rejects_replay_and_older_skew_steps() {
+        let now = 1_700_000_000u64;
+        let current = code_at(RFC_SECRET, now);
+        let previous = code_at(RFC_SECRET, now - TOTP_STEP_SECS);
+        assert!(verify_for_scope(
+            RFC_SECRET,
+            &current,
+            now,
+            "operator-vault"
+        ));
+        assert!(!verify_for_scope(
+            RFC_SECRET,
+            &current,
+            now,
+            "operator-vault"
+        ));
+        assert!(!verify_for_scope(
+            RFC_SECRET,
+            &previous,
+            now,
+            "operator-vault"
+        ));
+        // A distinct account can still use the same time step.
+        assert!(verify_for_scope(
+            RFC_SECRET,
+            &current,
+            now,
+            "second-account"
+        ));
     }
 
     #[test]

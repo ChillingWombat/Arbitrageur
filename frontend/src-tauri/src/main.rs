@@ -33,9 +33,41 @@ mod triangle;
 mod vault;
 mod ws_primary;
 
+use futures::FutureExt;
 use state::AppEngineState;
+use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use tauri::Manager;
+
+pub(crate) fn spawn_supervised<F, Fut>(
+    name: &'static str,
+    mut make_loop: F,
+) -> tauri::async_runtime::JoinHandle<()>
+where
+    F: FnMut() -> Fut + Send + 'static,
+    Fut: Future<Output = ()> + Send + 'static,
+{
+    tauri::async_runtime::spawn(async move {
+        loop {
+            match AssertUnwindSafe(make_loop()).catch_unwind().await {
+                Ok(()) => {
+                    tracing::info!("{name} supervisor loop exited cleanly");
+                    return;
+                }
+                Err(payload) => {
+                    let detail = payload
+                        .downcast_ref::<&str>()
+                        .copied()
+                        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+                        .unwrap_or("non-string panic payload");
+                    tracing::error!("{name} supervisor loop panicked: {detail}; restarting");
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                }
+            }
+        }
+    })
+}
 
 /// Outcome of taking the single-instance lock.
 enum InstanceLock {
@@ -126,7 +158,11 @@ fn main() {
         let monitor = monitor::SpreadMonitorEngine::new(&engine_state);
         *engine_state.monitor.lock() = Some(monitor.clone());
         let bg_state = engine_state.clone();
-        tauri::async_runtime::spawn(async move { monitor.run(bg_state).await });
+        spawn_supervised("spread_monitor", move || {
+            let monitor = monitor.clone();
+            let bg_state = bg_state.clone();
+            async move { monitor.run(bg_state).await }
+        });
     }
 
     // Spawn the stablecoin-FX refresh: CoinGecko every ~60s, Uniswap
@@ -135,11 +171,14 @@ fn main() {
     // the last good rate stands; stale observations converge to parity.
     {
         let fx = engine_state.stablecoin_fx.clone();
-        tauri::async_runtime::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
-            loop {
-                interval.tick().await;
-                fx.refresh_global().await;
+        spawn_supervised("stablecoin_fx", move || {
+            let fx = fx.clone();
+            async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+                loop {
+                    interval.tick().await;
+                    fx.refresh_global().await;
+                }
             }
         });
     }
@@ -150,7 +189,11 @@ fn main() {
         let bot = auto_exec::OpportunityExecutor::new();
         *engine_state.radar_bot.lock() = Some(bot.clone());
         let bg_state = engine_state.clone();
-        tauri::async_runtime::spawn(async move { bot.run(bg_state).await });
+        spawn_supervised("radar_bot", move || {
+            let bot = bot.clone();
+            let bg_state = bg_state.clone();
+            async move { bot.run(bg_state).await }
+        });
     }
 
     // Spawn the options substrategy bot (opt-in, testnet for auto entries,
@@ -158,7 +201,11 @@ fn main() {
     {
         let bot = options_bot::OptionsBotExecutor::new();
         let bg_state = engine_state.clone();
-        tauri::async_runtime::spawn(async move { bot.run(bg_state).await });
+        spawn_supervised("options_bot", move || {
+            let bot = bot.clone();
+            let bg_state = bg_state.clone();
+            async move { bot.run(bg_state).await }
+        });
     }
 
     // Spawn the live options volatility surface worker: continuously ingests
@@ -171,11 +218,15 @@ fn main() {
     // unwinds them upon convergence into the friction band or on timeout/stop.
     {
         let bg_state = engine_state.clone();
-        tauri::async_runtime::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
-            loop {
-                interval.tick().await;
-                let _ = commands::check_spatial_convergence_impl(None, "futures", &bg_state).await;
+        spawn_supervised("spatial_convergence", move || {
+            let bg_state = bg_state.clone();
+            async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+                loop {
+                    interval.tick().await;
+                    let _ =
+                        commands::check_spatial_convergence_impl(None, "futures", &bg_state).await;
+                }
             }
         });
     }
@@ -210,22 +261,25 @@ fn main() {
     // connectivity blip is not a drawdown.
     {
         let bg_state = engine_state.clone();
-        tauri::async_runtime::spawn(async move {
-            let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
-            loop {
-                interval.tick().await;
-                let mut breaker_feed = Vec::new();
-                for (vid, _name, adapter) in bg_state.get_venues() {
-                    if let Ok((mut acc, _stale)) =
-                        execution::live_account_or_cached(&bg_state, vid, &adapter).await
-                    {
-                        bg_state.normalize_account_usd(vid, &mut acc);
-                        let econ_key = execution::breaker_account_key(&bg_state, vid);
-                        breaker_feed.push((econ_key, acc.equity, acc.balances));
+        spawn_supervised("drawdown_breaker", move || {
+            let bg_state = bg_state.clone();
+            async move {
+                let mut interval = tokio::time::interval(std::time::Duration::from_secs(15));
+                loop {
+                    interval.tick().await;
+                    let mut breaker_feed = Vec::new();
+                    for (vid, _name, adapter) in bg_state.get_venues() {
+                        if let Ok((mut acc, _stale)) =
+                            execution::live_account_or_cached(&bg_state, vid, &adapter).await
+                        {
+                            bg_state.normalize_account_usd(vid, &mut acc);
+                            let econ_key = execution::breaker_account_key(&bg_state, vid);
+                            breaker_feed.push((econ_key, acc.equity, acc.balances));
+                        }
                     }
-                }
-                if !breaker_feed.is_empty() {
-                    execution::feed_breaker_equity(&bg_state, &breaker_feed);
+                    if !breaker_feed.is_empty() {
+                        execution::feed_breaker_equity(&bg_state, &breaker_feed);
+                    }
                 }
             }
         });

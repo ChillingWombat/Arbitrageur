@@ -22,13 +22,15 @@ use arbitrageur_exchanges::okx::OkxAdapter;
 use arbitrageur_exchanges::popdex::PopDexAdapter;
 use arbitrageur_exchanges::vanta::VantaAdapter;
 use arbitrageur_exchanges::variational::VariationalAdapter;
+use arbitrageur_execution::conformal_cvar_shield::ConformalCvarShieldEngine;
 use arbitrageur_execution::coordinator::AtomicArbitrageCoordinator;
 use arbitrageur_execution::passive_unwind::PassiveUnwindConfig;
 use arbitrageur_execution::smart_routing::SmartOrderRouter;
-use arbitrageur_math::kalman_filter::HedgeRatioKalmanFilter;
 use arbitrageur_risk::circuit_breaker::{CircuitBreaker, CircuitBreakerConfig};
 use arbitrageur_risk::delta_guard::DeltaGuard;
+use arbitrageur_strategy::hawkes_flow::{HawkesFlowOrchestrator, HawkesFlowVerdict};
 use arbitrageur_strategy::options_dispersion::LiveVolSurfaceCache;
+use arbitrageur_strategy::stat_arb_pairs::StatArbPairsStrategy;
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -1425,8 +1427,20 @@ pub struct AppEngineState {
     pub boros_yu_cache: Mutex<Option<BorosYuCache>>,
     pub circuit_breaker: Arc<CircuitBreaker>,
     pub delta_guard: RwLock<DeltaGuard>,
+    /// Shared cross-asset/cross-venue Hawkes flow gate. Books feed it
+    /// top-of-book imbalance events; radar entries consult it before
+    /// dispatch.
+    pub hawkes_orchestrator: Arc<RwLock<HawkesFlowOrchestrator>>,
+    /// Last synthetic flow sample per `(venue, asset)`. Presence is the
+    /// warm-up signal used to keep cold-start pairs unblocked.
+    pub hawkes_last_sample: Mutex<std::collections::HashMap<(String, String), std::time::Instant>>,
+    /// Distribution-free tail-slippage shield updated from every spatial
+    /// execution preflight.
+    pub conformal_cvar_shield: Mutex<ConformalCvarShieldEngine>,
     pub coordinator: Arc<AtomicArbitrageCoordinator>,
-    pub kalman_filter: RwLock<HedgeRatioKalmanFilter>,
+    /// Independent online stat-arb state per pair key. A shared unkeyed
+    /// Kalman filter let one caller poison every other pair's baseline.
+    pub stat_arb_sessions: RwLock<std::collections::HashMap<String, StatArbPairsStrategy>>,
     /// Active venue environment — `Live` production endpoints or `Testnet`
     /// demo endpoints. Drives adapter selection in `get_venues`, account
     /// eligibility, and the `is_live` flag on persisted records (testnet
@@ -2229,9 +2243,59 @@ impl AppEngineState {
             Decimal::from_f64_retain(initial_settings.delta_max_unhedged_usd_per_asset)
                 .unwrap_or(dec!(2500.0)),
         ));
+        let hawkes_assets: Vec<String> = [
+            "BTC", "ETH", "SOL", "XRP", "DOGE", "ADA", "AVAX", "LINK", "BNB", "LTC", "BCH", "DOT",
+            "TRX", "TON", "SUI", "APT", "ARB", "OP", "NEAR", "ATOM",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        let mut hawkes_venues: Vec<String> = [
+            "hyperliquid",
+            "lighter",
+            "robinhood",
+            "vanta",
+            "binance",
+            "okx",
+            "coinbase",
+            "kraken",
+            "deribit",
+            "decibel",
+            "popdex",
+            "alpaca",
+            "ibkr",
+            "aster",
+            "arcus",
+            "boros",
+            "variational",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        hawkes_venues.extend(
+            ADMITTED_DEX_PERP_VENUE_IDS
+                .iter()
+                .chain(ADMITTED_EVM_AMM_VENUE_IDS.iter())
+                .map(|venue| (*venue).to_string()),
+        );
+        hawkes_venues.sort();
+        hawkes_venues.dedup();
+        let hawkes_correlations = (0..hawkes_assets.len())
+            .map(|i| {
+                (0..hawkes_assets.len())
+                    .map(|j| if i == j { 1.0 } else { 0.75 })
+                    .collect()
+            })
+            .collect();
+        let hawkes_orchestrator = Arc::new(RwLock::new(HawkesFlowOrchestrator::new(
+            hawkes_assets.clone(),
+            hawkes_venues,
+            vec![1_000_000_000.0; hawkes_assets.len()],
+            hawkes_correlations,
+            vec![1e-4; hawkes_assets.len()],
+        )));
         let router = SmartOrderRouter::new(dec!(15.0)); // 15 bps slippage tolerance
         let coordinator = Arc::new(AtomicArbitrageCoordinator::new(router, cb.clone()));
-        let kalman_filter = RwLock::new(HedgeRatioKalmanFilter::new(1e-4, 1e-2));
         let settings = RwLock::new(initial_settings);
 
         // Reload the persisted execution log so the Log Monitor keeps history
@@ -2499,6 +2563,16 @@ impl AppEngineState {
             .flatten()
             .is_none()
         {
+            let testnet_key_present = state_store
+                .kv_get("pnl.total.testnet")
+                .ok()
+                .flatten()
+                .is_some();
+            let live_key_present = state_store
+                .kv_get("pnl.total.live")
+                .ok()
+                .flatten()
+                .is_some();
             if let Ok(all_logs) = state_store.load_execution_logs(100_000) {
                 let mut true_realized_testnet = Decimal::ZERO;
                 let mut true_realized_live = Decimal::ZERO;
@@ -2520,13 +2594,13 @@ impl AppEngineState {
                         true_realized_testnet += entry_realized;
                     }
                 }
-                if has_testnet {
+                if has_testnet && !testnet_key_present {
                     initial_pnl_testnet = true_realized_testnet;
                     let _ =
                         state_store.kv_set("pnl.total.testnet", &true_realized_testnet.to_string());
                     tracing::info!("pnl.total.testnet recalibrated to true realized PnL: {true_realized_testnet}");
                 }
-                if has_live {
+                if has_live && !live_key_present {
                     initial_pnl_live = true_realized_live;
                     let _ = state_store.kv_set("pnl.total.live", &true_realized_live.to_string());
                     tracing::info!(
@@ -2551,8 +2625,8 @@ impl AppEngineState {
                 .ok()
                 .flatten()
                 .and_then(|v| v.parse::<usize>().ok());
-            let log_floor = state_store.execution_log_count().unwrap_or(0) as usize + 8;
-            persisted.unwrap_or(8).max(log_floor)
+            let durable_floor = state_store.max_durable_sim_step().unwrap_or(0);
+            persisted.unwrap_or(8).max(durable_floor)
         };
         let strategy_params_map = load_strategy_params(&state_store);
         let ticker_configs_map = load_ticker_strategy_configs(&state_store);
@@ -2593,8 +2667,13 @@ impl AppEngineState {
             boros_yu_cache: Mutex::new(None),
             circuit_breaker: cb,
             delta_guard,
+            hawkes_orchestrator,
+            hawkes_last_sample: Mutex::new(std::collections::HashMap::new()),
+            conformal_cvar_shield: Mutex::new(ConformalCvarShieldEngine::new(
+                arbitrageur_execution::conformal_cvar_shield::ConformalCvarConfig::default(),
+            )),
             coordinator,
-            kalman_filter,
+            stat_arb_sessions: RwLock::new(std::collections::HashMap::new()),
             environment,
             last_risk_live_universe: RwLock::new(None),
             last_risk_account_set: RwLock::new(None),
@@ -2841,6 +2920,89 @@ impl AppEngineState {
             tracing::warn!("persist sim_step failed: {e}");
         }
         next
+    }
+
+    /// Translate a live top-of-book imbalance into the shared Hawkes feed.
+    /// Balanced books carry no directional sample; once a venue/asset has
+    /// emitted at least one imbalance event it is warm for entry gating.
+    pub fn feed_hawkes_book(&self, venue: &str, book: &arbitrageur_core::quote::OrderBook) {
+        let venue = canonical_venue_id(venue)
+            .map(str::to_string)
+            .unwrap_or_else(|| {
+                let raw = venue.trim().to_ascii_lowercase();
+                raw.strip_prefix("live_")
+                    .or_else(|| raw.strip_prefix("tn_"))
+                    .unwrap_or(&raw)
+                    .to_string()
+            });
+        let asset = arbitrageur_core::symbol::canonical_base(&book.symbol);
+        if asset.is_empty() {
+            return;
+        }
+        let depth = |levels: &[arbitrageur_core::quote::BookLevel]| -> f64 {
+            levels
+                .iter()
+                .filter_map(|level| {
+                    let price = level.price.to_string().parse::<f64>().ok()?;
+                    let size = level.size.to_string().parse::<f64>().ok()?;
+                    (price.is_finite() && price > 0.0 && size.is_finite() && size > 0.0)
+                        .then_some(price * size)
+                })
+                .sum()
+        };
+        let bid_depth = depth(&book.bids);
+        let ask_depth = depth(&book.asks);
+        let total = bid_depth + ask_depth;
+        if !total.is_finite() || total <= 0.0 {
+            return;
+        }
+        let imbalance = (bid_depth - ask_depth) / total;
+        if !imbalance.is_finite() || imbalance.abs() < 0.15 {
+            return;
+        }
+
+        let key = (venue.clone(), asset.clone());
+        let now = std::time::Instant::now();
+        {
+            let mut samples = self.hawkes_last_sample.lock();
+            if samples
+                .get(&key)
+                .is_some_and(|last| now.duration_since(*last).as_millis() < 250)
+            {
+                return;
+            }
+            samples.insert(key, now);
+        }
+        self.hawkes_orchestrator.write().record_trade(
+            &asset,
+            &arbitrageur_core::types::VenueId::new(venue),
+            imbalance > 0.0,
+            chrono::Utc::now().timestamp_millis() as f64 / 1000.0,
+        );
+    }
+
+    /// `None` means this venue/asset has not produced a flow sample yet;
+    /// callers treat that as neutral rather than blocking a cold start.
+    pub fn evaluate_hawkes_entry(
+        &self,
+        venue: &str,
+        asset: &str,
+        is_buy: bool,
+    ) -> Option<HawkesFlowVerdict> {
+        let venue = canonical_venue_id(venue)
+            .map(str::to_string)
+            .unwrap_or_else(|| venue.trim().to_ascii_lowercase());
+        let asset = arbitrageur_core::symbol::canonical_base(asset);
+        let key = (venue.clone(), asset.clone());
+        if !self.hawkes_last_sample.lock().contains_key(&key) {
+            return None;
+        }
+        Some(self.hawkes_orchestrator.read().evaluate_flow_conditions(
+            &asset,
+            &arbitrageur_core::types::VenueId::new(venue),
+            is_buy,
+            chrono::Utc::now().timestamp_millis() as f64 / 1000.0,
+        ))
     }
 
     /// Open the Stronghold snapshot that holds the shared EVM wallet key.
