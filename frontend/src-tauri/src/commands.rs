@@ -3034,11 +3034,16 @@ pub fn run_stat_arb_step_impl(
             ),
         )
     });
-    let kf = &mut session.kalman;
-    let (hedge_ratio, residual) = kf.update(price_x, price_y);
-    if let Some(hamilton) = session.hamilton_filter.as_mut() {
-        hamilton.update(residual, 1.0 / (365.25 * 24.0 * 60.0));
-    }
+    let y_dec = Decimal::from_f64_retain(price_y)
+        .ok_or_else(|| "price_y is not representable as Decimal".to_string())?;
+    let x_dec = Decimal::from_f64_retain(price_x)
+        .ok_or_else(|| "price_x is not representable as Decimal".to_string())?;
+    let pair_signal = session
+        .observe_pair_prices(y_dec, x_dec)
+        .map_err(|e| e.to_string())?;
+    let kf = &session.kalman;
+    let hedge_ratio = kf.state[1];
+    let residual = kf.latest_residual;
     let z = kf.spread_z_score();
     let alpha = kf.intercept();
     let variance = if z.abs() > 1e-6 {
@@ -3047,14 +3052,19 @@ pub fn run_stat_arb_step_impl(
         1.0
     };
 
-    let signal = if z > 2.0 {
-        "ENTRY_SHORT_SPREAD"
-    } else if z < -2.0 {
-        "ENTRY_LONG_SPREAD"
-    } else if z.abs() < 0.5 {
-        "EXIT"
-    } else {
-        "NEUTRAL"
+    let signal = match pair_signal {
+        Some(arbitrageur_strategy::stat_arb_pairs::SpreadSignal::Enter {
+            side_y: Side::Buy,
+            ..
+        }) => "ENTRY_LONG_SPREAD",
+        Some(arbitrageur_strategy::stat_arb_pairs::SpreadSignal::Enter {
+            side_y: Side::Sell,
+            ..
+        }) => "ENTRY_SHORT_SPREAD",
+        Some(arbitrageur_strategy::stat_arb_pairs::SpreadSignal::Exit { .. }) => "EXIT",
+        Some(arbitrageur_strategy::stat_arb_pairs::SpreadSignal::RebalanceHedge { .. }) | None => {
+            "NEUTRAL"
+        }
     };
 
     Ok(StatArbStepResultDto {

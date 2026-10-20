@@ -262,92 +262,6 @@ fn option_chain_close_proceeds(
     (option_legs > 0 && total.is_finite()).then_some(total)
 }
 
-fn fit_svi_slice(
-    slice: &arbitrageur_strategy::options_dispersion::LiveVolSurfaceSlice,
-) -> Option<arbitrageur_math::svi_arbitrage_free::SviSliceParameters> {
-    if slice.forward_price <= 0.0 || slice.tenor_years <= 1e-4 {
-        return None;
-    }
-    let points: Vec<(f64, f64)> = slice
-        .observed_strikes
-        .iter()
-        .filter_map(|(strike_key, iv)| {
-            let strike = *strike_key as f64 / 100.0;
-            let k = (strike / slice.forward_price).ln();
-            let total_variance = iv * iv * slice.tenor_years;
-            (k.is_finite()
-                && total_variance.is_finite()
-                && total_variance > 0.0
-                && (-2.0..=2.0).contains(&k))
-            .then_some((k, total_variance))
-        })
-        .collect();
-    if points.len() < 3 {
-        return None;
-    }
-    let k_min = points.iter().map(|(k, _)| *k).fold(f64::INFINITY, f64::min);
-    let k_max = points
-        .iter()
-        .map(|(k, _)| *k)
-        .fold(f64::NEG_INFINITY, f64::max);
-    if !(k_min.is_finite() && k_max.is_finite()) {
-        return None;
-    }
-    let width = (k_max - k_min).max(0.05);
-    let mut best: Option<(
-        f64,
-        arbitrageur_math::svi_arbitrage_free::SviSliceParameters,
-    )> = None;
-    for rho_step in -9..=9 {
-        let rho = rho_step as f64 / 10.0;
-        for m_step in 0..=8 {
-            let m = k_min + width * (m_step as f64 / 8.0 - 0.5);
-            for sigma_mult in [0.05, 0.10, 0.20, 0.40, 0.80] {
-                let sigma = (width * sigma_mult).max(1e-4);
-                let n = points.len() as f64;
-                let mut sx = 0.0;
-                let mut sy = 0.0;
-                let mut sxx = 0.0;
-                let mut sxy = 0.0;
-                for (k, w) in &points {
-                    let diff = k - m;
-                    let basis = rho * diff + (diff * diff + sigma * sigma).sqrt();
-                    sx += basis;
-                    sy += *w;
-                    sxx += basis * basis;
-                    sxy += basis * *w;
-                }
-                let denom = n * sxx - sx * sx;
-                if denom.abs() < 1e-12 {
-                    continue;
-                }
-                let a = (sy * sxx - sx * sxy) / denom;
-                let b = (n * sxy - sx * sy) / denom;
-                if !(a.is_finite() && b.is_finite() && b >= 0.0) {
-                    continue;
-                }
-                let candidate = arbitrageur_math::svi_arbitrage_free::SviSliceParameters::new(
-                    a, b, rho, m, sigma,
-                );
-                if !candidate.is_arbitrage_free() {
-                    continue;
-                }
-                let sse: f64 = points
-                    .iter()
-                    .map(|(k, w)| {
-                        let residual = candidate.total_variance(*k) - *w;
-                        residual * residual
-                    })
-                    .sum();
-                if sse.is_finite() && best.as_ref().is_none_or(|(best_sse, _)| sse < *best_sse) {
-                    best = Some((sse, candidate));
-                }
-            }
-        }
-    }
-    best.map(|(_, candidate)| candidate)
-}
-
 fn option_symbol_parts(symbol: &str) -> Option<(String, String, f64)> {
     let parts: Vec<&str> = symbol.split('-').collect();
     if parts.len() < 4 {
@@ -453,6 +367,110 @@ fn realized_vol_30d(
     best
 }
 
+fn cached_variance_strip(
+    cache: &arbitrageur_strategy::options_dispersion::LiveVolSurfaceCache,
+    asset: &str,
+    expiry: &str,
+) -> Option<(
+    f64,
+    f64,
+    Vec<arbitrageur_math::variance_swap::DiscreteOptionQuote>,
+)> {
+    let slice = cache
+        .slices
+        .read()
+        .get(&asset.to_ascii_uppercase())?
+        .get(expiry)?
+        .clone();
+    if slice.forward_price <= 0.0 || slice.tenor_years <= 1e-4 {
+        return None;
+    }
+    let mut quotes = Vec::with_capacity(slice.observed_strikes.len());
+    for (strike_key, iv) in slice.observed_strikes {
+        let strike = strike_key as f64 / 100.0;
+        if strike <= 0.0 || !iv.is_finite() || iv <= 0.0 {
+            continue;
+        }
+        let is_call = strike >= slice.forward_price;
+        let option_type = if is_call {
+            arbitrageur_math::black_scholes::OptionType::Call
+        } else {
+            arbitrageur_math::black_scholes::OptionType::Put
+        };
+        let price = arbitrageur_math::black_scholes::black_scholes_price(
+            option_type,
+            slice.forward_price,
+            strike,
+            slice.tenor_years,
+            0.04,
+            iv,
+        )?;
+        let half_spread = (price * 0.0005).max(1e-8);
+        quotes.push(arbitrageur_math::variance_swap::DiscreteOptionQuote::new(
+            strike,
+            price - half_spread,
+            price + half_spread,
+            is_call,
+        ));
+    }
+    quotes.sort_by(|a, b| a.strike.total_cmp(&b.strike));
+    (quotes.len() >= 3).then_some((slice.forward_price, slice.tenor_years, quotes))
+}
+
+fn evaluate_cached_variance_dispersion(
+    cache: &arbitrageur_strategy::options_dispersion::LiveVolSurfaceCache,
+    store: &crate::state_store::StateStore,
+    environment: &str,
+) -> Option<(
+    String,
+    arbitrageur_math::variance_swap::VarianceDispersionOpportunity,
+)> {
+    let mut common_expiries = {
+        let slices = cache.slices.read();
+        let btc = slices.get("BTC")?;
+        let eth = slices.get("ETH")?;
+        btc.keys()
+            .filter(|expiry| eth.contains_key(*expiry))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    common_expiries.sort();
+    let engine =
+        arbitrageur_strategy::options_dispersion::VarianceSwapDispersionEngine::new(0.04, 0.05);
+    for expiry in common_expiries {
+        let rv_btc = realized_vol_30d(store, "BTC", environment);
+        let rv_eth = realized_vol_30d(store, "ETH", environment);
+        let (Some(rv_btc), Some(rv_eth)) = (rv_btc, rv_eth) else {
+            continue;
+        };
+        let (
+            Some((btc_forward, btc_tenor, btc_quotes)),
+            Some((eth_forward, eth_tenor, eth_quotes)),
+        ) = (
+            cached_variance_strip(cache, "BTC", &expiry),
+            cached_variance_strip(cache, "ETH", &expiry),
+        )
+        else {
+            continue;
+        };
+        if let Some(opportunity) = engine.evaluate_dispersion_opportunity(
+            "BTC",
+            btc_forward,
+            btc_tenor,
+            btc_quotes,
+            rv_btc,
+            "ETH",
+            eth_forward,
+            eth_tenor,
+            eth_quotes,
+            rv_eth,
+        ) {
+            return Some((expiry, opportunity));
+        }
+    }
+    None
+}
+
 fn apply_svi_delta_adjustments(
     state: &AppEngineState,
     positions: &[arbitrageur_core::position::Position],
@@ -464,21 +482,6 @@ fn apply_svi_delta_adjustments(
             continue;
         }
         let Some((asset, expiry, strike)) = option_symbol_parts(&leg.symbol) else {
-            continue;
-        };
-        let slice = {
-            state
-                .vol_surface
-                .slices
-                .read()
-                .get(&asset)
-                .and_then(|slices| slices.get(&expiry))
-                .cloned()
-        };
-        let Some(slice) = slice else {
-            continue;
-        };
-        let Some(svi) = fit_svi_slice(&slice) else {
             continue;
         };
         let Some(spot) =
@@ -514,9 +517,17 @@ fn apply_svi_delta_adjustments(
         let Ok(signed_qty) = leg.signed_quantity().to_string().parse::<f64>() else {
             continue;
         };
+        let Some(expiry_ms) = parse_option_expiry_ms(&expiry) else {
+            continue;
+        };
+        let Some(smile_delta) = state
+            .vol_surface
+            .get_smile_adjusted_delta(&asset, expiry_ms, strike, spot, bs.delta, bs.vega)
+        else {
+            continue;
+        };
         let bs_delta = bs.delta * signed_qty;
-        let bs_vega = bs.vega * signed_qty;
-        let smile_delta = svi.smile_adjusted_delta(bs_delta, bs_vega, spot, strike, tau);
+        let smile_delta = smile_delta * signed_qty;
         if let Some(adjustment) = Decimal::from_f64_retain(smile_delta - bs_delta) {
             greeks
                 .entry(asset)
@@ -1723,7 +1734,12 @@ pub fn spawn_volatility_surface_worker(
 
                             let replicator =
                                 arbitrageur_math::variance_swap::VarianceSwapReplicator::default();
+                            let dispersion_engine =
+                                arbitrageur_strategy::options_dispersion::VarianceSwapDispersionEngine::new(
+                                    0.04, 0.05,
+                                );
                             let realized_vol = realized_vol_30d(&store, &ccy_str, &env_str);
+                            let mut calendar_slices = Vec::new();
                             for (expiry, (forward, quotes)) in variance_quotes {
                                 if quotes.len() < 3 {
                                     continue;
@@ -1735,7 +1751,20 @@ pub fn spawn_volatility_surface_worker(
                                         .get(&ccy_str.to_ascii_uppercase())
                                         .and_then(|slices| slices.get(&expiry))
                                         .cloned()
-                                        .and_then(|slice| fit_svi_slice(&slice))
+                                        .and_then(|slice| {
+                                            let mut strikes = Vec::new();
+                                            let mut ivs = Vec::new();
+                                            for (strike_key, iv) in &slice.observed_strikes {
+                                                strikes.push(*strike_key as f64 / 100.0);
+                                                ivs.push(*iv);
+                                            }
+                                            arbitrageur_math::svi_arbitrage_free::SviSliceParameters::fit_from_iv_smile(
+                                                &strikes,
+                                                &ivs,
+                                                slice.forward_price,
+                                                slice.tenor_years,
+                                            )
+                                        })
                                 }
                                 .map(|svi| {
                                     arbitrageur_math::variance_swap::SviParameters::new(
@@ -1764,6 +1793,11 @@ pub fn spawn_volatility_surface_worker(
                                 let Some(variance_strike) = variance_strike else {
                                     continue;
                                 };
+                                calendar_slices.push((
+                                    expiry.clone(),
+                                    tenor,
+                                    variance_strike,
+                                ));
                                 let prefix = format!("variance_swap.{ccy_str}.{expiry}");
                                 let _ = store.kv_set(
                                     &format!("{prefix}.variance_strike"),
@@ -1794,6 +1828,68 @@ pub fn spawn_volatility_surface_worker(
                                     &format!("{prefix}.updated_at_ms"),
                                     &now_ms.to_string(),
                                 );
+                            }
+
+                            calendar_slices.sort_by(|a, b| a.1.total_cmp(&b.1));
+                            if let Some(realized_vol) = realized_vol {
+                                for pair in calendar_slices.windows(2) {
+                                    let (front_expiry, front_t, front_var) = &pair[0];
+                                    let (back_expiry, back_t, back_var) = &pair[1];
+                                    let opportunity = dispersion_engine
+                                        .evaluate_calendar_vrp_opportunity(
+                                            &ccy_str,
+                                            *front_t,
+                                            *front_var,
+                                            realized_vol,
+                                            *back_t,
+                                            *back_var,
+                                            realized_vol,
+                                            0.02,
+                                        );
+                                    let prefix = format!(
+                                        "variance_swap.{ccy_str}.calendar.{front_expiry}.{back_expiry}"
+                                    );
+                                    let _ = store.kv_set(
+                                        &format!("{prefix}.calendar_spread"),
+                                        &opportunity.calendar_spread.to_string(),
+                                    );
+                                    let _ = store.kv_set(
+                                        &format!("{prefix}.action"),
+                                        &format!("{:?}", opportunity.action),
+                                    );
+                                    tracing::info!(
+                                        "calendar VRP {ccy_str}/{front_expiry}->{back_expiry}: spread {:+.4}, action {:?}",
+                                        opportunity.calendar_spread,
+                                        opportunity.action
+                                    );
+                                }
+                            }
+
+                            if ccy_str == "ETH" {
+                                if let Some((expiry, opportunity)) =
+                                    evaluate_cached_variance_dispersion(
+                                        &vol_cache,
+                                        &store,
+                                        &env_str,
+                                    )
+                                {
+                                    let prefix = format!(
+                                        "variance_swap.dispersion.BTC.ETH.{expiry}"
+                                    );
+                                    let _ = store.kv_set(
+                                        &format!("{prefix}.vrp_spread"),
+                                        &opportunity.vrp_spread.to_string(),
+                                    );
+                                    let _ = store.kv_set(
+                                        &format!("{prefix}.action"),
+                                        &format!("{:?}", opportunity.action),
+                                    );
+                                    tracing::info!(
+                                        "variance dispersion BTC/ETH {expiry}: spread {:+.4}, action {:?}",
+                                        opportunity.vrp_spread,
+                                        opportunity.action
+                                    );
+                                }
                             }
 
                             if ingested_count > 0 {

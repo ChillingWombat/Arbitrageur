@@ -59,24 +59,16 @@ risk_parity_allocator, safety_guards
 ### `arbitrageur-execution`
 
 ```
-atomic_bundle, causal_dml_impact, conformal_adadelta_shield,
-conformal_adagrad_shield, conformal_adam_shield, conformal_bernstein_shield,
-conformal_cvar_shield, conformal_dkw_process,
-conformal_double_kernel_shield, conformal_erm_slippage,
-conformal_evt_tail_guard, conformal_extreme_copula, conformal_forest_shield,
-conformal_lookahead_shield, conformal_matrix_bernstein,
-conformal_matrix_completion, conformal_matrix_shield,
-conformal_momentum_shield, conformal_mot_shield, conformal_nadam_shield,
-conformal_nesterov_shield, conformal_omd_shield,
-conformal_optimal_transport, conformal_quasi_hyperbolic_shield,
-conformal_rademacher_shield, conformal_risk_guard, conformal_rkhs_shield,
-conformal_rmsprop_shield, conformal_spline_shield, conformal_srm_shield,
-conformal_svrg_shield, conformal_wasserstein_drift, coordinator,
-emergency_unwind, l2_sequencer_guard, omd_dual_averaging, passive_unwind,
-queue_priority, sac_execution, smart_routing, virtual_ledger
+atomic_bundle, conformal_cvar_shield, conformal_risk_guard, coordinator,
+emergency_unwind, l2_sequencer_guard, passive_unwind, queue_priority,
+smart_routing, virtual_ledger
 ```
 
-Active desktop modules are `coordinator`, `emergency_unwind`, `passive_unwind`, `queue_priority`, `smart_routing`, and `virtual_ledger`. `atomic_bundle` is optional inside `SmartOrderRouter`; `l2_sequencer_guard` is optional inside `SpatialPriceArbStrategy`, which currently has only the CLI consumer. The `conformal_*` set has no desktop call site on this branch. ADR 0001 defines the consolidation seam and retained shield components.
+`CompositeExecutionShield` composes `conformal_risk_guard` and
+`conformal_cvar_shield` and is wired into desktop execution preflight.
+`atomic_bundle` is optional inside `SmartOrderRouter`; `l2_sequencer_guard`
+is optional inside `SpatialPriceArbStrategy`. ADR 0001 defines the
+consolidation seam.
 
 ### `arbitrageur-strategy`
 
@@ -85,13 +77,13 @@ Active desktop modules are `coordinator`, `emergency_unwind`, `passive_unwind`, 
 | `convergence_auto` | `auto_exec`, `monitor_ipc`, options bot mode | Live/Testnet policy |
 | `engine` | Strategy crate composition | No desktop or CLI constructor |
 | `funding_rate_arb` | `arbitrageur-app funding` | CLI only |
-| `hawkes_flow` | None | Library only; desktop wiring is part of #150 |
+| `hawkes_flow` | `state`, `feed`, `auto_exec` | Live/Testnet flow gate |
 | `options_dispersion` | Desktop `LiveVolSurfaceCache` and options bots | Live/Testnet |
 | `pair_trim` | `execution`, `triangle`, `dev_rpc` | Live/Testnet reduce paths |
-| `prediction_market_arb` | None | Library only; desktop prediction execution is disabled |
+| `prediction_market_arb` | `commands::scan_prediction_opportunities_impl` | Live/Testnet read-only scan |
 | `spatial_exit` | `execution::check_spatial_convergence_impl` | Live/Testnet |
 | `spatial_price_arb` | `arbitrageur-app monitor` and `simulate` | CLI only |
-| `stat_arb_pairs` | None | Library only; desktop wiring is part of #150 |
+| `stat_arb_pairs` | `state`, `commands` | Live/Testnet analysis |
 
 ### `arbitrageur-exchanges`
 

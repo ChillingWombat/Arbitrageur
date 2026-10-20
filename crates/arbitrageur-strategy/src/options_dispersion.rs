@@ -409,197 +409,6 @@ impl OnlineRecursiveSabrCalibrator {
     }
 }
 
-fn svi_fit_score(params: &SviSliceParameters, observations: &[(f64, f64)]) -> Option<f64> {
-    if !params.is_arbitrage_free() {
-        return None;
-    }
-    let mut sse = 0.0;
-    for (k, target_w) in observations {
-        let model_w = params.total_variance(*k);
-        if !model_w.is_finite() || model_w <= 0.0 {
-            return None;
-        }
-        let residual = model_w - target_w;
-        sse += residual * residual;
-    }
-    sse.is_finite().then_some(sse)
-}
-
-/// Fit an arbitrage-free Gatheral SVI slice by deterministic least squares.
-/// The four shape parameters are searched coarsely, then refined
-/// coordinate-wise; `a` is solved analytically as the least-squares level
-/// for each shape candidate.
-fn calibrate_svi_slice(
-    forward_price: f64,
-    time_to_expiry_years: f64,
-    quotes: &[(f64, f64)],
-) -> Option<SviSliceParameters> {
-    if forward_price <= 0.0 || time_to_expiry_years <= 1e-6 {
-        return None;
-    }
-    let mut observations: Vec<(f64, f64)> = quotes
-        .iter()
-        .filter_map(|(strike, iv)| {
-            if !strike.is_finite() || !iv.is_finite() || *strike <= 0.0 || *iv <= 0.0 {
-                return None;
-            }
-            let k = (*strike / forward_price).ln();
-            let w = iv * iv * time_to_expiry_years;
-            (k.is_finite() && w.is_finite() && w > 0.0).then_some((k, w))
-        })
-        .collect();
-    observations.sort_by(|a, b| a.0.total_cmp(&b.0));
-    observations.dedup_by(|a, b| (a.0 - b.0).abs() < 1e-12);
-    if observations.len() < 3 {
-        return None;
-    }
-
-    let k_min = observations.first()?.0;
-    let k_max = observations.last()?.0;
-    let k_span = (k_max - k_min).max(0.05);
-    let mean_k = observations.iter().map(|(k, _)| *k).sum::<f64>() / observations.len() as f64;
-    let mean_w = observations.iter().map(|(_, w)| *w).sum::<f64>() / observations.len() as f64;
-    let max_w = observations
-        .iter()
-        .map(|(_, w)| *w)
-        .fold(mean_w, f64::max)
-        .max(1e-6);
-
-    let b_grid = [0.02, 0.05, 0.10, 0.20, 0.35, 0.60, 1.0]
-        .into_iter()
-        .map(|scale| (max_w * scale).max(1e-5))
-        .collect::<Vec<_>>();
-    let rho_grid = [-0.90, -0.65, -0.40, -0.15, 0.0, 0.15, 0.40, 0.65, 0.90];
-    let m_grid = [
-        mean_k,
-        0.0,
-        k_min + k_span * 0.25,
-        k_min + k_span * 0.50,
-        k_min + k_span * 0.75,
-    ];
-    let sigma_grid = [
-        0.01,
-        0.03,
-        0.06,
-        0.10,
-        (k_span * 0.15).max(0.01),
-        (k_span * 0.30).max(0.02),
-    ];
-
-    let mut best: Option<(SviSliceParameters, f64)> = None;
-    for &b in &b_grid {
-        for &rho in &rho_grid {
-            for &m in &m_grid {
-                for &sigma in &sigma_grid {
-                    let shape_at = |k: f64| {
-                        let diff = k - m;
-                        let root = (diff * diff + sigma * sigma).sqrt();
-                        b * (rho * diff + root)
-                    };
-                    let mean_shape = observations.iter().map(|(k, _)| shape_at(*k)).sum::<f64>()
-                        / observations.len() as f64;
-                    let a = mean_w - mean_shape;
-                    let params = SviSliceParameters::new(a, b, rho, m, sigma);
-                    let Some(score) = svi_fit_score(&params, &observations) else {
-                        continue;
-                    };
-                    if best
-                        .as_ref()
-                        .is_none_or(|(_, best_score)| score < *best_score)
-                    {
-                        best = Some((params, score));
-                    }
-                }
-            }
-        }
-    }
-
-    let (mut params, mut best_score) = best?;
-    // Coordinate refinement around the coarse optimum. Each stage re-solves
-    // the variance level `a` so a shape-only move cannot be rejected merely
-    // because the slice was shifted up or down.
-    for _ in 0..4 {
-        let iteration_score = best_score;
-        {
-            let b_step = (params.b * 0.45).max(max_w * 0.02).max(1e-5);
-            for delta in [-2.0, -1.0, -0.5, 0.5, 1.0, 2.0] {
-                let b = (params.b + delta * b_step).max(0.0);
-                if let Some((candidate, score)) =
-                    refit_svi_level(params, observations.as_slice(), |p| p.b = b)
-                {
-                    if score + 1e-15 < best_score {
-                        params = candidate;
-                        best_score = score;
-                    }
-                }
-            }
-
-            for delta in [-0.30, -0.15, -0.075, 0.075, 0.15, 0.30] {
-                let rho = (params.rho + delta).clamp(-0.95, 0.95);
-                if let Some((candidate, score)) =
-                    refit_svi_level(params, observations.as_slice(), |p| p.rho = rho)
-                {
-                    if score + 1e-15 < best_score {
-                        params = candidate;
-                        best_score = score;
-                    }
-                }
-            }
-
-            let m_step = (k_span * 0.10).max(0.002);
-            for delta in [-2.0, -1.0, -0.5, 0.5, 1.0, 2.0] {
-                let m = params.m + delta * m_step;
-                if let Some((candidate, score)) =
-                    refit_svi_level(params, observations.as_slice(), |p| p.m = m)
-                {
-                    if score + 1e-15 < best_score {
-                        params = candidate;
-                        best_score = score;
-                    }
-                }
-            }
-
-            let sigma_step = (params.sigma * 0.45).max(k_span * 0.02).max(0.002);
-            for delta in [-2.0, -1.0, -0.5, 0.5, 1.0, 2.0] {
-                let sigma = (params.sigma + delta * sigma_step).max(1e-4);
-                if let Some((candidate, score)) =
-                    refit_svi_level(params, observations.as_slice(), |p| p.sigma = sigma)
-                {
-                    if score + 1e-15 < best_score {
-                        params = candidate;
-                        best_score = score;
-                    }
-                }
-            }
-        }
-        if best_score >= iteration_score {
-            break;
-        }
-    }
-
-    Some(params)
-}
-
-fn refit_svi_level(
-    mut params: SviSliceParameters,
-    observations: &[(f64, f64)],
-    mutate: impl FnOnce(&mut SviSliceParameters),
-) -> Option<(SviSliceParameters, f64)> {
-    mutate(&mut params);
-    let mean_w = observations.iter().map(|(_, w)| *w).sum::<f64>() / observations.len() as f64;
-    let mean_shape = observations
-        .iter()
-        .map(|(k, _)| {
-            params.a = 0.0;
-            params.total_variance(*k)
-        })
-        .sum::<f64>()
-        / observations.len() as f64;
-    params.a = mean_w - mean_shape;
-    let score = svi_fit_score(&params, observations)?;
-    Some((params, score))
-}
-
 /// Single expiry slice with calibrated SABR/SVI parameters and raw strike quotes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LiveVolSurfaceSlice {
@@ -617,13 +426,19 @@ pub struct LiveVolSurfaceSlice {
 }
 
 fn recalibrate_slice_svi(slice: &mut LiveVolSurfaceSlice) {
-    let mut quotes: Vec<(f64, f64)> = slice
+    let quotes: Vec<(f64, f64)> = slice
         .observed_strikes
         .iter()
         .map(|(strike_key, iv)| (*strike_key as f64 / 100.0, *iv))
         .collect();
-    quotes.sort_by(|a, b| a.0.total_cmp(&b.0));
-    slice.svi_params = calibrate_svi_slice(slice.forward_price, slice.tenor_years, &quotes);
+    let strikes = quotes.iter().map(|(strike, _)| *strike).collect::<Vec<_>>();
+    let ivs = quotes.iter().map(|(_, iv)| *iv).collect::<Vec<_>>();
+    slice.svi_params = SviSliceParameters::fit_from_iv_smile(
+        &strikes,
+        &ivs,
+        slice.forward_price,
+        slice.tenor_years,
+    );
 }
 
 /// Thread-safe in-memory cache of live SABR volatility surfaces.
@@ -835,6 +650,42 @@ impl LiveVolSurfaceCache {
 impl VolatilitySmileProvider for LiveVolSurfaceCache {
     fn get_implied_volatility(&self, asset: &str, expiry: &str, strike: f64) -> Option<f64> {
         self.evaluate_volatility(asset, expiry, strike)
+    }
+
+    fn get_svi_smile_adjusted_delta(
+        &self,
+        underlying: &str,
+        strike: f64,
+        time_to_expiry_years: f64,
+        spot: f64,
+        bs_delta: f64,
+        bs_vega_raw: f64,
+    ) -> Option<f64> {
+        if !time_to_expiry_years.is_finite() || time_to_expiry_years <= 0.0 {
+            return None;
+        }
+        let (expiry_ts_ms, slice_tenor) = {
+            let map = self.slices.read();
+            let slices = map.get(&underlying.to_ascii_uppercase())?;
+            let slice = slices.values().min_by(|a, b| {
+                (a.tenor_years - time_to_expiry_years)
+                    .abs()
+                    .total_cmp(&(b.tenor_years - time_to_expiry_years).abs())
+            })?;
+            (slice.expiry_ms, slice.tenor_years)
+        };
+        let tolerance = (1.0_f64 / 365.25).max(time_to_expiry_years * 0.02);
+        if (slice_tenor - time_to_expiry_years).abs() > tolerance {
+            return None;
+        }
+        self.get_smile_adjusted_delta(
+            underlying,
+            expiry_ts_ms,
+            strike,
+            spot,
+            bs_delta,
+            bs_vega_raw,
+        )
     }
 }
 
@@ -1460,6 +1311,21 @@ mod tests {
             .expect("smile-adjusted delta");
         assert!(adjusted.is_finite());
         assert!((adjusted - 0.35).abs() > 1e-8);
+        let provider_adjusted = VolatilitySmileProvider::get_svi_smile_adjusted_delta(
+            &cache, "BTC", 95.0, tenor, forward, 0.35, 18.0,
+        )
+        .expect("provider delegates to the calibrated SVI slice");
+        assert!((provider_adjusted - adjusted).abs() < 1e-12);
+        assert!(VolatilitySmileProvider::get_svi_smile_adjusted_delta(
+            &cache,
+            "BTC",
+            95.0,
+            tenor * 2.0,
+            forward,
+            0.35,
+            18.0,
+        )
+        .is_none());
         assert_eq!(
             cache.get_smile_adjusted_delta("BTC", expiry_ms + 1, 95.0, forward, 0.35, 18.0),
             None

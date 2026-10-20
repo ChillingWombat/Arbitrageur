@@ -2,8 +2,9 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use arbitrageur_core::hub::PublicTradeEvent;
 use arbitrageur_core::quote::OrderBook;
-use arbitrageur_core::types::{Decimal, VenueId};
+use arbitrageur_core::types::{Decimal, Side, VenueId};
 use arbitrageur_exchanges::ws::{
     apply_lighter_delta, hyperliquid_subscribe_message, hyperliquid_ws_url,
     lighter_book_from_sides, lighter_default_market_symbol_map, lighter_delta_continuous,
@@ -247,8 +248,14 @@ fn ingest_book(state: &AppEngineState, book: &OrderBook, venue_id: &VenueId, sym
         tracing::debug!("feed: {venue_id} dropped book for {symbol}: {e}");
         return;
     }
+    let previous = state.market_data_hub.get_orderbook(venue_id, symbol);
     state.feed_hawkes_book(&venue_id.0, book);
     state.market_data_hub.update_orderbook_from_ws(book.clone());
+    if let Some(previous) = previous {
+        if let Some(trade_event) = infer_book_fill(&previous, book) {
+            state.ingest_public_trade(&trade_event);
+        }
+    }
     if let Some(entry) = top_sample(book, venue_id) {
         // Normalize onto the USD basis and the mode's storage key: merged
         // modes keep the canonical-base key; `separate` keys on the pair
@@ -288,6 +295,43 @@ fn ingest_book(state: &AppEngineState, book: &OrderBook, venue_id: &VenueId, sym
             state.env().as_str(),
         );
     }
+}
+
+/// Infer a public trade only when the new top of book proves that liquidity
+/// traded through the previous frame: a top level was consumed at the same
+/// price, or the opposite side moved through it. Pure liquidity additions
+/// never emit a synthetic trade.
+fn infer_book_fill(previous: &OrderBook, current: &OrderBook) -> Option<PublicTradeEvent> {
+    if previous.venue != current.venue {
+        return None;
+    }
+    let mut candidates: Vec<(Side, Decimal, Decimal)> = Vec::new();
+    if let (Some(before), Some(after)) = (previous.best_ask(), current.best_ask()) {
+        if after.price > before.price {
+            candidates.push((Side::Buy, before.price, before.size));
+        } else if after.price == before.price && after.size < before.size {
+            candidates.push((Side::Buy, before.price, before.size - after.size));
+        }
+    }
+    if let (Some(before), Some(after)) = (previous.best_bid(), current.best_bid()) {
+        if after.price < before.price {
+            candidates.push((Side::Sell, before.price, before.size));
+        } else if after.price == before.price && after.size < before.size {
+            candidates.push((Side::Sell, before.price, before.size - after.size));
+        }
+    }
+    candidates.retain(|(_, _, size)| *size > Decimal::ZERO);
+    candidates.sort_by_key(|candidate| std::cmp::Reverse(candidate.2));
+    let (side, price, size) = candidates.into_iter().next()?;
+    Some(PublicTradeEvent {
+        timestamp: current.timestamp,
+        venue: current.venue.clone(),
+        symbol: canonical_base(&current.symbol),
+        side,
+        price,
+        size,
+        is_liquidation: false,
+    })
 }
 
 fn validate_feed_book(
@@ -875,6 +919,35 @@ mod tests {
             dec!(1),
         ));
         b
+    }
+
+    #[test]
+    fn infer_book_fill_uses_consumed_top_level_only() {
+        let previous = book("hyperliquid", "BTC-USDC", 100.0, 101.0);
+        let unchanged = previous.clone();
+        assert!(infer_book_fill(&previous, &unchanged).is_none());
+
+        let mut ask_consumed = unchanged.clone();
+        ask_consumed.asks[0].size = dec!(0.4);
+        let trade = infer_book_fill(&previous, &ask_consumed).expect("ask consumption is a fill");
+        assert_eq!(trade.side, Side::Buy);
+        assert_eq!(trade.price, dec!(101));
+        assert_eq!(trade.size, dec!(0.6));
+        assert_eq!(trade.symbol, "BTC");
+    }
+
+    #[test]
+    fn infer_book_fill_tracks_price_moving_bid_and_ask() {
+        let previous = book("lighter", "ETH-USDC", 100.0, 101.0);
+        let higher_ask = book("lighter", "ETH-USDC", 100.0, 102.0);
+        let buy = infer_book_fill(&previous, &higher_ask).expect("ask lift is a buy");
+        assert_eq!(buy.side, Side::Buy);
+        assert_eq!(buy.price, dec!(101));
+
+        let lower_bid = book("lighter", "ETH-USDC", 99.0, 101.0);
+        let sell = infer_book_fill(&previous, &lower_bid).expect("bid hit is a sell");
+        assert_eq!(sell.side, Side::Sell);
+        assert_eq!(sell.price, dec!(100));
     }
 
     #[test]
