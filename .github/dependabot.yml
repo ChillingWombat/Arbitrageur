@@ -10,6 +10,10 @@ updates:
         update-types:
           - minor
           - patch
+    ignore:
+      - dependency-name: "rand"
+        versions:
+          - ">= 0.9"
 
   - package-ecosystem: npm
     directory: "/frontend"
@@ -21,6 +25,16 @@ updates:
         update-types:
           - minor
           - patch
+    ignore:
+      - dependency-name: "vite"
+        versions:
+          - ">= 7.0"
+      - dependency-name: "@vitejs/plugin-react"
+        versions:
+          - ">= 6.0"
+      - dependency-name: "@types/node"
+        versions:
+          - ">= 25.0"
 
   - package-ecosystem: github-actions
     directory: "/"

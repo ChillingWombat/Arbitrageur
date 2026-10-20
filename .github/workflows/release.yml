@@ -110,7 +110,7 @@ jobs:
           ls -la "$GITHUB_WORKSPACE/pkg"
 
       - name: Upload desktop installers
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: desktop-${{ matrix.asset_name }}
           path: pkg/
@@ -153,7 +153,7 @@ jobs:
           tar -C "$stage" -czf "$GITHUB_WORKSPACE/pkg/arbitrageur-headless-${TAG}-linux-x86_64.tar.gz" bin opt
 
       - name: Upload headless tarball
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: headless-linux-x86_64
           path: pkg/
@@ -181,7 +181,7 @@ jobs:
           cargo sbom --output-format=cyclone_dx_json_1_6 > "$GITHUB_WORKSPACE/pkg/sbom.cdx.json"
 
       - name: Upload SBOM
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: sbom
           path: pkg/sbom.cdx.json
@@ -196,7 +196,7 @@ jobs:
         shell: bash
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
 
