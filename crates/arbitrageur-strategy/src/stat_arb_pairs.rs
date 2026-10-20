@@ -3,6 +3,7 @@ use arbitrageur_core::exchange::ExchangeAdapter;
 use arbitrageur_core::types::{dec, Decimal, Side};
 use arbitrageur_math::kalman_filter::HedgeRatioKalmanFilter;
 use arbitrageur_math::rolling_stats::RollingWindowStats;
+use rust_decimal::prelude::ToPrimitive;
 use std::sync::Arc;
 
 /// Signal emitted by the stat-arb pair strategy. Entry legs open the
@@ -29,6 +30,22 @@ pub enum SpreadSignal {
         delta_qty_x: Decimal,
         new_total_qty_x: Decimal,
     },
+}
+
+/// Compatibility alias for consumers that refer to the emitted spread action
+/// as a pair signal.
+pub type PairSignal = SpreadSignal;
+/// Compatibility alias for the strategy's fallible observation path.
+pub type ArbitrageError = anyhow::Error;
+
+/// Hedge-leg side for a Y position under spread `Y - beta * X`.
+/// The sign of beta is economically meaningful: a negative ratio flips the
+/// hedge direction instead of merely changing its magnitude.
+fn hedge_side_for_y(side_y: Side, beta: Decimal) -> Side {
+    match (side_y, beta >= dec!(0)) {
+        (Side::Buy, true) | (Side::Sell, false) => Side::Sell,
+        (Side::Buy, false) | (Side::Sell, true) => Side::Buy,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -131,8 +148,8 @@ impl StatArbPairsStrategy {
             stop_loss_z_score,
             max_holding_ticks: 300,
             base_trade_size_y,
-            round_trip_fee_bps: dec!(0.0),
-            min_profit_hurdle_bps: dec!(0.0),
+            round_trip_fee_bps: dec!(10.0),
+            min_profit_hurdle_bps: dec!(5.0),
             beta_rebalance_threshold_pct: 0.15,
             position: SpreadPosition::Flat,
             open_sides: None,
@@ -247,9 +264,22 @@ impl StatArbPairsStrategy {
             self.exchange.fetch_ticker(&self.symbol_y),
             self.exchange.fetch_ticker(&self.symbol_x)
         )?;
+        self.observe_pair_prices(tick_y.last, tick_x.last)
+    }
 
-        let py_f64 = tick_y.last.to_string().parse::<f64>().unwrap_or(0.0);
-        let px_f64 = tick_x.last.to_string().parse::<f64>().unwrap_or(0.0);
+    /// Pure observation entry point: runs the Kalman/Hamilton state machine
+    /// on supplied prices without fetching from an exchange adapter.
+    pub fn observe_pair_prices(
+        &mut self,
+        price_y: Decimal,
+        price_x: Decimal,
+    ) -> Result<Option<PairSignal>, ArbitrageError> {
+        let Some(py_f64) = price_y.to_f64() else {
+            return Ok(None);
+        };
+        let Some(px_f64) = price_x.to_f64() else {
+            return Ok(None);
+        };
 
         if py_f64 <= 0.0 || px_f64 <= 0.0 {
             return Ok(None);
@@ -456,16 +486,47 @@ impl StatArbPairsStrategy {
             let beta_drift_pct = (current_beta - snap.beta).abs() / snap.beta.abs().max(1e-4);
             if beta_drift_pct >= self.beta_rebalance_threshold_pct {
                 if let Some((side_y, side_x, qty_y, cur_qty_x)) = self.open_sides {
+                    let current_beta_dec =
+                        Decimal::from_f64_retain(current_beta).unwrap_or(dec!(0));
+                    let target_side_x = hedge_side_for_y(side_y, current_beta_dec);
                     let target_qty_x =
                         qty_y * Decimal::from_f64_retain(current_beta.abs()).unwrap_or(dec!(1.0));
+
+                    // A sign flip requires closing the old hedge before
+                    // opening the reversed one. Emit the close first and
+                    // leave the desired side in place for the next rebalance.
+                    if target_side_x != side_x {
+                        if cur_qty_x > dec!(0) {
+                            self.open_sides = Some((side_y, side_x, qty_y, dec!(0)));
+                            return Ok(Some(SpreadSignal::RebalanceHedge {
+                                side_x: side_x.opposite(),
+                                delta_qty_x: cur_qty_x,
+                                new_total_qty_x: dec!(0),
+                            }));
+                        }
+                        if target_qty_x > dec!(0) {
+                            self.open_sides = Some((side_y, target_side_x, qty_y, target_qty_x));
+                            self.entry_snapshot = Some(EntryModelSnapshot {
+                                alpha: snap.alpha,
+                                beta: current_beta,
+                                variance: snap.variance,
+                            });
+                            return Ok(Some(SpreadSignal::RebalanceHedge {
+                                side_x: target_side_x,
+                                delta_qty_x: target_qty_x,
+                                new_total_qty_x: target_qty_x,
+                            }));
+                        }
+                    }
+
                     let delta_x = target_qty_x - cur_qty_x;
                     if delta_x.abs() >= dec!(0.001) {
                         let rebal_side = if delta_x > dec!(0) {
-                            side_x
+                            target_side_x
                         } else {
-                            side_x.opposite()
+                            target_side_x.opposite()
                         };
-                        self.open_sides = Some((side_y, side_x, qty_y, target_qty_x));
+                        self.open_sides = Some((side_y, target_side_x, qty_y, target_qty_x));
                         self.entry_snapshot = Some(EntryModelSnapshot {
                             alpha: snap.alpha,
                             beta: current_beta,
@@ -637,9 +698,7 @@ impl StatArbPairsStrategy {
                 .unwrap_or(1.5);
             Decimal::from_f64_retain(z_diff * residual_std_bps).unwrap_or(dec!(0))
         };
-        if self.round_trip_fee_bps + self.min_profit_hurdle_bps > dec!(0)
-            && expected_edge_bps < self.round_trip_fee_bps + self.min_profit_hurdle_bps
-        {
+        if expected_edge_bps < self.round_trip_fee_bps + self.min_profit_hurdle_bps {
             tracing::warn!(
                 "[{}/{}] StatArb rejected: edge {:.1} bps < fees {:.1} bps + hurdle {:.1} bps",
                 self.symbol_y,
@@ -656,11 +715,8 @@ impl StatArbPairsStrategy {
 
         // If beta >= 0, spread = Y - beta*X: Long spread -> Buy Y, Sell X.
         // If beta < 0, spread = Y + |beta|*X: Long spread -> Buy Y, Buy X.
-        let (side_x_for_long_y, side_x_for_short_y) = if beta_dec >= dec!(0) {
-            (Side::Sell, Side::Buy)
-        } else {
-            (Side::Buy, Side::Sell)
-        };
+        let side_x_for_long_y = hedge_side_for_y(Side::Buy, beta_dec);
+        let side_x_for_short_y = hedge_side_for_y(Side::Sell, beta_dec);
 
         if z <= -self.entry_z_score {
             // Long Spread: Buy Y, hedge X
@@ -723,6 +779,49 @@ impl StatArbPairsStrategy {
 mod tests {
     use super::*;
     use arbitrageur_exchanges::simulated::SimulatedExchange;
+
+    fn simulated_pair() -> Arc<SimulatedExchange> {
+        let ex = Arc::new(SimulatedExchange::new(
+            "hyperliquid",
+            "Hyperliquid",
+            0,
+            dec!(2.0),
+            dec!(20000.0),
+        ));
+        ex.seed_market("Y", dec!(100.0), dec!(100.1), dec!(10.0), dec!(0));
+        ex.seed_market("X", dec!(100.0), dec!(100.1), dec!(10.0), dec!(0));
+        ex
+    }
+
+    #[test]
+    fn default_fee_and_profit_hurdles_are_non_zero() {
+        let strat =
+            StatArbPairsStrategy::new("Y", "X", simulated_pair(), dec!(1.5), dec!(0.5), dec!(1.0))
+                .expect("valid config");
+        assert_eq!(strat.round_trip_fee_bps, dec!(10.0));
+        assert_eq!(strat.min_profit_hurdle_bps, dec!(5.0));
+    }
+
+    #[test]
+    fn negative_beta_flips_the_hedge_side() {
+        assert_eq!(hedge_side_for_y(Side::Buy, dec!(0.5)), Side::Sell);
+        assert_eq!(hedge_side_for_y(Side::Buy, dec!(-0.5)), Side::Buy);
+        assert_eq!(hedge_side_for_y(Side::Sell, dec!(0.5)), Side::Buy);
+        assert_eq!(hedge_side_for_y(Side::Sell, dec!(-0.5)), Side::Sell);
+    }
+
+    #[test]
+    fn observe_pair_prices_runs_without_exchange_io() {
+        let mut strat =
+            StatArbPairsStrategy::new("Y", "X", simulated_pair(), dec!(1.5), dec!(0.5), dec!(1.0))
+                .expect("valid config");
+        let signal = strat
+            .observe_pair_prices(dec!(100.0), dec!(100.0))
+            .expect("observation");
+        assert!(signal.is_none());
+        assert_eq!(strat.prices_y, vec![100.0]);
+        assert_eq!(strat.prices_x, vec![100.0]);
+    }
 
     #[tokio::test]
     async fn test_stat_arb_granger_causality_gating() {

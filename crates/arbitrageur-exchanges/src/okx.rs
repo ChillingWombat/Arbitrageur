@@ -59,6 +59,17 @@ fn parse_pair(level: &serde_json::Value) -> Option<(Decimal, Decimal)> {
     }
 }
 
+fn funding_interval_hours(funding_time_ms: i64, next_funding_time_ms: i64) -> u32 {
+    if funding_time_ms > 0 && next_funding_time_ms > funding_time_ms {
+        let interval_ms = next_funding_time_ms - funding_time_ms;
+        let rounded_hours = ((interval_ms + 1_799_999) / 3_600_000) as u32;
+        if rounded_hours > 0 {
+            return rounded_hours;
+        }
+    }
+    8
+}
+
 impl OkxAdapter {
     pub fn new(
         base_url: Option<String>,
@@ -450,6 +461,7 @@ impl OkxAdapter {
         Decimal,
         Option<Decimal>,
         Option<Decimal>,
+        String,
     )> {
         use arbitrageur_core::types::OrderStatus;
         let path = format!("/api/v5/trade/order?instId={inst_id}&ordId={ord_id}");
@@ -481,14 +493,19 @@ impl OkxAdapter {
             .get("clOrdId")
             .and_then(|s| s.as_str())
             .filter(|s| !s.is_empty())
-            .ok_or_else(|| anyhow::anyhow!("OKX order query missing clOrdId: {v}"))?;
+            .map(str::to_string);
         if let Some(expected) = expected_client_id {
-            if returned_client != expected {
-                anyhow::bail!(
-                    "OKX order query clOrdId '{returned_client}' does not match request '{expected}': {v}"
-                );
+            if let Some(returned) = returned_client.as_deref() {
+                if returned != expected {
+                    anyhow::bail!(
+                        "OKX order query clOrdId '{returned}' does not match request '{expected}': {v}"
+                    );
+                }
             }
         }
+        let resolved_client = returned_client
+            .or_else(|| expected_client_id.map(str::to_string))
+            .unwrap_or_default();
         let state = data
             .get("state")
             .and_then(|s| s.as_str())
@@ -553,7 +570,7 @@ impl OkxAdapter {
             _ if filled_base == orig_base => OrderStatus::Filled,
             _ => OrderStatus::New,
         };
-        Ok((status, orig_base, filled_base, avg_px, fee))
+        Ok((status, orig_base, filled_base, avg_px, fee, resolved_client))
     }
 
     /// Poll a resting order for its true fill state (up to ~5s). Returns
@@ -573,7 +590,7 @@ impl OkxAdapter {
         Option<Decimal>,
     )> {
         for _ in 0..6 {
-            let (status, _orig, filled_base, avg_px, fee) = self
+            let (status, _orig, filled_base, avg_px, fee, _client_id) = self
                 .query_order_once(
                     inst_id,
                     ord_id,
@@ -832,7 +849,7 @@ impl ExchangeAdapter for OkxAdapter {
 
         let rate = dec_from_json(data.get("fundingRate"))
             .ok_or_else(|| anyhow::anyhow!("OKX missing fundingRate for {}", symbol))?;
-        let next_time_ms = data
+        let funding_time_ms = data
             .get("fundingTime")
             .and_then(|n| {
                 if let Some(s) = n.as_str() {
@@ -842,6 +859,17 @@ impl ExchangeAdapter for OkxAdapter {
                 }
             })
             .unwrap_or(0);
+        let next_time_ms = data
+            .get("nextFundingTime")
+            .and_then(|n| {
+                if let Some(s) = n.as_str() {
+                    s.parse::<i64>().ok()
+                } else {
+                    n.as_i64()
+                }
+            })
+            .unwrap_or(funding_time_ms);
+        let interval_hours = funding_interval_hours(funding_time_ms, next_time_ms);
         let next_funding_time =
             DateTime::from_timestamp_millis(next_time_ms).unwrap_or_else(Utc::now);
 
@@ -850,7 +878,7 @@ impl ExchangeAdapter for OkxAdapter {
             symbol: symbol.to_string(),
             rate,
             predicted_rate: None,
-            interval_hours: 8,
+            interval_hours,
             next_funding_time,
             timestamp: Utc::now(),
         })
@@ -1135,7 +1163,7 @@ impl ExchangeAdapter for OkxAdapter {
         &self,
         symbol: &str,
         order_id: &str,
-        _client_order_id: Option<&str>,
+        client_order_id: Option<&str>,
     ) -> anyhow::Result<OrderResponse> {
         if !self.has_credentials() {
             anyhow::bail!(
@@ -1147,8 +1175,8 @@ impl ExchangeAdapter for OkxAdapter {
         }
         let inst_id = Self::to_venue_symbol(symbol)?;
         let ct_val = self.contract_face_value(&inst_id).await?;
-        let (status, orig_base, filled_base, avg_px, fee) = self
-            .query_order_once(&inst_id, order_id, ct_val, None, None)
+        let (status, orig_base, filled_base, avg_px, fee, returned_client) = self
+            .query_order_once(&inst_id, order_id, ct_val, client_order_id, None)
             .await?;
         let remaining = orig_base.saturating_sub(filled_base);
         let fee_currency = if inst_id.contains("-USDC-") {
@@ -1158,7 +1186,7 @@ impl ExchangeAdapter for OkxAdapter {
         };
         Ok(OrderResponse {
             order_id: order_id.to_string(),
-            client_order_id: String::new(),
+            client_order_id: returned_client,
             venue: VenueId::new("okx"),
             symbol: symbol.to_string(),
             status,
@@ -1186,7 +1214,7 @@ impl ExchangeAdapter for OkxAdapter {
         let body = serde_json::json!({
             "instId": inst_id,
             "lever": leverage.to_string(),
-            "mgnMode": "isolated",
+            "mgnMode": self.td_mode,
         });
         let body_str = serde_json::to_string(&body)?;
         let v = self
@@ -1227,6 +1255,11 @@ impl ExchangeAdapter for OkxAdapter {
                 .read()
                 .as_ref()
                 .is_some_and(|s| !s.trim().is_empty())
+            && self
+                .passphrase
+                .read()
+                .as_ref()
+                .is_some_and(|p| !p.trim().is_empty())
     }
 }
 
@@ -1285,6 +1318,37 @@ mod tests {
         assert_eq!(OkxAdapter::contracts_for_qty(dec!(0.015), dec!(0.01)), None);
         assert_eq!(OkxAdapter::contracts_for_qty(dec!(0.005), dec!(0.01)), None);
         assert_eq!(OkxAdapter::contracts_for_qty(dec!(0), dec!(0.01)), None);
+    }
+
+    #[test]
+    fn live_credentials_require_the_full_api_triplet() {
+        let complete = OkxAdapter::new(
+            None,
+            Some("key".into()),
+            Some("secret".into()),
+            Some("pass".into()),
+        );
+        assert!(complete.has_live_credentials());
+
+        for passphrase in [None, Some(String::new()), Some("   ".to_string())] {
+            let incomplete =
+                OkxAdapter::new(None, Some("key".into()), Some("secret".into()), passphrase);
+            assert!(
+                !incomplete.has_live_credentials(),
+                "passphrase must be non-empty for live readiness"
+            );
+        }
+    }
+
+    #[test]
+    fn funding_interval_is_derived_from_venue_timestamps() {
+        assert_eq!(
+            funding_interval_hours(1_000_000, 1_000_000 + 4 * 3_600_000),
+            4
+        );
+        assert_eq!(funding_interval_hours(1_000_000, 1_000_000 + 3_600_000), 1);
+        assert_eq!(funding_interval_hours(1_000_000, 0), 8);
+        assert_eq!(funding_interval_hours(0, 0), 8);
     }
 
     #[test]

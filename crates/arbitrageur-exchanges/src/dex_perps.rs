@@ -6686,17 +6686,10 @@ impl DexPerpAdapter {
     async fn qfex_place(&self, order: &OrderRequest) -> anyhow::Result<OrderResponse> {
         let vsym = self.venue_symbol(&order.symbol);
         let (order_type, tif) = qfex_policy(order);
-        let qty_f = order
-            .quantity
-            .to_string()
-            .parse::<f64>()
-            .map_err(|e| anyhow::anyhow!("QFEX quantity not a float: {e}"))?;
-        let price_f = match order.price {
-            Some(p) => p
-                .to_string()
-                .parse::<f64>()
-                .map_err(|e| anyhow::anyhow!("QFEX price not a float: {e}"))?,
-            None if order_type == "MARKET" => 0.0,
+        let qty_wire = order.quantity.normalize().to_string();
+        let price_wire = match order.price {
+            Some(p) => p.normalize().to_string(),
+            None if order_type == "MARKET" => "0".to_string(),
             None => anyhow::bail!("QFEX limit/ALO orders require a price"),
         };
         let resp = self
@@ -6709,8 +6702,8 @@ impl DexPerpAdapter {
                         "side": if order.side.is_buy() { "BUY" } else { "SELL" },
                         "order_type": order_type,
                         "order_time_in_force": tif,
-                        "quantity": qty_f,
-                        "price": price_f,
+                        "quantity": qty_wire,
+                        "price": price_wire,
                         "take_profit": 0,
                         "stop_loss": 0,
                         "reduce_only": order.reduce_only,

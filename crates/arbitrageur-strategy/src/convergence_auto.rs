@@ -1,14 +1,17 @@
 //! Autonomous convergence executor policy — Spread Radar bot (GitHub issue #5).
 //!
-//! Pure decision functions for the opt-in testnet bot that consumes the
-//! spread monitor's qualified-opportunity stream. No I/O, no engine state,
-//! no time reads: every input arrives as an argument so policy is
-//! deterministic and unit-testable in isolation.
+//! Pure decision functions for the opt-in convergence bot in the testnet and
+//! live postures. No I/O, no engine state, no time reads: every input arrives
+//! as an argument so policy is deterministic and unit-testable in isolation.
 //!
-//! Contract notes (testnet-only, fail-closed):
+//! Contract notes (dual-posture, fail-closed):
 //! - The monitor remains the sole authority on qualification. These functions
 //!   never re-derive P_win, convergence time, or capacity; they consume them
 //!   and refuse to trade when any required field is missing.
+//! - Testnet uses the configured win-probability and expected-profit floors.
+//!   Live mode raises those floors to at least 90% and 25 bps respectively,
+//!   and a probability invalidation only force-closes when the spread has also
+//!   widened adversely relative to entry.
 //! - Sizing prices depth-decay via the row's `optimal_size_usd` and never
 //!   walks the book past the marginal `breakeven_size_usd` bound.
 //! - The authoritative delta/margin/slippage/depth gates stay inside the
@@ -17,8 +20,8 @@
 //!   any live breach still fails closed inside execution and is audited.
 //! - Stop evaluation uses an entry-relative band (`stop_mult × |entry_dev|`,
 //!   floored at the friction band) because the monitor row DTO does not carry
-//!   the OU σ the stop band was conditioned on. This is the documented
-//!   testnet-only approximation; it never overlaps the convergence band.
+//!   the OU σ the stop band was conditioned on. This approximation applies in
+//!   both postures and never overlaps the convergence band.
 
 use serde::{Deserialize, Serialize};
 
@@ -737,17 +740,21 @@ pub fn evaluate_exit(
             ),
         };
     }
-    // Statistical Invalidation Gate: if the live estimated win/reversion probability
-    // drops below the invalidation threshold (hypothesis broken, no statistical edge),
-    // unwind the position rather than holding dead risk.
+    // Statistical Invalidation Gate: a noisy probability dip alone must not
+    // force-close a converging trade at a loss. Require the live deviation to
+    // be on the entry side of zero and strictly wider than the entry edge.
+    let widened_adversely =
+        entry_dev != 0.0 && dev.signum() == entry_dev.signum() && dev.abs() > entry_dev.abs();
     if let Some(p) = row.p_win.filter(|p| p.is_finite()) {
-        if p < cfg.invalidation_p_win {
+        if p < cfg.invalidation_p_win && widened_adversely {
             return ExitEval::Exit {
                 trigger: ExitTrigger::ProbabilityDecayed,
                 reason: format!(
-                    "win probability decayed to {:.1}% (below {:.1}% floor)",
+                    "win probability decayed to {:.1}% (below {:.1}% floor) while deviation widened adversely to {:.1} bps (entry {:.1} bps)",
                     p * 100.0,
-                    cfg.invalidation_p_win * 100.0
+                    cfg.invalidation_p_win * 100.0,
+                    dev,
+                    entry_dev
                 ),
             };
         }
@@ -1136,7 +1143,8 @@ mod tests {
     #[test]
     fn exit_on_probability_decay_below_floor() {
         let cfg = exit_cfg(); // invalidation_p_win: 0.50
-                              // Outside friction band, not stopped, but win probability collapsed to 30% -> exit
+                              // Probability collapsed, but the spread converged from 10 to 8 bps:
+                              // a noisy probability dip must not force a loss-taking exit.
         let e = evaluate_exit(
             10.0,
             None,
@@ -1144,6 +1152,20 @@ mod tests {
             999_999,
             None,
             Some(&live_with_prob("ready", Some(8.0), Some(0.30))),
+            0,
+            &cfg,
+        );
+        assert_eq!(e, ExitEval::Hold);
+
+        // Same probability collapse with adverse widening (10 -> 11 bps)
+        // invalidates the trade and exits.
+        let e = evaluate_exit(
+            10.0,
+            None,
+            4.0,
+            999_999,
+            None,
+            Some(&live_with_prob("ready", Some(11.0), Some(0.30))),
             0,
             &cfg,
         );

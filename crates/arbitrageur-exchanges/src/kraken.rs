@@ -32,6 +32,24 @@ fn dec_from_json(v: Option<&serde_json::Value>) -> Option<Decimal> {
     }
 }
 
+fn kraken_json_id(v: Option<&serde_json::Value>) -> Option<String> {
+    let value = v?;
+    match value {
+        serde_json::Value::String(s) => {
+            let trimmed = s.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_string())
+        }
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+fn kraken_client_order_id(order: &serde_json::Value) -> Option<String> {
+    ["cliOrdId", "cl_ord_id", "clientOrderId", "userref"]
+        .into_iter()
+        .find_map(|field| kraken_json_id(order.get(field)))
+}
+
 fn parse_pair(level: &serde_json::Value) -> Option<(Decimal, Decimal)> {
     let arr = level.as_array()?;
     if arr.len() < 2 {
@@ -385,6 +403,7 @@ impl KrakenAdapter {
         &self,
         symbol: &str,
         order_id: &str,
+        expected_client_id: Option<&str>,
     ) -> anyhow::Result<OrderResponse> {
         use arbitrageur_core::types::OrderStatus;
         let ct = self.contract_size_for(symbol).await?;
@@ -392,15 +411,25 @@ impl KrakenAdapter {
 
         // 1) Open orders snapshot.
         let open_v = self.authed_get("/derivatives/api/v3/orders").await?;
-        let mut open_entry: Option<serde_json::Value> = None;
+        let mut open_entry: Option<(serde_json::Value, String, String)> = None;
         if let Some(arr) = open_v.get("openOrders").and_then(|o| o.as_array()) {
             for o in arr {
                 let oid = o
                     .get("order_id")
                     .or_else(|| o.get("orderId"))
                     .and_then(|s| s.as_str());
-                if oid == Some(order_id) {
-                    open_entry = Some(o.clone());
+                let cid = kraken_client_order_id(o);
+                let id_matches = oid == Some(order_id);
+                let cid_matches = expected_client_id
+                    .zip(cid.as_deref())
+                    .is_some_and(|(expected, actual)| expected == actual);
+                if id_matches || cid_matches {
+                    open_entry = Some((
+                        o.clone(),
+                        oid.unwrap_or(order_id).to_string(),
+                        cid.or_else(|| expected_client_id.map(str::to_string))
+                            .unwrap_or_default(),
+                    ));
                     break;
                 }
             }
@@ -419,6 +448,8 @@ impl KrakenAdapter {
                      filled: Decimal,
                      avg_px: Option<Decimal>,
                      fee: Decimal,
+                     resolved_order_id: &str,
+                     resolved_client_id: &str,
                      raw: serde_json::Value|
          -> anyhow::Result<OrderResponse> {
             if filled > orig && orig > dec!(0) {
@@ -427,8 +458,8 @@ impl KrakenAdapter {
                 );
             }
             Ok(OrderResponse {
-                order_id: order_id.to_string(),
-                client_order_id: String::new(),
+                order_id: resolved_order_id.to_string(),
+                client_order_id: resolved_client_id.to_string(),
                 venue: VenueId::new("kraken"),
                 symbol: symbol.to_string(),
                 status,
@@ -443,7 +474,7 @@ impl KrakenAdapter {
             })
         };
 
-        if let Some(o) = open_entry {
+        if let Some((o, resolved_order_id, resolved_client_id)) = open_entry {
             let osym = o.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
             if !osym.is_empty() && osym != venue_sym {
                 anyhow::bail!(
@@ -478,6 +509,8 @@ impl KrakenAdapter {
                 filled,
                 fill_agg.map(|(_, px, _)| px),
                 fill_agg.map(|(_, _, f)| f).unwrap_or_default(),
+                &resolved_order_id,
+                &resolved_client_id,
                 o,
             );
         }
@@ -495,9 +528,16 @@ impl KrakenAdapter {
                     .get("order_id")
                     .or_else(|| o.get("orderId"))
                     .and_then(|s| s.as_str());
-                if oid != Some(order_id) {
+                let cid = kraken_client_order_id(o);
+                let id_matches = oid == Some(order_id);
+                let cid_matches = expected_client_id
+                    .zip(cid.as_deref())
+                    .is_some_and(|(expected, actual)| expected == actual);
+                if !id_matches && !cid_matches {
                     continue;
                 }
+                let resolved_order_id = oid.unwrap_or(order_id);
+                let resolved_client_id = cid.as_deref().or(expected_client_id).unwrap_or_default();
                 let osym = o.get("symbol").and_then(|s| s.as_str()).unwrap_or("");
                 if !osym.is_empty() && osym != venue_sym {
                     anyhow::bail!(
@@ -538,6 +578,8 @@ impl KrakenAdapter {
                     filled,
                     fill_agg.map(|(_, px, _)| px),
                     fill_agg.map(|(_, _, f)| f).unwrap_or_default(),
+                    resolved_order_id,
+                    resolved_client_id,
                     entry.clone(),
                 );
             }
@@ -556,6 +598,8 @@ impl KrakenAdapter {
                     filled,
                     Some(vwap),
                     fee,
+                    order_id,
+                    expected_client_id.unwrap_or_default(),
                     fills_v,
                 )
             }
@@ -568,6 +612,8 @@ impl KrakenAdapter {
                     dec!(0),
                     None,
                     dec!(0),
+                    order_id,
+                    expected_client_id.unwrap_or_default(),
                     serde_json::json!({"resolved_by": "absence", "order_id": order_id}),
                 )
             }
@@ -1220,7 +1266,14 @@ impl ExchangeAdapter for KrakenAdapter {
                     if attempt > 0 {
                         tokio::time::sleep(std::time::Duration::from_millis(600)).await;
                     }
-                    match self.resolve_order_state(&order.symbol, &order_id).await {
+                    match self
+                        .resolve_order_state(
+                            &order.symbol,
+                            &order_id,
+                            Some(order.client_order_id.as_str()),
+                        )
+                        .await
+                    {
                         Ok(state) if state.filled_qty > dec!(0) || state.status.is_final() => {
                             let mut out = state;
                             out.client_order_id = order.client_order_id.clone();
@@ -1310,7 +1363,7 @@ impl ExchangeAdapter for KrakenAdapter {
         &self,
         symbol: &str,
         order_id: &str,
-        _client_order_id: Option<&str>,
+        client_order_id: Option<&str>,
     ) -> anyhow::Result<OrderResponse> {
         if !self.has_credentials() {
             anyhow::bail!("Cannot fetch order on Kraken: API credentials are not configured or vault is locked");
@@ -1318,7 +1371,8 @@ impl ExchangeAdapter for KrakenAdapter {
         if order_id.trim().is_empty() {
             anyhow::bail!("Kraken fetch_order requires a non-empty order_id");
         }
-        self.resolve_order_state(symbol, order_id).await
+        self.resolve_order_state(symbol, order_id, client_order_id)
+            .await
     }
 
     fn order_status_polling_implemented(&self) -> bool {
@@ -1349,6 +1403,22 @@ impl ExchangeAdapter for KrakenAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_venue_client_order_id_variants() {
+        for (field, value) in [
+            ("cliOrdId", serde_json::json!("client-1")),
+            ("cl_ord_id", serde_json::json!("client-2")),
+            ("clientOrderId", serde_json::json!("client-3")),
+            ("userref", serde_json::json!(4242)),
+        ] {
+            let row = serde_json::json!({ (field): value });
+            assert!(
+                kraken_client_order_id(&row).is_some(),
+                "missing client id for {field}"
+            );
+        }
+    }
 
     #[test]
     fn parse_account_response_rolls_up_balances_and_positions() {
