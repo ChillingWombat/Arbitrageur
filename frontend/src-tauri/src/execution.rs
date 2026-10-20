@@ -8,7 +8,7 @@
 //! used by flatten paths come from `crate::triangle`.
 
 use crate::commands::{
-    compute_route_economics, compute_route_economics_for_mode, effective_venue_fee_bps,
+    compute_route_economics, compute_route_economics_with_gas, effective_venue_fee_bps,
     fetch_multi_market_quotes_impl, live_entry_gate, maybe_record_margin_snapshots,
     record_execution_failure, record_execution_log, refresh_equity_expectations_after_fills,
     resolve_effective_leverage, snapshot_venue_equity, snapshot_venue_equity_for,
@@ -1488,7 +1488,10 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
                 crate::state::StrategyParamsDto::defaults_for("futures").target_profit_bps
             }),
     };
-    let econ = compute_route_economics_for_mode(
+    let route_gas_usd = (crate::commands::venue_estimated_gas_cost_usd(buy_vid.as_str())
+        + crate::commands::venue_estimated_gas_cost_usd(sell_vid.as_str()))
+        * if is_two_way { 2.0 } else { 1.0 };
+    let econ = compute_route_economics_with_gas(
         &book_buy,
         &book_sell,
         qty_dec,
@@ -1496,6 +1499,7 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
         effective_venue_fee_bps(state, sell_vid.as_str()),
         target_profit_bps,
         is_two_way,
+        route_gas_usd,
     )
     .ok_or_else(|| {
         format!(
@@ -1650,6 +1654,65 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
         .fetch_account()
         .await
         .map_err(|e| format!("Failed to fetch account on {}: {}", sell_venue, e))?;
+
+    let order_notional_usd = ((buy_vwap + sell_vwap) / dec!(2) * qty_dec)
+        .to_string()
+        .parse::<f64>()
+        .unwrap_or(0.0);
+    let cvar_verdict = {
+        let mut shield = state.conformal_cvar_shield.lock();
+        shield.record_loss_bps(
+            (econ.entry_slippage_bps + econ.exit_slippage_bps + econ.closing_spread_bps).max(0.0),
+        );
+        shield.evaluate_shield()
+    };
+    match cvar_verdict {
+        arbitrageur_execution::conformal_cvar_shield::ShieldVerdict::AllowNormalExecution {
+            ..
+        } => {}
+        arbitrageur_execution::conformal_cvar_shield::ShieldVerdict::ThrottledExecution {
+            reason,
+            ..
+        } if reason.starts_with("Warmup:") => {
+            tracing::debug!("conformal preflight warmup: {reason}");
+        }
+        arbitrageur_execution::conformal_cvar_shield::ShieldVerdict::ThrottledExecution {
+            scale,
+            estimated_cvar_bps,
+            reason,
+        } => {
+            return Err(format!(
+                "Conformal tail-risk preflight throttled this entry to {:.0}% (CVaR {:.1} bps): {reason}",
+                scale * 100.0,
+                estimated_cvar_bps
+            ));
+        }
+        arbitrageur_execution::conformal_cvar_shield::ShieldVerdict::HaltOrEvacuate {
+            estimated_cvar_bps,
+            reason,
+        } => {
+            return Err(format!(
+                "Conformal tail-risk preflight blocked this entry (CVaR {estimated_cvar_bps:.1} bps): {reason}"
+            ));
+        }
+    }
+    let conformal_guard = arbitrageur_execution::conformal_risk_guard::ConformalRiskGuard::new(
+        0.05,
+        1.0,
+        (order_notional_usd * 0.20).max(1.0),
+        0.20,
+    );
+    for (vname, acc) in [(buy_venue, &acc_buy), (sell_venue, &acc_sell)] {
+        let free_margin = acc.free_margin.to_string().parse::<f64>().unwrap_or(0.0);
+        let verdict = conformal_guard.evaluate_account_health(free_margin, 1.0, 0.0);
+        if !verdict.can_submit_order {
+            return Err(format!(
+                "Conformal margin preflight blocked {vname}: {}",
+                verdict.reason
+            ));
+        }
+    }
+
     for (vname, acc) in [(buy_venue, &acc_buy), (sell_venue, &acc_sell)] {
         match margin_monitor.evaluate_account(acc) {
             MarginHealthStatus::Empty => {
@@ -3148,7 +3211,7 @@ pub async fn get_open_positions_impl(
     };
     let mut signals = state
         .state_store
-        .list_signals(None, None)
+        .list_signals_for_env(None, state.env().as_str())
         .map_err(|e| e.to_string())?;
     if let Some(sid) = sid {
         signals.retain(|s| s.strategy_id.eq_ignore_ascii_case(&sid));
@@ -3158,36 +3221,40 @@ pub async fn get_open_positions_impl(
 
     let hub = &state.market_data_hub;
     let engine: &AppEngineState = state;
-    let mut positions = crate::state_store::aggregate_open_positions(&signals, &|venue, symbol| {
-        hub.get_valid_orderbook(&VenueId::from(venue), symbol, Some(MARK_READ_TTL))
-            // For options (fixed contracts), the venue's Black-76 implied volatility mark price
-            // (Deribit mark_price) is the true economic and margin accounting mark, not a
-            // noisy / wide bid-ask midpoint. For perps/spot, mid_price is preferred.
-            .and_then(|b| {
-                if crate::state_store::symbol_is_fixed_contract(symbol) {
-                    b.mark_price.or_else(|| b.mid_price())
-                } else {
-                    b.mid_price().or(b.mark_price)
-                }
-            })
-            .and_then(|m| dec_to_f64(m, "mark mid").ok())
-            .and_then(|p| ledger_px_usd(engine, venue, symbol, p))
-            .or_else(|| {
-                let acct_key = format!("{}-{}", engine.env().as_str(), venue.to_lowercase());
-                let guard = engine.last_good_accounts.lock();
-                let (snap, ts_ms) = guard.get(&acct_key)?;
-                let age_ms = chrono::Utc::now().timestamp_millis().saturating_sub(*ts_ms);
-                // Account snapshots are polled at longer intervals than order books; allow
-                // up to 15 minutes of staleness for position mark fallback rather than dropping to null.
-                if age_ms > 900_000 {
-                    return None;
-                }
-                snap.positions
-                    .iter()
-                    .find(|p| p.symbol.eq_ignore_ascii_case(symbol) && p.mark_price > dec!(0))
-                    .and_then(|p| dec_to_f64(p.mark_price, "account position mark").ok())
-            })
-    });
+    let mut positions = crate::state_store::aggregate_open_positions(
+        &signals,
+        state.env().as_str(),
+        &|venue, symbol| {
+            hub.get_valid_orderbook(&VenueId::from(venue), symbol, Some(MARK_READ_TTL))
+                // For options (fixed contracts), the venue's Black-76 implied volatility mark price
+                // (Deribit mark_price) is the true economic and margin accounting mark, not a
+                // noisy / wide bid-ask midpoint. For perps/spot, mid_price is preferred.
+                .and_then(|b| {
+                    if crate::state_store::symbol_is_fixed_contract(symbol) {
+                        b.mark_price.or_else(|| b.mid_price())
+                    } else {
+                        b.mid_price().or(b.mark_price)
+                    }
+                })
+                .and_then(|m| dec_to_f64(m, "mark mid").ok())
+                .and_then(|p| ledger_px_usd(engine, venue, symbol, p))
+                .or_else(|| {
+                    let acct_key = format!("{}-{}", engine.env().as_str(), venue.to_lowercase());
+                    let guard = engine.last_good_accounts.lock();
+                    let (snap, ts_ms) = guard.get(&acct_key)?;
+                    let age_ms = chrono::Utc::now().timestamp_millis().saturating_sub(*ts_ms);
+                    // Account snapshots are polled at longer intervals than order books; allow
+                    // up to 15 minutes of staleness for position mark fallback rather than dropping to null.
+                    if age_ms > 900_000 {
+                        return None;
+                    }
+                    snap.positions
+                        .iter()
+                        .find(|p| p.symbol.eq_ignore_ascii_case(symbol) && p.mark_price > dec!(0))
+                        .and_then(|p| dec_to_f64(p.mark_price, "account position mark").ok())
+                })
+        },
+    );
     // An unreadable flag fails closed: refuse the whole read rather than
     // badge a reduce-only ticker as freely tradable.
     for p in &mut positions {
@@ -3657,6 +3724,19 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
     let total_equity_dec: Decimal = accounts.iter().map(|a| a.equity).sum();
     let total_free_margin_dec: Decimal = accounts.iter().map(|a| a.free_margin).sum();
     let total_mm_dec: Decimal = accounts.iter().map(|a| a.maintenance_margin).sum();
+    let tail_copula_stressed = monitor.is_any_venue_tail_stressed(&accounts, None, 300.0);
+    let venue_balances: std::collections::HashMap<String, Decimal> = accounts
+        .iter()
+        .map(|account| (account.venue.0.clone(), account.equity))
+        .collect();
+    let safety_rebalances = arbitrageur_risk::safety_guards::evaluate_venue_rebalance_needs(
+        &venue_balances,
+        dec!(15.0),
+    );
+    let safety_guard_rebalances: Vec<String> = safety_rebalances
+        .iter()
+        .map(|recommendation| recommendation.warning_message.clone())
+        .collect();
     // Filter out sub-$1 dust residuals (e.g. worthless deep-OTM options with
     // empty bid books) using the same $1 threshold as `external_positions.rs`
     // so DeltaGuard and Margin Health agree with External Position & Stop All.
@@ -3877,6 +3957,25 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
         );
     }
 
+    if tail_copula_stressed {
+        crate::alerting::dispatch_throttled(
+            state.env().as_str(),
+            "tail_copula_stressed",
+            "portfolio",
+            std::time::Duration::from_secs(300),
+            "At least one segregated venue breaches the tail-copula insolvency buffer".into(),
+        );
+    }
+    for recommendation in &safety_rebalances {
+        crate::alerting::dispatch_throttled(
+            state.env().as_str(),
+            "venue_balance_rebalance",
+            &recommendation.low_venue,
+            std::time::Duration::from_secs(300),
+            recommendation.warning_message.clone(),
+        );
+    }
+
     if let Some(ref instr) = rebalance_instruction {
         if instr.destination_utilization_pct >= 75.0 {
             crate::alerting::dispatch_throttled(
@@ -3945,11 +4044,33 @@ pub async fn get_risk_overview_impl(state: &AppEngineState) -> Result<RiskOvervi
                 .unwrap_or(0.0),
             rebalance_recommendation,
         },
+        tail_copula_stressed,
+        safety_guard_rebalances,
     })
 }
 
 /// Transition all automated bots (Radar Bot and Options Bot) to Off mode.
 pub fn stop_all_bots(state: &AppEngineState) {
+    // A bot stop is a halt decision, including when it is reached through
+    // the breaker-reset path. Keep the in-memory pause, canonical key and
+    // legacy key in lockstep, then disarm the monitor executor so it cannot
+    // continue dispatching entries behind the bot configs.
+    *state.is_paused.write() = true;
+    if let Err(e) = state.state_store.kv_set("engine.paused", "1") {
+        tracing::warn!("Failed to persist engine.paused = 1: {e}");
+    }
+    if let Err(e) = state.state_store.kv_set("engine.is_paused", "true") {
+        tracing::warn!("Failed to synchronize legacy engine.is_paused: {e}");
+    }
+    let monitor = state.monitor.lock().clone();
+    if let Some(monitor) = monitor {
+        let mut cfg = monitor.config();
+        cfg.enabled = false;
+        if let Err(e) = monitor.set_config(cfg, state) {
+            tracing::warn!("Failed to persist monitor auto-execution disabled: {e}");
+        }
+    }
+
     // 1. Radar bot: persist mode = off and enabled = false
     let (cfg, _) = crate::auto_exec::OpportunityExecutor::load_config(state);
     let disabled_cfg = crate::auto_exec::RadarBotConfigDto::from_policy(
@@ -4183,7 +4304,7 @@ pub async fn execute_emergency_stop_all_impl(
 
     let all_signals = state
         .state_store
-        .list_signals(None, None)
+        .list_signals_for_env(None, state.env().as_str())
         .map_err(|e| e.to_string())?;
 
     let open_engine_signals: Vec<crate::state_store::SignalExecution> = all_signals
@@ -4237,7 +4358,10 @@ pub async fn execute_emergency_stop_all_impl(
     }
 
     // Clean up any remaining open flatten/trim children whose parents are already closed
-    if let Ok(all_sigs_now) = state.state_store.list_signals(None, None) {
+    if let Ok(all_sigs_now) = state
+        .state_store
+        .list_signals_for_env(None, state.env().as_str())
+    {
         for s in &all_sigs_now {
             if (s.id.starts_with("flat-") || s.id.starts_with("trim-")) && s.status.counts_as_open()
             {
@@ -5680,10 +5804,13 @@ async fn flatten_positions_inner(
     }
     let _execution_guard = state.execution_lock.lock().await;
 
-    let all_signals = state
+    let mut all_signals = state
         .state_store
-        .list_signals(symbol, None)
+        .list_signals_for_env(None, state.env().as_str())
         .map_err(|e| e.to_string())?;
+    if let Some(symbol) = symbol {
+        all_signals.retain(|s| s.symbol.eq_ignore_ascii_case(symbol));
+    }
     let trade_match = |id: &str| -> bool {
         match only_trade_id {
             None => true,
@@ -6407,6 +6534,14 @@ async fn flatten_positions_inner(
             accumulate_unlotted_family_fills(state, &sig, &family_now, false);
         }
 
+        let flatten_fees_usd: f64 = family_now
+            .iter()
+            .filter(|child| crate::state_store::is_flatten_child_id(&child.id, &sig.id))
+            .flat_map(|child| child.legs.iter())
+            .map(|leg| leg.fee_usd)
+            .filter(|fee| fee.is_finite() && *fee >= 0.0)
+            .sum();
+
         record_execution_log(
             state,
             ExecutionLogEntry {
@@ -6421,7 +6556,7 @@ async fn flatten_positions_inner(
                 leg_b_status: leg_desc.get(1).cloned().unwrap_or_else(|| "—".into()),
                 success: fully_flat,
                 gross_profit: 0.0,
-                fees: 0.0,
+                fees: flatten_fees_usd,
                 net_profit: flatten_realized.map(|(usd, _, _)| usd).unwrap_or(0.0),
                 latency_us: 0,
                 note: if fully_flat {
@@ -6445,15 +6580,14 @@ async fn flatten_positions_inner(
 
     out.residual_signals = state
         .state_store
-        .list_signals(symbol, None)
+        .list_signals_for_env(None, state.env().as_str())
         .map_err(|e| e.to_string())?
         .into_iter()
         .filter(|s| {
             // A scoped flatten measures residual against that scope only —
             // unrelated open trades (a sibling package under the same
             // strategy) must not keep the scoped row "actionable" forever.
-            (s.environment.eq_ignore_ascii_case(state.env().as_str())
-                || s.environment.eq_ignore_ascii_case("unknown"))
+            symbol.is_none_or(|symbol| s.symbol.eq_ignore_ascii_case(symbol))
                 && (only_signal_id.is_none() || only_signal_id == Some(s.id.as_str()))
                 && trade_match(&s.id)
                 && !s.id.starts_with("flat-")

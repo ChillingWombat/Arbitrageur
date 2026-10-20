@@ -473,7 +473,7 @@ pub fn evaluate_jelly(
         if near_pv <= 0.0 || far_pv <= 0.0 {
             return None;
         }
-        let implied = (near_pv / far_pv).ln() / (t2_years - t1_years);
+        let implied = (far_pv / near_pv).ln() / (t2_years - t1_years);
         let leg_pxs: [(bool, f64); 8] = if long {
             [
                 (true, side_px(c1t, true)?),
@@ -2556,8 +2556,8 @@ mod tests {
         // fair = 20000·(e^{-0.005} − e^{-0.015}) ≈ 198.05; net_cost = −500.
         let fair = 20_000.0 * ((-0.05 * 0.1_f64).exp() - (-0.05 * 0.3_f64).exp());
         assert!((ev.gross_edge_usd - (fair + 500.0)).abs() < 1e-6);
-        // implied term rate = ln(near_pv/far_pv)/(0.3−0.1) = ln(500/1000)/0.2
-        assert!((ev.implied_rate - (500.0_f64 / 1_000.0).ln() / 0.2).abs() < 1e-9);
+        // implied term rate = ln(far_pv/near_pv)/(0.3−0.1) = ln(1000/500)/0.2
+        assert!((ev.implied_rate - (1_000.0_f64 / 500.0).ln() / 0.2).abs() < 1e-9);
         // Long jelly = long near box + short far box.
         assert_eq!(
             ev.legs.map(|(buy, _)| buy),

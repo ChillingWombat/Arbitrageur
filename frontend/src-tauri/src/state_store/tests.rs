@@ -177,7 +177,7 @@ fn test_default_account_lifecycle() {
             false,
             "standard",
             None,
-            None,
+            Some("live"),
         )
         .unwrap();
     assert!(first.is_default);
@@ -193,7 +193,7 @@ fn test_default_account_lifecycle() {
             false,
             "standard",
             None,
-            None,
+            Some("live"),
         )
         .unwrap();
     assert!(!second.is_default);
@@ -215,7 +215,7 @@ fn test_default_account_lifecycle() {
             false,
             "standard",
             None,
-            None,
+            Some("live"),
         )
         .unwrap();
     store.set_default_account("hyperliquid", "hl_zulu").unwrap();
@@ -231,7 +231,7 @@ fn test_default_account_lifecycle() {
             false,
             "standard",
             None,
-            None,
+            Some("live"),
         )
         .unwrap();
     let promoted = store
@@ -249,7 +249,7 @@ fn test_default_account_lifecycle() {
             false,
             "standard",
             None,
-            None,
+            Some("live"),
         )
         .unwrap();
     store
@@ -261,7 +261,7 @@ fn test_default_account_lifecycle() {
             false,
             "standard",
             None,
-            None,
+            Some("live"),
         )
         .unwrap();
     assert!(store
@@ -279,7 +279,7 @@ fn test_default_account_lifecycle() {
             false,
             "standard",
             None,
-            None,
+            Some("live"),
         )
         .unwrap();
     assert!(reenabled.is_default);
@@ -297,7 +297,7 @@ fn test_delete_default_promotes_alphabetically_first_enabled() {
             true,
             "standard",
             None,
-            None,
+            Some("live"),
         )
         .unwrap();
     store
@@ -309,7 +309,7 @@ fn test_delete_default_promotes_alphabetically_first_enabled() {
             false,
             "standard",
             None,
-            None,
+            Some("live"),
         )
         .unwrap();
     store
@@ -321,7 +321,7 @@ fn test_delete_default_promotes_alphabetically_first_enabled() {
             false,
             "standard",
             None,
-            None,
+            Some("live"),
         )
         .unwrap();
     assert!(store.delete_account("a_main").unwrap());
@@ -372,7 +372,7 @@ fn test_validation_and_immutable_venue() {
         )
         .is_err());
     assert!(store
-        .upsert_account("a", "", "Main", true, false, "standard", None, None)
+        .upsert_account("a", "", "Main", true, false, "standard", None, Some("live"))
         .is_err());
     assert!(store
         .upsert_account(
@@ -387,7 +387,16 @@ fn test_validation_and_immutable_venue() {
         )
         .is_err());
     assert!(store
-        .upsert_account("a", "hyperliquid", "", true, false, "standard", None, None)
+        .upsert_account(
+            "a",
+            "hyperliquid",
+            "",
+            true,
+            false,
+            "standard",
+            None,
+            Some("live")
+        )
         .is_err());
     assert!(store
         .upsert_account(
@@ -423,11 +432,20 @@ fn test_validation_and_immutable_venue() {
             false,
             "standard",
             None,
-            None,
+            Some("live"),
         )
         .unwrap();
     assert!(store
-        .upsert_account("acct1", "lighter", "Moved", true, false, "standard", None, None)
+        .upsert_account(
+            "acct1",
+            "lighter",
+            "Moved",
+            true,
+            false,
+            "standard",
+            None,
+            Some("live")
+        )
         .is_err());
     let renamed = store
         .upsert_account(
@@ -438,7 +456,7 @@ fn test_validation_and_immutable_venue() {
             false,
             "standard",
             None,
-            None,
+            Some("live"),
         )
         .unwrap();
     assert_eq!(renamed.venue, "hyperliquid");
@@ -457,7 +475,7 @@ fn test_label_uniqueness_scoped_to_venue() {
             false,
             "standard",
             None,
-            None,
+            Some("live"),
         )
         .unwrap();
     assert!(store
@@ -473,7 +491,16 @@ fn test_label_uniqueness_scoped_to_venue() {
         )
         .is_err());
     store
-        .upsert_account("a2", "lighter", "main", true, false, "standard", None, None)
+        .upsert_account(
+            "a2",
+            "lighter",
+            "main",
+            true,
+            false,
+            "standard",
+            None,
+            Some("live"),
+        )
         .unwrap();
     assert_eq!(store.list_accounts(None).unwrap().len(), 2);
 }
@@ -490,7 +517,7 @@ fn test_route_rules_and_canonicalization() {
             false,
             "standard",
             None,
-            None,
+            Some("live"),
         )
         .unwrap();
     store
@@ -502,17 +529,31 @@ fn test_route_rules_and_canonicalization() {
             false,
             "standard",
             None,
+            Some("live"),
+        )
+        .unwrap();
+    store
+        .upsert_account(
+            "lt_a",
+            "lighter",
+            "LT A",
+            true,
+            false,
+            "standard",
             None,
+            Some("live"),
         )
         .unwrap();
     store
         .upsert_account(
-            "lt_a", "lighter", "LT A", true, false, "standard", None, None,
-        )
-        .unwrap();
-    store
-        .upsert_account(
-            "lt_off", "lighter", "LT Off", false, false, "standard", None, None,
+            "lt_off",
+            "lighter",
+            "LT Off",
+            false,
+            false,
+            "standard",
+            None,
+            Some("live"),
         )
         .unwrap();
 
@@ -569,12 +610,19 @@ fn test_referenced_account_delete_requires_route_removal() {
             false,
             "standard",
             None,
-            None,
+            Some("live"),
         )
         .unwrap();
     store
         .upsert_account(
-            "lt_a", "lighter", "LT A", true, false, "standard", None, None,
+            "lt_a",
+            "lighter",
+            "LT A",
+            true,
+            false,
+            "standard",
+            None,
+            Some("live"),
         )
         .unwrap();
     store
@@ -602,7 +650,7 @@ fn test_eligible_strategy_routes_filters() {
             false,
             "standard",
             None,
-            None,
+            Some("live"),
         )
         .unwrap();
     store
@@ -614,17 +662,31 @@ fn test_eligible_strategy_routes_filters() {
             false,
             "standard",
             None,
+            Some("live"),
+        )
+        .unwrap();
+    store
+        .upsert_account(
+            "lt_a",
+            "lighter",
+            "LT A",
+            true,
+            false,
+            "standard",
             None,
+            Some("live"),
         )
         .unwrap();
     store
         .upsert_account(
-            "lt_a", "lighter", "LT A", true, false, "standard", None, None,
-        )
-        .unwrap();
-    store
-        .upsert_account(
-            "lt_b", "lighter", "LT B", true, false, "standard", None, None,
+            "lt_b",
+            "lighter",
+            "LT B",
+            true,
+            false,
+            "standard",
+            None,
+            Some("live"),
         )
         .unwrap();
 
@@ -639,7 +701,14 @@ fn test_eligible_strategy_routes_filters() {
         .unwrap();
     store
         .upsert_account(
-            "lt_b", "lighter", "LT B", false, false, "standard", None, None,
+            "lt_b",
+            "lighter",
+            "LT B",
+            false,
+            false,
+            "standard",
+            None,
+            Some("live"),
         )
         .unwrap();
 
@@ -679,12 +748,19 @@ fn test_file_store_persists_across_reopen() {
                 false,
                 "standard",
                 None,
-                None,
+                Some("live"),
             )
             .unwrap();
         store
             .upsert_account(
-                "lt_a", "lighter", "Alt", true, false, "standard", None, None,
+                "lt_a",
+                "lighter",
+                "Alt",
+                true,
+                false,
+                "standard",
+                None,
+                Some("live"),
             )
             .unwrap();
         store
@@ -1001,12 +1077,19 @@ fn test_signal_lifecycle_blocks_then_frees_ticker() {
             false,
             "standard",
             None,
-            None,
+            Some("live"),
         )
         .unwrap();
     store
         .upsert_account(
-            "lt_a", "lighter", "Main", true, false, "standard", None, None,
+            "lt_a",
+            "lighter",
+            "Main",
+            true,
+            false,
+            "standard",
+            None,
+            Some("live"),
         )
         .unwrap();
 
@@ -1481,7 +1564,7 @@ fn test_signal_validation_and_account_fk() {
             false,
             "standard",
             None,
-            None,
+            Some("live"),
         )
         .unwrap();
     assert!(!store.account_has_signal_legs("hl_a").unwrap());
@@ -3158,7 +3241,7 @@ fn test_aggregate_open_positions_groups_by_trade() {
     );
 
     let signals = store.list_signals(None, None).unwrap();
-    let positions = aggregate_open_positions(&signals, &|_, _| None);
+    let positions = aggregate_open_positions(&signals, "testnet", &|_, _| None);
     assert_eq!(positions.len(), 3, "each executed signal is its own trade");
 
     let s1 = positions.iter().find(|p| p.trade_id == "s1").unwrap();
@@ -3202,7 +3285,7 @@ fn test_aggregate_open_positions_leg_siblings_merge_into_one_trade() {
     }
 
     let signals = store.list_signals(None, None).unwrap();
-    let positions = aggregate_open_positions(&signals, &|_, _| None);
+    let positions = aggregate_open_positions(&signals, "testnet", &|_, _| None);
     assert_eq!(positions.len(), 1, "leg siblings collapse to one trade");
     let p = &positions[0];
     assert_eq!(p.trade_id, "opar-btc-1766707200000-88000-deadbeef");
@@ -3264,7 +3347,7 @@ fn test_aggregate_open_positions_marks_to_market_and_filters() {
 
     let signals = store.list_signals(None, None).unwrap();
     // Marks: both venues at 110 -> long +10, short loses (110-105)*1 = -5.
-    let positions = aggregate_open_positions(&signals, &|_, _| Some(110.0));
+    let positions = aggregate_open_positions(&signals, "testnet", &|_, _| Some(110.0));
     assert_eq!(positions.len(), 2, "closed signals drop out");
 
     let btc = positions.iter().find(|p| p.symbol == "BTC-USDC").unwrap();
@@ -3321,7 +3404,7 @@ fn test_aggregate_open_positions_jelly_roll_linear_accretion() {
     let signals = store.list_signals(None, None).unwrap();
     // In wide/crossed testnet books, summing legs individually would produce severe phantom losses.
     // Package linear accretion protects against phantom MTM loss.
-    let positions = aggregate_open_positions(&signals, &|_, _| Some(500.0));
+    let positions = aggregate_open_positions(&signals, "testnet", &|_, _| Some(500.0));
     assert_eq!(positions.len(), 1);
     let ojel = &positions[0];
     assert_eq!(ojel.strategy_id, "options_jelly_roll");
@@ -3366,7 +3449,7 @@ fn test_aggregate_open_positions_partial_flatten_nets_residual() {
         .unwrap();
 
     let signals = store.list_signals(None, None).unwrap();
-    let positions = aggregate_open_positions(&signals, &|_, _| None);
+    let positions = aggregate_open_positions(&signals, "testnet", &|_, _| None);
     assert_eq!(positions.len(), 1, "flatten child joins the same group");
     let p = &positions[0];
     assert!((p.venues[0].net_qty - 0.4).abs() < 1e-9);
@@ -3404,7 +3487,7 @@ fn test_aggregate_open_positions_single_leg_flatten_child_merges() {
         .unwrap();
 
     let signals = store.list_signals(None, None).unwrap();
-    let positions = aggregate_open_positions(&signals, &|_, _| None);
+    let positions = aggregate_open_positions(&signals, "testnet", &|_, _| None);
     // The single-leg child must merge into the parent's group — the canary
     // bug rendered it as a second card showing a fabricated +0 position.
     assert_eq!(
@@ -3536,7 +3619,7 @@ fn test_max_leverage_validation_bounds() {
             false,
             "standard",
             Some(0),
-            None
+            Some("live")
         )
         .is_err());
     assert!(store
@@ -3548,7 +3631,7 @@ fn test_max_leverage_validation_bounds() {
             false,
             "standard",
             Some(6),
-            None
+            Some("live")
         )
         .is_err());
     assert!(store
@@ -3560,7 +3643,7 @@ fn test_max_leverage_validation_bounds() {
             false,
             "standard",
             Some(99),
-            None
+            Some("live")
         )
         .is_err());
     for ok in [None, Some(1), Some(3), Some(5)] {
@@ -3573,7 +3656,7 @@ fn test_max_leverage_validation_bounds() {
                 false,
                 "standard",
                 ok,
-                None,
+                Some("live"),
             )
             .unwrap();
         let got = store.get_account("a1").unwrap().expect("row");
@@ -3593,7 +3676,7 @@ fn test_max_leverage_roundtrip_update_and_clear() {
             true,
             "standard",
             Some(2),
-            None,
+            Some("live"),
         )
         .unwrap();
     assert_eq!(created.max_leverage, Some(2));
@@ -3601,7 +3684,16 @@ fn test_max_leverage_roundtrip_update_and_clear() {
     assert_eq!(listed.len(), 1);
     assert_eq!(listed[0].max_leverage, Some(2));
     let cleared = store
-        .upsert_account("a1", "lighter", "Main", true, true, "standard", None, None)
+        .upsert_account(
+            "a1",
+            "lighter",
+            "Main",
+            true,
+            true,
+            "standard",
+            None,
+            Some("live"),
+        )
         .unwrap();
     assert_eq!(cleared.max_leverage, None);
     let fetched = store.get_account("a1").unwrap().expect("row");

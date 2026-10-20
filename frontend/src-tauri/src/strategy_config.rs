@@ -28,20 +28,24 @@ pub fn save_ticker_strategy_config_impl(
     config: TickerStrategyConfigDto,
     state: &AppEngineState,
 ) -> Result<(), String> {
-    if !config.target_profit_bps.is_finite() || config.target_profit_bps <= 0.0 {
-        return Err("target_profit_bps must be finite and positive".into());
+    crate::commands::validate_market_symbol(&config.symbol)?;
+    if !config.target_profit_bps.is_finite()
+        || config.target_profit_bps <= 0.0
+        || config.target_profit_bps > 10_000.0
+    {
+        return Err("target_profit_bps must be finite, positive and at most 10000".into());
     }
     if config.window_percentile < 50 {
         return Err("window_percentile must be at least 50%".into());
     }
-    if config.max_accumulated_units < 1 {
-        return Err("max_accumulated_units must be at least 1".into());
+    if !(1..=1_000_000).contains(&config.max_accumulated_units) {
+        return Err("max_accumulated_units must be between 1 and 1000000".into());
     }
     if !(1..=10).contains(&config.user_target_leverage) {
         return Err("user_target_leverage must be between 1 and 10".into());
     }
-    if !config.unit_size.is_finite() || config.unit_size <= 0.0 {
-        return Err("unit_size must be finite and positive".into());
+    if !config.unit_size.is_finite() || config.unit_size <= 0.0 || config.unit_size > 1_000_000.0 {
+        return Err("unit_size must be finite, positive and at most 1000000".into());
     }
     // Persist alongside the in-memory map so caps survive restarts — the
     // grid-cap gate reads this record at entry time. A failed kv write is
@@ -591,5 +595,30 @@ mod preset_tests {
             preset.user_target_leverage as u64
         );
         assert_eq!(applied["ticker"]["executionMode"], preset.execution_mode);
+    }
+
+    #[test]
+    fn ticker_config_rejects_invalid_symbol_and_unbounded_inputs() {
+        let state = AppEngineState::new();
+        let mut cfg = TickerStrategyConfigDto {
+            symbol: "BTC-USD".into(),
+            ..TickerStrategyConfigDto::default()
+        };
+        assert!(save_ticker_strategy_config_impl(cfg.clone(), &state).is_ok());
+
+        cfg.symbol = "BTC USD!".into();
+        assert!(save_ticker_strategy_config_impl(cfg.clone(), &state).is_err());
+
+        cfg.symbol = "BTC-USD".into();
+        cfg.unit_size = 1_000_001.0;
+        assert!(save_ticker_strategy_config_impl(cfg.clone(), &state).is_err());
+
+        cfg.unit_size = 1.0;
+        cfg.max_accumulated_units = 1_000_001;
+        assert!(save_ticker_strategy_config_impl(cfg.clone(), &state).is_err());
+
+        cfg.max_accumulated_units = 10;
+        cfg.target_profit_bps = 10_001.0;
+        assert!(save_ticker_strategy_config_impl(cfg, &state).is_err());
     }
 }

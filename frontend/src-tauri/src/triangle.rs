@@ -14,7 +14,10 @@ use arbitrageur_core::exchange::ExchangeAdapter;
 use arbitrageur_core::quote::OrderBook;
 use arbitrageur_core::symbol::{canonical_base, is_usd_family, symbol_quote};
 use arbitrageur_core::types::{dec, Decimal, Side, VenueId};
-use arbitrageur_math::triangular::{evaluate_triangular_cycle, TriLegSide};
+use arbitrageur_math::triangular::{evaluate_triangular_cycle, CurrencyGraph, TriLegSide};
+use arbitrageur_math::tropical_arbitrage::{
+    TropicalArbitrageEngine, TropicalCycleArbitrageResult, TropicalMarketEdge,
+};
 use arbitrageur_risk::margin_monitor::MarginHealthStatus;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -53,6 +56,14 @@ pub struct TriangleOpportunityDto {
     /// expected fields are `None` by construction.
     #[serde(default)]
     pub depth_curve: Vec<crate::monitor::DepthCurvePointDto>,
+    /// Tropical maximum-mean-cycle score when the CurrencyGraph validates
+    /// this candidate's node path.
+    #[serde(default)]
+    pub tropical_mean_yield_bps: Option<f64>,
+    #[serde(default)]
+    pub tropical_cycle_validated: bool,
+    #[serde(default)]
+    pub currency_graph_cycle: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -424,6 +435,144 @@ fn triangle_target_profit_bps(state: &AppEngineState) -> f64 {
         .unwrap_or(4.0)
 }
 
+struct TropicalFeedback {
+    max_mean_cycle: Option<TropicalCycleArbitrageResult>,
+    graph_cycles: Vec<Vec<String>>,
+}
+
+fn tropical_feedback(
+    state: &AppEngineState,
+    venue: &VenueId,
+    fee_bps: f64,
+    trade_size_usd: f64,
+    hurdle_bps: f64,
+) -> TropicalFeedback {
+    use std::collections::{BTreeSet, HashMap};
+
+    let mut symbols = BTreeSet::new();
+    for base in TRIANGLE_BASES {
+        symbols.insert(format!("{base}-{TRIANGLE_QUOTE}"));
+        for quote in TRIANGLE_BASES {
+            if base != quote {
+                symbols.insert(format!("{base}-{quote}"));
+            }
+        }
+    }
+
+    let mut graph = CurrencyGraph::new();
+    let mut node_idx = HashMap::<String, usize>::new();
+    let mut node_names = Vec::<String>::new();
+    let mut edges = Vec::new();
+    let get_node =
+        |name: &str, node_idx: &mut HashMap<String, usize>, node_names: &mut Vec<String>| {
+            if let Some(idx) = node_idx.get(name) {
+                *idx
+            } else {
+                let idx = node_names.len();
+                node_names.push(name.to_string());
+                node_idx.insert(name.to_string(), idx);
+                idx
+            }
+        };
+    let depth_usd = |levels: &[arbitrageur_core::quote::BookLevel]| -> f64 {
+        levels
+            .iter()
+            .filter_map(|level| {
+                let price = level.price.to_string().parse::<f64>().ok()?;
+                let size = level.size.to_string().parse::<f64>().ok()?;
+                (price.is_finite() && price > 0.0 && size.is_finite() && size > 0.0)
+                    .then_some(price * size)
+            })
+            .sum()
+    };
+
+    for symbol in symbols {
+        let Some(book) = state.market_data_hub.get_valid_orderbook(
+            venue,
+            &symbol,
+            Some(std::time::Duration::from_secs(2)),
+        ) else {
+            continue;
+        };
+        if validate_adapter_book(&book, venue, &symbol).is_err() {
+            continue;
+        }
+        let base = canonical_base(&symbol);
+        let Some(quote) = symbol_quote(&symbol) else {
+            continue;
+        };
+        let (Some(ask), Some(bid)) = (book.best_ask_price(), book.best_bid_price()) else {
+            continue;
+        };
+        let (Ok(ask), Ok(bid)) = (
+            ask.to_string().parse::<f64>(),
+            bid.to_string().parse::<f64>(),
+        ) else {
+            continue;
+        };
+        if ask <= 0.0 || bid <= 0.0 || ask <= bid {
+            continue;
+        }
+        let quote_idx = get_node(&quote, &mut node_idx, &mut node_names);
+        let base_idx = get_node(&base, &mut node_idx, &mut node_names);
+        let ask_capacity = depth_usd(&book.asks);
+        let bid_capacity = depth_usd(&book.bids);
+        if ask_capacity > 0.0 {
+            edges.push(TropicalMarketEdge {
+                from_node: quote_idx,
+                to_node: base_idx,
+                venue: venue.0.clone(),
+                pair_symbol: symbol.clone(),
+                raw_rate: 1.0 / ask,
+                fee_bps,
+                max_capacity_usd: ask_capacity,
+            });
+        }
+        if bid_capacity > 0.0 {
+            edges.push(TropicalMarketEdge {
+                from_node: base_idx,
+                to_node: quote_idx,
+                venue: venue.0.clone(),
+                pair_symbol: symbol.clone(),
+                raw_rate: bid,
+                fee_bps,
+                max_capacity_usd: bid_capacity,
+            });
+        }
+        graph.add_orderbook_edges(&base, &quote, &symbol, &book, fee_bps);
+    }
+
+    let max_mean_cycle = TropicalArbitrageEngine::new(node_names.len(), edges, hurdle_bps)
+        .solve_maximum_mean_cycle();
+    let graph_cycles = graph
+        .find_negative_cycles_spfa(trade_size_usd, 5)
+        .into_iter()
+        .map(|cycle| cycle.path)
+        .collect();
+    TropicalFeedback {
+        max_mean_cycle,
+        graph_cycles,
+    }
+}
+
+fn matching_currency_cycle<'a>(
+    feedback: &'a TropicalFeedback,
+    first: &str,
+    second: &str,
+) -> Option<&'a Vec<String>> {
+    feedback.graph_cycles.iter().find(|cycle| {
+        cycle.len() >= 3
+            && cycle
+                .iter()
+                .position(|node| node.eq_ignore_ascii_case(TRIANGLE_QUOTE))
+                .is_some_and(|start| {
+                    let n = cycle.len();
+                    cycle[(start + 1) % n].eq_ignore_ascii_case(first)
+                        && cycle[(start + 2) % n].eq_ignore_ascii_case(second)
+                })
+    })
+}
+
 pub async fn scan_triangular_opportunities_impl(
     filter_asset: &str,
     state: &AppEngineState,
@@ -467,6 +616,7 @@ pub async fn scan_triangular_opportunities_impl(
             continue;
         }
         let usdc_rate = state.fx_price_factor(Some(vid), TRIANGLE_QUOTE);
+        let feedback = tropical_feedback(state, &venue_id, fee, trade_size / usdc_rate, hurdle);
         let mut venue_book_cache: HashMap<String, Option<Arc<OrderBook>>> =
             HashMap::with_capacity(30);
         for base_a in TRIANGLE_BASES {
@@ -546,6 +696,14 @@ pub async fn scan_triangular_opportunities_impl(
                     } else {
                         format!("{vid}-TRI-{base_a}-{base_b}-{TRIANGLE_QUOTE}")
                     };
+                    let matched_cycle =
+                        matching_currency_cycle(&feedback, &plan.base_a, &plan.base_b);
+                    let tropical_score = matched_cycle.and_then(|_| {
+                        feedback
+                            .max_mean_cycle
+                            .as_ref()
+                            .map(|cycle| cycle.mean_yield_per_hop_bps)
+                    });
                     opps.push(TriangleOpportunityDto {
                         id: opp_id,
                         venue: vname.to_string(),
@@ -564,6 +722,9 @@ pub async fn scan_triangular_opportunities_impl(
                         estimated_latency_ms: latency_ms,
                         is_executable: eval.net_bps >= hurdle,
                         depth_curve: triangle_depth_curve(&books, plan.leg_sides, fee, trade_size),
+                        tropical_mean_yield_bps: tropical_score,
+                        tropical_cycle_validated: matched_cycle.is_some(),
+                        currency_graph_cycle: matched_cycle.map(|cycle| cycle.join(" -> ")),
                     });
                 }
             }
@@ -1689,6 +1850,9 @@ mod tests {
             estimated_latency_ms: 50,
             is_executable: true,
             depth_curve: vec![],
+            tropical_mean_yield_bps: None,
+            tropical_cycle_validated: false,
+            currency_graph_cycle: None,
         };
 
         let plan = triangle_plan_from_opp(&opp);
