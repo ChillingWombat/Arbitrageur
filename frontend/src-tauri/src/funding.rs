@@ -701,7 +701,12 @@ async fn scan_funding_opportunities_for_symbol(
         ) {
             rates.push((*vid, *vname, fr));
         } else if allow_network_fetch {
-            if let Ok(rate) = adapter.fetch_funding_rate(symbol).await {
+            let fetched = tokio::time::timeout(
+                std::time::Duration::from_secs(6),
+                adapter.fetch_funding_rate(symbol),
+            )
+            .await;
+            if let Ok(Ok(rate)) = fetched {
                 state.market_data_hub.update_funding(rate.clone());
                 rates.push((*vid, *vname, rate));
             }

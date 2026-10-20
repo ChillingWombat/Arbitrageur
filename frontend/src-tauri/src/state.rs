@@ -3869,7 +3869,13 @@ impl AppEngineState {
                 }
             }
         }
-        match adapter.fetch_markets().await {
+        let fetched =
+            tokio::time::timeout(std::time::Duration::from_secs(6), adapter.fetch_markets())
+                .await
+                .unwrap_or_else(|_| {
+                    Err(anyhow::anyhow!("{vid}: markets fetch timed out after 6s"))
+                });
+        match fetched {
             Ok(markets) => {
                 self.venue_fetch_failures.lock().remove(&fail_key);
                 self.markets_cache
@@ -3937,7 +3943,17 @@ impl AppEngineState {
                 }
             }
         }
-        match adapter.fetch_market_prices().await {
+        let fetched = tokio::time::timeout(
+            std::time::Duration::from_secs(6),
+            adapter.fetch_market_prices(),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            Err(anyhow::anyhow!(
+                "{vid}: market prices fetch timed out after 6s"
+            ))
+        });
+        match fetched {
             Ok(prices) => {
                 self.venue_fetch_failures.lock().remove(&fail_key);
                 self.market_prices_cache
