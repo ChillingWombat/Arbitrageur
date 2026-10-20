@@ -1390,7 +1390,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.23.1",
  "tokio-util",
- "tonic",
+ "tonic 0.14.6",
  "tracing",
  "urlencoding",
  "uuid 1.28.0",
@@ -2839,7 +2839,7 @@ checksum = "95ac39be7373404accccaede7cc1ec942ccef14f0ca18d209967a756bf1dbb1f"
 dependencies = [
  "prost",
  "tendermint-proto",
- "tonic",
+ "tonic 0.13.1",
 ]
 
 [[package]]
@@ -3661,7 +3661,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.26.2",
  "toml 0.8.2",
- "tonic",
+ "tonic 0.13.1",
  "tower",
 ]
 
@@ -3676,7 +3676,7 @@ dependencies = [
  "prost-build",
  "prost-types",
  "regex",
- "tonic",
+ "tonic 0.13.1",
  "tonic-buf-build",
  "tonic-build",
 ]
@@ -4995,7 +4995,7 @@ dependencies = [
  "prost",
  "subtle-encoding",
  "tendermint-proto",
- "tonic",
+ "tonic 0.13.1",
 ]
 
 [[package]]
@@ -9931,7 +9931,37 @@ dependencies = [
  "tower-layer",
  "tower-service",
  "tracing",
- "webpki-roots 0.26.11",
+]
+
+[[package]]
+name = "tonic"
+version = "0.14.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac2a5518c70fa84342385732db33fb3f44bc4cc748936eb5833d2df34d6445ef"
+dependencies = [
+ "async-trait",
+ "axum",
+ "base64 0.22.1",
+ "bytes",
+ "h2",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-timeout",
+ "hyper-util",
+ "percent-encoding",
+ "pin-project",
+ "socket2 0.6.5",
+ "sync_wrapper",
+ "tokio",
+ "tokio-rustls",
+ "tokio-stream",
+ "tower",
+ "tower-layer",
+ "tower-service",
+ "tracing",
+ "webpki-roots 1.0.9",
 ]
 
 [[package]]
