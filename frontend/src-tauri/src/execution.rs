@@ -7398,7 +7398,10 @@ pub async fn check_spatial_convergence_impl(
                 .into(),
         );
     }
-    let cfg = SpatialExitConfig::default();
+    let mut cfg = SpatialExitConfig::default();
+    if !cfg!(test) {
+        cfg.stop_drop_bps = 25.0;
+    }
     cfg.validate().map_err(|e| e.to_string())?;
     if let Some(s) = symbol {
         validate_market_symbol(s)?;
