@@ -1200,8 +1200,20 @@ impl DeribitAdapter {
         let amount = dec_from_json(o.get("amount")).unwrap_or(dec!(0));
         let filled_v = dec_from_json(o.get("filled_amount")).unwrap_or(dec!(0));
         let avg_px = dec_from_json(o.get("average_price")).filter(|p| *p > dec!(0));
-        let filled = Self::from_venue_amount(meta, filled_v, avg_px.or(ref_price_usd));
-        let original = Self::from_venue_amount(meta, amount, avg_px.or(ref_price_usd));
+        let (original, filled) =
+            if meta.kind == DeribitKind::Future && order.quantity > dec!(0) && amount > dec!(0) {
+                let orig = order.quantity;
+                let fill = if filled_v == amount {
+                    orig
+                } else {
+                    orig * (filled_v / amount)
+                };
+                (orig, fill)
+            } else {
+                let fill = Self::from_venue_amount(meta, filled_v, avg_px.or(ref_price_usd));
+                let orig = Self::from_venue_amount(meta, amount, avg_px.or(ref_price_usd));
+                (orig, fill)
+            };
         if filled < dec!(0) || original < dec!(0) || filled > original + dec!(0.000001) {
             anyhow::bail!(
                 "Deribit order quantity mismatch: filled {filled} of original {original}"
