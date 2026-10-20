@@ -190,12 +190,6 @@ pub fn simulate_estimator_performance(
     target_profit_bps: f64,
     friction_bps: f64,
 ) -> EstimatorEvaluation {
-    let hurdle = target_profit_bps + friction_bps;
-    let mut pnl_series: Vec<f64> = Vec::new();
-    let mut errors: Vec<f64> = Vec::new();
-    let mut wins = 0usize;
-    let mut trades = 0usize;
-
     if quotes.len() <= window_size + 1 {
         return EstimatorEvaluation {
             estimator,
@@ -209,9 +203,74 @@ pub fn simulate_estimator_performance(
         };
     }
 
+    let full = simulate_quote_slice(
+        quotes,
+        estimator,
+        window_size,
+        target_profit_bps,
+        friction_bps,
+    );
+    let (in_sample_sharpe, out_of_sample_sharpe) = if quotes.len() >= 10 {
+        let split_idx = ((quotes.len() as f64 * 0.70).round() as usize).clamp(1, quotes.len() - 1);
+        let in_sample = simulate_quote_slice(
+            &quotes[..split_idx],
+            estimator,
+            window_size,
+            target_profit_bps,
+            friction_bps,
+        );
+        let out_of_sample = simulate_quote_slice(
+            &quotes[split_idx..],
+            estimator,
+            window_size,
+            target_profit_bps,
+            friction_bps,
+        );
+        (in_sample.sharpe, out_of_sample.sharpe)
+    } else {
+        (full.sharpe, full.sharpe)
+    };
+
+    EstimatorEvaluation {
+        estimator,
+        window_size,
+        in_sample_sharpe,
+        out_of_sample_sharpe,
+        tracking_error_bps: full.tracking_error,
+        simulated_net_profit_bps: full.total_profit,
+        win_rate_pct: full.win_rate,
+        total_trades: full.trades,
+    }
+}
+
+#[derive(Default)]
+struct QuoteSlicePerformance {
+    sharpe: f64,
+    tracking_error: f64,
+    total_profit: f64,
+    win_rate: f64,
+    trades: usize,
+}
+
+fn simulate_quote_slice(
+    quotes: &[QuoteObservation],
+    estimator: BaselineEstimatorType,
+    window_size: usize,
+    target_profit_bps: f64,
+    friction_bps: f64,
+) -> QuoteSlicePerformance {
+    let hurdle = target_profit_bps + friction_bps;
+    let mut pnl_series: Vec<f64> = Vec::new();
+    let mut errors: Vec<f64> = Vec::new();
+    let mut wins = 0usize;
+    let mut trades = 0usize;
+
+    if quotes.len() <= window_size + 1 {
+        return QuoteSlicePerformance::default();
+    }
+
     let mut in_position = false;
     let mut entry_spread = 0.0;
-    let mut _entry_baseline = 0.0;
 
     for i in window_size..quotes.len() {
         let window = &quotes[(i - window_size)..i];
@@ -227,7 +286,6 @@ pub fn simulate_estimator_performance(
             if diff >= hurdle {
                 in_position = true;
                 entry_spread = current_spread;
-                _entry_baseline = baseline;
                 trades += 1;
             }
         } else {
@@ -296,15 +354,12 @@ pub fn simulate_estimator_performance(
         0.0
     };
 
-    EstimatorEvaluation {
-        estimator,
-        window_size,
-        in_sample_sharpe: sharpe,
-        out_of_sample_sharpe: sharpe,
-        tracking_error_bps: tracking_error,
-        simulated_net_profit_bps: total_profit,
-        win_rate_pct: win_rate,
-        total_trades: trades,
+    QuoteSlicePerformance {
+        sharpe,
+        tracking_error,
+        total_profit,
+        win_rate,
+        trades,
     }
 }
 
@@ -523,5 +578,27 @@ mod tests {
         .contains(&wfo.optimal_estimator));
         assert!(wfo.optimal_window_size == 10 || wfo.optimal_window_size == 20);
         assert!(!wfo.recommendation_notes.is_empty());
+    }
+
+    #[test]
+    fn test_simulate_estimator_uses_distinct_is_and_oos_slices() {
+        let quotes = (0..20)
+            .map(|i| {
+                let spread = match i {
+                    3 | 8 | 12 => 30.0,
+                    _ => 10.0,
+                };
+                QuoteObservation::new(i * 1000, spread, 10_000.0)
+            })
+            .collect::<Vec<_>>();
+
+        let evaluation =
+            simulate_estimator_performance(&quotes, BaselineEstimatorType::SMA, 2, 2.0, 1.0);
+        assert!(
+            evaluation.in_sample_sharpe > evaluation.out_of_sample_sharpe,
+            "in-sample={} out-of-sample={}",
+            evaluation.in_sample_sharpe,
+            evaluation.out_of_sample_sharpe
+        );
     }
 }

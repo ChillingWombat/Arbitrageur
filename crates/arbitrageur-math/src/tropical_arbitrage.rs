@@ -197,6 +197,35 @@ impl TropicalArbitrageEngine {
         mat
     }
 
+    /// Scores a three-leg cycle in the max-plus semiring. The result is the
+    /// cumulative log yield, using the best executable edge per leg.
+    pub fn evaluate_3hop_cycle(&self, u: usize, v: usize, w: usize) -> Option<f64> {
+        if u >= self.num_nodes
+            || v >= self.num_nodes
+            || w >= self.num_nodes
+            || u == v
+            || v == w
+            || w == u
+        {
+            return None;
+        }
+        let legs = [(u, v), (v, w), (w, u)];
+        let mut total = 0.0;
+        for (from, to) in legs {
+            let best = self
+                .edges
+                .iter()
+                .filter(|edge| {
+                    edge.from_node == from && edge.to_node == to && edge.max_capacity_usd > 0.0
+                })
+                .map(TropicalMarketEdge::tropical_weight)
+                .filter(|weight| weight.is_finite())
+                .reduce(f64::max)?;
+            total += best;
+        }
+        total.is_finite().then_some(total)
+    }
+
     /// Executes Karp's $O(V \cdot E)$ algorithm to compute the exact Tropical Spectral Radius $\lambda^*$
     /// and extract the highest-efficiency simple arbitrage cycle.
     pub fn solve_maximum_mean_cycle(&self) -> Option<TropicalCycleArbitrageResult> {
@@ -402,5 +431,49 @@ mod tests {
         assert!((res.mean_yield_per_hop_bps - 15.0).abs() < 0.2);
         assert!((res.total_cycle_yield_bps - 30.0).abs() < 0.4);
         assert_eq!(res.bottleneck_capacity_usd, 40_000.0);
+    }
+
+    #[test]
+    fn test_evaluate_3hop_cycle_returns_max_plus_log_yield() {
+        let engine = TropicalArbitrageEngine::new(
+            3,
+            vec![
+                TropicalMarketEdge {
+                    from_node: 0,
+                    to_node: 1,
+                    venue: "a".into(),
+                    pair_symbol: "BTC/USDC".into(),
+                    raw_rate: 1.01,
+                    fee_bps: 10.0,
+                    max_capacity_usd: 10_000.0,
+                },
+                TropicalMarketEdge {
+                    from_node: 1,
+                    to_node: 2,
+                    venue: "b".into(),
+                    pair_symbol: "ETH/BTC".into(),
+                    raw_rate: 1.02,
+                    fee_bps: 20.0,
+                    max_capacity_usd: 10_000.0,
+                },
+                TropicalMarketEdge {
+                    from_node: 2,
+                    to_node: 0,
+                    venue: "c".into(),
+                    pair_symbol: "USDC/ETH".into(),
+                    raw_rate: 1.03,
+                    fee_bps: 30.0,
+                    max_capacity_usd: 10_000.0,
+                },
+            ],
+            0.0,
+        );
+
+        let expected = (1.01_f64 * 0.999).ln() + (1.02_f64 * 0.998).ln() + (1.03_f64 * 0.997).ln();
+        let score = engine
+            .evaluate_3hop_cycle(0, 1, 2)
+            .expect("complete triangle should evaluate");
+        assert!((score - expected).abs() < 1e-12);
+        assert!(engine.evaluate_3hop_cycle(0, 2, 1).is_none());
     }
 }

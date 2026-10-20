@@ -1,5 +1,6 @@
 use crate::types::{dec, Decimal, Side, VenueId};
 use chrono::{DateTime, Utc};
+use rust_decimal::prelude::{MathematicalOps, ToPrimitive};
 use serde::{Deserialize, Serialize};
 
 /// Single price level in the orderbook.
@@ -106,8 +107,11 @@ impl OrderBook {
 
         for l in 0..k {
             let w = (-eta * l as f64).exp();
-            let q_b = self.bids[l].size.to_string().parse::<f64>().unwrap_or(0.0);
-            let q_a = self.asks[l].size.to_string().parse::<f64>().unwrap_or(0.0);
+            let q_b = self.bids[l].size.to_f64()?;
+            let q_a = self.asks[l].size.to_f64()?;
+            if !q_b.is_finite() || !q_a.is_finite() {
+                return None;
+            }
             weighted_diff += w * (q_b - q_a);
             weighted_total += w * (q_b + q_a);
         }
@@ -136,8 +140,23 @@ impl OrderBook {
     /// e_a^l = -Q_a,t^l (if P_a,t < P_a,t-1) | -(Q_a,t^l - Q_a,t-1^l) (if ==) | Q_a,t-1^l (if >)
     /// OFI_multi = \sum_{l=0}^{k-1} exp(-decay_lambda * l) * (e_b^l + e_a^l)
     pub fn compute_ofi_delta(&self, prev: &OrderBook, max_levels: usize, decay_lambda: f64) -> f64 {
+        self.compute_ofi_delta_with_decay(prev, max_levels, decay_lambda)
+            .unwrap_or(0.0)
+    }
+
+    /// Checked OFI without depth-decay weighting.
+    pub fn compute_ofi_delta_checked(&self, prev: &OrderBook, depth: usize) -> Option<f64> {
+        self.compute_ofi_delta_with_decay(prev, depth, 0.0)
+    }
+
+    fn compute_ofi_delta_with_decay(
+        &self,
+        prev: &OrderBook,
+        max_levels: usize,
+        decay_lambda: f64,
+    ) -> Option<f64> {
         if max_levels == 0 || self.bids.is_empty() || self.asks.is_empty() {
-            return 0.0;
+            return Some(0.0);
         }
         let k = max_levels
             .min(self.bids.len())
@@ -145,7 +164,7 @@ impl OrderBook {
             .min(prev.bids.len())
             .min(prev.asks.len());
         if k == 0 {
-            return 0.0;
+            return Some(0.0);
         }
 
         let lambda = decay_lambda.max(0.0);
@@ -154,27 +173,27 @@ impl OrderBook {
         for l in 0..k {
             let w = (-lambda * l as f64).exp();
 
-            let curr_b_px = self.bids[l].price.to_string().parse::<f64>().unwrap_or(0.0);
-            let prev_b_px = prev.bids[l].price.to_string().parse::<f64>().unwrap_or(0.0);
-            let curr_b_sz = self.bids[l].size.to_string().parse::<f64>().unwrap_or(0.0);
-            let prev_b_sz = prev.bids[l].size.to_string().parse::<f64>().unwrap_or(0.0);
+            let curr_b_px = self.bids[l].price;
+            let prev_b_px = prev.bids[l].price;
+            let curr_b_sz = self.bids[l].size.to_f64()?;
+            let prev_b_sz = prev.bids[l].size.to_f64()?;
 
             let e_b = if curr_b_px > prev_b_px {
                 curr_b_sz
-            } else if (curr_b_px - prev_b_px).abs() < 1e-9 {
+            } else if curr_b_px == prev_b_px {
                 curr_b_sz - prev_b_sz
             } else {
                 -prev_b_sz
             };
 
-            let curr_a_px = self.asks[l].price.to_string().parse::<f64>().unwrap_or(0.0);
-            let prev_a_px = prev.asks[l].price.to_string().parse::<f64>().unwrap_or(0.0);
-            let curr_a_sz = self.asks[l].size.to_string().parse::<f64>().unwrap_or(0.0);
-            let prev_a_sz = prev.asks[l].size.to_string().parse::<f64>().unwrap_or(0.0);
+            let curr_a_px = self.asks[l].price;
+            let prev_a_px = prev.asks[l].price;
+            let curr_a_sz = self.asks[l].size.to_f64()?;
+            let prev_a_sz = prev.asks[l].size.to_f64()?;
 
             let e_a = if curr_a_px < prev_a_px {
                 -curr_a_sz
-            } else if (curr_a_px - prev_a_px).abs() < 1e-9 {
+            } else if curr_a_px == prev_a_px {
                 -(curr_a_sz - prev_a_sz)
             } else {
                 prev_a_sz
@@ -183,7 +202,7 @@ impl OrderBook {
             total_ofi += w * (e_b + e_a);
         }
 
-        total_ofi
+        total_ofi.is_finite().then_some(total_ofi)
     }
 
     /// Rejects books that cannot safely drive execution: empty symbol, missing
@@ -518,15 +537,22 @@ impl FundingRate {
     /// Annualized Percentage Yield (APY) based on periodic compounding.
     /// APY = (1 + r)^n - 1
     pub fn apy(&self) -> Decimal {
+        self.apy_checked().unwrap_or(Decimal::ZERO)
+    }
+
+    /// Checked annualized percentage yield.
+    pub fn apy_checked(&self) -> Option<Decimal> {
         if self.interval_hours == 0 {
-            return dec!(0);
+            return Some(Decimal::ZERO);
         }
-        let periods_per_day = 24.0 / self.interval_hours as f64;
-        let n = periods_per_day * 365.0;
-        let r = self.rate.to_string().parse::<f64>().unwrap_or(0.0);
-        let apy_f64 = (1.0 + r).powf(n) - 1.0;
-        Decimal::from_str_exact(&format!("{:.8}", apy_f64))
-            .unwrap_or_else(|_| Decimal::from_f64_retain(apy_f64).unwrap_or(dec!(0)))
+        let periods_per_day = Decimal::from(24).checked_div(Decimal::from(self.interval_hours))?;
+        let periods_per_year = periods_per_day.checked_mul(dec!(365))?;
+        let base = Decimal::ONE.checked_add(self.rate)?;
+        if base <= Decimal::ZERO {
+            return None;
+        }
+        base.checked_powd(periods_per_year)?
+            .checked_sub(Decimal::ONE)
     }
 }
 
@@ -678,5 +704,42 @@ mod tests {
         let ofi = curr.compute_ofi_delta(&prev, 1, 0.5);
         // Total ofi should be 3.0 + 1.0 = 4.0
         assert!((ofi - 4.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_compute_ofi_delta_checked_matches_unweighted_ofi() {
+        let mut prev = OrderBook::new(VenueId::new("hyperliquid"), "BTC-USDC".to_string());
+        prev.bids.push(BookLevel::new(dec!(100.0), dec!(2.0)));
+        prev.asks.push(BookLevel::new(dec!(102.0), dec!(2.0)));
+
+        let mut curr = OrderBook::new(VenueId::new("hyperliquid"), "BTC-USDC".to_string());
+        curr.bids.push(BookLevel::new(dec!(100.5), dec!(3.0)));
+        curr.asks.push(BookLevel::new(dec!(102.0), dec!(1.0)));
+
+        let checked = curr
+            .compute_ofi_delta_checked(&prev, 1)
+            .expect("representable book values should convert");
+        assert!((checked - 4.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_funding_apy_checked_fails_closed_on_overflow() {
+        let normal = FundingRate {
+            venue: VenueId::new("hyperliquid"),
+            symbol: "BTC-USDC".to_string(),
+            rate: dec!(0.0001),
+            predicted_rate: None,
+            interval_hours: 1,
+            next_funding_time: Utc::now(),
+            timestamp: Utc::now(),
+        };
+        assert!(normal.apy_checked().is_some());
+
+        let extreme = FundingRate {
+            rate: Decimal::MAX,
+            ..normal
+        };
+        assert!(extreme.apy_checked().is_none());
+        assert_eq!(extreme.apy(), dec!(0));
     }
 }

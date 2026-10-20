@@ -77,22 +77,22 @@ pub fn evaluate_funding_carry(
         return None;
     }
 
-    let net_rate_8h = net_hourly.checked_mul(dec!(8)).unwrap_or(dec!(999999));
-    let net_apr = net_hourly.checked_mul(dec!(8760)).unwrap_or(dec!(999999));
+    let net_rate_8h = net_hourly.checked_mul(dec!(8)).unwrap_or(Decimal::MAX);
+    let net_apr = net_hourly.checked_mul(dec!(8760)).unwrap_or(Decimal::MAX);
 
     let net_apy = compounded_apy(net_hourly);
 
     let fee_ratio = round_trip_fee_bps / BPS_DIVISOR;
     let break_even_hours = if net_hourly > dec!(0) {
-        fee_ratio.checked_div(net_hourly).unwrap_or(dec!(999999))
+        fee_ratio.checked_div(net_hourly).unwrap_or(Decimal::MAX)
     } else {
-        dec!(999999)
+        Decimal::MAX
     };
 
     let daily_income_usd = trade_size_usd
         .checked_mul(net_hourly)
         .and_then(|d| d.checked_mul(dec!(24)))
-        .unwrap_or(dec!(999999));
+        .unwrap_or(Decimal::MAX);
 
     Some(FundingCarryOpportunity {
         long_venue,
@@ -284,16 +284,16 @@ pub fn evaluate_spot_perp_basis_with_borrow(
     }
     let basis_bps = ((perp_price - spot_price) / spot_price) * BPS_DIVISOR;
 
-    let net_rate_8h = net_hourly.checked_mul(dec!(8)).unwrap_or(dec!(999999));
-    let net_apr = net_hourly.checked_mul(dec!(8760)).unwrap_or(dec!(999999));
+    let net_rate_8h = net_hourly.checked_mul(dec!(8)).unwrap_or(Decimal::MAX);
+    let net_apr = net_hourly.checked_mul(dec!(8760)).unwrap_or(Decimal::MAX);
 
     let fee_ratio = round_trip_fee_bps / BPS_DIVISOR;
-    let break_even_hours = fee_ratio.checked_div(net_hourly).unwrap_or(dec!(999999));
+    let break_even_hours = fee_ratio.checked_div(net_hourly).unwrap_or(Decimal::MAX);
 
     let daily_income_usd = trade_size_usd
         .checked_mul(net_hourly)
         .and_then(|d| d.checked_mul(dec!(24)))
-        .unwrap_or(dec!(999999));
+        .unwrap_or(Decimal::MAX);
 
     let carry = FundingCarryOpportunity {
         long_venue: "SPOT".to_string(),
@@ -1527,6 +1527,19 @@ mod spot_perp_basis_tests {
             evaluate_spot_perp_basis(dec!(100.0), dec!(100.5), &fr, dec!(3.5), dec!(2000.0))
                 .expect("new");
         assert_eq!(via_legacy, via_new.carry);
+    }
+
+    #[test]
+    fn overflow_saturates_to_decimal_max() {
+        let mut extreme = perp_funding("binance", "BTC-USDC", "0", 1);
+        extreme.rate = Decimal::MAX;
+        let zero = perp_funding("hyperliquid", "BTC-USDC", "0", 1);
+
+        let opp = evaluate_funding_carry(&extreme, &zero, dec!(1.0), dec!(1.0))
+            .expect("positive differential should evaluate");
+        assert_eq!(opp.net_rate_8h, Decimal::MAX);
+        assert_eq!(opp.net_apr, Decimal::MAX);
+        assert_eq!(opp.daily_income_usd, Decimal::MAX);
     }
 }
 

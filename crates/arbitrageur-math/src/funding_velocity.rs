@@ -17,6 +17,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::VecDeque;
 
+const SECONDS_PER_YEAR: f64 = 365.25 * 86_400.0;
+
 /// Kinematic funding rate state vector [F, v_F, a_F].
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct FundingKinematicState {
@@ -296,9 +298,10 @@ impl PredictiveCarryYieldHarvester {
         // Convert to basis points (assuming rate is in decimal per second or normalized interval)
         let projected_accrued_bps = raw_accrued * 10_000.0;
 
-        let tau_hours = tau_rem_sec / 3600.0;
-        let volatility_buffer =
-            1.96 * annualized_rate_volatility.max(1e-4) * tau_hours.sqrt() * 100.0;
+        let volatility_buffer = 1.96
+            * annualized_rate_volatility.max(1e-4)
+            * (tau_rem_sec / SECONDS_PER_YEAR).sqrt()
+            * 100.0;
         let required_hurdle_bps = 2.0 * round_trip_cost_bps + volatility_buffer;
 
         let net_edge_bps = projected_accrued_bps - required_hurdle_bps;
@@ -378,5 +381,19 @@ mod tests {
 
         assert!(decision.projected_accrued_bps > 0.0);
         assert!(decision.required_hurdle_bps >= 4.0);
+    }
+
+    #[test]
+    fn test_predictive_carry_volatility_buffer_scales_with_years() {
+        let filter = FundingVelocityKalmanHawkes::new(0.0, 1e-7, 1e-8, 0.1, 0.8, 1.5);
+        let one_year =
+            PredictiveCarryYieldHarvester::evaluate(&filter, 365.25 * 86_400.0, 2.0, 0.05, 1.0);
+
+        let expected = 4.0 + 1.96 * 0.05 * 100.0;
+        assert!(
+            (one_year.required_hurdle_bps - expected).abs() < 1e-8,
+            "expected {expected}, got {}",
+            one_year.required_hurdle_bps
+        );
     }
 }
