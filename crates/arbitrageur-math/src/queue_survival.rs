@@ -66,15 +66,20 @@ impl QueueSurvivalEstimator {
         let phi1 = standard_normal_cdf(term1_arg);
         let phi2 = standard_normal_cdf(term2_arg);
 
-        // Exponential term: exp( 2 * mu * queue_pos / sigma^2 )
+        // Evaluate the reflected term in log space to avoid overflow before clamping.
         let exp_exponent = (2.0 * mu * queue_pos) / (sigma * sigma);
-        let exp_factor = if exp_exponent > 50.0 {
+        let reflected_term = if phi2 <= 0.0 {
             0.0
         } else {
-            exp_exponent.exp()
+            let log_term = exp_exponent + phi2.ln();
+            if log_term >= 0.0 {
+                1.0
+            } else {
+                log_term.exp()
+            }
         };
 
-        let raw_p = phi1 - exp_factor * phi2;
+        let raw_p = phi1 + reflected_term;
         raw_p.clamp(0.0, 1.0)
     }
 
@@ -164,6 +169,21 @@ mod tests {
             p_long > p_deep,
             "Shallower queue position should have higher fill probability"
         );
+    }
+
+    #[test]
+    fn test_fill_probability_increases_with_depletion_drift() {
+        let slow = QueueSurvivalEstimator::new(0.5, 2.0, 1.0);
+        let fast = QueueSurvivalEstimator::new(1.5, 2.0, 1.0);
+        let p_slow = slow.fill_probability(1.0, 5.0);
+        let p_fast = fast.fill_probability(1.0, 5.0);
+
+        assert!(
+            p_fast > p_slow,
+            "faster depletion drift should fill sooner: {p_fast} vs {p_slow}"
+        );
+        assert!((0.0..=1.0).contains(&p_slow));
+        assert!((0.0..=1.0).contains(&p_fast));
     }
 
     #[test]

@@ -82,32 +82,70 @@ impl VarianceSwapReplicator {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
 
-        let m = options.len();
         let f0 = forward_price;
         let mut integral_sum = 0.0;
+        let mut selected = Vec::new();
+        let mut i = 0;
+        while i < options.len() {
+            let strike = options[i].strike;
+            let tolerance = strike.abs().max(1.0) * 1e-12;
+            let mut end = i + 1;
+            while end < options.len() && (options[end].strike - strike).abs() <= tolerance {
+                end += 1;
+            }
 
-        for i in 0..m {
-            let k_i = options[i].strike;
-            let mid_price = options[i].mid_price();
+            let group = &options[i..end];
+            let (put_sum, put_count) = group
+                .iter()
+                .filter(|quote| !quote.is_call)
+                .fold((0.0, 0usize), |(sum, count), quote| {
+                    (sum + quote.mid_price(), count + 1)
+                });
+            let (call_sum, call_count) = group
+                .iter()
+                .filter(|quote| quote.is_call)
+                .fold((0.0, 0usize), |(sum, count), quote| {
+                    (sum + quote.mid_price(), count + 1)
+                });
+            let put_mid = (put_count > 0).then_some(put_sum / put_count as f64);
+            let call_mid = (call_count > 0).then_some(call_sum / call_count as f64);
 
-            // Compute delta K_i
+            let atm = ((strike / f0) - 1.0).abs() <= 0.005;
+            let q_price = if atm {
+                match (put_mid, call_mid) {
+                    (Some(put), Some(call)) => Some(0.5 * (put + call)),
+                    (Some(put), None) => Some(put),
+                    (None, Some(call)) => Some(call),
+                    (None, None) => None,
+                }
+            } else if strike < f0 {
+                put_mid
+            } else {
+                call_mid
+            };
+
+            if let Some(q_price) = q_price {
+                if q_price.is_finite() {
+                    selected.push((strike, q_price));
+                }
+            }
+            i = end;
+        }
+
+        if selected.len() < 3 {
+            return None;
+        }
+
+        for i in 0..selected.len() {
+            let k_i = selected[i].0;
+            let q_price = selected[i].1;
             let delta_k = if i == 0 {
-                (options[1].strike - options[0].strike).max(1e-4)
-            } else if i == m - 1 {
-                (options[m - 1].strike - options[m - 2].strike).max(1e-4)
+                (selected[1].0 - selected[0].0).max(1e-4)
+            } else if i == selected.len() - 1 {
+                (selected[i].0 - selected[i - 1].0).max(1e-4)
             } else {
-                0.5 * (options[i + 1].strike - options[i - 1].strike).max(1e-4)
+                0.5 * (selected[i + 1].0 - selected[i - 1].0).max(1e-4)
             };
-
-            // Select OTM contract Q(K_i)
-            let q_price = if (k_i - f0).abs() < (delta_k * 0.5) {
-                // Near ATM: split 50/50 between call and put
-                mid_price * 0.5
-            } else {
-                // Out-of-the-money contract price
-                mid_price
-            };
-
             integral_sum += (delta_k / (k_i * k_i)) * q_price;
         }
 
@@ -568,6 +606,66 @@ mod tests {
         assert!(
             iv > 0.10 && iv < 2.0,
             "Implied vol must be reasonable: {iv}"
+        );
+    }
+
+    #[test]
+    fn test_variance_strike_uses_only_otm_quotes() {
+        let replicator = VarianceSwapReplicator::new(0.0);
+        let forward = 100.0;
+        let expiry = 0.25;
+        let otm = vec![
+            DiscreteOptionQuote::new(90.0, 2.0, 2.0, false),
+            DiscreteOptionQuote::new(95.0, 1.0, 1.0, false),
+            DiscreteOptionQuote::new(100.0, 4.0, 4.0, false),
+            DiscreteOptionQuote::new(100.0, 4.0, 4.0, true),
+            DiscreteOptionQuote::new(105.0, 1.0, 1.0, true),
+            DiscreteOptionQuote::new(110.0, 2.0, 2.0, true),
+        ];
+        let mut mixed = otm.clone();
+        mixed.extend([
+            DiscreteOptionQuote::new(90.0, 50.0, 50.0, true),
+            DiscreteOptionQuote::new(95.0, 25.0, 25.0, true),
+            DiscreteOptionQuote::new(105.0, 25.0, 25.0, false),
+            DiscreteOptionQuote::new(110.0, 50.0, 50.0, false),
+        ]);
+
+        let otm_var = replicator
+            .replicate_variance_strike(forward, expiry, otm)
+            .expect("OTM strip should price");
+        let mixed_var = replicator
+            .replicate_variance_strike(forward, expiry, mixed)
+            .expect("mixed strip should price");
+        assert!(
+            (otm_var - mixed_var).abs() < 1e-12,
+            "ITM quotes changed the variance strike: {otm_var} vs {mixed_var}"
+        );
+    }
+
+    #[test]
+    fn test_variance_strike_does_not_double_count_duplicate_strikes() {
+        let replicator = VarianceSwapReplicator::new(0.0);
+        let forward = 100.0;
+        let expiry = 0.25;
+        let unique = vec![
+            DiscreteOptionQuote::new(90.0, 2.0, 2.0, false),
+            DiscreteOptionQuote::new(95.0, 1.0, 1.0, false),
+            DiscreteOptionQuote::new(100.0, 4.0, 4.0, true),
+            DiscreteOptionQuote::new(105.0, 1.0, 1.0, true),
+            DiscreteOptionQuote::new(110.0, 2.0, 2.0, true),
+        ];
+        let mut duplicated = unique.clone();
+        duplicated.extend(unique.clone());
+
+        let unique_var = replicator
+            .replicate_variance_strike(forward, expiry, unique)
+            .expect("unique strip should price");
+        let duplicated_var = replicator
+            .replicate_variance_strike(forward, expiry, duplicated)
+            .expect("duplicated strip should price");
+        assert!(
+            (unique_var - duplicated_var).abs() < 1e-12,
+            "duplicate strikes changed the variance strike: {unique_var} vs {duplicated_var}"
         );
     }
 

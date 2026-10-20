@@ -245,9 +245,8 @@ impl LeungLiBasisStoppingRouter {
         let log_arg_lower = (sigma / ((2.0 * kappa).sqrt() * eff_fee_lower)).max(1.0001);
 
         let delta_u = scale * log_arg_upper.ln().sqrt();
-        let delta_l = scale
-            * log_arg_lower.ln().sqrt()
-            * (1.0 + (net_carry_rate.abs() * 10_000.0) / (rho * sigma));
+        let carry_tilt = (net_carry_rate / rho.max(1e-4)).clamp(-0.5, 0.5);
+        let delta_l = scale * log_arg_lower.ln().sqrt() * (1.0 + carry_tilt);
 
         let b_u_star = mean_basis_theta_bps + delta_u;
         let b_l_star = mean_basis_theta_bps - delta_l;
@@ -635,6 +634,22 @@ mod tests {
                 assert!(hurdle_b_l_bps > -150.0);
             }
             other => panic!("Expected StopLossRoll, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_leung_li_lower_barrier_tracks_carry_tilt() {
+        let router = LeungLiBasisStoppingRouter::new(0.10);
+        let decision = router.evaluate_basis_exit(4.80, 5.0, 2.0, 12.0, 0.06, 0.16, 8.0);
+
+        match decision {
+            BasisExitDecision::StopLossRoll { hurdle_b_l_bps, .. } => {
+                assert!(
+                    (4.5..5.0).contains(&hurdle_b_l_bps),
+                    "carry-adjusted lower barrier should remain protective: {hurdle_b_l_bps}"
+                );
+            }
+            other => panic!("Expected StopLossRoll near the mean, got {other:?}"),
         }
     }
 

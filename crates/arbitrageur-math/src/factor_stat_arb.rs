@@ -188,6 +188,9 @@ impl FactorNeutralKellyAllocator {
             return vec![];
         }
         let k = factor_loadings[0].len();
+        if factor_loadings.iter().any(|row| row.len() != k) {
+            return vec![];
+        }
 
         // 1. Identify active assets with healthy mean-reverting regime probability
         let mut active_indices = Vec::with_capacity(n);
@@ -207,37 +210,39 @@ impl FactorNeutralKellyAllocator {
             w_proj[i] = alphas[i] / var;
         }
 
-        // 3. Project out factor exposure restricted strictly to active assets:
-        // Enforces sum_{i in active} B_i w_i = 0, leaving inactive assets at 0.0 weight.
-        if k == 1 {
-            let mut dot_bw = 0.0;
-            let mut dot_bb = 0.0;
+        // 3. Orthonormalize the active loading columns, then project w onto
+        // their orthogonal complement. Reorthogonalization keeps correlated
+        // factors from leaving residual exposure.
+        let mut basis: Vec<Vec<f64>> = Vec::with_capacity(k);
+        for factor_idx in 0..k {
+            let mut vector = vec![0.0; n];
             for &i in &active_indices {
-                let b_i = factor_loadings[i][0];
-                dot_bw += b_i * w_proj[i];
-                dot_bb += b_i * b_i;
+                vector[i] = factor_loadings[i][factor_idx];
             }
-            if dot_bb > 1e-8 {
-                let beta_factor = dot_bw / dot_bb;
-                for &i in &active_indices {
-                    w_proj[i] -= factor_loadings[i][0] * beta_factor;
-                }
-            }
-        } else if k > 1 {
-            for factor_idx in 0..k {
-                let mut dot_bw = 0.0;
-                let mut dot_bb = 0.0;
-                for &i in &active_indices {
-                    let b_i = factor_loadings[i][factor_idx];
-                    dot_bw += b_i * w_proj[i];
-                    dot_bb += b_i * b_i;
-                }
-                if dot_bb > 1e-8 {
-                    let beta_factor = dot_bw / dot_bb;
+            for _ in 0..2 {
+                for q in &basis {
+                    let dot: f64 = active_indices.iter().map(|&i| vector[i] * q[i]).sum();
                     for &i in &active_indices {
-                        w_proj[i] -= factor_loadings[i][factor_idx] * beta_factor;
+                        vector[i] -= dot * q[i];
                     }
                 }
+            }
+            let norm = active_indices
+                .iter()
+                .map(|&i| vector[i] * vector[i])
+                .sum::<f64>()
+                .sqrt();
+            if norm > 1e-12 {
+                for &i in &active_indices {
+                    vector[i] /= norm;
+                }
+                basis.push(vector);
+            }
+        }
+        for q in &basis {
+            let dot: f64 = active_indices.iter().map(|&i| w_proj[i] * q[i]).sum();
+            for &i in &active_indices {
+                w_proj[i] -= dot * q[i];
             }
         }
 
@@ -330,5 +335,29 @@ mod tests {
             weights_gated[1].abs() < 1e-6,
             "Asset 1 should have zero allocation on breakdown"
         );
+    }
+
+    #[test]
+    fn test_factor_neutral_kelly_handles_correlated_factors() {
+        let allocator = FactorNeutralKellyAllocator::new(1.0, 10.0, 0.50);
+        let alphas = vec![0.08, -0.06, 0.04, 0.03];
+        let variances = vec![0.01, 0.015, 0.02, 0.012];
+        let regime_probs = vec![0.95; 4];
+        let loadings = vec![
+            vec![1.0, 0.0, 0.3],
+            vec![0.9, 0.1, 0.25],
+            vec![0.8, -0.1, 0.35],
+            vec![1.1, 0.05, 0.2],
+        ];
+
+        let weights = allocator.allocate(&alphas, &variances, &regime_probs, &loadings);
+        for factor in 0..3 {
+            let exposure: f64 = weights
+                .iter()
+                .zip(&loadings)
+                .map(|(w, row)| w * row[factor])
+                .sum();
+            assert!(exposure.abs() < 1e-9, "factor {factor} exposure {exposure}");
+        }
     }
 }

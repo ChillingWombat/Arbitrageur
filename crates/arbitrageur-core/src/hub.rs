@@ -226,6 +226,15 @@ impl MarketDataHub {
     /// Dispatches a newly ingested public trade tick and broadcasts the update to all subscribed strategies.
     pub fn update_public_trade(&self, trade: PublicTradeEvent) -> MarketUpdateEvent {
         let seq = self.sequence_counter.fetch_add(1, Ordering::SeqCst);
+        let key = (
+            trade.venue.clone(),
+            hub_key(&trade.symbol, self.merge_usd()),
+        );
+        let mid_price = self
+            .orderbooks
+            .read()
+            .get(&key)
+            .and_then(|cached| cached.book.mid_price());
         let event = MarketUpdateEvent {
             timestamp: trade.timestamp,
             sequence: seq,
@@ -233,7 +242,7 @@ impl MarketDataHub {
             symbol: trade.symbol.clone(),
             best_bid: None,
             best_ask: None,
-            mid_price: Some(trade.price),
+            mid_price,
             spread_bps: None,
             funding_rate_8h: None,
             trade_event: Some(trade),
@@ -447,5 +456,38 @@ mod tests {
         assert!(hub
             .get_valid_ws_book(&vid, "BTC", Some(Duration::from_millis(350)))
             .is_none());
+    }
+
+    #[test]
+    fn public_trade_does_not_fabricate_mid_without_book() {
+        let hub = MarketDataHub::new(16, 400);
+        let event = hub.update_public_trade(PublicTradeEvent {
+            timestamp: Utc::now(),
+            venue: VenueId::new("hyperliquid"),
+            symbol: "BTC".to_string(),
+            side: crate::types::Side::Buy,
+            price: dec(100.5),
+            size: dec(1.0),
+            is_liquidation: false,
+        });
+
+        assert!(event.mid_price.is_none());
+    }
+
+    #[test]
+    fn public_trade_uses_cached_book_mid() {
+        let hub = MarketDataHub::new(16, 400);
+        hub.update_orderbook(book("hyperliquid", "BTC"));
+        let event = hub.update_public_trade(PublicTradeEvent {
+            timestamp: Utc::now(),
+            venue: VenueId::new("hyperliquid"),
+            symbol: "BTC-USDC".to_string(),
+            side: crate::types::Side::Buy,
+            price: dec(100.5),
+            size: dec(1.0),
+            is_liquidation: false,
+        });
+
+        assert_eq!(event.mid_price, Some(dec(100.5)));
     }
 }
