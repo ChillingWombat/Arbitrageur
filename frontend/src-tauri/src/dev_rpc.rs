@@ -29,7 +29,11 @@
 use crate::state::AppEngineState;
 use serde_json::{json, Value};
 use std::sync::Arc;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+const MAX_CONCURRENT_CONNECTIONS: usize = 16;
+const MAX_CONNECTION_FRAME_BYTES: u64 = 65_536;
 
 /// Accepted connection type. Unix keeps the filesystem socket; elsewhere
 /// (Windows) the bridge falls back to loopback TCP — see module docs.
@@ -55,8 +59,14 @@ pub fn maybe_spawn(state: Arc<AppEngineState>) {
 /// filesystem permissions plus `SO_PEERCRED` already identify the peer.
 type DevToken = Option<String>;
 
-fn spawn_conn(stream: DevStream, state: Arc<AppEngineState>, token: DevToken) {
+fn spawn_conn(
+    stream: DevStream,
+    state: Arc<AppEngineState>,
+    token: DevToken,
+    permit: OwnedSemaphorePermit,
+) {
     tauri::async_runtime::spawn(async move {
+        let _permit = permit;
         if let Err(e) = handle_conn(stream, state, token).await {
             tracing::warn!("dev rpc: connection error: {e}");
         }
@@ -66,6 +76,7 @@ fn spawn_conn(stream: DevStream, state: Arc<AppEngineState>, token: DevToken) {
 #[cfg(unix)]
 async fn serve_unix(path: std::path::PathBuf, state: Arc<AppEngineState>) {
     use tokio::net::UnixListener;
+    let connection_limit = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
     let _ = std::fs::remove_file(&path);
     match UnixListener::bind(&path) {
         Ok(listener) => {
@@ -95,6 +106,12 @@ async fn serve_unix(path: std::path::PathBuf, state: Arc<AppEngineState>) {
             loop {
                 match listener.accept().await {
                     Ok((stream, _)) => {
+                        let Ok(permit) = connection_limit.clone().acquire_owned().await else {
+                            tracing::error!(
+                                "dev rpc: connection limiter closed — refusing further connections"
+                            );
+                            return;
+                        };
                         #[cfg(target_os = "linux")]
                         {
                             match stream.peer_cred() {
@@ -115,7 +132,7 @@ async fn serve_unix(path: std::path::PathBuf, state: Arc<AppEngineState>) {
                                 }
                             }
                         }
-                        spawn_conn(stream, state.clone(), None);
+                        spawn_conn(stream, state.clone(), None, permit);
                     }
                     Err(e) => {
                         tracing::warn!("dev rpc: accept failed: {e}");
@@ -135,6 +152,7 @@ async fn serve_unix(path: std::path::PathBuf, state: Arc<AppEngineState>) {
 #[cfg(not(unix))]
 async fn serve_loopback(path: std::path::PathBuf, state: Arc<AppEngineState>) {
     use tokio::net::TcpListener;
+    let connection_limit = Arc::new(Semaphore::new(MAX_CONCURRENT_CONNECTIONS));
     // Fail closed on every ambiguity: no port published → nothing can
     // connect, rather than a bridge serving on an unknown port.
     let listener = match TcpListener::bind("127.0.0.1:0").await {
@@ -179,7 +197,13 @@ async fn serve_loopback(path: std::path::PathBuf, state: Arc<AppEngineState>) {
                     tracing::warn!("dev rpc: rejected non-loopback peer {peer}");
                     continue;
                 }
-                spawn_conn(stream, state.clone(), Some(token.clone()));
+                let Ok(permit) = connection_limit.clone().acquire_owned().await else {
+                    tracing::error!(
+                        "dev rpc: connection limiter closed — refusing further connections"
+                    );
+                    return;
+                };
+                spawn_conn(stream, state.clone(), Some(token.clone()), permit);
             }
             Err(e) => {
                 tracing::warn!("dev rpc: accept failed: {e}");
@@ -209,7 +233,10 @@ async fn handle_conn(
     expect_token: DevToken,
 ) -> std::io::Result<()> {
     let (read, mut write) = stream.into_split();
-    let mut lines = BufReader::new(read).lines();
+    // One connection may consume at most 64 KiB of request bytes. Bound the
+    // reader before `lines()` so an unterminated oversized frame cannot grow
+    // the line buffer without limit.
+    let mut lines = BufReader::new(read.take(MAX_CONNECTION_FRAME_BYTES)).lines();
     // Non-unix transports have no peer identity, so the connection must open
     // with the bearer token published in the port file. Anything else gets
     // one error line and a closed socket — never a dispatch.

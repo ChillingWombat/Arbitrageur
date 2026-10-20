@@ -3,6 +3,7 @@ use arbitrageur_core::order::OrderRequest;
 use arbitrageur_core::types::{dec, Decimal, Side};
 use arbitrageur_execution::coordinator::{ArbitrageExecutionResult, AtomicArbitrageCoordinator};
 use arbitrageur_math::spatial_spread::evaluate_spatial_spread;
+use rust_decimal::prelude::ToPrimitive;
 use std::sync::Arc;
 use tracing::debug;
 
@@ -497,6 +498,43 @@ impl SpatialPriceArbStrategy {
         self.gas_cost_usd_b = gas_b;
     }
 
+    /// Enforces the configured maximum against the actual depth-walk VWAP
+    /// slippage on both legs, not merely against the final net edge.
+    fn passes_slippage_gate(
+        &self,
+        best_buy_price: Decimal,
+        buy_vwap: Decimal,
+        best_sell_price: Decimal,
+        sell_vwap: Decimal,
+    ) -> bool {
+        if self.max_slippage_bps < dec!(0)
+            || best_buy_price <= dec!(0)
+            || best_sell_price <= dec!(0)
+        {
+            return false;
+        }
+        let buy_slippage_bps =
+            ((buy_vwap - best_buy_price) / best_buy_price) * arbitrageur_core::types::BPS_DIVISOR;
+        let sell_slippage_bps = ((best_sell_price - sell_vwap) / best_sell_price)
+            * arbitrageur_core::types::BPS_DIVISOR;
+        buy_slippage_bps.max(dec!(0)) <= self.max_slippage_bps
+            && sell_slippage_bps.max(dec!(0)) <= self.max_slippage_bps
+    }
+
+    /// True gross edge and failed-leg cost for the racing guard. Conversion
+    /// failure returns `None` so execution fails closed rather than feeding a
+    /// fabricated default into the pre-flight risk model.
+    fn racing_guard_inputs(&self, buy_price: Decimal, sell_price: Decimal) -> Option<(f64, f64)> {
+        if buy_price <= dec!(0) || sell_price <= dec!(0) || self.max_slippage_bps < dec!(0) {
+            return None;
+        }
+        let gross_edge_bps =
+            ((sell_price - buy_price) / buy_price) * arbitrageur_core::types::BPS_DIVISOR;
+        let failed_leg_cost_bps =
+            self.max_slippage_bps + (self.fee_a_bps + self.fee_b_bps).max(dec!(0));
+        Some((gross_edge_bps.to_f64()?, failed_leg_cost_bps.to_f64()?))
+    }
+
     /// Computes the reservation profit hurdle accounting for cross-venue inventory skew and margin health.
     pub fn effective_hurdle_bps(&self, direction: SpatialDirection) -> Decimal {
         self.effective_hurdle_bps_with_ref_price(direction, None)
@@ -509,21 +547,22 @@ impl SpatialPriceArbStrategy {
         direction: SpatialDirection,
         ref_price: Option<Decimal>,
     ) -> Decimal {
-        let base_f64 = self
-            .target_profit_bps
-            .to_string()
-            .parse::<f64>()
-            .unwrap_or(5.0);
+        self.try_effective_hurdle_bps_with_ref_price(direction, ref_price)
+            .unwrap_or(Decimal::MAX)
+    }
+
+    fn try_effective_hurdle_bps_with_ref_price(
+        &self,
+        direction: SpatialDirection,
+        ref_price: Option<Decimal>,
+    ) -> Option<Decimal> {
+        let base_f64 = self.target_profit_bps.to_f64()?;
 
         let adj_bps = if let Some(cfg) = self.inventory_skew_cfg.as_ref() {
-            let inv_f64 = self
-                .net_inventory_usd
-                .to_string()
-                .parse::<f64>()
-                .unwrap_or(0.0);
-            let qty_f64 = self.order_qty.to_string().parse::<f64>().unwrap_or(1.0);
+            let inv_f64 = self.net_inventory_usd.to_f64()?;
+            let qty_f64 = self.order_qty.to_f64()?;
             let trade_size_usd = if let Some(px) = ref_price {
-                let px_f64 = px.to_string().parse::<f64>().unwrap_or(1.0);
+                let px_f64 = px.to_f64()?;
                 (qty_f64.abs() * px_f64).max(1.0)
             } else {
                 // Sensible fallback when quote is unobserved
@@ -617,21 +656,17 @@ impl SpatialPriceArbStrategy {
                 .iter()
                 .position(|s| s.eq_ignore_ascii_case(&self.symbol))
                 .unwrap_or(0);
-            let qty_f64 = self.order_qty.to_string().parse::<f64>().unwrap_or(1.0);
-            let px_f64 = ref_price
-                .and_then(|p| p.to_string().parse::<f64>().ok())
-                .unwrap_or(100.0);
+            let qty_f64 = self.order_qty.to_f64()?;
+            let px_f64 = match ref_price {
+                Some(price) => price.to_f64()?,
+                None => 100.0,
+            };
             let dir_sign = match direction {
                 SpatialDirection::BuyASellB => 1.0,
                 SpatialDirection::BuyBSellA => -1.0,
             };
             let trade_size = qty_f64.abs() * dir_sign;
-            let inv_f64 = self
-                .net_inventory_usd
-                .to_string()
-                .parse::<f64>()
-                .unwrap_or(0.0)
-                / px_f64.max(1e-4);
+            let inv_f64 = self.net_inventory_usd.to_f64()? / px_f64.max(1e-4);
             let mut q_vec = vec![0.0; avellaneda.asset_symbols.len()];
             if asset_idx < q_vec.len() {
                 q_vec[asset_idx] = inv_f64;
@@ -673,10 +708,11 @@ impl SpatialPriceArbStrategy {
         };
 
         let resilience_penalty_bps = if let Some(ref pacer) = self.resilience_pacer {
-            let px_f64 = ref_price
-                .map(|p| p.to_string().parse::<f64>().unwrap_or(1.0))
-                .unwrap_or(1.0);
-            let qty = self.order_qty.to_string().parse::<f64>().unwrap_or(1.0);
+            let px_f64 = match ref_price {
+                Some(price) => price.to_f64()?,
+                None => 1.0,
+            };
+            let qty = self.order_qty.to_f64()?;
             let rec = pacer.compute_child_slice_recommendation(qty.abs(), 5.0, 5.0, 0.0002, px_f64);
             rec.adverse_selection_penalty_bps
         } else {
@@ -691,10 +727,7 @@ impl SpatialPriceArbStrategy {
             + multi_asset_hurdle_adj
             + cross_hawkes_penalty_bps
             + resilience_penalty_bps;
-        Decimal::from_str_exact(&format!("{:.4}", total_bps))
-            .ok()
-            .or_else(|| Decimal::from_f64_retain(total_bps))
-            .unwrap_or(self.target_profit_bps)
+        Some(Decimal::from_f64_retain(total_bps)?.round_dp(4))
     }
 
     /// Evaluates toxicity of an observed spread opportunity given lead-lag analysis and OFI.
@@ -737,7 +770,9 @@ impl SpatialPriceArbStrategy {
 
         let mid_ref = (bid_a + ask_a + bid_b + ask_b) / dec!(4);
         if let Some(ref mut jd) = self.jump_detector {
-            let mid_f64 = mid_ref.to_string().parse::<f64>().unwrap_or(0.0);
+            let Some(mid_f64) = mid_ref.to_f64() else {
+                return Ok(None);
+            };
             if mid_f64 > 0.0 {
                 let assessment = jd.ingest_tick(mid_f64, 1.0);
                 self.last_jump_assessment = Some(assessment.clone());
@@ -803,12 +838,13 @@ impl SpatialPriceArbStrategy {
 
             if let Some(ref ll) = self.lead_lag {
                 let ofi_z = self.lead_venue_ofi_z.unwrap_or(0.0);
-                let gross_spread_bps = ((bid_b - ask_a).max(bid_a - ask_b)
+                let Some(gross_spread_bps) = (((bid_b - ask_a).max(bid_a - ask_b)
                     / bid_a.max(bid_b).max(dec!(1)))
-                .to_string()
-                .parse::<f64>()
-                .unwrap_or(0.0)
-                    * 10000.0;
+                    * arbitrageur_core::types::BPS_DIVISOR)
+                    .to_f64()
+                else {
+                    return Ok(None);
+                };
                 let assessment =
                     te.evaluate_toxicity(age_a_ms, age_b_ms, ll, ofi_z, gross_spread_bps);
                 if let arbitrageur_math::lead_lag::ToxicityAssessment::ToxicAdverseSelection {
@@ -830,32 +866,36 @@ impl SpatialPriceArbStrategy {
                 .bids
                 .iter()
                 .take(5)
-                .map(|l| l.size.to_string().parse::<f64>().unwrap_or(0.0))
+                .filter_map(|l| l.size.to_f64())
                 .collect();
             let asks_a: Vec<f64> = book_a
                 .asks
                 .iter()
                 .take(5)
-                .map(|l| l.size.to_string().parse::<f64>().unwrap_or(0.0))
+                .filter_map(|l| l.size.to_f64())
                 .collect();
             let bids_b: Vec<f64> = book_b
                 .bids
                 .iter()
                 .take(5)
-                .map(|l| l.size.to_string().parse::<f64>().unwrap_or(0.0))
+                .filter_map(|l| l.size.to_f64())
                 .collect();
             let asks_b: Vec<f64> = book_b
                 .asks
                 .iter()
                 .take(5)
-                .map(|l| l.size.to_string().parse::<f64>().unwrap_or(0.0))
+                .filter_map(|l| l.size.to_f64())
                 .collect();
             let imb_a = mps.compute_multi_level_imbalance(&bids_a, &asks_a, 0.0, 0.0);
             let imb_b = mps.compute_multi_level_imbalance(&bids_b, &asks_b, 0.0, 0.0);
             let ofi_z = self.lead_venue_ofi_z.unwrap_or(0.0);
             let features = [imb_a, ofi_z, 0.0, 1.0, imb_b, 0.0];
-            let fee_a = self.fee_a_bps.to_string().parse::<f64>().unwrap_or(2.0);
-            let fee_b = self.fee_b_bps.to_string().parse::<f64>().unwrap_or(2.0);
+            let Some(fee_a) = self.fee_a_bps.to_f64() else {
+                return Ok(None);
+            };
+            let Some(fee_b) = self.fee_b_bps.to_f64() else {
+                return Ok(None);
+            };
             let sniping_res =
                 mps.evaluate_anticipatory_sniping(&features, 1.5, fee_a, fee_b, 8.0, 0.02, 0.50);
             if sniping_res.decision
@@ -1008,7 +1048,9 @@ impl SpatialPriceArbStrategy {
         ) {
             let total_gas = self.gas_cost_usd_a + self.gas_cost_usd_b;
             let net_profit_usd = opp1.total_net_profit_usd - total_gas;
-            if net_profit_usd > dec!(0) {
+            if net_profit_usd > dec!(0)
+                && self.passes_slippage_gate(ask_a, opp1.buy_vwap, bid_b, opp1.sell_vwap)
+            {
                 let notional = opp1.buy_vwap * opp1.executable_qty;
                 let net_profit_bps = if notional > dec!(0) {
                     (net_profit_usd / notional) * arbitrageur_core::types::BPS_DIVISOR
@@ -1020,7 +1062,9 @@ impl SpatialPriceArbStrategy {
                     Some(opp1.buy_vwap),
                 );
                 let passes_sequencer_guard = if let Some(ref guard) = self.l2_sequencer_guard {
-                    let net_usd_f64 = net_profit_usd.to_string().parse::<f64>().unwrap_or(0.0);
+                    let Some(net_usd_f64) = net_profit_usd.to_f64() else {
+                        return Ok(None);
+                    };
                     let rec = guard.optimize_priority_fee(
                         net_usd_f64,
                         150_000.0,
@@ -1083,16 +1127,19 @@ impl SpatialPriceArbStrategy {
                     Decimal::from_f64_retain((kyle_a + kyle_b).clamp(0.0, 50.0)).unwrap_or(dec!(0))
                 };
                 let rough_discount_1 = if let Some(ref mut rf) = self.rough_fou_engine {
-                    let spread_f64 = opp1
-                        .gross_spread_bps
-                        .to_string()
-                        .parse::<f64>()
-                        .unwrap_or(0.0);
+                    let Some(spread_f64) = opp1.gross_spread_bps.to_f64() else {
+                        return Ok(None);
+                    };
                     rf.ingest_spread(spread_f64);
                     rf.update_hurst_adaptive(0.05);
-                    let base_hurdle_f64 = hurdle1.to_string().parse::<f64>().unwrap_or(5.0);
+                    let Some(base_hurdle_f64) = hurdle1.to_f64() else {
+                        return Ok(None);
+                    };
                     let discount_bps = rf.compute_rough_hurdle_discount_bps(base_hurdle_f64);
-                    Decimal::from_f64_retain(discount_bps).unwrap_or(dec!(0))
+                    let Some(discount) = Decimal::from_f64_retain(discount_bps) else {
+                        return Ok(None);
+                    };
+                    discount
                 } else {
                     dec!(0)
                 };
@@ -1125,7 +1172,9 @@ impl SpatialPriceArbStrategy {
         ) {
             let total_gas = self.gas_cost_usd_a + self.gas_cost_usd_b;
             let net_profit_usd = opp2.total_net_profit_usd - total_gas;
-            if net_profit_usd > dec!(0) {
+            if net_profit_usd > dec!(0)
+                && self.passes_slippage_gate(ask_b, opp2.buy_vwap, bid_a, opp2.sell_vwap)
+            {
                 let notional = opp2.buy_vwap * opp2.executable_qty;
                 let net_profit_bps = if notional > dec!(0) {
                     (net_profit_usd / notional) * arbitrageur_core::types::BPS_DIVISOR
@@ -1137,7 +1186,9 @@ impl SpatialPriceArbStrategy {
                     Some(opp2.buy_vwap),
                 );
                 let passes_sequencer_guard = if let Some(ref guard) = self.l2_sequencer_guard {
-                    let net_usd_f64 = net_profit_usd.to_string().parse::<f64>().unwrap_or(0.0);
+                    let Some(net_usd_f64) = net_profit_usd.to_f64() else {
+                        return Ok(None);
+                    };
                     let rec = guard.optimize_priority_fee(
                         net_usd_f64,
                         150_000.0,
@@ -1200,16 +1251,19 @@ impl SpatialPriceArbStrategy {
                     Decimal::from_f64_retain((kyle_b + kyle_a).clamp(0.0, 50.0)).unwrap_or(dec!(0))
                 };
                 let rough_discount_2 = if let Some(ref mut rf) = self.rough_fou_engine {
-                    let spread_f64 = opp2
-                        .gross_spread_bps
-                        .to_string()
-                        .parse::<f64>()
-                        .unwrap_or(0.0);
+                    let Some(spread_f64) = opp2.gross_spread_bps.to_f64() else {
+                        return Ok(None);
+                    };
                     rf.ingest_spread(spread_f64);
                     rf.update_hurst_adaptive(0.05);
-                    let base_hurdle_f64 = hurdle2.to_string().parse::<f64>().unwrap_or(5.0);
+                    let Some(base_hurdle_f64) = hurdle2.to_f64() else {
+                        return Ok(None);
+                    };
                     let discount_bps = rf.compute_rough_hurdle_discount_bps(base_hurdle_f64);
-                    Decimal::from_f64_retain(discount_bps).unwrap_or(dec!(0))
+                    let Some(discount) = Decimal::from_f64_retain(discount_bps) else {
+                        return Ok(None);
+                    };
+                    discount
                 } else {
                     dec!(0)
                 };
@@ -1332,16 +1386,16 @@ impl SpatialPriceArbStrategy {
                     )
                 };
 
-                let gross_edge_a = signal.spread_bps.to_string().parse::<f64>().unwrap_or(10.0);
-                let failed_cost_a = self
-                    .max_slippage_bps
-                    .to_string()
-                    .parse::<f64>()
-                    .unwrap_or(5.0)
-                    + (self.fee_a_bps + self.fee_b_bps)
-                        .to_string()
-                        .parse::<f64>()
-                        .unwrap_or(5.0);
+                let Some((gross_edge_a, failed_cost_a)) =
+                    self.racing_guard_inputs(signal.buy_price, signal.sell_price)
+                else {
+                    let error =
+                        "racing guard inputs could not be converted; refusing dispatch".to_string();
+                    return ArbitrageExecutionResult::BothFailed {
+                        error_a: error.clone(),
+                        error_b: error,
+                    };
+                };
 
                 coordinator
                     .execute_two_leg_with_racing_guard(
@@ -1418,16 +1472,16 @@ impl SpatialPriceArbStrategy {
                     )
                 };
 
-                let gross_edge_b = signal.spread_bps.to_string().parse::<f64>().unwrap_or(10.0);
-                let failed_cost_b = self
-                    .max_slippage_bps
-                    .to_string()
-                    .parse::<f64>()
-                    .unwrap_or(5.0)
-                    + (self.fee_a_bps + self.fee_b_bps)
-                        .to_string()
-                        .parse::<f64>()
-                        .unwrap_or(5.0);
+                let Some((gross_edge_b, failed_cost_b)) =
+                    self.racing_guard_inputs(signal.buy_price, signal.sell_price)
+                else {
+                    let error =
+                        "racing guard inputs could not be converted; refusing dispatch".to_string();
+                    return ArbitrageExecutionResult::BothFailed {
+                        error_a: error.clone(),
+                        error_b: error,
+                    };
+                };
 
                 coordinator
                     .execute_two_leg_with_racing_guard(
@@ -1583,6 +1637,45 @@ mod tests {
         };
         assert!(sig.worst_buy_price > sig.buy_price);
         assert!(sig.worst_sell_price < sig.sell_price);
+    }
+
+    #[test]
+    fn max_slippage_applies_to_both_depth_walk_legs() {
+        let ex_a = Arc::new(SimulatedExchange::new(
+            "a",
+            "A",
+            0,
+            dec!(2.0),
+            dec!(10000.0),
+        ));
+        let ex_b = Arc::new(SimulatedExchange::new(
+            "b",
+            "B",
+            0,
+            dec!(2.0),
+            dec!(10000.0),
+        ));
+        let strat = SpatialPriceArbStrategy::new(
+            "BTC-USDC",
+            ex_a,
+            ex_b,
+            dec!(10.0),
+            dec!(5.0),
+            dec!(1.0),
+            dec!(2.0),
+            dec!(2.0),
+            50,
+            1,
+        );
+
+        assert!(strat.passes_slippage_gate(dec!(100), dec!(100.04), dec!(110), dec!(110)));
+        assert!(!strat.passes_slippage_gate(dec!(100), dec!(100.06), dec!(110), dec!(110)));
+        assert!(!strat.passes_slippage_gate(dec!(100), dec!(100), dec!(110), dec!(109.94)));
+        let (gross, failed_cost) = strat
+            .racing_guard_inputs(dec!(100), dec!(101))
+            .expect("racing inputs");
+        assert!((gross - 100.0).abs() < 1e-9);
+        assert!((failed_cost - 9.0).abs() < 1e-9);
     }
 
     #[tokio::test]

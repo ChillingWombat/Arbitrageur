@@ -1674,43 +1674,46 @@ async fn dispatch_residual_flatten(state: &AppEngineState, signal_id: &str) {
 /// loop. The pass never overlaps itself (`reconcile_lock` try-lock) and
 /// never converts a poll failure into a resolved state.
 pub fn spawn_supervisor(state: Arc<AppEngineState>) {
-    tauri::async_runtime::spawn(async move {
-        let first = reconcile_pending_orders(&state).await;
-        if first.pending_legs > 0 {
-            tracing::info!(
-                "order reconciliation startup pass: {} pending leg(s), {} polled, {} resolved, {} escalated, {} errors",
-                first.pending_legs,
-                first.polled,
-                first.resolved,
-                first.escalated,
-                first.poll_errors
-            );
-        }
-        let mut interval =
-            tokio::time::interval(std::time::Duration::from_secs(POLL_INTERVAL_SECS));
-        let mut lock_warned = false;
-        loop {
-            interval.tick().await;
-            let s = reconcile_pending_orders(&state).await;
-            if s.vault_locked {
-                if !lock_warned {
-                    tracing::warn!(
-                        "reconciliation paused: credential vault locked — {} pending leg(s) cannot be polled until re-unlock",
-                        s.pending_legs
-                    );
-                    lock_warned = true;
-                }
-                continue;
-            }
-            lock_warned = false;
-            if s.resolved > 0 || s.escalated > 0 || s.poll_errors > 0 {
+    crate::spawn_supervised("order_reconciliation", move || {
+        let state = state.clone();
+        async move {
+            let first = reconcile_pending_orders(&state).await;
+            if first.pending_legs > 0 {
                 tracing::info!(
-                    "order reconciliation pass: {} pending, {} resolved, {} escalated, {} errors",
-                    s.pending_legs,
-                    s.resolved,
-                    s.escalated,
-                    s.poll_errors
+                    "order reconciliation startup pass: {} pending leg(s), {} polled, {} resolved, {} escalated, {} errors",
+                    first.pending_legs,
+                    first.polled,
+                    first.resolved,
+                    first.escalated,
+                    first.poll_errors
                 );
+            }
+            let mut interval =
+                tokio::time::interval(std::time::Duration::from_secs(POLL_INTERVAL_SECS));
+            let mut lock_warned = false;
+            loop {
+                interval.tick().await;
+                let s = reconcile_pending_orders(&state).await;
+                if s.vault_locked {
+                    if !lock_warned {
+                        tracing::warn!(
+                            "reconciliation paused: credential vault locked — {} pending leg(s) cannot be polled until re-unlock",
+                            s.pending_legs
+                        );
+                        lock_warned = true;
+                    }
+                    continue;
+                }
+                lock_warned = false;
+                if s.resolved > 0 || s.escalated > 0 || s.poll_errors > 0 {
+                    tracing::info!(
+                        "order reconciliation pass: {} pending, {} resolved, {} escalated, {} errors",
+                        s.pending_legs,
+                        s.resolved,
+                        s.escalated,
+                        s.poll_errors
+                    );
+                }
             }
         }
     });

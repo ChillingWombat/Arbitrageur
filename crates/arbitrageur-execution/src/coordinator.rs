@@ -251,13 +251,12 @@ fn known_fee(resp: &OrderResponse) -> Decimal {
 /// A partial fill is trimmable only when it is attributable to the
 /// dispatched order, echoes the requested quantity, carries a positive fill
 /// price with a nonnegative fee, and reports a coherent remainder:
-/// `PartiallyFilled` (still working — reconciler tracks it) or a TERMINAL
-/// status (`Cancelled`/`Rejected`/`Expired`) where the remainder is either
-/// the exact shortfall or already consumed by the cancel. A terminal IOC
-/// leg that ended partially filled is exactly this case — refusing it
-/// would force the full-unwind path on a sound, finished fill. Malformed
-/// fills (wrong echoed qty, missing price, negative fee, incoherent
-/// remainder) are never kept open — they fall through to full unwind.
+/// a terminal status (`Cancelled`/`Rejected`/`Expired`) after its resting
+/// remainder has been settled or cancelled. A terminal IOC leg that ended
+/// partially filled is exactly this case — refusing it would force the
+/// full-unwind path on a sound, finished fill. Malformed fills (wrong echoed
+/// qty, missing price, negative fee, incoherent remainder) are never kept
+/// open — they fall through to full unwind.
 fn is_trimmable_partial(
     resp: &OrderResponse,
     exchange: &Arc<dyn ExchangeAdapter>,
@@ -265,11 +264,10 @@ fn is_trimmable_partial(
     client_order_id: &str,
     requested_qty: Decimal,
 ) -> bool {
-    let status_ok = resp.status == OrderStatus::PartiallyFilled
-        || matches!(
-            resp.status,
-            OrderStatus::Cancelled | OrderStatus::Rejected | OrderStatus::Expired
-        );
+    let status_ok = matches!(
+        resp.status,
+        OrderStatus::Cancelled | OrderStatus::Rejected | OrderStatus::Expired
+    );
     // `remaining` is coherent when it equals the shortfall, or when the
     // order is terminal and reports nothing open (the cancel consumed the
     // rest — no further fill can arrive).
@@ -722,11 +720,11 @@ impl AtomicArbitrageCoordinator {
                 // Acks can precede the fill report: settle still-working
                 // legs on venue truth first (zero-fill remainders are
                 // cancelled so they can never fill later untracked).
-                // Partially-filled legs keep working for the matched-pair
-                // trim below — their remainder is the pair's inventory.
+                // Partial legs are cancelled before the matched-pair trim so
+                // no uncorrelated remainder can stay resting on the book.
                 let (fill_a, fill_b) = tokio::join!(
-                    settle_working_leg(exchange_a, &sym_a, &cid_a, fill_a, false),
-                    settle_working_leg(exchange_b, &sym_b, &cid_b, fill_b, false),
+                    settle_working_leg(exchange_a, &sym_a, &cid_a, fill_a, true),
+                    settle_working_leg(exchange_b, &sym_b, &cid_b, fill_b, true),
                 );
                 let identity_a = response_identity_matches(&fill_a, exchange_a, &sym_a, &cid_a);
                 let identity_b = response_identity_matches(&fill_b, exchange_b, &sym_b, &cid_b);
@@ -1257,7 +1255,7 @@ impl AtomicArbitrageCoordinator {
                         &leg.order.symbol,
                         &leg.order.client_order_id,
                         resp,
-                        false,
+                        true,
                     )
                     .await;
 

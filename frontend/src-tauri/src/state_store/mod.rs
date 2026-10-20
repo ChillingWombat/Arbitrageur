@@ -650,6 +650,7 @@ fn option_legs_common_prefix(members: &[&SignalExecution]) -> Option<String> {
 /// rather than being marked at a stale or invented price.
 pub fn aggregate_open_positions(
     signals: &[SignalExecution],
+    environment: &str,
     mark: &dyn Fn(&str, &str) -> Option<f64>,
 ) -> Vec<OpenPositionDto> {
     use std::collections::BTreeMap;
@@ -726,6 +727,7 @@ pub fn aggregate_open_positions(
         }
 
         let mut pnl = Some(0.0f64);
+        let mut missing_live_mark = false;
         let mut notional = Some(0.0f64);
         for ((v, sym), q) in &nets {
             if q.abs() <= EPS {
@@ -766,6 +768,9 @@ pub fn aggregate_open_positions(
             };
 
             let cur_mark = mark(v, sym);
+            if cur_mark.is_none() {
+                missing_live_mark = true;
+            }
             let leg_px = cur_mark.or(avg_entry_px);
             match leg_px {
                 Some(px) => {
@@ -786,7 +791,9 @@ pub fn aggregate_open_positions(
             }
         }
 
-        if (strategy_id == "options_box_spread" || strategy_id == "options_jelly_roll")
+        if environment.eq_ignore_ascii_case("testnet")
+            && missing_live_mark
+            && (strategy_id == "options_box_spread" || strategy_id == "options_jelly_roll")
             && expected_any
             && expected_sum > 0.0
         {

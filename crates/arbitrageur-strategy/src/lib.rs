@@ -480,7 +480,9 @@ mod tests {
 
         let mut strat =
             StatArbPairsStrategy::new("Y", "X", ex.clone(), dec!(1.5), dec!(0.5), dec!(2.0))
-                .expect("valid config");
+                .expect("valid config")
+                .with_round_trip_fee_bps(dec!(0))
+                .with_min_profit_hurdle_bps(dec!(0));
 
         // Manually configure Kalman filter with negative beta and fixed state
         strat.kalman.state = [0.0, -1.5]; // Beta = -1.5 (inverse relationship)
@@ -560,6 +562,8 @@ mod tests {
         let mut strat =
             StatArbPairsStrategy::new("Y", "X", ex.clone(), dec!(1.5), dec!(0.5), dec!(2.0))
                 .expect("valid config")
+                .with_round_trip_fee_bps(dec!(0))
+                .with_min_profit_hurdle_bps(dec!(0))
                 .with_stop_loss_z_score(Some(dec!(3.0)))
                 .expect("valid stop loss");
 
@@ -599,6 +603,8 @@ mod tests {
         let mut strat =
             StatArbPairsStrategy::new("Y", "X", ex.clone(), dec!(1.5), dec!(0.5), dec!(2.0))
                 .expect("valid config")
+                .with_round_trip_fee_bps(dec!(0))
+                .with_min_profit_hurdle_bps(dec!(0))
                 .with_stop_loss_z_score(Some(dec!(5.0)))
                 .expect("valid stop loss")
                 .with_max_holding_ticks(2);
@@ -639,6 +645,8 @@ mod tests {
         let mut strat =
             StatArbPairsStrategy::new("Y", "X", ex.clone(), dec!(1.5), dec!(0.5), dec!(2.0))
                 .expect("valid config")
+                .with_round_trip_fee_bps(dec!(0))
+                .with_min_profit_hurdle_bps(dec!(0))
                 .with_stop_loss_z_score(Some(dec!(8.0)))
                 .expect("valid stop loss")
                 .with_max_holding_ticks(10);
@@ -710,6 +718,8 @@ mod tests {
         let mut strat =
             StatArbPairsStrategy::new("Y", "X", ex.clone(), dec!(1.5), dec!(0.5), dec!(2.0))
                 .expect("valid config")
+                .with_round_trip_fee_bps(dec!(0))
+                .with_min_profit_hurdle_bps(dec!(0))
                 .with_beta_rebalance_threshold_pct(0.15);
 
         strat.kalman.state = [0.0, 2.0];
@@ -783,6 +793,8 @@ mod tests {
         let mut strat =
             StatArbPairsStrategy::new("Y", "X", ex.clone(), dec!(1.5), dec!(0.5), dec!(2.0))
                 .expect("valid config")
+                .with_round_trip_fee_bps(dec!(0))
+                .with_min_profit_hurdle_bps(dec!(0))
                 .with_stop_loss_z_score(Some(dec!(8.0)))
                 .expect("valid stop loss")
                 .with_max_holding_ticks(100);

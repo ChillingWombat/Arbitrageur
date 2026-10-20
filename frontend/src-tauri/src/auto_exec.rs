@@ -845,6 +845,27 @@ impl OpportunityExecutor {
             Ok(()) => (true, None),
             Err(r) => (false, Some(r)),
         };
+        let mut hawkes_flow_ok = true;
+        let mut hawkes_flow_reason = None;
+        for (venue, is_buy, direction) in [
+            (signal.buy_venue.as_str(), true, "buy"),
+            (signal.sell_venue.as_str(), false, "sell"),
+        ] {
+            let Some(verdict) = state.evaluate_hawkes_entry(venue, &signal.symbol, is_buy) else {
+                continue;
+            };
+            if verdict.is_supercritical || !verdict.is_entry_allowed {
+                hawkes_flow_ok = false;
+                hawkes_flow_reason = Some(format!(
+                    "{direction} leg {venue} blocked by Hawkes {:?} regime (toxicity drift {:.2} bps, burst={}, cojump={})",
+                    verdict.regime,
+                    verdict.toxic_drift_bps,
+                    verdict.is_toxic_burst,
+                    verdict.cojump_withdrawal_recommended
+                ));
+                break;
+            }
+        }
         GateContext {
             live_mode: state.is_live(),
             engine_paused: *state.is_paused.read(),
@@ -864,8 +885,8 @@ impl OpportunityExecutor {
             size_usd,
             cooldown_remaining_secs,
             blocking_signal,
-            hawkes_flow_ok: true,
-            hawkes_flow_reason: None,
+            hawkes_flow_ok,
+            hawkes_flow_reason,
         }
     }
 

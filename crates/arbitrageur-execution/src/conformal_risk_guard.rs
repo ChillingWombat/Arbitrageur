@@ -15,7 +15,21 @@
 //! Dynamically scales maintenance margin and enforces fail-closed order submission
 //! blocking and proportional de-leveraging when available margin drops below conformal bounds.
 
+use crate::conformal_cvar_shield::{ConformalCvarShieldEngine, ShieldVerdict as CvarShieldVerdict};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::sync::OnceLock;
+
+/// Maximum number of shock observations retained for conformal calibration.
+pub const MAX_CALIBRATION_SAMPLES: usize = 512;
+
+static CALIBRATION_CACHE: OnceLock<Mutex<HashMap<u64, f64>>> = OnceLock::new();
+
+fn default_max_calibration_samples() -> usize {
+    MAX_CALIBRATION_SAMPLES
+}
 
 /// An empirical shock observation recorded during stress episodes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,6 +84,9 @@ pub struct ConformalRiskGuard {
     pub ofi_skew_beta: f64,
     /// Historical calibration shock dataset.
     pub calibration_data: Vec<MarginShockObservation>,
+    /// Rolling calibration history capacity.
+    #[serde(default = "default_max_calibration_samples")]
+    pub max_calibration_samples: usize,
 }
 
 impl ConformalRiskGuard {
@@ -85,11 +102,17 @@ impl ConformalRiskGuard {
             base_margin_usd: base_margin_usd.max(1.0),
             ofi_skew_beta: ofi_skew_beta.max(0.0),
             calibration_data: Vec::new(),
+            max_calibration_samples: MAX_CALIBRATION_SAMPLES,
         }
     }
 
     /// Appends a new stress episode observation to the calibration dataset.
     pub fn record_observation(&mut self, obs: MarginShockObservation) {
+        let capacity = self.max_calibration_samples.max(1);
+        if self.calibration_data.len() >= capacity {
+            let excess = self.calibration_data.len() + 1 - capacity;
+            self.calibration_data.drain(0..excess);
+        }
         self.calibration_data.push(obs);
     }
 
@@ -120,7 +143,7 @@ impl ConformalRiskGuard {
     /// Calibrates the conformal safety buffer $\lambda^*(\alpha)$ via exact 1D bisection.
     ///
     /// Finds $\lambda^* = \inf \{ \lambda \ge 0 : \frac{n}{n+1} \hat{R}(\lambda) + \frac{B}{n+1} \le \alpha \}$.
-    pub fn calibrate_lambda(&self) -> f64 {
+    fn calibrate_lambda_uncached(&self) -> f64 {
         let n = self.calibration_data.len() as f64;
         if n < 5.0 {
             // Insufficient samples: fallback to conservative heuristic buffer
@@ -167,6 +190,39 @@ impl ConformalRiskGuard {
         }
 
         high
+    }
+
+    /// Calibrates the conformal safety buffer, reusing the cached result while
+    /// the calibration dataset and guard parameters are unchanged.
+    pub fn calibrate_lambda(&self) -> f64 {
+        let key = self.calibration_cache_key();
+        let cache = CALIBRATION_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+        if let Some(lambda) = cache.lock().get(&key).copied() {
+            return lambda;
+        }
+
+        let lambda = self.calibrate_lambda_uncached();
+        let mut guard = cache.lock();
+        if guard.len() >= MAX_CALIBRATION_SAMPLES {
+            guard.clear();
+        }
+        guard.insert(key, lambda);
+        lambda
+    }
+
+    fn calibration_cache_key(&self) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.target_alpha.to_bits().hash(&mut hasher);
+        self.loss_bound.to_bits().hash(&mut hasher);
+        self.base_margin_usd.to_bits().hash(&mut hasher);
+        self.ofi_skew_beta.to_bits().hash(&mut hasher);
+        self.calibration_data.len().hash(&mut hasher);
+        for obs in &self.calibration_data {
+            obs.vol_ratio.to_bits().hash(&mut hasher);
+            obs.ofi.to_bits().hash(&mut hasher);
+            obs.realized_adverse_shock.to_bits().hash(&mut hasher);
+        }
+        hasher.finish()
     }
 
     /// Computes the required dynamic conformal margin requirement in USD for current market conditions.
@@ -233,6 +289,115 @@ impl ConformalRiskGuard {
                     deficit, required_margin, available_equity_usd
                 ),
             }
+        }
+    }
+}
+
+/// Unified synchronous preflight shield used by live execution paths and the
+/// desktop bridge. It combines conformal margin sizing with observed execution
+/// slippage (CVaR) and requires the expected edge to compensate that tail risk.
+#[derive(Debug, Clone)]
+pub struct CompositeExecutionShield {
+    pub risk_guard: ConformalRiskGuard,
+    pub cvar_shield: ConformalCvarShieldEngine,
+}
+
+impl CompositeExecutionShield {
+    pub fn new(risk_guard: ConformalRiskGuard, cvar_shield: ConformalCvarShieldEngine) -> Self {
+        Self {
+            risk_guard,
+            cvar_shield,
+        }
+    }
+
+    pub fn preflight_order(
+        &self,
+        notional_usd: f64,
+        available_margin_usd: f64,
+        base_mm_rate: f64,
+        expected_edge_bps: f64,
+    ) -> CvarShieldVerdict {
+        let notional_usd = notional_usd.max(0.0);
+        let available_margin_usd = available_margin_usd.max(0.0);
+        let base_mm_rate = base_mm_rate.clamp(0.0, 1.0);
+        let expected_edge_bps = expected_edge_bps.max(0.0);
+
+        let lambda = self.risk_guard.calibrate_lambda();
+        let conformal_reserve = (lambda - self.risk_guard.base_margin_usd).max(0.0);
+        let required_margin_usd = notional_usd * base_mm_rate + conformal_reserve;
+        let margin_ratio = if required_margin_usd > 0.0 {
+            available_margin_usd / required_margin_usd
+        } else {
+            f64::INFINITY
+        };
+        let margin_scale = (margin_ratio / 1.10).clamp(0.10, 1.0);
+
+        let cvar_verdict = self.cvar_shield.evaluate_shield();
+        let estimated_cvar_bps = match &cvar_verdict {
+            CvarShieldVerdict::AllowNormalExecution {
+                estimated_cvar_bps, ..
+            }
+            | CvarShieldVerdict::ThrottledExecution {
+                estimated_cvar_bps, ..
+            }
+            | CvarShieldVerdict::HaltOrEvacuate {
+                estimated_cvar_bps, ..
+            } => *estimated_cvar_bps,
+        };
+
+        let edge_scale = if expected_edge_bps > 0.0 && estimated_cvar_bps > expected_edge_bps {
+            (expected_edge_bps / estimated_cvar_bps).clamp(0.10, 0.95)
+        } else {
+            1.0
+        };
+
+        if available_margin_usd < required_margin_usd {
+            return CvarShieldVerdict::HaltOrEvacuate {
+                estimated_cvar_bps,
+                reason: format!(
+                    "Conformal margin breach: available ${available_margin_usd:.2} is below required ${required_margin_usd:.2} (lambda={lambda:.2})"
+                ),
+            };
+        }
+
+        match cvar_verdict {
+            CvarShieldVerdict::HaltOrEvacuate {
+                estimated_cvar_bps,
+                reason,
+            } => CvarShieldVerdict::HaltOrEvacuate {
+                estimated_cvar_bps,
+                reason,
+            },
+            CvarShieldVerdict::ThrottledExecution {
+                scale,
+                estimated_cvar_bps,
+                reason,
+            } => {
+                let combined_scale = scale.min(margin_scale).min(edge_scale);
+                CvarShieldVerdict::ThrottledExecution {
+                    scale: combined_scale,
+                    estimated_cvar_bps,
+                    reason: format!(
+                        "{reason}; conformal margin scale {margin_scale:.2}, edge/CVaR scale {edge_scale:.2}"
+                    ),
+                }
+            }
+            CvarShieldVerdict::AllowNormalExecution {
+                estimated_cvar_bps,
+                ..
+            } if margin_scale < 1.0 || edge_scale < 1.0 => {
+                CvarShieldVerdict::ThrottledExecution {
+                    scale: margin_scale.min(edge_scale),
+                    estimated_cvar_bps,
+                    reason: format!(
+                        "Preflight throttled: conformal margin scale {margin_scale:.2}, expected edge {expected_edge_bps:.1} bps vs CVaR {estimated_cvar_bps:.1} bps"
+                    ),
+                }
+            }
+            CvarShieldVerdict::AllowNormalExecution { .. } => CvarShieldVerdict::AllowNormalExecution {
+                scale: 1.0,
+                estimated_cvar_bps,
+            },
         }
     }
 }
@@ -339,5 +504,61 @@ mod tests {
         assert_eq!(verdict_breach.status, ConformalMarginStatus::Breach);
         assert!(!verdict_breach.can_submit_order); // Fail-closed block active!
         assert!(verdict_breach.deleverage_notional_usd > 0.0);
+    }
+
+    #[test]
+    fn test_calibration_history_is_bounded_and_cache_tracks_new_data() {
+        let mut guard = ConformalRiskGuard::new(0.05, 1.0, 1000.0, 0.2);
+        for i in 0..(MAX_CALIBRATION_SAMPLES + 40) {
+            guard.record_observation(MarginShockObservation {
+                vol_ratio: 1.0,
+                ofi: 0.0,
+                realized_adverse_shock: i as f64,
+            });
+        }
+
+        assert_eq!(guard.calibration_data.len(), MAX_CALIBRATION_SAMPLES);
+        let first_lambda = guard.calibrate_lambda();
+        assert_eq!(guard.calibrate_lambda(), first_lambda);
+
+        guard.record_observation(MarginShockObservation {
+            vol_ratio: 1.0,
+            ofi: 0.0,
+            realized_adverse_shock: 50_000.0,
+        });
+        assert_ne!(guard.calibrate_lambda(), first_lambda);
+    }
+
+    #[test]
+    fn test_composite_shield_blocks_margin_breach_and_throttles_thin_edge() {
+        let mut guard = ConformalRiskGuard::new(0.05, 1.0, 500.0, 0.1);
+        for i in 0..50 {
+            guard.record_observation(MarginShockObservation {
+                vol_ratio: 1.0,
+                ofi: 0.0,
+                realized_adverse_shock: (i as f64) * 10.0,
+            });
+        }
+
+        let mut cvar =
+            ConformalCvarShieldEngine::new(crate::conformal_cvar_shield::ConformalCvarConfig {
+                alpha: 0.05,
+                max_tolerable_cvar_bps: 40.0,
+                min_calibration_samples: 5,
+                window_size: 100,
+            });
+        for _ in 0..20 {
+            cvar.record_loss_bps(32.0);
+        }
+        let shield = CompositeExecutionShield::new(guard, cvar);
+
+        assert!(matches!(
+            shield.preflight_order(100_000.0, 100.0, 0.05, 50.0),
+            CvarShieldVerdict::HaltOrEvacuate { .. }
+        ));
+        assert!(matches!(
+            shield.preflight_order(1_000.0, 500.0, 0.05, 20.0),
+            CvarShieldVerdict::ThrottledExecution { .. }
+        ));
     }
 }

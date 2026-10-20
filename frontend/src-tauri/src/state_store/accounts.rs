@@ -10,14 +10,11 @@ use super::*;
 /// API. Accounts never move between environments — a testnet account is a
 /// distinct credential set, not a flag on a live account.
 fn normalize_environment(raw: Option<&str>) -> anyhow::Result<String> {
-    match raw.map(|e| e.trim().to_ascii_lowercase()).as_deref() {
-        None | Some("") => Ok("live".into()),
-        Some("live") => Ok("live".into()),
-        Some("testnet") | Some("test") => Ok("testnet".into()),
-        Some(other) => {
-            anyhow::bail!("invalid account environment '{other}': expected live or testnet")
-        }
-    }
+    let raw = raw
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| anyhow::anyhow!("account environment is required: expected live|testnet"))?;
+    super::normalize_environment(raw)
 }
 
 impl StateStore {
@@ -131,7 +128,6 @@ impl StateStore {
 
         let mut conn = self.conn.lock();
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-
         let row: Option<(String, bool, String)> = tx
             .query_row(
                 "SELECT venue, enabled, environment FROM exchange_accounts WHERE id = ?1",

@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use arbitrageur_math::black_scholes::sabr_implied_volatility;
+use arbitrageur_math::svi_arbitrage_free::SviSliceParameters;
 use arbitrageur_risk::delta_guard::VolatilitySmileProvider;
 
 /// Point on the cross-asset implied correlation smile.
@@ -408,7 +409,7 @@ impl OnlineRecursiveSabrCalibrator {
     }
 }
 
-/// Single expiry slice with calibrated SABR parameters and raw strike quotes.
+/// Single expiry slice with calibrated SABR/SVI parameters and raw strike quotes.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LiveVolSurfaceSlice {
     pub expiry: String,
@@ -416,9 +417,28 @@ pub struct LiveVolSurfaceSlice {
     pub tenor_years: f64,
     pub forward_price: f64,
     pub sabr_calibrator: OnlineRecursiveSabrCalibrator,
+    /// Arbitrage-free Gatheral SVI fit for smile-adjusted Greeks.
+    #[serde(default)]
+    pub svi_params: Option<SviSliceParameters>,
     /// Exact market IVs by strike (strike in USD -> IV fraction)
     pub observed_strikes: HashMap<u64, f64>,
     pub last_updated_ms: i64,
+}
+
+fn recalibrate_slice_svi(slice: &mut LiveVolSurfaceSlice) {
+    let quotes: Vec<(f64, f64)> = slice
+        .observed_strikes
+        .iter()
+        .map(|(strike_key, iv)| (*strike_key as f64 / 100.0, *iv))
+        .collect();
+    let strikes = quotes.iter().map(|(strike, _)| *strike).collect::<Vec<_>>();
+    let ivs = quotes.iter().map(|(_, iv)| *iv).collect::<Vec<_>>();
+    slice.svi_params = SviSliceParameters::fit_from_iv_smile(
+        &strikes,
+        &ivs,
+        slice.forward_price,
+        slice.tenor_years,
+    );
 }
 
 /// Thread-safe in-memory cache of live SABR volatility surfaces.
@@ -515,6 +535,7 @@ impl LiveVolSurfaceCache {
                     tenor_years,
                     market_iv,
                 ),
+                svi_params: None,
                 observed_strikes: HashMap::new(),
                 last_updated_ms: chrono::Utc::now().timestamp_millis(),
             });
@@ -528,6 +549,69 @@ impl LiveVolSurfaceCache {
         let strike_key = (strike * 100.0).round() as u64;
         slice.observed_strikes.insert(strike_key, market_iv);
         slice.last_updated_ms = chrono::Utc::now().timestamp_millis();
+        recalibrate_slice_svi(slice);
+    }
+
+    /// Ingests a complete expiry chain and calibrates one arbitrage-free SVI
+    /// slice from the resulting quote set.
+    #[allow(clippy::too_many_arguments)]
+    pub fn ingest_chain_slice(
+        &self,
+        asset: &str,
+        expiry: &str,
+        expiry_ms: i64,
+        tenor_years: f64,
+        forward_price: f64,
+        quotes: &[(f64, f64)],
+    ) {
+        for &(strike, market_iv) in quotes {
+            self.ingest_quote(
+                asset,
+                expiry,
+                expiry_ms,
+                tenor_years,
+                forward_price,
+                strike,
+                market_iv,
+            );
+        }
+        let mut map = self.slices.write();
+        let Some(slice) = map
+            .get_mut(&asset.to_ascii_uppercase())
+            .and_then(|slices| slices.get_mut(expiry))
+        else {
+            return;
+        };
+        recalibrate_slice_svi(slice);
+    }
+
+    /// Computes the SVI smile-adjusted delta for an option expiry.
+    pub fn get_smile_adjusted_delta(
+        &self,
+        asset: &str,
+        expiry_ts_ms: i64,
+        strike: f64,
+        spot: f64,
+        bs_delta: f64,
+        bs_vega_raw: f64,
+    ) -> Option<f64> {
+        if spot <= 0.0 || strike <= 0.0 {
+            return None;
+        }
+        let map = self.slices.read();
+        let slice = map
+            .get(&asset.to_ascii_uppercase())?
+            .values()
+            .find(|slice| slice.expiry_ms == expiry_ts_ms)?;
+        let svi = slice.svi_params.as_ref()?;
+        let adjusted = svi.smile_adjusted_delta(
+            bs_delta,
+            bs_vega_raw,
+            slice.forward_price,
+            strike,
+            slice.tenor_years,
+        );
+        adjusted.is_finite().then_some(adjusted)
     }
 
     /// Evaluates model implied volatility for (asset, expiry, strike).
@@ -536,14 +620,28 @@ impl LiveVolSurfaceCache {
         let asset_slices = map.get(&asset.to_ascii_uppercase())?;
         let slice = asset_slices.get(expiry)?;
 
-        // 1. Try calibrated SABR model:
+        // 1. Prefer the arbitrage-free SVI slice.
+        if let Some(svi) = slice.svi_params.as_ref() {
+            let k = (strike / slice.forward_price).ln();
+            if k.is_finite() && slice.tenor_years > 1e-6 {
+                let variance = svi.total_variance(k);
+                if variance.is_finite() && variance > 0.0 {
+                    let iv = (variance / slice.tenor_years).sqrt();
+                    if iv > 0.05 && iv < 4.0 {
+                        return Some(iv);
+                    }
+                }
+            }
+        }
+
+        // 2. Try calibrated SABR model:
         if let Some(iv) = slice.sabr_calibrator.model_volatility(strike) {
             if iv > 0.05 && iv < 4.0 {
                 return Some(iv);
             }
         }
 
-        // 2. Direct lookup in observed strikes:
+        // 3. Direct lookup in observed strikes:
         let strike_key = (strike * 100.0).round() as u64;
         slice.observed_strikes.get(&strike_key).copied()
     }
@@ -552,6 +650,42 @@ impl LiveVolSurfaceCache {
 impl VolatilitySmileProvider for LiveVolSurfaceCache {
     fn get_implied_volatility(&self, asset: &str, expiry: &str, strike: f64) -> Option<f64> {
         self.evaluate_volatility(asset, expiry, strike)
+    }
+
+    fn get_svi_smile_adjusted_delta(
+        &self,
+        underlying: &str,
+        strike: f64,
+        time_to_expiry_years: f64,
+        spot: f64,
+        bs_delta: f64,
+        bs_vega_raw: f64,
+    ) -> Option<f64> {
+        if !time_to_expiry_years.is_finite() || time_to_expiry_years <= 0.0 {
+            return None;
+        }
+        let (expiry_ts_ms, slice_tenor) = {
+            let map = self.slices.read();
+            let slices = map.get(&underlying.to_ascii_uppercase())?;
+            let slice = slices.values().min_by(|a, b| {
+                (a.tenor_years - time_to_expiry_years)
+                    .abs()
+                    .total_cmp(&(b.tenor_years - time_to_expiry_years).abs())
+            })?;
+            (slice.expiry_ms, slice.tenor_years)
+        };
+        let tolerance = (1.0_f64 / 365.25).max(time_to_expiry_years * 0.02);
+        if (slice_tenor - time_to_expiry_years).abs() > tolerance {
+            return None;
+        }
+        self.get_smile_adjusted_delta(
+            underlying,
+            expiry_ts_ms,
+            strike,
+            spot,
+            bs_delta,
+            bs_vega_raw,
+        )
     }
 }
 
@@ -1147,6 +1281,55 @@ mod tests {
         assert!(cache
             .get_implied_volatility("BTC", "31DEC99", 65000.0)
             .is_none());
+    }
+
+    #[test]
+    fn live_vol_surface_calibrates_arbitrage_free_svi_and_smile_delta() {
+        let cache = LiveVolSurfaceCache::new();
+        let forward = 100.0;
+        let tenor = 0.25;
+        let expiry_ms = 1_900_000_000_000;
+        let truth = SviSliceParameters::new(0.04, 0.10, -0.40, 0.0, 0.15);
+        let quotes = [-0.30, -0.20, -0.10, 0.0, 0.10, 0.20, 0.30]
+            .into_iter()
+            .map(|k| {
+                let iv = (truth.total_variance(k) / tenor).sqrt();
+                ((forward * k.exp() * 100.0).round() / 100.0, iv)
+            })
+            .collect::<Vec<_>>();
+
+        cache.ingest_chain_slice("BTC", "SVI-TEST", expiry_ms, tenor, forward, &quotes);
+        let fitted = {
+            let map = cache.slices.read();
+            map["BTC"]["SVI-TEST"]
+                .svi_params
+                .expect("SVI slice should calibrate")
+        };
+        assert!(fitted.is_arbitrage_free());
+        let adjusted = cache
+            .get_smile_adjusted_delta("BTC", expiry_ms, 95.0, forward, 0.35, 18.0)
+            .expect("smile-adjusted delta");
+        assert!(adjusted.is_finite());
+        assert!((adjusted - 0.35).abs() > 1e-8);
+        let provider_adjusted = VolatilitySmileProvider::get_svi_smile_adjusted_delta(
+            &cache, "BTC", 95.0, tenor, forward, 0.35, 18.0,
+        )
+        .expect("provider delegates to the calibrated SVI slice");
+        assert!((provider_adjusted - adjusted).abs() < 1e-12);
+        assert!(VolatilitySmileProvider::get_svi_smile_adjusted_delta(
+            &cache,
+            "BTC",
+            95.0,
+            tenor * 2.0,
+            forward,
+            0.35,
+            18.0,
+        )
+        .is_none());
+        assert_eq!(
+            cache.get_smile_adjusted_delta("BTC", expiry_ms + 1, 95.0, forward, 0.35, 18.0),
+            None
+        );
     }
 
     #[test]

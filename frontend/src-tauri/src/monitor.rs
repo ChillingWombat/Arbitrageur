@@ -726,8 +726,8 @@ fn fast_basis_harvest_exit_reason(
     // Taker crossing fee across 4 legs (entry buy + entry sell + exit sell + exit buy):
     // Standard taker fee ~5 bps per execution = 20 bps total round-trip.
     let round_trip_fee_usd = notional * 0.0005 * 4.0;
-    let is_spot_leg = long_leg.venue.to_ascii_lowercase().contains("spot")
-        || short_leg.venue.to_ascii_lowercase().contains("spot");
+    let is_spot_leg = is_spot_or_equity_leg(&long_leg.venue, &long_leg.symbol)
+        || is_spot_or_equity_leg(&short_leg.venue, &short_leg.symbol);
     let borrow_cost_usd = if is_spot_leg {
         notional * (0.08 / 8760.0) * elapsed_hours
     } else {
@@ -792,11 +792,70 @@ fn fast_basis_harvest_exit_reason(
     let friction_bps = (total_friction_usd / notional.max(1.0)) * 10_000.0;
     let net_funding_annual = (rate_short_hourly - rate_long_hourly) * 8760.0;
     let borrow_annual = if is_spot_leg { 0.08 } else { 0.0 };
+    let fitted_ou = {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let from_ms = now_ms.saturating_sub(7 * 24 * 60 * 60 * 1000);
+        state
+            .state_store
+            .spread_samples_mode(
+                &sig.symbol,
+                state.usd_merge_quotes(),
+                from_ms,
+                now_ms,
+                state.env().as_str(),
+            )
+            .ok()
+            .and_then(|samples| {
+                let long_venue = crate::state::canonical_venue_id(&long_leg.venue)
+                    .unwrap_or(long_leg.venue.as_str());
+                let short_venue = crate::state::canonical_venue_id(&short_leg.venue)
+                    .unwrap_or(short_leg.venue.as_str());
+                let mut long_mids = Vec::new();
+                let mut short_mids = Vec::new();
+                for sample in samples {
+                    if sample.venue_id.eq_ignore_ascii_case(long_venue) {
+                        long_mids.push((sample.ts_ms, sample.mid));
+                    } else if sample.venue_id.eq_ignore_ascii_case(short_venue) {
+                        short_mids.push((sample.ts_ms, sample.mid));
+                    }
+                }
+                long_mids.sort_by_key(|(ts, _)| *ts);
+                short_mids.sort_by_key(|(ts, _)| *ts);
+                let observations = arbitrageur_math::pair_monitor::build_pair_series(
+                    &long_mids,
+                    &short_mids,
+                    crate::monitor::PAIR_ALIGN_GAP_MS,
+                );
+                if observations.len() < 30 {
+                    return None;
+                }
+                let mut deltas: Vec<i64> = observations
+                    .windows(2)
+                    .filter_map(|window| {
+                        let dt = window[1].ts_ms - window[0].ts_ms;
+                        (dt > 0).then_some(dt)
+                    })
+                    .collect();
+                deltas.sort_unstable();
+                let median_dt_secs = (*deltas.get(deltas.len() / 2)? as f64 / 1000.0).max(1.0);
+                let series: Vec<f64> = observations
+                    .iter()
+                    .map(|observation| observation.spread_bps)
+                    .collect();
+                arbitrageur_math::ou_process::OuModelParams::fit(
+                    &series,
+                    median_dt_secs / (365.25 * 24.0 * 60.0 * 60.0),
+                )
+            })
+    };
+    let (mean_basis_bps, reversion_speed, basis_volatility_bps) = fitted_ou
+        .map(|fit| (fit.mu, fit.theta, fit.sigma))
+        .unwrap_or((0.0, 15.0, 25.0));
     let leung_li_decision = evaluator.evaluate_leung_li_exit(
         current_basis_bps,
-        0.0,
-        15.0,
-        25.0,
+        mean_basis_bps,
+        reversion_speed,
+        basis_volatility_bps,
         borrow_annual,
         net_funding_annual,
         friction_bps,
@@ -2744,6 +2803,7 @@ impl SpreadMonitorEngine {
         self.refresh_group_ratios(state, group);
 
         let write_group_book = |conv: OrderBook| {
+            state.feed_hawkes_book(venue, &conv);
             state.market_data_hub.update_orderbook(conv.clone());
             if let Some(e) = self.fx_sample(state, venue, group.key(), &conv) {
                 let _ = state.state_store.record_spread_samples_mode(
@@ -3020,6 +3080,7 @@ impl SpreadMonitorEngine {
                         lane.note_success();
                     }
                     let entry = self.fx_sample(state, &venue, &symbol, &book);
+                    state.feed_hawkes_book(&venue, &book);
                     state.market_data_hub.update_orderbook(book.clone());
                     if let Some(e) = entry {
                         let _ = state.state_store.record_spread_samples_mode(

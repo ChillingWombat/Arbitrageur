@@ -23,7 +23,10 @@ use zeroize::Zeroizing;
 ///   REST endpoints.
 pub struct IbkrAdapter {
     venue_id: VenueId,
-    client: Client,
+    /// The local Client Portal gateway commonly presents a self-signed cert.
+    client_loopback: Client,
+    /// Remote gateways must satisfy normal TLS verification.
+    client_verified_tls: Client,
     /// Authoritative REST gateway endpoint (e.g. `https://127.0.0.1:5000/v1/api`).
     base_url: RwLock<String>,
     /// Configured account id (e.g. `DU1234567` for paper, `U1234567` for live).
@@ -51,10 +54,15 @@ impl IbkrAdapter {
         let url = base_url
             .filter(|u| !u.trim().is_empty())
             .unwrap_or_else(|| Self::DEFAULT_BASE_URL.to_string());
-        let client = Client::builder()
+        let client_loopback = Client::builder()
             .timeout(std::time::Duration::from_secs(12))
             // IBKR Client Portal gateway generates self-signed certificates for local TLS.
             .danger_accept_invalid_certs(true)
+            .user_agent("Arbitrageur/1.0")
+            .build()
+            .unwrap_or_default();
+        let client_verified_tls = Client::builder()
+            .timeout(std::time::Duration::from_secs(12))
             .user_agent("Arbitrageur/1.0")
             .build()
             .unwrap_or_default();
@@ -80,7 +88,8 @@ impl IbkrAdapter {
 
         Self {
             venue_id: VenueId::new("ibkr"),
-            client,
+            client_loopback,
+            client_verified_tls,
             base_url: RwLock::new(url.trim_end_matches('/').to_string()),
             account_id: RwLock::new(
                 account_id
@@ -95,6 +104,22 @@ impl IbkrAdapter {
 
     pub fn is_paper(&self) -> bool {
         self.is_paper
+    }
+
+    fn allows_invalid_certs_for(url: &str) -> bool {
+        reqwest::Url::parse(url)
+            .ok()
+            .and_then(|parsed| parsed.host_str().map(str::to_ascii_lowercase))
+            .map(|host| host.trim_matches(['[', ']']).to_string())
+            .is_some_and(|host| matches!(host.as_str(), "localhost" | "127.0.0.1" | "::1"))
+    }
+
+    fn http_client(&self) -> Client {
+        if Self::allows_invalid_certs_for(&self.base_url.read()) {
+            self.client_loopback.clone()
+        } else {
+            self.client_verified_tls.clone()
+        }
     }
 
     pub fn set_base_url(&self, url: Option<String>) {
@@ -205,7 +230,7 @@ impl IbkrAdapter {
         // Try discovering available accounts from the gateway
         let base = self.base_url.read().clone();
         let url = format!("{}/portfolio/accounts", base.trim_end_matches('/'));
-        let resp = self.client.get(&url).send().await?;
+        let resp = self.http_client().get(&url).send().await?;
         if !resp.status().is_success() {
             anyhow::bail!(
                 "IBKR account ID not configured and gateway query failed with status {}",
@@ -256,7 +281,7 @@ impl IbkrAdapter {
             base.trim_end_matches('/'),
             urlencoding::encode(&venue_sym)
         );
-        let resp = self.client.get(&url).send().await?;
+        let resp = self.http_client().get(&url).send().await?;
         if !resp.status().is_success() {
             anyhow::bail!(
                 "Failed to search contract for {venue_sym} on IBKR (HTTP {})",
@@ -448,14 +473,14 @@ impl ExchangeAdapter for IbkrAdapter {
         let base = self.base_url.read().clone();
         let tickle_url = format!("{}/tickle", base.trim_end_matches('/'));
         // Modern Client Portal gateway keepalive probe is GET /tickle
-        if let Ok(resp) = self.client.get(&tickle_url).send().await {
+        if let Ok(resp) = self.http_client().get(&tickle_url).send().await {
             if resp.status().is_success() {
                 return Ok(());
             }
         }
         // Fallback to GET /iserver/auth/status
         let auth_url = format!("{}/iserver/auth/status", base.trim_end_matches('/'));
-        let resp = self.client.get(&auth_url).send().await?;
+        let resp = self.http_client().get(&auth_url).send().await?;
         if resp.status().is_success() {
             Ok(())
         } else {
@@ -526,7 +551,7 @@ impl ExchangeAdapter for IbkrAdapter {
             base.trim_end_matches('/'),
             conids.join(",")
         );
-        let resp = match self.client.get(&url).send().await {
+        let resp = match self.http_client().get(&url).send().await {
             Ok(r) if r.status().is_success() => r,
             _ => return Ok(HashMap::new()),
         };
@@ -573,7 +598,7 @@ impl ExchangeAdapter for IbkrAdapter {
             base.trim_end_matches('/'),
             conid
         );
-        let resp = self.client.get(&url).send().await?;
+        let resp = self.http_client().get(&url).send().await?;
         if !resp.status().is_success() {
             anyhow::bail!(
                 "Failed to fetch market snapshot for {symbol} (HTTP {})",
@@ -647,7 +672,7 @@ impl ExchangeAdapter for IbkrAdapter {
         // Prime the gateway session context by querying accounts first,
         // preventing IBKR's "Please query /accounts first" portfolio session failure.
         let acct_url = format!("{}/portfolio/accounts", base.trim_end_matches('/'));
-        let _ = self.client.get(&acct_url).send().await;
+        let _ = self.http_client().get(&acct_url).send().await;
 
         // 1. Fetch Summary
         let sum_url = format!(
@@ -655,7 +680,7 @@ impl ExchangeAdapter for IbkrAdapter {
             base.trim_end_matches('/'),
             urlencoding::encode(&account_id)
         );
-        let sum_resp = self.client.get(&sum_url).send().await?;
+        let sum_resp = self.http_client().get(&sum_url).send().await?;
         if !sum_resp.status().is_success() {
             let status = sum_resp.status();
             let body = sum_resp.text().await.unwrap_or_default();
@@ -683,7 +708,7 @@ impl ExchangeAdapter for IbkrAdapter {
             base.trim_end_matches('/'),
             urlencoding::encode(&account_id)
         );
-        let pos_resp = self.client.get(&pos_url).send().await?;
+        let pos_resp = self.http_client().get(&pos_url).send().await?;
         if !pos_resp.status().is_success() {
             let status = pos_resp.status();
             let body = pos_resp.text().await.unwrap_or_default();
@@ -762,7 +787,12 @@ impl ExchangeAdapter for IbkrAdapter {
             urlencoding::encode(&account_id)
         );
 
-        let resp = self.client.post(&place_url).json(&body).send().await?;
+        let resp = self
+            .http_client()
+            .post(&place_url)
+            .json(&body)
+            .send()
+            .await?;
         let resp_val: serde_json::Value = resp.json().await?;
 
         // Handle prompt reply confirmation if required by IBKR gateway
@@ -791,7 +821,7 @@ impl ExchangeAdapter for IbkrAdapter {
                 let reply_url = format!("{}/iserver/reply/{}", base.trim_end_matches('/'), id);
                 let confirm_body = serde_json::json!({ "confirmed": true });
                 let reply_resp = self
-                    .client
+                    .http_client()
                     .post(&reply_url)
                     .json(&confirm_body)
                     .send()
@@ -894,7 +924,7 @@ impl ExchangeAdapter for IbkrAdapter {
             urlencoding::encode(&account_id),
             urlencoding::encode(order_id)
         );
-        let resp = self.client.delete(&url).send().await?;
+        let resp = self.http_client().delete(&url).send().await?;
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
@@ -913,7 +943,7 @@ impl ExchangeAdapter for IbkrAdapter {
                     format!("{}/iserver/reply/{}", base.trim_end_matches('/'), reply_id);
                 let confirm_body = serde_json::json!({ "confirmed": true });
                 let _ = self
-                    .client
+                    .http_client()
                     .post(&reply_url)
                     .json(&confirm_body)
                     .send()
@@ -937,7 +967,7 @@ impl ExchangeAdapter for IbkrAdapter {
             urlencoding::encode(order_id)
         );
 
-        let resp = self.client.get(&url).send().await?;
+        let resp = self.http_client().get(&url).send().await?;
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
@@ -1043,6 +1073,25 @@ impl ExchangeAdapter for IbkrAdapter {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_certificates_are_limited_to_loopback_gateways() {
+        assert!(IbkrAdapter::allows_invalid_certs_for(
+            "https://localhost:5000/v1/api"
+        ));
+        assert!(IbkrAdapter::allows_invalid_certs_for(
+            "https://127.0.0.1:5000/v1/api"
+        ));
+        assert!(IbkrAdapter::allows_invalid_certs_for(
+            "https://[::1]:5000/v1/api"
+        ));
+        assert!(!IbkrAdapter::allows_invalid_certs_for(
+            "https://gateway.example.com/v1/api"
+        ));
+        assert!(!IbkrAdapter::allows_invalid_certs_for(
+            "https://10.0.0.12:5000/v1/api"
+        ));
+    }
 
     #[test]
     fn test_adapter_initialization() {

@@ -150,6 +150,108 @@ impl BasisCurvePcaEngine {
         }
     }
 
+    /// Fits the leading three principal components from historical basis curves.
+    #[allow(clippy::needless_range_loop)]
+    pub fn fit_from_history(tenor_years: Vec<f64>, history: &[Vec<f64>]) -> Option<Self> {
+        let num_tenors = tenor_years.len();
+        if num_tenors < 3
+            || history.len() < 3
+            || tenor_years
+                .iter()
+                .any(|tenor| !tenor.is_finite() || *tenor < 0.0)
+            || tenor_years.windows(2).any(|pair| pair[1] <= pair[0])
+            || history
+                .iter()
+                .any(|row| row.len() != num_tenors || row.iter().any(|value| !value.is_finite()))
+        {
+            return None;
+        }
+
+        let sample_count = history.len() as f64;
+        let baseline_means = (0..num_tenors)
+            .map(|j| history.iter().map(|row| row[j]).sum::<f64>() / sample_count)
+            .collect::<Vec<_>>();
+
+        let mut covariance = vec![vec![0.0; num_tenors]; num_tenors];
+        for row in history {
+            for i in 0..num_tenors {
+                let di = row[i] - baseline_means[i];
+                for j in i..num_tenors {
+                    covariance[i][j] += di * (row[j] - baseline_means[j]);
+                }
+            }
+        }
+        let denominator = sample_count - 1.0;
+        for i in 0..num_tenors {
+            for j in i..num_tenors {
+                covariance[i][j] /= denominator;
+                covariance[j][i] = covariance[i][j];
+            }
+        }
+
+        let (eigenvalues, eigenvectors) = symmetric_jacobi_eigen(covariance)?;
+        let mut order = (0..num_tenors).collect::<Vec<_>>();
+        order.sort_by(|&a, &b| {
+            eigenvalues[b]
+                .partial_cmp(&eigenvalues[a])
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        if eigenvalues[order[0]] <= f64::EPSILON {
+            return None;
+        }
+
+        let mut v1_level = (0..num_tenors)
+            .map(|i| eigenvectors[i][order[0]])
+            .collect::<Vec<_>>();
+        let mut v2_slope = (0..num_tenors)
+            .map(|i| eigenvectors[i][order[1]])
+            .collect::<Vec<_>>();
+        let mut v3_curvature = (0..num_tenors)
+            .map(|i| eigenvectors[i][order[2]])
+            .collect::<Vec<_>>();
+
+        if v1_level.iter().sum::<f64>() < 0.0 {
+            for value in &mut v1_level {
+                *value = -*value;
+            }
+        }
+        let mid = (num_tenors - 1) as f64 / 2.0;
+        let slope_sign = v2_slope
+            .iter()
+            .enumerate()
+            .map(|(i, value)| (i as f64 - mid) * value)
+            .sum::<f64>();
+        if slope_sign < 0.0 {
+            for value in &mut v2_slope {
+                *value = -*value;
+            }
+        }
+        if v3_curvature
+            .iter()
+            .find(|value| value.abs() > 1e-12)
+            .is_some_and(|value| *value < 0.0)
+        {
+            for value in &mut v3_curvature {
+                *value = -*value;
+            }
+        }
+
+        let factor_volatilities = [
+            eigenvalues[order[0]].max(0.0).sqrt(),
+            eigenvalues[order[1]].max(0.0).sqrt(),
+            eigenvalues[order[2]].max(0.0).sqrt(),
+        ];
+
+        Some(Self {
+            num_tenors,
+            v1_level,
+            v2_slope,
+            v3_curvature,
+            baseline_means,
+            factor_volatilities,
+        })
+    }
+
     /// Evaluates synthetic forward basis yield between two maturities $(T_1, T_2)$:
     /// $$F(T_1, T_2) = \frac{y_2 T_2 - y_1 T_1}{T_2 - T_1}$$
     pub fn compute_synthetic_forward_yield(
@@ -276,6 +378,78 @@ impl BasisCurvePcaEngine {
     }
 }
 
+#[allow(clippy::needless_range_loop)]
+fn symmetric_jacobi_eigen(mut matrix: Vec<Vec<f64>>) -> Option<(Vec<f64>, Vec<Vec<f64>>)> {
+    let n = matrix.len();
+    if n == 0 || matrix.iter().any(|row| row.len() != n) {
+        return None;
+    }
+    let mut eigenvectors = vec![vec![0.0; n]; n];
+    for (i, row) in eigenvectors.iter_mut().enumerate() {
+        row[i] = 1.0;
+    }
+
+    for _ in 0..(100 * n * n) {
+        let mut p = 0;
+        let mut q = 0;
+        let mut max_off_diagonal = 0.0;
+        for i in 0..n {
+            for j in (i + 1)..n {
+                let value = matrix[i][j].abs();
+                if value > max_off_diagonal {
+                    max_off_diagonal = value;
+                    p = i;
+                    q = j;
+                }
+            }
+        }
+        if max_off_diagonal <= 1e-12 {
+            break;
+        }
+
+        let app = matrix[p][p];
+        let aqq = matrix[q][q];
+        let apq = matrix[p][q];
+        let tau = (aqq - app) / (2.0 * apq);
+        let t = if tau >= 0.0 {
+            1.0 / (tau + (1.0 + tau * tau).sqrt())
+        } else {
+            -1.0 / (-tau + (1.0 + tau * tau).sqrt())
+        };
+        let c = 1.0 / (1.0 + t * t).sqrt();
+        let s = t * c;
+
+        for i in 0..n {
+            if i == p || i == q {
+                continue;
+            }
+            let aip = matrix[i][p];
+            let aiq = matrix[i][q];
+            matrix[i][p] = c * aip - s * aiq;
+            matrix[p][i] = matrix[i][p];
+            matrix[i][q] = s * aip + c * aiq;
+            matrix[q][i] = matrix[i][q];
+        }
+        matrix[p][p] = c * c * app - 2.0 * s * c * apq + s * s * aqq;
+        matrix[q][q] = s * s * app + 2.0 * s * c * apq + c * c * aqq;
+        matrix[p][q] = 0.0;
+        matrix[q][p] = 0.0;
+
+        for row in &mut eigenvectors {
+            let vip = row[p];
+            let viq = row[q];
+            row[p] = c * vip - s * viq;
+            row[q] = s * vip + c * viq;
+        }
+    }
+
+    let eigenvalues = (0..n).map(|i| matrix[i][i]).collect::<Vec<_>>();
+    if eigenvalues.iter().any(|value| !value.is_finite()) {
+        return None;
+    }
+    Some((eigenvalues, eigenvectors))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -395,5 +569,76 @@ mod tests {
         );
         assert!(contango_scores.slope_z_score > 1.5);
         assert!(engine.is_curve_dislocated(&contango_scores, 1.5));
+    }
+
+    #[test]
+    fn test_fit_from_history_recovers_empirical_curve_factors() {
+        let tenor_years = vec![0.0, 0.25, 0.5, 0.75, 1.0];
+        let level = [1.0, 1.0, 1.0, 1.0, 1.0];
+        let slope = [-2.0, -1.0, 0.0, 1.0, 2.0];
+        let curvature = [2.0, -1.0, -2.0, -1.0, 2.0];
+        let normalize = |v: &[f64; 5]| {
+            let norm = v.iter().map(|x| x * x).sum::<f64>().sqrt();
+            v.iter().map(|x| x / norm).collect::<Vec<_>>()
+        };
+        let level = normalize(&level);
+        let slope = normalize(&slope);
+        let curvature = normalize(&curvature);
+
+        let center = |values: Vec<f64>| {
+            let mean = values.iter().sum::<f64>() / values.len() as f64;
+            values
+                .into_iter()
+                .map(|value| value - mean)
+                .collect::<Vec<_>>()
+        };
+        let level_series = center((0..240).map(|i| (i as f64 * 0.17).sin() * 3.0).collect());
+        let slope_series = center((0..240).map(|i| (i as f64 * 0.11).cos() * 1.2).collect());
+        let curvature_series = center((0..240).map(|i| (i as f64 * 0.07).sin() * 0.6).collect());
+        let history = (0..240)
+            .map(|i| {
+                let l = level_series[i];
+                let s = slope_series[i];
+                let c = curvature_series[i];
+                (0..5)
+                    .map(|j| 8.0 + l * level[j] + s * slope[j] + c * curvature[j])
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        let fitted = BasisCurvePcaEngine::fit_from_history(tenor_years, &history)
+            .expect("history should fit");
+        assert_eq!(fitted.num_tenors, 5);
+        assert!(
+            fitted.factor_volatilities[0] > fitted.factor_volatilities[1],
+            "{:?}",
+            fitted.factor_volatilities
+        );
+        assert!(
+            fitted.factor_volatilities[1] > fitted.factor_volatilities[2],
+            "{:?}",
+            fitted.factor_volatilities
+        );
+        assert!(fitted
+            .baseline_means
+            .iter()
+            .all(|mean| (*mean - 8.0).abs() < 0.1));
+
+        let level_alignment: f64 = fitted
+            .v1_level
+            .iter()
+            .zip(&level)
+            .map(|(a, b)| a * b)
+            .sum::<f64>()
+            .abs();
+        let slope_alignment: f64 = fitted
+            .v2_slope
+            .iter()
+            .zip(&slope)
+            .map(|(a, b)| a * b)
+            .sum::<f64>()
+            .abs();
+        assert!(level_alignment > 0.99, "{level_alignment}");
+        assert!(slope_alignment > 0.99, "{slope_alignment}");
     }
 }

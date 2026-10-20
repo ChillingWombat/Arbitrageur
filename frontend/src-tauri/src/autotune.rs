@@ -870,6 +870,9 @@ pub fn set_ticker_autotune_mode(
 /// Returns the number of symbols evaluated. Symbols whose recommendation
 /// errors or produces no READY rows still advance their last-run stamp.
 pub async fn run_scheduled_autotune(state: &AppEngineState) -> Result<usize, String> {
+    if *state.is_paused.read() || state.circuit_breaker.is_tripped() {
+        return Ok(0);
+    }
     let now_ms = Utc::now().timestamp_millis();
     let period_secs = autotune_i64_kv(
         state,

@@ -269,6 +269,10 @@ pub struct SpatialOpportunityDto {
     /// Per-chunk capacity curve for the detail-modal chart.
     #[serde(default)]
     pub depth_curve: Vec<crate::monitor::DepthCurvePointDto>,
+    /// 1-based rank from the disjoint greedy venue matching pass. `None`
+    /// means another higher-ranked opportunity already claimed one leg.
+    #[serde(default)]
+    pub disjoint_rank: Option<usize>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -396,6 +400,10 @@ pub struct RiskOverviewDto {
     pub total_portfolio_value_usd: f64,
     pub net_deltas: Vec<NetDeltaDto>,
     pub margin_health: MarginHealthDto,
+    #[serde(default)]
+    pub tail_copula_stressed: bool,
+    #[serde(default)]
+    pub safety_guard_rebalances: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -625,9 +633,9 @@ pub(crate) struct RouteEconomics {
     buy_fee_bps: f64,
     sell_fee_bps: f64,
     round_trip_commission_bps: f64,
-    entry_slippage_bps: f64,
-    exit_slippage_bps: f64,
-    closing_spread_bps: f64,
+    pub(crate) entry_slippage_bps: f64,
+    pub(crate) exit_slippage_bps: f64,
+    pub(crate) closing_spread_bps: f64,
     expected_friction_bps: f64,
     top_gross_bps: f64,
     pub(crate) expected_net_bps: f64,
@@ -1128,7 +1136,8 @@ pub async fn get_system_status_impl(state: &AppEngineState) -> Result<SystemStat
     };
 
     // Cloned so no lock guard is held across the latency-probe awaits.
-    let s = state.settings.read().clone();
+    let mut s = state.settings.read().clone();
+    s.clear_credential_material();
     // A venue is enabled when its engine flag is set OR it owns an enabled
     // account profile — the same admission rule `get_venues` applies.
     let env = state.env();
@@ -1665,11 +1674,21 @@ pub async fn get_market_universe_impl(
     Ok(out)
 }
 
+#[cfg(test)]
 pub(crate) fn enforce_retention_pass(state: &AppEngineState, now_ms: i64) {
     let (max_days, max_gb) = {
         let s = state.settings.read();
         (s.spread_samples_max_days, s.spread_samples_max_gb)
     };
+    enforce_retention_pass_store(&state.state_store, now_ms, max_days, max_gb);
+}
+
+fn enforce_retention_pass_store(
+    store: &crate::state_store::StateStore,
+    now_ms: i64,
+    max_days: Option<u32>,
+    max_gb: Option<f64>,
+) {
     // Row caps are unconditional — a disabled day window (`None`/`0`) must
     // never let a telemetry table grow without bound. `i64::MIN` makes the
     // day cutoff a no-op while the per-table caps still evict oldest-first.
@@ -1677,27 +1696,25 @@ pub(crate) fn enforce_retention_pass(state: &AppEngineState, now_ms: i64) {
         Some(days) if days > 0 => now_ms - (days as i64) * 86_400_000,
         _ => i64::MIN,
     };
-    let _ = state
-        .state_store
-        .prune_spread_samples(retain_after, crate::state_store::SPREAD_SAMPLES_MAX_ROWS);
+    let _ = store.prune_spread_samples(retain_after, crate::state_store::SPREAD_SAMPLES_MAX_ROWS);
     // Same cutoff bounds the raw volume log. Session profiles and hour
     // bins are derived state and are never pruned here.
-    let _ = state.state_store.prune_venue_volume_samples(
+    let _ = store.prune_venue_volume_samples(
         retain_after,
         crate::state_store::VENUE_VOLUME_SAMPLES_MAX_ROWS,
     );
     // Same day cutoff bounds the signal-event audit log, with its own row
     // cap so audit history and price history prune independently.
-    let _ = state.state_store.prune_monitor_signal_events(
+    let _ = store.prune_monitor_signal_events(
         retain_after,
         crate::state_store::MONITOR_SIGNAL_EVENTS_MAX_ROWS,
     );
     // Same day cutoff bounds the margin-snapshot log behind the 24h
     // average-utilisation stat.
-    let _ = state.state_store.prune_margin_snapshots(retain_after);
+    let _ = store.prune_margin_snapshots(retain_after);
     // Same day cutoff bounds the funding-rate history log (future
     // persistence / half-life training substrate).
-    let _ = state.state_store.prune_funding_rate_samples(retain_after);
+    let _ = store.prune_funding_rate_samples(retain_after);
     if let Some(gb) = max_gb {
         if gb.is_finite() && gb > 0.0 {
             let budget = (gb * 1024.0 * 1024.0 * 1024.0) as u64;
@@ -1705,14 +1722,14 @@ pub(crate) fn enforce_retention_pass(state: &AppEngineState, now_ms: i64) {
             // without shrinking page_count, so an allocated-size budget can
             // never be satisfied and would drain the whole table.
             for _ in 0..1000 {
-                let size = match state.state_store.db_used_bytes() {
+                let size = match store.db_used_bytes() {
                     Ok(s) => s,
                     Err(_) => break,
                 };
                 if size <= budget {
                     break;
                 }
-                match state.state_store.delete_oldest_spread_samples(100_000) {
+                match store.delete_oldest_spread_samples(100_000) {
                     Ok(0) => break,
                     Ok(_) => {}
                     Err(_) => break,
@@ -1723,7 +1740,7 @@ pub(crate) fn enforce_retention_pass(state: &AppEngineState, now_ms: i64) {
     // Return freed pages to the OS on every pass — bounded per pass,
     // converges over successive hourly runs toward the used size. No-op on
     // databases opened before the v34 auto_vacuum migration.
-    let _ = state.state_store.incremental_vacuum(50_000);
+    let _ = store.incremental_vacuum(50_000);
 }
 
 /// Venue-facing fetch spelling for a canonical base. Adapters address
@@ -1971,13 +1988,24 @@ pub async fn fetch_orderbooks_impl(
         let mut last_hour = state.sample_prune_at.lock();
         if current_hour > *last_hour {
             *last_hour = current_hour;
-            enforce_retention_pass(state, now_ms);
             true
         } else {
             false
         }
     };
     if heartbeat_due {
+        let store = state.state_store.clone();
+        let (max_days, max_gb) = {
+            let s = state.settings.read();
+            (s.spread_samples_max_days, s.spread_samples_max_gb)
+        };
+        if let Err(e) = tokio::task::spawn_blocking(move || {
+            enforce_retention_pass_store(&store, now_ms, max_days, max_gb);
+        })
+        .await
+        {
+            tracing::warn!("retention pass task failed: {e}");
+        }
         // Periodic heartbeat for the utilisation history: the cadence
         // cap keeps this to at most one row per venue per minute.
         maybe_record_margin_snapshots(state, now_ms).await;
@@ -2231,8 +2259,9 @@ pub async fn scan_spatial_opportunities_impl(
             }
             let (buy_id, buy_name, ref book_buy, buy_fee) = books[i];
             let (sell_id, sell_name, ref book_sell, sell_fee) = books[j];
-            let route_gas_usd =
-                venue_estimated_gas_cost_usd(buy_id) + venue_estimated_gas_cost_usd(sell_id);
+            let route_gas_usd = (venue_estimated_gas_cost_usd(buy_id)
+                + venue_estimated_gas_cost_usd(sell_id))
+                * 2.0;
 
             if let Some(econ) = compute_route_economics_with_gas(
                 book_buy,
@@ -2385,6 +2414,7 @@ pub async fn scan_spatial_opportunities_impl(
                         .iter()
                         .map(crate::monitor::DepthCurvePointDto::from)
                         .collect(),
+                    disjoint_rank: None,
                 });
             }
         }
@@ -2395,6 +2425,30 @@ pub async fn scan_spatial_opportunities_impl(
             .partial_cmp(&a.net_spread_bps)
             .unwrap_or(std::cmp::Ordering::Equal)
     });
+    let candidates = opps
+        .iter()
+        .map(
+            |opp| arbitrageur_risk::safety_guards::CandidateOpportunity {
+                id: opp.id.clone(),
+                symbol: opp.symbol.clone(),
+                venue_a: opp.buy_venue_id.clone(),
+                venue_b: opp.sell_venue_id.clone(),
+                expected_net_bps: opp.net_spread_bps,
+                order_qty: opp.order_qty,
+                est_profit_usd: opp.estimated_profit_usd,
+            },
+        )
+        .collect();
+    let disjoint =
+        arbitrageur_risk::safety_guards::select_disjoint_greedy_opportunities(candidates);
+    let ranks: HashMap<&str, usize> = disjoint
+        .iter()
+        .enumerate()
+        .map(|(idx, opp)| (opp.id.as_str(), idx + 1))
+        .collect();
+    for opp in &mut opps {
+        opp.disjoint_rank = ranks.get(opp.id.as_str()).copied();
+    }
     Ok(opps)
 }
 
@@ -2507,7 +2561,7 @@ pub async fn scan_spot_opportunities_impl(
             if validate_adapter_book(&book, &venue_id, &canonical).is_err() {
                 continue;
             }
-            books.push((*vid, *vname, book, effective_venue_fee_bps(state, vid)));
+            books.push((*vid, *vname, book, effective_venue_spot_fee_bps(state, vid)));
         }
         if books.len() < 2 {
             continue;
@@ -2538,8 +2592,9 @@ pub async fn scan_spot_opportunities_impl(
                     Some(q) if q > dec!(0) => q,
                     _ => continue,
                 };
-                let route_gas_usd =
-                    venue_estimated_gas_cost_usd(buy_id) + venue_estimated_gas_cost_usd(sell_id);
+                let route_gas_usd = (venue_estimated_gas_cost_usd(buy_id)
+                    + venue_estimated_gas_cost_usd(sell_id))
+                    * 2.0;
                 let Some(econ) = compute_route_economics_with_gas(
                     book_buy,
                     book_sell,
@@ -2795,11 +2850,155 @@ pub async fn scan_prediction_opportunities_impl(
     market: &str,
     state: &AppEngineState,
 ) -> Result<Vec<PredictionOpportunityDto>, String> {
-    let _ = (market, state);
-    Ok(Vec::new())
+    let market_filter = market.trim().to_ascii_uppercase();
+    let settings = {
+        let mut settings = state.settings.read().clone();
+        settings.clear_credential_material();
+        settings
+    };
+    let poly_enabled = settings.polymarket_enabled
+        || state
+            .state_store
+            .has_enabled_account("polymarket", state.env().as_str())
+            .unwrap_or(false);
+    let kalshi_enabled = settings.kalshi_enabled
+        || state
+            .state_store
+            .has_enabled_account("kalshi", state.env().as_str())
+            .unwrap_or(false);
+    if !(poly_enabled && kalshi_enabled) {
+        return Ok(Vec::new());
+    }
+    let poly: Arc<dyn ExchangeAdapter> =
+        Arc::new(arbitrageur_exchanges::prediction::PolymarketAdapter::new(
+            Some(settings.polymarket_url.clone()),
+            Some(settings.polymarket_api_key.clone()).filter(|value| !value.trim().is_empty()),
+        ));
+    let kalshi: Arc<dyn ExchangeAdapter> =
+        Arc::new(arbitrageur_exchanges::prediction::KalshiAdapter::new(
+            Some(settings.kalshi_url.clone()),
+            Some(settings.kalshi_api_key_id.clone()).filter(|value| !value.trim().is_empty()),
+        ));
+    let Ok((poly_markets, kalshi_markets)) = tokio::try_join!(
+        state.cached_markets("polymarket", &poly),
+        state.cached_markets("kalshi", &kalshi),
+    ) else {
+        return Ok(Vec::new());
+    };
+
+    let hub_book = |venue: &str, candidates: &[String]| {
+        candidates.iter().find_map(|symbol| {
+            state.market_data_hub.get_valid_orderbook(
+                &arbitrageur_core::types::VenueId::new(venue),
+                symbol,
+                Some(std::time::Duration::from_secs(30)),
+            )
+        })
+    };
+    let kalshi_by_title: HashMap<String, &arbitrageur_core::market::MarketMetadata> =
+        kalshi_markets
+            .iter()
+            .filter(|market| market.is_active)
+            .map(|market| (market.symbol.base.clone(), market))
+            .collect();
+    let mut out = Vec::new();
+    for poly_market in poly_markets.iter().filter(|market| market.is_active) {
+        let title = poly_market.symbol.base.trim_end_matches("-YES").to_string();
+        if !market_filter.is_empty()
+            && !title.contains(&market_filter)
+            && !poly_market.symbol.raw.contains(&market_filter)
+        {
+            continue;
+        }
+        let Some(kalshi_market) = kalshi_by_title.get(&format!("{title}-YES")) else {
+            continue;
+        };
+        let strategy = arbitrageur_strategy::prediction_market_arb::PredictionMarketArbStrategy::new_with_tokens(
+            poly.clone(),
+            kalshi.clone(),
+            poly_market.venue_symbol.clone(),
+            strategy_no_symbol(&poly_market.venue_symbol),
+            kalshi_market.venue_symbol.clone(),
+            format!("{}:NO", kalshi_market.venue_symbol),
+            dec!(2.0),
+            dec!(1.0),
+        );
+        let poly_book = hub_book(
+            "polymarket",
+            &[
+                strategy.poly_yes_symbol.clone(),
+                poly_market.symbol.raw.clone(),
+                poly_market.symbol.base.clone(),
+            ],
+        );
+        let kalshi_no_book = hub_book(
+            "kalshi",
+            &[
+                strategy.kalshi_no_symbol.clone(),
+                format!("{}:NO", kalshi_market.venue_symbol),
+                format!("{title}-NO"),
+            ],
+        );
+        let (Some(poly_book), Some(kalshi_no_book)) = (poly_book, kalshi_no_book) else {
+            continue;
+        };
+        let (Some(poly_yes_ask), Some(poly_bid), Some(kalshi_no_ask), Some(kalshi_bid)) = (
+            poly_book.best_ask_price(),
+            poly_book.best_bid_price(),
+            kalshi_no_book.best_ask_price(),
+            kalshi_no_book.best_bid_price(),
+        ) else {
+            continue;
+        };
+        let poly_no_ask = (dec!(1.0) - poly_bid).min(dec!(1.0));
+        let kalshi_yes_ask = (dec!(1.0) - kalshi_bid).min(dec!(1.0));
+        let Some(opp) = arbitrageur_math::prediction_synthetic::evaluate_prediction_cross_venue(
+            strategy.poly_exchange.name(),
+            poly_yes_ask,
+            poly_no_ask,
+            strategy.kalshi_exchange.name(),
+            kalshi_yes_ask,
+            kalshi_no_ask,
+            strategy.fee_bps,
+        ) else {
+            continue;
+        };
+        let cents = |value: Decimal| value.to_string().parse::<f64>().unwrap_or(0.0) * 100.0;
+        out.push(PredictionOpportunityDto {
+            id: format!("prediction-{title}-{}", kalshi_market.venue_symbol),
+            market_title: title.replace('-', " "),
+            venue_a: poly.name().to_string(),
+            venue_b: kalshi.name().to_string(),
+            strategy: opp.strategy_name,
+            buy_yes_venue: opp.buy_yes_venue,
+            buy_no_venue: opp.buy_no_venue,
+            yes_price_cents: cents(opp.yes_price),
+            no_price_cents: cents(opp.no_price),
+            total_cost_cents: cents(opp.total_cost),
+            conditional_payout_cents: cents(opp.conditional_payout),
+            net_profit_cents: cents(opp.net_profit),
+            roi_pct: opp.net_return_pct.to_string().parse::<f64>().unwrap_or(0.0),
+            has_arbitrage: true,
+            depth_curve: Vec::new(),
+        });
+    }
+    out.sort_by(|a, b| {
+        b.net_profit_cents
+            .partial_cmp(&a.net_profit_cents)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    Ok(out)
+}
+
+fn strategy_no_symbol(yes_symbol: &str) -> String {
+    yes_symbol
+        .strip_suffix("-YES")
+        .map(|prefix| format!("{prefix}-NO"))
+        .unwrap_or_else(|| format!("{yes_symbol}-NO"))
 }
 
 pub fn run_stat_arb_step_impl(
+    pair_key: &str,
     step: usize,
     price_y: f64,
     price_x: f64,
@@ -2808,8 +3007,43 @@ pub fn run_stat_arb_step_impl(
     if !price_y.is_finite() || price_y <= 0.0 || !price_x.is_finite() || price_x <= 0.0 {
         return Err("prices must be finite and positive".into());
     }
-    let mut kf = state.kalman_filter.write();
-    let (hedge_ratio, residual) = kf.update(price_x, price_y);
+    let pair_key = pair_key.trim();
+    if pair_key.is_empty()
+        || pair_key.len() > 80
+        || !pair_key
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '/' | '-' | '_'))
+    {
+        return Err("pair_key must be 1-80 characters of ASCII alphanumerics or :/_-".into());
+    }
+    let exchange: Arc<dyn arbitrageur_core::exchange::ExchangeAdapter> = state.live_hl.clone();
+    let mut sessions = state.stat_arb_sessions.write();
+    let session = sessions.entry(pair_key.to_string()).or_insert_with(|| {
+        arbitrageur_strategy::stat_arb_pairs::StatArbPairsStrategy::new(
+            "Y",
+            "X",
+            exchange,
+            dec!(2.0),
+            dec!(0.5),
+            dec!(1.0),
+        )
+        .expect("static stat-arb defaults are valid")
+        .with_hamilton_filter(
+            arbitrageur_math::factor_stat_arb::HamiltonKalmanSpreadFilter::new(
+                12.0, 0.0, 0.02, 0.01, 0.5, 0.15, 0.98, 0.98,
+            ),
+        )
+    });
+    let y_dec = Decimal::from_f64_retain(price_y)
+        .ok_or_else(|| "price_y is not representable as Decimal".to_string())?;
+    let x_dec = Decimal::from_f64_retain(price_x)
+        .ok_or_else(|| "price_x is not representable as Decimal".to_string())?;
+    let pair_signal = session
+        .observe_pair_prices(y_dec, x_dec)
+        .map_err(|e| e.to_string())?;
+    let kf = &session.kalman;
+    let hedge_ratio = kf.state[1];
+    let residual = kf.latest_residual;
     let z = kf.spread_z_score();
     let alpha = kf.intercept();
     let variance = if z.abs() > 1e-6 {
@@ -2818,14 +3052,19 @@ pub fn run_stat_arb_step_impl(
         1.0
     };
 
-    let signal = if z > 2.0 {
-        "ENTRY_SHORT_SPREAD"
-    } else if z < -2.0 {
-        "ENTRY_LONG_SPREAD"
-    } else if z.abs() < 0.5 {
-        "EXIT"
-    } else {
-        "NEUTRAL"
+    let signal = match pair_signal {
+        Some(arbitrageur_strategy::stat_arb_pairs::SpreadSignal::Enter {
+            side_y: Side::Buy,
+            ..
+        }) => "ENTRY_LONG_SPREAD",
+        Some(arbitrageur_strategy::stat_arb_pairs::SpreadSignal::Enter {
+            side_y: Side::Sell,
+            ..
+        }) => "ENTRY_SHORT_SPREAD",
+        Some(arbitrageur_strategy::stat_arb_pairs::SpreadSignal::Exit { .. }) => "EXIT",
+        Some(arbitrageur_strategy::stat_arb_pairs::SpreadSignal::RebalanceHedge { .. }) | None => {
+            "NEUTRAL"
+        }
     };
 
     Ok(StatArbStepResultDto {
@@ -3160,7 +3399,6 @@ pub async fn reset_transaction_history_impl(
         *state.total_realized_profit.write() = dec!(0);
         *state.total_premium_outlay.write() = dec!(0);
     }
-    state.circuit_breaker.reset();
     *state.last_risk_live_universe.write() = None;
     // Force a re-anchor on the next risk snapshot: the account universe for
     // a freshly-reset environment is unknown until it is observed.
@@ -3336,6 +3574,12 @@ pub fn set_engine_paused_impl(paused: bool, state: &AppEngineState) -> Result<bo
         .state_store
         .kv_set("engine.paused", if paused { "1" } else { "0" })
         .map_err(|e| format!("Failed to persist pause state: {e}"))?;
+    if let Err(e) = state
+        .state_store
+        .kv_set("engine.is_paused", if paused { "true" } else { "false" })
+    {
+        tracing::warn!("Failed to synchronize legacy engine.is_paused: {e}");
+    }
     *state.is_paused.write() = paused;
     if !paused {
         *state.is_stopped.write() = false;
@@ -4633,9 +4877,16 @@ pub async fn run_stat_arb_step(
     step: usize,
     price_y: f64,
     price_x: f64,
+    pair_key: Option<String>,
     state: State<'_, Arc<AppEngineState>>,
 ) -> Result<StatArbStepResultDto, String> {
-    run_stat_arb_step_impl(step, price_y, price_x, &state)
+    run_stat_arb_step_impl(
+        pair_key.as_deref().unwrap_or("Y/X"),
+        step,
+        price_y,
+        price_x,
+        &state,
+    )
 }
 
 #[tauri::command]
@@ -5674,7 +5925,9 @@ pub(crate) async fn refresh_equity_expectations_after_fills(
         let Some(&b) = before.get(&key) else {
             continue;
         };
-        let Ok(mut acc) = adapter.fetch_account().await else {
+        let Ok(Ok(mut acc)) =
+            tokio::time::timeout(std::time::Duration::from_secs(3), adapter.fetch_account()).await
+        else {
             continue;
         };
         // Post-trade reads must see post-trade state: refresh the
@@ -6315,7 +6568,7 @@ mod tests {
     #[tokio::test]
     async fn test_upsert_account_refuses_credentials_for_unadapted_venue() {
         let (state, dir) = test_state_with_vault("unadapted-creds");
-        initialize_vault_impl("test password", &state).expect("init vault");
+        initialize_vault_impl("test-password-123", &state).expect("init vault");
 
         // Credential-bearing create on polymarket → refused, no row persisted.
         let err = upsert_account_impl(
@@ -8325,7 +8578,7 @@ mod tests {
     #[tokio::test]
     async fn test_credential_save_is_vault_only_and_sanitized() {
         let (state, dir) = test_state_with_vault("creds");
-        initialize_vault_impl("test password", &state).expect("init vault");
+        initialize_vault_impl("test-password-123", &state).expect("init vault");
 
         let settings = EngineSettingsDto {
             hyperliquid_enabled: true,
@@ -8381,7 +8634,7 @@ mod tests {
         let err = delete_exchange_credentials_impl("hyperliquid", &state).unwrap_err();
         assert!(err.contains("locked"), "err: {}", err);
 
-        initialize_vault_impl("test password", &state).expect("init vault");
+        initialize_vault_impl("test-password-123", &state).expect("init vault");
 
         let settings = EngineSettingsDto {
             hyperliquid_enabled: true,
@@ -8412,7 +8665,7 @@ mod tests {
     #[tokio::test]
     async fn test_account_crud_and_credential_binding() {
         let (state, dir) = test_state_with_vault("accounts");
-        initialize_vault_impl("test password", &state).expect("init vault");
+        initialize_vault_impl("test-password-123", &state).expect("init vault");
 
         let a1 = upsert_account_impl(
             AccountUpsertInput {
@@ -8534,7 +8787,7 @@ mod tests {
 
         // Locked vault and unknown accounts both fail closed.
         assert!(delete_account_credentials_impl("lighter-default", &state).is_err());
-        initialize_vault_impl("test password", &state).expect("init vault");
+        initialize_vault_impl("test-password-123", &state).expect("init vault");
         assert!(delete_account_credentials_impl("no-such-account", &state).is_err());
 
         let a1 = upsert_account_impl(
@@ -8611,7 +8864,7 @@ mod tests {
         let (state, dir) = test_state_with_vault("cred-reveal");
 
         assert!(get_account_credential_field_impl("lighter-default", "apiSecret", &state).is_err());
-        initialize_vault_impl("test password", &state).expect("init vault");
+        initialize_vault_impl("test-password-123", &state).expect("init vault");
         assert!(get_account_credential_field_impl("no-such-account", "apiSecret", &state).is_err());
 
         let a1 = upsert_account_impl(
@@ -8677,7 +8930,7 @@ mod tests {
     #[tokio::test]
     async fn test_account_base_url_patch_semantics() {
         let (state, dir) = test_state_with_vault("base-url-patch");
-        initialize_vault_impl("test password", &state).expect("init vault");
+        initialize_vault_impl("test-password-123", &state).expect("init vault");
 
         // Create an OKX account carrying a regional-entity override plus a
         // secret; both must persist.
@@ -8797,7 +9050,7 @@ mod tests {
     #[tokio::test]
     async fn test_save_evm_wallet_fans_out_keyed_vs_address_only() {
         let (state, dir) = test_state_with_vault("evm-wallet");
-        initialize_vault_impl("test password", &state).expect("init vault");
+        initialize_vault_impl("test-password-123", &state).expect("init vault");
         state.set_environment(crate::state::TradingEnvironment::Live);
 
         let res = save_evm_wallet_impl(EVM_WALLET_TEST_KEY, None, &state).expect("save wallet");
@@ -8865,7 +9118,7 @@ mod tests {
     #[tokio::test]
     async fn test_save_evm_wallet_mismatch_and_locked_refuse() {
         let (state, dir) = test_state_with_vault("evm-wallet-refuse");
-        initialize_vault_impl("test password", &state).expect("init vault");
+        initialize_vault_impl("test-password-123", &state).expect("init vault");
 
         // Address/key mismatch refuses before any write.
         let err = save_evm_wallet_impl(
@@ -8900,7 +9153,7 @@ mod tests {
     #[tokio::test]
     async fn test_evm_wallet_enable_resolves_adapter_and_clear_strips() {
         let (state, dir) = test_state_with_vault("evm-wallet-enable");
-        initialize_vault_impl("test password", &state).expect("init vault");
+        initialize_vault_impl("test-password-123", &state).expect("init vault");
         state.set_environment(crate::state::TradingEnvironment::Live);
 
         save_evm_wallet_impl(EVM_WALLET_TEST_KEY, None, &state).expect("save wallet");
@@ -8967,7 +9220,7 @@ mod tests {
         // adopt the shared wallet immediately — the resolved account and the
         // canonical `{venue}-default` both receive the material.
         let (state, dir) = test_state_with_vault("evm-wallet-rekey");
-        initialize_vault_impl("test password", &state).expect("init vault");
+        initialize_vault_impl("test-password-123", &state).expect("init vault");
         state.set_environment(crate::state::TradingEnvironment::Live);
 
         let legacy_key = "0x0000000000000000000000000000000000000000000000000000000000000002";
@@ -9037,7 +9290,7 @@ mod tests {
     #[tokio::test]
     async fn test_unlock_migrates_raw_evm_key_to_stronghold() {
         let (state, dir) = test_state_with_vault("evm-migrate");
-        initialize_vault_impl("test password", &state).expect("init vault");
+        initialize_vault_impl("test-password-123", &state).expect("init vault");
 
         // Seed a legacy raw-key record directly (bypassing the accounts
         // hooks, which would migrate it immediately).
@@ -9069,7 +9322,7 @@ mod tests {
         }
 
         let _ = lock_vault_impl(&state);
-        unlock_vault_impl("test password", None, &state).expect("unlock migrates");
+        unlock_vault_impl("test-password-123", None, &state).expect("unlock migrates");
 
         let data = state.vault.write().get_data().expect("data").clone();
         assert_eq!(
@@ -9102,7 +9355,7 @@ mod tests {
     #[tokio::test]
     async fn test_vault_unlock_backoff_throttles_retries() {
         let (state, dir) = test_state_with_vault("unlock-backoff");
-        initialize_vault_impl("correct password", &state).expect("init vault");
+        initialize_vault_impl("correct-password-123", &state).expect("init vault");
         let _ = lock_vault_impl(&state);
 
         // First failure counts and opens a 1s backoff window.
@@ -9119,12 +9372,13 @@ mod tests {
         );
         // Even the CORRECT password is refused inside the window — the
         // throttle applies to the attempt, not the credential.
-        let err = unlock_vault_impl("correct password", None, &state).expect_err("still throttled");
+        let err =
+            unlock_vault_impl("correct-password-123", None, &state).expect_err("still throttled");
         assert!(err.contains("Too many"), "throttled: {err}");
 
         // Waiting out the window lets a correct unlock through and resets.
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        unlock_vault_impl("correct password", None, &state).expect("unlock after backoff");
+        unlock_vault_impl("correct-password-123", None, &state).expect("unlock after backoff");
         let (failures, _) = *state.vault_unlock_backoff.lock();
         assert_eq!(failures, 0, "success resets the backoff counter");
         let _ = std::fs::remove_dir_all(dir);
@@ -9136,13 +9390,13 @@ mod tests {
     #[tokio::test]
     async fn test_mfa_lifecycle_gates_unlock_and_disable() {
         let (state, dir) = test_state_with_vault("mfa-gate");
-        initialize_vault_impl("correct password", &state).expect("init vault");
+        initialize_vault_impl("correct-password-123", &state).expect("init vault");
         assert!(!get_vault_status_impl(&state).mfa_enabled);
 
         // Locked vault refuses enrollment before it begins.
         let _ = lock_vault_impl(&state);
         assert!(begin_mfa_enrollment_impl(&state).is_err());
-        unlock_vault_impl("correct password", None, &state).expect("re-unlock");
+        unlock_vault_impl("correct-password-123", None, &state).expect("re-unlock");
 
         // begin → pending secret + otpauth URI; nothing enrolled yet.
         let enrollment = begin_mfa_enrollment_impl(&state).expect("begin");
@@ -9168,19 +9422,22 @@ mod tests {
 
         // Password-only is refused; the live code is mandatory. The failure
         // trips the unlock backoff — wait out the 1s window.
-        assert!(unlock_vault_impl("correct password", None, &state).is_err());
+        assert!(unlock_vault_impl("correct-password-123", None, &state).is_err());
         std::thread::sleep(std::time::Duration::from_millis(1100));
         let code = crate::totp::code_at(&secret, crate::totp::unix_now());
-        unlock_vault_impl("correct password", Some(&code), &state).expect("unlock with MFA");
+        unlock_vault_impl("correct-password-123", Some(&code), &state).expect("unlock with MFA");
 
-        // Disable refuses a wrong code, accepts a live one, and clears the flag.
+        // Disable refuses a wrong code, accepts the next step, and clears the flag.
         assert!(disable_mfa_impl("000000", &state).is_err());
-        let code = crate::totp::code_at(&secret, crate::totp::unix_now());
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        let now = crate::totp::unix_now();
+        let next_step = now / crate::totp::TOTP_STEP_SECS + 1;
+        let code = crate::totp::code_at(&secret, next_step * crate::totp::TOTP_STEP_SECS);
         let status = disable_mfa_impl(&code, &state).expect("disable");
         assert!(!status.mfa_enabled);
         let _ = lock_vault_impl(&state);
         assert!(!get_vault_status_impl(&state).mfa_enabled);
-        unlock_vault_impl("correct password", None, &state).expect("password-only unlock");
+        unlock_vault_impl("correct-password-123", None, &state).expect("password-only unlock");
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -9190,7 +9447,7 @@ mod tests {
     #[tokio::test]
     async fn test_divergent_evm_keys_stay_vault_held() {
         let (state, dir) = test_state_with_vault("evm-diverge");
-        initialize_vault_impl("test password", &state).expect("init vault");
+        initialize_vault_impl("test-password-123", &state).expect("init vault");
 
         let cred = |venue: &str, key: &str| ExchangeCredentials {
             venue: venue.into(),
@@ -9220,7 +9477,7 @@ mod tests {
             .expect("seed divergent keys");
 
         let _ = lock_vault_impl(&state);
-        unlock_vault_impl("test password", None, &state).expect("unlock");
+        unlock_vault_impl("test-password-123", None, &state).expect("unlock");
 
         let data = state.vault.write().get_data().expect("data").clone();
         assert!(
@@ -9244,7 +9501,7 @@ mod tests {
 
         // Locked vault -> fail closed; no account -> fail closed.
         assert!(get_account_signer_address_impl("nope", &state).is_err());
-        initialize_vault_impl("test password", &state).expect("init vault");
+        initialize_vault_impl("test-password-123", &state).expect("init vault");
 
         let a1 = upsert_account_impl(
             AccountUpsertInput {
@@ -9334,7 +9591,7 @@ mod tests {
     #[tokio::test]
     async fn test_evm_sentinel_signer_resolution_and_revoke() {
         let (state, dir) = test_state_with_vault("evm-sentinel");
-        initialize_vault_impl("test password", &state).expect("init vault");
+        initialize_vault_impl("test-password-123", &state).expect("init vault");
         state.set_environment(crate::state::TradingEnvironment::Live);
 
         let res = save_evm_wallet_impl(EVM_WALLET_TEST_KEY, None, &state).expect("save wallet");
@@ -9393,8 +9650,8 @@ mod tests {
         // exit and operator flatten would fail until re-unlock. Live mode
         // with an open position must refuse the lock.
         let (state, dir) = test_state_with_vault("lock_gate");
-        initialize_vault_impl("test password", &state).expect("init vault");
-        unlock_vault_impl("test password", None, &state).expect("unlock");
+        initialize_vault_impl("test-password-123", &state).expect("init vault");
+        unlock_vault_impl("test-password-123", None, &state).expect("unlock");
         state.set_environment(crate::state::TradingEnvironment::Live);
 
         state
@@ -9462,8 +9719,8 @@ mod tests {
         // Deleting a venue's credentials while an open live leg routes
         // through it strands exit supervision — refuse until flattened.
         let (state, dir) = test_state_with_vault("cred_gate");
-        initialize_vault_impl("test password", &state).expect("init vault");
-        unlock_vault_impl("test password", None, &state).expect("unlock");
+        initialize_vault_impl("test-password-123", &state).expect("init vault");
+        unlock_vault_impl("test-password-123", None, &state).expect("unlock");
         state.set_environment(crate::state::TradingEnvironment::Live);
 
         state
@@ -9614,7 +9871,7 @@ mod tests {
     #[tokio::test]
     async fn test_legacy_credentials_migrate_to_default_profile() {
         let (state, dir) = test_state_with_vault("migrate");
-        initialize_vault_impl("test password", &state).expect("init vault");
+        initialize_vault_impl("test-password-123", &state).expect("init vault");
 
         // Simulate a pre-account-model record: venue-keyed, unbound.
         state
@@ -9658,7 +9915,7 @@ mod tests {
             .expect("seed hsm");
 
         let _ = lock_vault_impl(&state);
-        unlock_vault_impl("test password", None, &state).expect("unlock migrates");
+        unlock_vault_impl("test-password-123", None, &state).expect("unlock migrates");
 
         // Legacy unbound creds migrate to the live environment — scope the
         // listing accordingly (accounts are env-filtered).
@@ -9719,7 +9976,7 @@ mod tests {
     #[tokio::test]
     async fn test_strategy_route_crud_and_eligibility() {
         let (state, dir) = test_state_with_vault("routes");
-        initialize_vault_impl("test password", &state).expect("init vault");
+        initialize_vault_impl("test-password-123", &state).expect("init vault");
 
         let hl = upsert_account_impl(
             AccountUpsertInput {
@@ -9834,7 +10091,7 @@ mod tests {
         // admitted here, so routing it must refuse at upsert time rather
         // than persist a pair that can never be eligible.
         let (state, dir) = test_state_with_vault("routes_env");
-        initialize_vault_impl("test password", &state).expect("init vault");
+        initialize_vault_impl("test-password-123", &state).expect("init vault");
         assert_eq!(
             state.env(),
             crate::state::TradingEnvironment::Testnet,
@@ -9968,7 +10225,7 @@ mod tests {
     #[tokio::test]
     async fn test_account_delete_requires_unlock_and_listing_is_lock_safe() {
         let (state, dir) = test_state_with_vault("del_locked");
-        initialize_vault_impl("test password", &state).expect("init vault");
+        initialize_vault_impl("test-password-123", &state).expect("init vault");
 
         let a = upsert_account_impl(
             AccountUpsertInput {
@@ -10000,7 +10257,7 @@ mod tests {
         assert_eq!(listed[0].credentials_configured, None);
 
         // The secret survives the refused deletion.
-        unlock_vault_impl("test password", None, &state).expect("unlock");
+        unlock_vault_impl("test-password-123", None, &state).expect("unlock");
         let stored = state.vault.write().get_data().expect("vault data").clone();
         assert_eq!(stored.credentials.len(), 1);
         assert_eq!(stored.credentials[0].api_secret, "SENTINEL_DEL");
@@ -10359,6 +10616,13 @@ mod tests {
         // Tight cross (~23 bps) so the max-entry-spread gate passes.
         seed_test_book(&state, "hyperliquid", "DOT-USDC", dec!(4.41), dec!(4.43));
         seed_test_book(&state, "lighter", "DOT-USDC", dec!(4.40), dec!(4.42));
+        state.strategy_params.write().insert(
+            "funding".to_string(),
+            StrategyParamsDto {
+                funding_max_entry_spread_bps: 50.0,
+                ..StrategyParamsDto::defaults_for("funding")
+            },
+        );
         // Steep HL-vs-Lighter gap: short HL, long Lighter, APR far above hurdle.
         state
             .market_data_hub
@@ -10722,14 +10986,22 @@ mod tests {
 
         // Open aggregation yields two same-venue rows with distinct symbols.
         let signals = state.state_store.list_open_signals(None).expect("signals");
-        let positions = crate::state_store::aggregate_open_positions(&signals, &|venue, symbol| {
-            state
-                .market_data_hub
-                .get_valid_orderbook(&arbitrageur_core::types::VenueId::from(venue), symbol, None)
-                .and_then(|b| b.mid_price())
-                .and_then(|m| dec_to_f64(m, "mark mid").ok())
-                .and_then(|p| crate::execution::ledger_px_usd(&state, venue, symbol, p))
-        });
+        let positions = crate::state_store::aggregate_open_positions(
+            &signals,
+            state.env().as_str(),
+            &|venue, symbol| {
+                state
+                    .market_data_hub
+                    .get_valid_orderbook(
+                        &arbitrageur_core::types::VenueId::from(venue),
+                        symbol,
+                        None,
+                    )
+                    .and_then(|b| b.mid_price())
+                    .and_then(|m| dec_to_f64(m, "mark mid").ok())
+                    .and_then(|p| crate::execution::ledger_px_usd(&state, venue, symbol, p))
+            },
+        );
         let funding_pos = positions
             .iter()
             .find(|p| p.strategy_id.eq_ignore_ascii_case("funding"))
@@ -12101,7 +12373,7 @@ mod tests {
     #[tokio::test]
     async fn test_toggle_off_keeps_stored_venue_discoverable_and_deletable() {
         let (state, dir) = test_state_with_vault("toggle");
-        initialize_vault_impl("test password", &state).expect("init vault");
+        initialize_vault_impl("test-password-123", &state).expect("init vault");
 
         let settings = EngineSettingsDto {
             hyperliquid_enabled: true,
@@ -12131,7 +12403,7 @@ mod tests {
                 false,
                 "standard",
                 None,
-                None,
+                Some("live"),
             )
             .expect("disable account");
         let off = EngineSettingsDto {
@@ -14767,7 +15039,7 @@ mod tests {
     #[tokio::test]
     async fn test_scans_fail_closed_even_when_fully_configured() {
         let (state, dir) = test_state_with_vault("scans");
-        initialize_vault_impl("test password", &state).expect("init vault");
+        initialize_vault_impl("test-password-123", &state).expect("init vault");
 
         let settings = EngineSettingsDto {
             hyperliquid_enabled: true,
@@ -14981,8 +15253,8 @@ mod tests {
                 .is_err()
         );
 
-        assert!(run_stat_arb_step_impl(0, f64::NAN, 100.0, &state).is_err());
-        assert!(run_stat_arb_step_impl(0, 100.0, -1.0, &state).is_err());
+        assert!(run_stat_arb_step_impl("Y/X", 0, f64::NAN, 100.0, &state).is_err());
+        assert!(run_stat_arb_step_impl("Y/X", 0, 100.0, -1.0, &state).is_err());
         assert!(fit_ou_process_impl(&[100.0; 12], f64::NAN).is_err());
         assert!(fit_ou_process_impl(&[f64::INFINITY; 12], 1.0).is_err());
         assert!(compute_optimal_thresholds_impl(f64::NAN, 0.0, 1.0, 0.1).is_err());
@@ -15712,7 +15984,7 @@ mod tests {
                 false,
                 "standard",
                 None,
-                None,
+                Some(state.env().as_str()),
             )
             .expect("account");
 

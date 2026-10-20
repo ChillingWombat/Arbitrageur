@@ -52,11 +52,8 @@ sha3 = "0.10"
 k256 = { version = "0.14", features = ["ecdsa", "arithmetic"] }
 hex = "0.4"
 hmac = "0.13"
-config = "0.14"
-crossterm = "0.27"
-ratatui = "0.27"
 rand = "0.8"
-aes-gcm = "0.10"
+aes-gcm = "0.11.1"
 argon2 = "0.6"
 zeroize = { version = "1.8", features = ["derive"] }
 base32 = "0.5"
