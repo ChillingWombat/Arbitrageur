@@ -1870,7 +1870,11 @@ pub fn spawn_volatility_surface_worker(
                                 if let Some(iv_dec) = summary.mark_iv {
                                     if let Ok(iv_raw) = iv_dec.to_string().parse::<f64>() {
                                         let fractional_iv = iv_raw * 0.01;
-                                        if fractional_iv > 0.01 && fractional_iv < 5.0 && forward_price > 0.0 && strike > 0.0 {
+                                        if (0.05..=1.80).contains(&fractional_iv)
+                                            && forward_price > 0.0
+                                            && strike >= 0.50 * forward_price
+                                            && strike <= 1.80 * forward_price
+                                        {
                                             vol_cache.ingest_quote(
                                                 asset,
                                                 expiry_str,
@@ -1935,17 +1939,27 @@ pub fn spawn_volatility_surface_worker(
                                 else {
                                     continue;
                                 };
-                                let variance_strike = if let Some(svi) = slice_svi.as_ref() {
-                                    replicator.replicate_variance_strike_svi_tails(
+                                let variance_strike = match slice_svi.as_ref() {
+                                    Some(svi) => {
+                                        let svi_strike = replicator.replicate_variance_strike_svi_tails(
+                                            forward,
+                                            tenor,
+                                            quotes.clone(),
+                                            svi,
+                                        );
+                                        if svi_strike.is_some_and(|strike| strike > 1.50) {
+                                            replicator.replicate_variance_strike(
+                                                forward, tenor, quotes,
+                                            )
+                                        } else {
+                                            svi_strike
+                                        }
+                                    }
+                                    None => replicator.replicate_variance_strike(
                                         forward,
                                         tenor,
-                                        quotes.clone(),
-                                        svi,
-                                    )
-                                } else {
-                                    replicator.replicate_variance_strike(
-                                        forward, tenor, quotes,
-                                    )
+                                        quotes,
+                                    ),
                                 };
                                 let Some(variance_strike) = variance_strike else {
                                     continue;
