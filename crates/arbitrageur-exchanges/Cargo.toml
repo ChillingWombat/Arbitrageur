@@ -42,7 +42,7 @@ aptos-sdk = { workspace = true }
 bcs = { workspace = true }
 futures = { workspace = true }
 paradex = { version = "0.8.0", features = ["onboarding"] }
-alloy-signer-local = "1"
+alloy-signer-local = "2"
 starknet-crypto = "0.8.1"
 dydx = { version = "0.3.0", default-features = false, features = ["noble"] }
 prost = "0.13"
