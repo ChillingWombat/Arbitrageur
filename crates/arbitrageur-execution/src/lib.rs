@@ -1,84 +1,22 @@
 pub mod atomic_bundle;
-pub mod causal_dml_impact;
-pub mod conformal_adadelta_shield;
-pub mod conformal_adagrad_shield;
-pub mod conformal_adam_shield;
-pub mod conformal_bernstein_shield;
 pub mod conformal_cvar_shield;
-pub mod conformal_dkw_process;
-pub mod conformal_double_kernel_shield;
-pub mod conformal_erm_slippage;
-pub mod conformal_evt_tail_guard;
-pub mod conformal_extreme_copula;
-pub mod conformal_forest_shield;
-pub mod conformal_lookahead_shield;
-pub mod conformal_matrix_bernstein;
-pub mod conformal_matrix_completion;
-pub mod conformal_matrix_shield;
-pub mod conformal_momentum_shield;
-pub mod conformal_mot_shield;
-pub mod conformal_nadam_shield;
-pub mod conformal_nesterov_shield;
-pub mod conformal_omd_shield;
-pub mod conformal_optimal_transport;
-pub mod conformal_quasi_hyperbolic_shield;
-pub mod conformal_rademacher_shield;
 pub mod conformal_risk_guard;
-pub mod conformal_rkhs_shield;
-pub mod conformal_rmsprop_shield;
-pub mod conformal_spline_shield;
-pub mod conformal_srm_shield;
-pub mod conformal_svrg_shield;
-pub mod conformal_wasserstein_drift;
 pub mod coordinator;
 pub mod emergency_unwind;
 pub mod l2_sequencer_guard;
-pub mod omd_dual_averaging;
 pub mod passive_unwind;
 pub mod queue_priority;
-pub mod sac_execution;
 pub mod smart_routing;
 pub mod virtual_ledger;
 
 pub use atomic_bundle::*;
-pub use causal_dml_impact::*;
-pub use conformal_adadelta_shield::*;
-pub use conformal_adagrad_shield::*;
-pub use conformal_adam_shield::*;
-pub use conformal_bernstein_shield::*;
 pub use conformal_cvar_shield::*;
-pub use conformal_dkw_process::*;
-pub use conformal_double_kernel_shield::*;
-pub use conformal_erm_slippage::*;
-pub use conformal_evt_tail_guard::*;
-pub use conformal_extreme_copula::*;
-pub use conformal_forest_shield::*;
-pub use conformal_lookahead_shield::*;
-pub use conformal_matrix_bernstein::*;
-pub use conformal_matrix_completion::*;
-pub use conformal_matrix_shield::*;
-pub use conformal_momentum_shield::*;
-pub use conformal_mot_shield::*;
-pub use conformal_nadam_shield::*;
-pub use conformal_nesterov_shield::*;
-pub use conformal_omd_shield::*;
-pub use conformal_optimal_transport::*;
-pub use conformal_quasi_hyperbolic_shield::*;
-pub use conformal_rademacher_shield::*;
 pub use conformal_risk_guard::*;
-pub use conformal_rkhs_shield::*;
-pub use conformal_rmsprop_shield::*;
-pub use conformal_spline_shield::*;
-pub use conformal_srm_shield::*;
-pub use conformal_svrg_shield::*;
-pub use conformal_wasserstein_drift::*;
 pub use coordinator::*;
 pub use emergency_unwind::*;
 pub use l2_sequencer_guard::*;
-pub use omd_dual_averaging::*;
 pub use passive_unwind::*;
 pub use queue_priority::*;
-pub use sac_execution::*;
 pub use smart_routing::*;
 pub use virtual_ledger::*;
 
@@ -117,6 +55,8 @@ mod tests {
         calls: Arc<Mutex<Vec<OrderRequest>>>,
         fetch_script: Arc<Mutex<Vec<anyhow::Result<OrderResponse>>>>,
         cancels: Arc<Mutex<Vec<arbitrageur_core::order::CancelRequest>>>,
+        orders: Arc<Mutex<Vec<OrderResponse>>>,
+        cancelled: Arc<Mutex<std::collections::HashSet<String>>>,
     }
 
     impl MockExchange {
@@ -128,6 +68,8 @@ mod tests {
                 calls: Arc::new(Mutex::new(Vec::new())),
                 fetch_script: Arc::new(Mutex::new(Vec::new())),
                 cancels: Arc::new(Mutex::new(Vec::new())),
+                orders: Arc::new(Mutex::new(Vec::new())),
+                cancelled: Arc::new(Mutex::new(std::collections::HashSet::new())),
             }
         }
 
@@ -223,6 +165,7 @@ mod tests {
                 .unwrap_or_else(|| self.fallback.clone());
 
             if let MockResponse::Raw(resp) = behavior {
+                self.orders.lock().unwrap().push(resp.clone());
                 return Ok(resp);
             }
 
@@ -242,7 +185,7 @@ mod tests {
                 OrderStatus::Rejected
             };
 
-            Ok(OrderResponse {
+            let response = OrderResponse {
                 order_id: format!("mock_order_{}_{}", self.name, call_idx),
                 client_order_id: req.client_order_id,
                 venue: self.venue_id(),
@@ -260,29 +203,58 @@ mod tests {
                 fee_currency: "USDC".to_string(),
                 raw_response: None,
                 timestamp: chrono::Utc::now(),
-            })
+            };
+            self.orders.lock().unwrap().push(response.clone());
+            Ok(response)
         }
         async fn cancel_order(
             &self,
             req: arbitrageur_core::order::CancelRequest,
         ) -> anyhow::Result<()> {
+            if let Some(order_id) = &req.order_id {
+                self.cancelled.lock().unwrap().insert(order_id.clone());
+            }
+            if let Some(client_order_id) = &req.client_order_id {
+                self.cancelled
+                    .lock()
+                    .unwrap()
+                    .insert(client_order_id.clone());
+            }
             self.cancels.lock().unwrap().push(req);
             Ok(())
         }
         async fn fetch_order(
             &self,
             _symbol: &str,
-            _order_id: &str,
-            _client_order_id: Option<&str>,
+            order_id: &str,
+            client_order_id: Option<&str>,
         ) -> anyhow::Result<OrderResponse> {
             let mut script = self.fetch_script.lock().unwrap();
-            if script.is_empty() {
-                anyhow::bail!(
-                    "order-status polling not implemented for mock {}",
-                    self.name
-                );
+            if !script.is_empty() {
+                return script.remove(0);
             }
-            script.remove(0)
+            drop(script);
+
+            let cancelled = self.cancelled.lock().unwrap();
+            if cancelled.contains(order_id)
+                || client_order_id.is_some_and(|cid| cancelled.contains(cid))
+            {
+                let orders = self.orders.lock().unwrap();
+                if let Some(order) = orders.iter().find(|order| {
+                    order.order_id == order_id
+                        || client_order_id.is_some_and(|cid| order.client_order_id == cid)
+                }) {
+                    let mut terminal = order.clone();
+                    terminal.status = OrderStatus::Cancelled;
+                    terminal.remaining_qty = Decimal::ZERO;
+                    return Ok(terminal);
+                }
+            }
+
+            anyhow::bail!(
+                "order-status polling not implemented for mock {}",
+                self.name
+            )
         }
     }
 
@@ -520,6 +492,7 @@ mod tests {
         let mock_b = MockExchange::new("ex_b", vec![], MockResponse::Full);
         let log_a = mock_a.call_log();
         let log_b = mock_b.call_log();
+        let cancels_a = mock_a.cancel_log();
         let ex_a: Arc<dyn ExchangeAdapter> = Arc::new(mock_a);
         let ex_b: Arc<dyn ExchangeAdapter> = Arc::new(mock_b);
 
@@ -568,6 +541,7 @@ mod tests {
         assert_eq!(calls_b[0].side, Side::Sell);
         assert_eq!(calls_b[1].side, Side::Buy);
         assert_eq!(calls_b[1].quantity, dec!(0.6));
+        assert_eq!(cancels_a.lock().unwrap().len(), 1);
     }
 
     #[tokio::test]
@@ -1730,6 +1704,8 @@ mod tests {
             calls: mock_b_calls.clone(),
             fetch_script: Arc::new(Mutex::new(Vec::new())),
             cancels: Arc::new(Mutex::new(Vec::new())),
+            orders: Arc::new(Mutex::new(Vec::new())),
+            cancelled: Arc::new(Mutex::new(std::collections::HashSet::new())),
         });
 
         let mut plan = MultiLegExecutionPlan::new("options_box", dec!(5.0));

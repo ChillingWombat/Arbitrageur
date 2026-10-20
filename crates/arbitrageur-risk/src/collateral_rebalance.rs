@@ -1614,14 +1614,14 @@ impl MarginRebalanceDaemonState {
                 // Free margin on source is reduced by pending outflows
                 let cur_free: f64 = acc.free_margin.to_string().parse().unwrap_or(0.0);
                 let eff_free = (cur_free - outflow).max(0.0);
-                adjusted.free_margin = arbitrageur_core::types::Decimal::from_f64_retain(eff_free)
-                    .unwrap_or(acc.free_margin);
+                adjusted.free_margin =
+                    crate::delta_guard::f64_to_dec_opt(eff_free).unwrap_or(acc.free_margin);
 
                 // Equity on destination is increased by pending inflows for planning
                 let cur_equity: f64 = acc.equity.to_string().parse().unwrap_or(0.0);
                 let eff_equity = (cur_equity + inflow - outflow).max(0.0);
-                adjusted.equity = arbitrageur_core::types::Decimal::from_f64_retain(eff_equity)
-                    .unwrap_or(acc.equity);
+                adjusted.equity =
+                    crate::delta_guard::f64_to_dec_opt(eff_equity).unwrap_or(acc.equity);
 
                 adjusted
             })
