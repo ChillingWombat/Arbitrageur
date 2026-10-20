@@ -1822,8 +1822,17 @@ pub fn spawn_volatility_surface_worker(
                                 let is_call = parts
                                     .get(3)
                                     .is_some_and(|kind| kind.eq_ignore_ascii_case("C"));
-                                if (is_call && strike >= forward_price)
-                                    || (!is_call && strike < forward_price)
+                                if strike >= 0.50 * forward_price
+                                    && strike <= 1.80 * forward_price
+                                    && summary
+                                        .mark_iv
+                                        .and_then(|v| v.to_string().parse::<f64>().ok())
+                                        .is_some_and(|iv| (5.0..=180.0).contains(&iv))
+                                    && if is_call {
+                                        strike >= forward_price
+                                    } else {
+                                        strike < forward_price
+                                    }
                                 {
                                     let quote = match (
                                         summary.bid.and_then(|v| v.to_string().parse::<f64>().ok()),

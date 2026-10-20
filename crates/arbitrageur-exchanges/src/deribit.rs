@@ -266,17 +266,13 @@ fn is_supported_currency(name: &str) -> bool {
             .unwrap_or(false)
 }
 
-/// Resolve bare currency into its active perpetual instrument name ("BTC" -> "BTC-PERPETUAL").
+/// Resolve base-asset aliases into their active perpetual instrument name.
 pub fn resolve_deribit_instrument(name: &str) -> String {
     let s = name.trim().to_ascii_uppercase();
-    if !s.contains('-')
-        && SUPPORTED_CURRENCIES
-            .iter()
-            .any(|c| c.eq_ignore_ascii_case(&s))
-    {
-        format!("{s}-PERPETUAL")
-    } else {
-        s
+    match s.as_str() {
+        "BTC" | "BTC-USD" | "BTC-USDC" | "BTC-USDT" => "BTC-PERPETUAL".to_string(),
+        "ETH" | "ETH-USD" | "ETH-USDC" | "ETH-USDT" => "ETH-PERPETUAL".to_string(),
+        _ => s,
     }
 }
 
@@ -1664,7 +1660,7 @@ impl ExchangeAdapter for DeribitAdapter {
         if order.quantity <= dec!(0) {
             anyhow::bail!("Deribit order quantity must be positive");
         }
-        let instrument = order.symbol.trim().to_ascii_uppercase();
+        let instrument = resolve_deribit_instrument(&order.symbol);
         if !is_supported_currency(&instrument) {
             anyhow::bail!("Deribit unsupported instrument '{instrument}'");
         }
@@ -1898,7 +1894,7 @@ impl ExchangeAdapter for DeribitAdapter {
         order_id: &str,
         client_order_id: Option<&str>,
     ) -> anyhow::Result<OrderResponse> {
-        let instrument = symbol.trim().to_ascii_uppercase();
+        let instrument = resolve_deribit_instrument(symbol);
         let meta = self.instrument_meta(&instrument).await?;
         let currency = instrument_currency(&instrument)
             .unwrap_or("BTC")
@@ -1967,7 +1963,7 @@ impl ExchangeAdapter for DeribitAdapter {
     /// to base); futures floor the USD amount to its lot and convert back
     /// at the venue mark.
     async fn wire_base_qty(&self, symbol: &str, qty: Decimal) -> anyhow::Result<Decimal> {
-        let instrument = symbol.trim().to_ascii_uppercase();
+        let instrument = resolve_deribit_instrument(symbol);
         let meta = self.instrument_meta(&instrument).await?;
         let ref_px = match meta.kind {
             DeribitKind::Option => None,
@@ -2245,8 +2241,14 @@ mod tests {
     #[test]
     fn test_resolve_deribit_instrument() {
         assert_eq!(resolve_deribit_instrument("BTC"), "BTC-PERPETUAL");
+        assert_eq!(resolve_deribit_instrument("BTC-USD"), "BTC-PERPETUAL");
+        assert_eq!(resolve_deribit_instrument("BTC-USDC"), "BTC-PERPETUAL");
+        assert_eq!(resolve_deribit_instrument("BTC-USDT"), "BTC-PERPETUAL");
         assert_eq!(resolve_deribit_instrument("btc"), "BTC-PERPETUAL");
         assert_eq!(resolve_deribit_instrument("ETH"), "ETH-PERPETUAL");
+        assert_eq!(resolve_deribit_instrument("ETH-USD"), "ETH-PERPETUAL");
+        assert_eq!(resolve_deribit_instrument("ETH-USDC"), "ETH-PERPETUAL");
+        assert_eq!(resolve_deribit_instrument("ETH-USDT"), "ETH-PERPETUAL");
         assert_eq!(resolve_deribit_instrument("eth"), "ETH-PERPETUAL");
         assert_eq!(resolve_deribit_instrument("BTC-PERPETUAL"), "BTC-PERPETUAL");
         assert_eq!(
