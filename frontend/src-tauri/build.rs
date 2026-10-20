@@ -18,11 +18,11 @@ fn main() {
 }
 
 /// True when `dir` holds a coherent set of real ELF shared objects: at least
-/// one `.so`, and **every** `.so` starts with the `\x7fELF` magic. A single
-/// `IntxLNK…` placeholder (what a `.so` symlink becomes when the checkout
-/// crosses a Windows filesystem) disqualifies the directory — the linker
-/// would pick it up for a bare `-l` name and fail with
-/// "unknown directive: IntxLNK".
+/// one readable `.so`, and **every** readable `.so` starts with the `\x7fELF`
+/// magic. A single `IntxLNK…` placeholder (what a `.so` symlink becomes when
+/// the checkout crosses a Windows filesystem) disqualifies the directory —
+/// the linker would pick it up for a bare `-l` name and fail with
+/// "unknown directive: IntxLNK". Dangling `.so` symlinks are ignored.
 fn sysroot_is_usable(dir: &std::path::Path) -> bool {
     use std::io::Read;
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -34,10 +34,13 @@ fn sysroot_is_usable(dir: &std::path::Path) -> bool {
         if path.extension().and_then(|e| e.to_str()) != Some("so") {
             continue;
         }
-        seen += 1;
         let Ok(mut f) = std::fs::File::open(&path) else {
+            if path.is_symlink() && !path.exists() {
+                continue;
+            }
             return false;
         };
+        seen += 1;
         let mut magic = [0u8; 4];
         if f.read_exact(&mut magic).is_err() || &magic != b"\x7fELF" {
             return false;
