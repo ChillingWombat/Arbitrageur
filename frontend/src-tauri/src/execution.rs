@@ -837,6 +837,43 @@ pub(crate) fn unwind_round_trip_pnl(
     px_pnl - fees
 }
 
+fn execution_result_has_fill(result: &ArbitrageExecutionResult) -> bool {
+    match result {
+        ArbitrageExecutionResult::Success { .. }
+        | ArbitrageExecutionResult::PartialPairKept { .. }
+        | ArbitrageExecutionResult::LegBFailedUnwound { .. }
+        | ArbitrageExecutionResult::LegAFailedUnwound { .. } => true,
+        ArbitrageExecutionResult::UnresolvedExposure {
+            leg_a_fill,
+            leg_b_fill,
+            ..
+        } => [leg_a_fill.as_ref(), leg_b_fill.as_ref()]
+            .into_iter()
+            .flatten()
+            .any(|fill| fill.filled_qty > Decimal::ZERO),
+        ArbitrageExecutionResult::BothFailed { .. } | ArbitrageExecutionResult::HaltedByRisk(_) => {
+            false
+        }
+    }
+}
+
+fn record_execution_shield_fill(state: &AppEngineState, notional_usd: f64, realized_pnl_usd: f64) {
+    if !notional_usd.is_finite() || notional_usd <= 0.0 || !realized_pnl_usd.is_finite() {
+        return;
+    }
+    let adverse_usd = (-realized_pnl_usd).max(0.0);
+    let adverse_bps = (adverse_usd / notional_usd * 10_000.0).max(0.0);
+    let mut shield = state.execution_shield.write();
+    shield.risk_guard.record_observation(
+        arbitrageur_execution::conformal_risk_guard::MarginShockObservation {
+            vol_ratio: 1.0,
+            ofi: 0.0,
+            realized_adverse_shock: adverse_usd,
+        },
+    );
+    shield.cvar_shield.record_loss_bps(adverse_bps);
+}
+
 /// Forecast attached to an entry for the durable calibration log.
 /// `kind` fixes which event `win_probability` describes — only "net_win"
 /// rows score against realized net P&L at close; "reversion" rows persist
@@ -1659,57 +1696,45 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
         .to_string()
         .parse::<f64>()
         .unwrap_or(0.0);
-    let cvar_verdict = {
-        let mut shield = state.conformal_cvar_shield.lock();
-        shield.record_loss_bps(
-            (econ.entry_slippage_bps + econ.exit_slippage_bps + econ.closing_spread_bps).max(0.0),
-        );
-        shield.evaluate_shield()
-    };
-    match cvar_verdict {
-        arbitrageur_execution::conformal_cvar_shield::ShieldVerdict::AllowNormalExecution {
-            ..
-        } => {}
-        arbitrageur_execution::conformal_cvar_shield::ShieldVerdict::ThrottledExecution {
-            reason,
-            ..
-        } if reason.starts_with("Warmup:") => {
-            tracing::debug!("conformal preflight warmup: {reason}");
-        }
-        arbitrageur_execution::conformal_cvar_shield::ShieldVerdict::ThrottledExecution {
-            scale,
-            estimated_cvar_bps,
-            reason,
-        } => {
-            return Err(format!(
-                "Conformal tail-risk preflight throttled this entry to {:.0}% (CVaR {:.1} bps): {reason}",
-                scale * 100.0,
-                estimated_cvar_bps
-            ));
-        }
-        arbitrageur_execution::conformal_cvar_shield::ShieldVerdict::HaltOrEvacuate {
-            estimated_cvar_bps,
-            reason,
-        } => {
-            return Err(format!(
-                "Conformal tail-risk preflight blocked this entry (CVaR {estimated_cvar_bps:.1} bps): {reason}"
-            ));
-        }
-    }
-    let conformal_guard = arbitrageur_execution::conformal_risk_guard::ConformalRiskGuard::new(
-        0.05,
-        1.0,
-        (order_notional_usd * 0.20).max(1.0),
-        0.20,
-    );
-    for (vname, acc) in [(buy_venue, &acc_buy), (sell_venue, &acc_sell)] {
-        let free_margin = acc.free_margin.to_string().parse::<f64>().unwrap_or(0.0);
-        let verdict = conformal_guard.evaluate_account_health(free_margin, 1.0, 0.0);
-        if !verdict.can_submit_order {
-            return Err(format!(
-                "Conformal margin preflight blocked {vname}: {}",
-                verdict.reason
-            ));
+    {
+        let execution_shield = state.execution_shield.read();
+        for (vname, acc) in [(buy_venue, &acc_buy), (sell_venue, &acc_sell)] {
+            let free_margin = acc.free_margin.to_string().parse::<f64>().unwrap_or(0.0);
+            match execution_shield.preflight_order(
+                order_notional_usd,
+                free_margin,
+                0.20,
+                net_bps_f.max(0.0),
+            ) {
+                arbitrageur_execution::conformal_cvar_shield::ShieldVerdict::AllowNormalExecution {
+                    ..
+                } => {}
+                arbitrageur_execution::conformal_cvar_shield::ShieldVerdict::ThrottledExecution {
+                    reason,
+                    ..
+                } if reason.starts_with("Warmup:") => {
+                    tracing::debug!("conformal preflight warmup for {vname}: {reason}");
+                }
+                arbitrageur_execution::conformal_cvar_shield::ShieldVerdict::ThrottledExecution {
+                    scale,
+                    estimated_cvar_bps,
+                    reason,
+                } => {
+                    return Err(format!(
+                        "Composite execution preflight throttled {vname} to {:.0}% (CVaR {:.1} bps): {reason}",
+                        scale * 100.0,
+                        estimated_cvar_bps
+                    ));
+                }
+                arbitrageur_execution::conformal_cvar_shield::ShieldVerdict::HaltOrEvacuate {
+                    estimated_cvar_bps,
+                    reason,
+                } => {
+                    return Err(format!(
+                        "Composite execution preflight blocked {vname} (CVaR {estimated_cvar_bps:.1} bps): {reason}"
+                    ));
+                }
+            }
         }
     }
 
@@ -2029,6 +2054,9 @@ pub(crate) async fn execute_spatial_arbitrage_inner(
             .unwrap_or(0.0),
         _ => 0.0,
     };
+    if execution_result_has_fill(&res) {
+        record_execution_shield_fill(state, order_notional_usd, pnl_f);
+    }
     let tot_f = accumulate_realized_profit(state, is_live, pnl_f);
     let (attempt_pnl_f, total_f) = (pnl_f, tot_f);
 
@@ -2692,10 +2720,21 @@ pub async fn list_signal_executions(
         ),
         None => None,
     };
-    state
+    let mut signals = state
         .state_store
-        .list_signals(symbol.as_deref(), st)
-        .map_err(|e| e.to_string())
+        .list_signals_for_env(st, state.env().as_str())
+        .map_err(|e| e.to_string())?;
+    if let Some(symbol) = symbol {
+        let symbol = symbol.trim();
+        if symbol.is_empty()
+            || symbol.chars().count() > 64
+            || symbol.chars().any(|c| c.is_control())
+        {
+            return Err("invalid symbol: expected 1-64 non-control characters".into());
+        }
+        signals.retain(|signal| signal.symbol.eq_ignore_ascii_case(symbol));
+    }
+    Ok(signals)
 }
 
 /// One atomic venue order of a traded opportunity — a persisted signal leg

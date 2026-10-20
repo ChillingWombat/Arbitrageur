@@ -1,5 +1,5 @@
 use crate::vault::ExchangeCredentials;
-use arbitrageur_core::hub::MarketDataHub;
+use arbitrageur_core::hub::{MarketDataHub, PublicTradeEvent};
 use arbitrageur_core::position::AccountSnapshot;
 use arbitrageur_core::types::{dec, Decimal};
 use arbitrageur_exchanges::alpaca::AlpacaAdapter;
@@ -23,6 +23,7 @@ use arbitrageur_exchanges::popdex::PopDexAdapter;
 use arbitrageur_exchanges::vanta::VantaAdapter;
 use arbitrageur_exchanges::variational::VariationalAdapter;
 use arbitrageur_execution::conformal_cvar_shield::ConformalCvarShieldEngine;
+use arbitrageur_execution::conformal_risk_guard::{CompositeExecutionShield, ConformalRiskGuard};
 use arbitrageur_execution::coordinator::AtomicArbitrageCoordinator;
 use arbitrageur_execution::passive_unwind::PassiveUnwindConfig;
 use arbitrageur_execution::smart_routing::SmartOrderRouter;
@@ -1434,9 +1435,9 @@ pub struct AppEngineState {
     /// Last synthetic flow sample per `(venue, asset)`. Presence is the
     /// warm-up signal used to keep cold-start pairs unblocked.
     pub hawkes_last_sample: Mutex<std::collections::HashMap<(String, String), std::time::Instant>>,
-    /// Distribution-free tail-slippage shield updated from every spatial
-    /// execution preflight.
-    pub conformal_cvar_shield: Mutex<ConformalCvarShieldEngine>,
+    /// Stateful execution risk seam. Every entry preflight reads this shield;
+    /// observed fills calibrate its margin and tail-loss models.
+    pub execution_shield: Arc<RwLock<CompositeExecutionShield>>,
     pub coordinator: Arc<AtomicArbitrageCoordinator>,
     /// Independent online stat-arb state per pair key. A shared unkeyed
     /// Kalman filter let one caller poison every other pair's baseline.
@@ -2669,9 +2670,12 @@ impl AppEngineState {
             delta_guard,
             hawkes_orchestrator,
             hawkes_last_sample: Mutex::new(std::collections::HashMap::new()),
-            conformal_cvar_shield: Mutex::new(ConformalCvarShieldEngine::new(
-                arbitrageur_execution::conformal_cvar_shield::ConformalCvarConfig::default(),
-            )),
+            execution_shield: Arc::new(RwLock::new(CompositeExecutionShield::new(
+                ConformalRiskGuard::new(0.05, 1.0, 1_000.0, 0.20),
+                ConformalCvarShieldEngine::new(
+                    arbitrageur_execution::conformal_cvar_shield::ConformalCvarConfig::default(),
+                ),
+            ))),
             coordinator,
             stat_arb_sessions: RwLock::new(std::collections::HashMap::new()),
             environment,
@@ -2920,6 +2924,17 @@ impl AppEngineState {
             tracing::warn!("persist sim_step failed: {e}");
         }
         next
+    }
+
+    /// Publish a public trade through both market-data consumers. Keeping the
+    /// two writes together prevents the hub and Hawkes gate from observing
+    /// different flow histories.
+    pub fn ingest_public_trade(&self, trade_event: &PublicTradeEvent) {
+        self.market_data_hub
+            .update_public_trade(trade_event.clone());
+        self.hawkes_orchestrator
+            .write()
+            .ingest_trade_event(trade_event);
     }
 
     /// Translate a live top-of-book imbalance into the shared Hawkes feed.
