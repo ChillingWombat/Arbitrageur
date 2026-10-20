@@ -1998,7 +1998,11 @@ impl ExchangeAdapter for DeribitAdapter {
         if snapped <= dec!(0) {
             return Ok(dec!(0));
         }
-        Ok(Self::from_venue_amount(&meta, snapped, ref_px))
+        let base = Self::from_venue_amount(&meta, snapped, ref_px);
+        Ok(match meta.kind {
+            DeribitKind::Future => base.round_dp(5),
+            DeribitKind::Option => base,
+        })
     }
 
     fn supports_live_execution(&self) -> bool {
