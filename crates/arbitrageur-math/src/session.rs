@@ -169,15 +169,6 @@ pub fn in_funding_mask(ts_ms: i64, venue_intervals_h: &[u32]) -> bool {
             stamps[h as usize] = true;
         }
     }
-    let mut stamps = [false; 24];
-    for h in [0u32, 8, 16] {
-        stamps[h as usize] = true;
-    }
-    if venue_intervals_h.iter().any(|&i| i <= 4) {
-        for h in [4u32, 12, 20] {
-            stamps[h as usize] = true;
-        }
-    }
     // Circular distance to the nearest stamp: the +/-2min window straddles
     // the hour boundary (07:58 belongs to the 08:00 stamp).
     for (h, active) in stamps.iter().enumerate() {
