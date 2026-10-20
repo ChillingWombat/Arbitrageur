@@ -59,7 +59,7 @@ zeroize = { version = "1.8", features = ["derive"] }
 base32 = "0.5"
 base64 = "0.22"
 bs58 = "0.5"
-libloading = "0.8"
+libloading = "0.9"
 urlencoding = "2.1"
 aptos-sdk = { version = "0.7.1", default-features = false, features = ["ed25519"] }
 bcs = "0.1"
