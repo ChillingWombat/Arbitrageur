@@ -1369,11 +1369,14 @@ fn scheduled_exit_retryable(err: &str) -> bool {
 /// Background scheduler: 10s tick, fires due rows. Spawned once at app
 /// start; the store's claim transition makes restarts idempotent.
 pub fn spawn_exit_scheduler(state: Arc<AppEngineState>) {
-    tauri::async_runtime::spawn(async move {
-        let mut tick = tokio::time::interval(std::time::Duration::from_secs(10));
-        loop {
-            tick.tick().await;
-            run_due_scheduled_exits(&state).await;
+    crate::spawn_supervised("scheduled_exits", move || {
+        let state = state.clone();
+        async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(10));
+            loop {
+                tick.tick().await;
+                run_due_scheduled_exits(&state).await;
+            }
         }
     });
 }

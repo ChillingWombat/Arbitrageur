@@ -12,7 +12,8 @@ use arbitrageur_exchanges::ws::{
     parse_vanta_ws_book, vanta_subscribe_topic, vanta_ws_url, LIGHTER_KEEPALIVE_SECS,
 };
 use chrono::Utc;
-use futures::{Sink, SinkExt, StreamExt};
+use futures::{FutureExt, Sink, SinkExt, StreamExt};
+use std::panic::AssertUnwindSafe;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use crate::monitor::canonical_base;
@@ -33,6 +34,9 @@ const VANTA_KEEPALIVE_SECS: u64 = 20;
 /// Delay between subscription frames during the connect burst — instant
 /// floods get the connection RST by venue-side WS flood protection.
 const SUB_BURST_PACE_MS: u64 = 50;
+/// A half-open TCP path produces no inbound frames even while protocol
+/// pings appear to succeed. Force a reconnect after this long without data.
+const WS_READ_TIMEOUT_SECS: u64 = 45;
 
 /// Outcome of one connection attempt: keep supervising or stop the lane.
 enum FeedOutcome {
@@ -57,8 +61,12 @@ pub fn spawn_all(state: Arc<AppEngineState>) {
             .or_default()
             .phase = "starting".into();
         let task_state = state.clone();
-        tauri::async_runtime::spawn(async move {
-            supervise(venue, task_state).await;
+        crate::spawn_supervised("ws_feed", move || {
+            let task_state = task_state.clone();
+            async move {
+                tracing::info!("starting WS feed lane {venue}");
+                supervise(venue, task_state).await;
+            }
         });
     }
 }
@@ -150,7 +158,14 @@ async fn supervise(venue: &'static str, state: Arc<AppEngineState>) {
             t.backoff_until_ms = None;
         }
         let started = std::time::Instant::now();
-        let outcome = run_connection(venue, &state).await;
+        let outcome = AssertUnwindSafe(run_connection(venue, &state))
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|_| {
+                Err(anyhow::anyhow!(
+                    "{venue} WS lane panicked; supervisor preserving lane for retry"
+                ))
+            });
         {
             let mut lanes = state.feed_lanes.lock();
             let t = lanes.entry(venue.to_string()).or_default();
@@ -232,6 +247,7 @@ fn ingest_book(state: &AppEngineState, book: &OrderBook, venue_id: &VenueId, sym
         tracing::debug!("feed: {venue_id} dropped book for {symbol}: {e}");
         return;
     }
+    state.feed_hawkes_book(&venue_id.0, book);
     state.market_data_hub.update_orderbook_from_ws(book.clone());
     if let Some(entry) = top_sample(book, venue_id) {
         // Normalize onto the USD basis and the mode's storage key: merged
@@ -416,13 +432,27 @@ async fn run_hyperliquid(state: &AppEngineState) -> anyhow::Result<FeedOutcome> 
     );
     let mut keepalive = tokio::time::interval(Duration::from_secs(WS_KEEPALIVE_SECS));
     keepalive.tick().await;
+    let read_deadline = tokio::time::sleep(Duration::from_secs(WS_READ_TIMEOUT_SECS));
+    tokio::pin!(read_deadline);
     loop {
         let msg = tokio::select! {
             _ = keepalive.tick() => {
                 write.send(Message::Ping(Vec::new())).await?;
                 continue;
             }
-            msg = read.next() => msg,
+            msg = read.next() => {
+                read_deadline
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + Duration::from_secs(WS_READ_TIMEOUT_SECS));
+                msg
+            },
+            _ = &mut read_deadline => {
+                tracing::warn!(
+                    "feed: hyperliquid WS read timed out after {}s — reconnecting",
+                    WS_READ_TIMEOUT_SECS
+                );
+                return Ok(FeedOutcome::Reconnect);
+            },
         };
         let Some(msg) = msg else {
             return Ok(FeedOutcome::Reconnect);
@@ -499,7 +529,6 @@ async fn run_lighter_protocol(
         reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(15))
             .default_headers(headers)
-            .timeout(Duration::from_secs(5))
             .build()
             .unwrap_or_default()
     };
@@ -547,6 +576,7 @@ async fn run_lighter_protocol(
     for market_id in symbol_map.keys() {
         let frame = lighter_subscribe_message(*market_id).to_string();
         write.send(Message::Text(frame)).await?;
+        tokio::time::sleep(Duration::from_millis(SUB_BURST_PACE_MS)).await;
     }
     tracing::info!(
         "feed: {venue} WS connected; subscribed {} markets ({})",
@@ -571,26 +601,40 @@ async fn run_lighter_protocol(
 
     let mut keepalive = tokio::time::interval(Duration::from_secs(LIGHTER_KEEPALIVE_SECS));
     keepalive.tick().await;
+    let read_deadline = tokio::time::sleep(Duration::from_secs(WS_READ_TIMEOUT_SECS));
+    tokio::pin!(read_deadline);
     loop {
-        tokio::select! {
+        let msg = tokio::select! {
             _ = keepalive.tick() => {
                 write.send(Message::Ping(Vec::new())).await?;
+                continue;
             }
             msg = read.next() => {
-                let Some(msg) = msg else {
-                    return Ok(FeedOutcome::Reconnect);
-                };
-                let msg = msg?;
-                let Message::Text(text) = msg else {
-                    continue;
-                };
-                if state.env() != connect_env {
-                    tracing::info!("feed: {venue} env switched mid-connection; reconnecting under new env");
-                    return Ok(FeedOutcome::Reconnect);
-                }
-                handle_lighter_text(state, &venue_id, &mut lanes, &mut write, &text).await?;
+                read_deadline
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + Duration::from_secs(WS_READ_TIMEOUT_SECS));
+                msg
             }
+            _ = &mut read_deadline => {
+                tracing::warn!(
+                    "feed: {venue} WS read timed out after {}s — reconnecting",
+                    WS_READ_TIMEOUT_SECS
+                );
+                return Ok(FeedOutcome::Reconnect);
+            }
+        };
+        let Some(msg) = msg else {
+            return Ok(FeedOutcome::Reconnect);
+        };
+        let msg = msg?;
+        let Message::Text(text) = msg else {
+            continue;
+        };
+        if state.env() != connect_env {
+            tracing::info!("feed: {venue} env switched mid-connection; reconnecting under new env");
+            return Ok(FeedOutcome::Reconnect);
         }
+        handle_lighter_text(state, &venue_id, &mut lanes, &mut write, &text).await?;
     }
 }
 
@@ -710,6 +754,8 @@ async fn run_vanta(state: &AppEngineState) -> anyhow::Result<FeedOutcome> {
     );
     let mut keepalive = tokio::time::interval(Duration::from_secs(VANTA_KEEPALIVE_SECS));
     keepalive.tick().await;
+    let read_deadline = tokio::time::sleep(Duration::from_secs(WS_READ_TIMEOUT_SECS));
+    tokio::pin!(read_deadline);
     loop {
         let msg = tokio::select! {
             // Orderly keepalive is application-level `{"event":"ping"}` —
@@ -721,7 +767,19 @@ async fn run_vanta(state: &AppEngineState) -> anyhow::Result<FeedOutcome> {
                     .await?;
                 continue;
             }
-            msg = read.next() => msg,
+            msg = read.next() => {
+                read_deadline
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + Duration::from_secs(WS_READ_TIMEOUT_SECS));
+                msg
+            },
+            _ = &mut read_deadline => {
+                tracing::warn!(
+                    "feed: vanta WS read timed out after {}s — reconnecting",
+                    WS_READ_TIMEOUT_SECS
+                );
+                return Ok(FeedOutcome::Reconnect);
+            },
         };
         let Some(msg) = msg else {
             return Ok(FeedOutcome::Reconnect);

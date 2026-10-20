@@ -223,6 +223,319 @@ pub(crate) fn parse_option_expiry_ms(token: &str) -> Option<i64> {
     None
 }
 
+/// Fresh executable value of the package's option legs, using bid for a
+/// long close and ask for a short close. `None` means at least one option
+/// mark is unavailable, so elapsed-time synthesis must not authorize an
+/// early harvest.
+fn option_chain_close_proceeds(
+    state: &AppEngineState,
+    position: &crate::state_store::OpenPositionDto,
+) -> Option<f64> {
+    let mut total = 0.0f64;
+    let mut option_legs = 0usize;
+    for leg in &position.venues {
+        if !crate::state_store::symbol_is_fixed_contract(&leg.symbol) || leg.net_qty.abs() <= 1e-9 {
+            continue;
+        }
+        option_legs += 1;
+        let book = state.market_data_hub.get_valid_orderbook(
+            &arbitrageur_core::types::VenueId::new(&leg.venue),
+            &leg.symbol,
+            Some(Duration::from_secs(30)),
+        )?;
+        let price = if leg.net_qty > 0.0 {
+            book.best_bid_price()
+        } else {
+            book.best_ask_price()
+        }?;
+        let price = price.to_string().parse::<f64>().ok()?;
+        if !price.is_finite() || price <= 0.0 {
+            return None;
+        }
+        let signed_proceeds = if leg.net_qty > 0.0 {
+            leg.net_qty.abs() * price
+        } else {
+            -leg.net_qty.abs() * price
+        };
+        total += signed_proceeds;
+    }
+    (option_legs > 0 && total.is_finite()).then_some(total)
+}
+
+fn fit_svi_slice(
+    slice: &arbitrageur_strategy::options_dispersion::LiveVolSurfaceSlice,
+) -> Option<arbitrageur_math::svi_arbitrage_free::SviSliceParameters> {
+    if slice.forward_price <= 0.0 || slice.tenor_years <= 1e-4 {
+        return None;
+    }
+    let points: Vec<(f64, f64)> = slice
+        .observed_strikes
+        .iter()
+        .filter_map(|(strike_key, iv)| {
+            let strike = *strike_key as f64 / 100.0;
+            let k = (strike / slice.forward_price).ln();
+            let total_variance = iv * iv * slice.tenor_years;
+            (k.is_finite()
+                && total_variance.is_finite()
+                && total_variance > 0.0
+                && (-2.0..=2.0).contains(&k))
+            .then_some((k, total_variance))
+        })
+        .collect();
+    if points.len() < 3 {
+        return None;
+    }
+    let k_min = points.iter().map(|(k, _)| *k).fold(f64::INFINITY, f64::min);
+    let k_max = points
+        .iter()
+        .map(|(k, _)| *k)
+        .fold(f64::NEG_INFINITY, f64::max);
+    if !(k_min.is_finite() && k_max.is_finite()) {
+        return None;
+    }
+    let width = (k_max - k_min).max(0.05);
+    let mut best: Option<(
+        f64,
+        arbitrageur_math::svi_arbitrage_free::SviSliceParameters,
+    )> = None;
+    for rho_step in -9..=9 {
+        let rho = rho_step as f64 / 10.0;
+        for m_step in 0..=8 {
+            let m = k_min + width * (m_step as f64 / 8.0 - 0.5);
+            for sigma_mult in [0.05, 0.10, 0.20, 0.40, 0.80] {
+                let sigma = (width * sigma_mult).max(1e-4);
+                let n = points.len() as f64;
+                let mut sx = 0.0;
+                let mut sy = 0.0;
+                let mut sxx = 0.0;
+                let mut sxy = 0.0;
+                for (k, w) in &points {
+                    let diff = k - m;
+                    let basis = rho * diff + (diff * diff + sigma * sigma).sqrt();
+                    sx += basis;
+                    sy += *w;
+                    sxx += basis * basis;
+                    sxy += basis * *w;
+                }
+                let denom = n * sxx - sx * sx;
+                if denom.abs() < 1e-12 {
+                    continue;
+                }
+                let a = (sy * sxx - sx * sxy) / denom;
+                let b = (n * sxy - sx * sy) / denom;
+                if !(a.is_finite() && b.is_finite() && b >= 0.0) {
+                    continue;
+                }
+                let candidate = arbitrageur_math::svi_arbitrage_free::SviSliceParameters::new(
+                    a, b, rho, m, sigma,
+                );
+                if !candidate.is_arbitrage_free() {
+                    continue;
+                }
+                let sse: f64 = points
+                    .iter()
+                    .map(|(k, w)| {
+                        let residual = candidate.total_variance(*k) - *w;
+                        residual * residual
+                    })
+                    .sum();
+                if sse.is_finite() && best.as_ref().is_none_or(|(best_sse, _)| sse < *best_sse) {
+                    best = Some((sse, candidate));
+                }
+            }
+        }
+    }
+    best.map(|(_, candidate)| candidate)
+}
+
+fn option_symbol_parts(symbol: &str) -> Option<(String, String, f64)> {
+    let parts: Vec<&str> = symbol.split('-').collect();
+    if parts.len() < 4 {
+        return None;
+    }
+    let asset = parts[0].to_ascii_uppercase();
+    let expiry = parts
+        .iter()
+        .skip(1)
+        .find(|part| part.len() >= 6)
+        .copied()?
+        .to_string();
+    let strike = parse_option_expiry_ms(symbol).and_then(|expiry_ms| {
+        parts.iter().skip(2).find_map(|part| {
+            let value = part.parse::<f64>().ok()?;
+            (value > 0.0 && value < expiry_ms as f64).then_some(value)
+        })
+    })?;
+    Some((asset, expiry, strike))
+}
+
+fn live_linear_mid(state: &AppEngineState, asset: &str) -> Option<Decimal> {
+    if let Some(price) = state
+        .vol_surface
+        .get_spot(asset)
+        .or_else(|| state.vol_surface.latest_forward(asset))
+        .and_then(Decimal::from_f64_retain)
+        .filter(|price| *price > Decimal::ZERO)
+    {
+        return Some(price);
+    }
+    let symbols = [
+        format!("{asset}-USDC"),
+        format!("{asset}-USDT"),
+        format!("{asset}-USD"),
+    ];
+    for (venue, _, _) in state.get_venues() {
+        for symbol in &symbols {
+            if let Some(mid) = state
+                .market_data_hub
+                .get_valid_orderbook(
+                    &arbitrageur_core::types::VenueId::new(venue),
+                    symbol,
+                    Some(Duration::from_secs(5)),
+                )
+                .and_then(|book| book.mid_price().or(book.mark_price))
+                .filter(|price| *price > Decimal::ZERO)
+            {
+                return Some(mid);
+            }
+        }
+    }
+    None
+}
+
+fn realized_vol_30d(
+    store: &crate::state_store::StateStore,
+    asset: &str,
+    environment: &str,
+) -> Option<f64> {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let from_ms = now_ms.saturating_sub(30 * 24 * 60 * 60 * 1000);
+    let samples = store
+        .spread_samples_mode(asset, true, from_ms, now_ms, environment)
+        .ok()?;
+    let mut by_venue: HashMap<String, Vec<(i64, f64)>> = HashMap::new();
+    for sample in samples {
+        if sample.mid.is_finite() && sample.mid > 0.0 {
+            by_venue
+                .entry(sample.venue_id)
+                .or_default()
+                .push((sample.ts_ms, sample.mid));
+        }
+    }
+    let mut best: Option<f64> = None;
+    for points in by_venue.values_mut() {
+        if points.len() < 30 {
+            continue;
+        }
+        points.sort_by_key(|(ts, _)| *ts);
+        let mut returns = Vec::with_capacity(points.len().saturating_sub(1));
+        let mut deltas = Vec::with_capacity(points.len().saturating_sub(1));
+        for pair in points.windows(2) {
+            let dt_secs = (pair[1].0 - pair[0].0) as f64 / 1000.0;
+            if dt_secs <= 0.0 {
+                continue;
+            }
+            returns.push((pair[1].1 / pair[0].1).ln());
+            deltas.push(dt_secs);
+        }
+        if returns.len() < 20 {
+            continue;
+        }
+        deltas.sort_by(f64::total_cmp);
+        let median_dt = deltas[deltas.len() / 2].max(1.0);
+        let variance_per_step =
+            returns.iter().map(|ret| ret * ret).sum::<f64>() / returns.len() as f64;
+        let annualized = (variance_per_step * (365.25 * 24.0 * 60.0 * 60.0) / median_dt).sqrt();
+        if annualized.is_finite() {
+            best = Some(best.map_or(annualized, |prior| prior.max(annualized)));
+        }
+    }
+    best
+}
+
+fn apply_svi_delta_adjustments(
+    state: &AppEngineState,
+    positions: &[arbitrageur_core::position::Position],
+    greeks: &mut HashMap<String, arbitrageur_risk::delta_guard::PortfolioGreeks>,
+    now_ms: i64,
+) {
+    for leg in positions {
+        if !crate::state_store::symbol_is_fixed_contract(&leg.symbol) {
+            continue;
+        }
+        let Some((asset, expiry, strike)) = option_symbol_parts(&leg.symbol) else {
+            continue;
+        };
+        let slice = {
+            state
+                .vol_surface
+                .slices
+                .read()
+                .get(&asset)
+                .and_then(|slices| slices.get(&expiry))
+                .cloned()
+        };
+        let Some(slice) = slice else {
+            continue;
+        };
+        let Some(svi) = fit_svi_slice(&slice) else {
+            continue;
+        };
+        let Some(spot) =
+            live_linear_mid(state, &asset).and_then(|price| price.to_string().parse::<f64>().ok())
+        else {
+            continue;
+        };
+        let Some(tau) = arbitrageur_risk::delta_guard::parse_expiry_tenor_years(&expiry, now_ms)
+        else {
+            continue;
+        };
+        let Some(iv) = state
+            .vol_surface
+            .evaluate_volatility(&asset, &expiry, strike)
+        else {
+            continue;
+        };
+        let option_type = if leg.symbol.to_ascii_uppercase().ends_with("-C") {
+            arbitrageur_math::black_scholes::OptionType::Call
+        } else {
+            arbitrageur_math::black_scholes::OptionType::Put
+        };
+        let Some(bs) = arbitrageur_math::black_scholes::black_scholes_greeks(
+            option_type,
+            spot,
+            strike,
+            tau,
+            0.0,
+            iv,
+        ) else {
+            continue;
+        };
+        let Ok(signed_qty) = leg.signed_quantity().to_string().parse::<f64>() else {
+            continue;
+        };
+        let bs_delta = bs.delta * signed_qty;
+        let bs_vega = bs.vega * signed_qty;
+        let smile_delta = svi.smile_adjusted_delta(bs_delta, bs_vega, spot, strike, tau);
+        if let Some(adjustment) = Decimal::from_f64_retain(smile_delta - bs_delta) {
+            greeks
+                .entry(asset)
+                .or_insert(arbitrageur_risk::delta_guard::PortfolioGreeks {
+                    net_delta: dec!(0),
+                    net_gamma: dec!(0),
+                    net_vega: dec!(0),
+                    net_theta: dec!(0),
+                })
+                .net_delta += adjustment;
+            tracing::debug!(
+                "options bot: SVI smile delta on {} adjusted {:+.6}",
+                leg.symbol,
+                smile_delta - bs_delta
+            );
+        }
+    }
+}
+
 static LAST_HEDGED_SPOTS: Mutex<Option<HashMap<String, Decimal>>> = Mutex::new(None);
 
 fn get_or_init_last_hedged_spot(asset: &str, current_spot: Decimal) -> Decimal {
@@ -466,15 +779,18 @@ impl OptionsBotExecutor {
                 _ => 0.0,
             };
 
-            let is_edge_harvest_ready = edge_harvest_ratio >= 0.88;
+            let option_close_proceeds = option_chain_close_proceeds(state, &pos);
+            let is_edge_harvest_ready =
+                option_close_proceeds.is_some() && edge_harvest_ratio >= 0.88;
             let is_pin_risk_imminent = hours_to_expiry.is_some_and(|h| h <= 3.0 && h > 0.0);
 
             if is_edge_harvest_ready || is_pin_risk_imminent {
                 let reason = if is_edge_harvest_ready {
                     format!(
-                        "early harvest triggered: {:.1}% of target edge captured (+${:.2} USD) — avoiding Deribit expiration delivery fees",
+                        "early harvest triggered: {:.1}% of target edge captured (+${:.2} USD; option-chain close value ${:.2}) — avoiding Deribit expiration delivery fees",
                         edge_harvest_ratio * 100.0,
-                        pos.unrealized_pnl_usd.unwrap_or(0.0)
+                        pos.unrealized_pnl_usd.unwrap_or(0.0),
+                        option_close_proceeds.unwrap_or(0.0)
                     )
                 } else {
                     format!(
@@ -535,12 +851,13 @@ impl OptionsBotExecutor {
                 portfolio_all_positions.extend(leg_positions.clone());
                 // Analytical Black-76 Greeks supervision (delta, gamma & vega) with live SABR volatility smile
                 let now_ms = chrono::Utc::now().timestamp_millis();
-                let greeks = dg.calculate_analytical_greeks_with_smile(
+                let mut greeks = dg.calculate_analytical_greeks_with_smile(
                     &leg_positions,
                     Some(&*state.vol_surface),
                     None,
                     Some(now_ms),
                 );
+                apply_svi_delta_adjustments(state, &leg_positions, &mut greeks, now_ms);
                 for (asset, g) in &greeks {
                     if g.net_delta.abs() > dec!(0.05) {
                         tracing::warn!(
@@ -577,25 +894,25 @@ impl OptionsBotExecutor {
             {
                 let dg = state.delta_guard.read();
                 let now_ms = chrono::Utc::now().timestamp_millis();
-                let portfolio_greeks = dg.calculate_analytical_greeks_with_smile(
+                let mut portfolio_greeks = dg.calculate_analytical_greeks_with_smile(
                     &portfolio_all_positions,
                     Some(&*state.vol_surface),
                     None,
                     Some(now_ms),
                 );
+                apply_svi_delta_adjustments(
+                    state,
+                    &portfolio_all_positions,
+                    &mut portfolio_greeks,
+                    now_ms,
+                );
                 for (asset, g) in &portfolio_greeks {
                     // Fail closed: a rehedge sized off a fabricated spot is a
                     // fabricated order. Skip the asset until a real mark
                     // exists instead of falling back to a hardcoded price.
-                    let Some(spot) = state
-                        .vol_surface
-                        .get_spot(asset)
-                        .or_else(|| state.vol_surface.latest_forward(asset))
-                        .and_then(Decimal::from_f64_retain)
-                        .filter(|p| *p > dec!(0))
-                    else {
+                    let Some(spot) = live_linear_mid(state, asset) else {
                         tracing::warn!(
-                            "options bot portfolio: no live spot/forward for {asset} — rehedge skipped (no synthetic price)"
+                            "options bot portfolio: no live spot/forward/mid for {asset} — rehedge skipped (no synthetic price)"
                         );
                         continue;
                     };
@@ -612,7 +929,7 @@ impl OptionsBotExecutor {
                         jump_variance: dec!(0.04),
                     };
 
-                    let decision = dg.evaluate_bichuch_2d_rehedge_trigger(
+                    let bichuch_decision = dg.evaluate_bichuch_2d_rehedge_trigger(
                         spot,
                         last_spot,
                         g.net_delta,
@@ -621,6 +938,31 @@ impl OptionsBotExecutor {
                         dec!(0),
                         Some(&bichuch_cfg),
                     );
+                    let ww_decision = dg
+                        .compute_whalley_wilmott_bandwidth(spot, g.net_gamma, None)
+                        .and_then(|bands| {
+                            let spot_drift = (spot - last_spot).abs();
+                            let delta_drift = g.net_delta.abs();
+                            (spot_drift >= bands.delta_s_star
+                                || delta_drift >= bands.delta_band_width)
+                                .then(|| {
+                                    arbitrageur_risk::delta_guard::BichuchRehedgeDecision::DeltaRebalance {
+                                        rebalance_qty: -g.net_delta,
+                                        reason: format!(
+                                            "Whalley-Wilmott breach: spot drift ${spot_drift:.2} (band ${:.2}) or delta drift {:.4} (band {:.4})",
+                                            bands.delta_s_star, delta_drift, bands.delta_band_width
+                                        ),
+                                    }
+                                })
+                        });
+                    let decision = match bichuch_decision {
+                        arbitrageur_risk::delta_guard::BichuchRehedgeDecision::NoAction => {
+                            ww_decision.unwrap_or(
+                                arbitrageur_risk::delta_guard::BichuchRehedgeDecision::NoAction,
+                            )
+                        }
+                        other => other,
+                    };
 
                     match decision {
                         arbitrageur_risk::delta_guard::BichuchRehedgeDecision::DeltaRebalance {
@@ -699,43 +1041,62 @@ impl OptionsBotExecutor {
                     }
                 }
 
-                let btc_spot = state
-                    .vol_surface
-                    .get_spot("BTC")
-                    .or_else(|| state.vol_surface.latest_forward("BTC"))
-                    .and_then(Decimal::from_f64_retain)
-                    .unwrap_or(dec!(60000.0));
-                let eth_spot = state
-                    .vol_surface
-                    .get_spot("ETH")
-                    .or_else(|| state.vol_surface.latest_forward("ETH"))
-                    .and_then(Decimal::from_f64_retain)
-                    .unwrap_or(dec!(3000.0));
-
-                // Cross-asset curvature and beta-adjusted BTC-equivalent delta
-                let cross_report = dg.evaluate_cross_asset_risk(
-                    &portfolio_greeks,
-                    btc_spot,
-                    eth_spot,
-                    dec!(1.15),
-                    dec!(0.85),
-                    dec!(15000.0),
+                let (_, correlated_delta) = dg.calculate_correlated_portfolio_delta(
+                    &portfolio_all_positions,
+                    Some(dec!(0.85)),
                 );
-                if !cross_report.is_portfolio_neutral {
+                let correlated_limit = dg.max_unhedged_usd_per_asset() * dec!(2.0);
+                if correlated_delta > correlated_limit {
                     tracing::warn!(
-                        "options bot portfolio: Cross-asset BTC-equivalent delta skew: {:.4} BTC exceeds neutrality band",
-                        cross_report.btc_equivalent_delta
+                        "options bot portfolio: correlated delta ${:.2} exceeds ${:.2} limit",
+                        correlated_delta,
+                        correlated_limit
                     );
                     crate::alerting::dispatch_throttled(
                         state.env().as_str(),
-                        "options_cross_asset_skew",
+                        "options_correlated_delta",
                         "portfolio",
                         std::time::Duration::from_secs(300),
                         format!(
-                            "Cross-asset BTC-equivalent delta skew {:.4} BTC exceeds neutrality tolerance",
-                            cross_report.btc_equivalent_delta
+                            "Correlated portfolio delta ${:.2} exceeds ${:.2}",
+                            correlated_delta, correlated_limit
                         ),
                     );
+                }
+
+                // Cross-asset curvature and beta-adjusted BTC-equivalent
+                // delta use live mids from the market-data hub (or the vol
+                // surface); no hardcoded BTC/ETH fallback is permitted.
+                match (live_linear_mid(state, "BTC"), live_linear_mid(state, "ETH")) {
+                    (Some(btc_spot), Some(eth_spot)) => {
+                        let cross_report = dg.evaluate_cross_asset_risk(
+                            &portfolio_greeks,
+                            btc_spot,
+                            eth_spot,
+                            dec!(1.15),
+                            dec!(0.85),
+                            dec!(15000.0),
+                        );
+                        if !cross_report.is_portfolio_neutral {
+                            tracing::warn!(
+                                "options bot portfolio: Cross-asset BTC-equivalent delta skew: {:.4} BTC exceeds neutrality band",
+                                cross_report.btc_equivalent_delta
+                            );
+                            crate::alerting::dispatch_throttled(
+                                state.env().as_str(),
+                                "options_cross_asset_skew",
+                                "portfolio",
+                                std::time::Duration::from_secs(300),
+                                format!(
+                                    "Cross-asset BTC-equivalent delta skew {:.4} BTC exceeds neutrality tolerance",
+                                    cross_report.btc_equivalent_delta
+                                ),
+                            );
+                        }
+                    }
+                    _ => tracing::debug!(
+                        "options bot portfolio: live BTC/ETH mids unavailable — cross-asset report skipped"
+                    ),
                 }
             } // drop(dg) occurs here
 
@@ -884,6 +1245,7 @@ impl OptionsBotExecutor {
     async fn tick_substrategy(&self, state: &AppEngineState, substrategy: &str) -> u64 {
         let (cfg, mode) = Self::load_config(state, substrategy);
         let poll = cfg.poll_interval_secs.max(5);
+        let mut retired_on_breaker = false;
         if state.circuit_breaker.is_tripped() && mode != BotMode::Off {
             let next = OptionsBotConfigDto::from_policy(substrategy, &cfg, BotMode::Off);
             if let Err(e) = Self::save_config(state, &next) {
@@ -903,11 +1265,15 @@ impl OptionsBotExecutor {
                 last_refusal: None,
             };
             Self::note_tick(state, status);
-            return poll;
+            retired_on_breaker = true;
         }
         let mut status = OptionsBotTickStatus {
             substrategy: substrategy.to_string(),
-            mode: format!("{mode:?}").to_lowercase(),
+            mode: if retired_on_breaker {
+                "off".to_string()
+            } else {
+                format!("{mode:?}").to_lowercase()
+            },
             open_positions: 0,
             max_open_positions: cfg.max_open_positions,
             last_scan_ms: chrono::Utc::now().timestamp_millis(),
@@ -916,12 +1282,10 @@ impl OptionsBotExecutor {
             best_edge_usd: None,
             last_refusal: None,
         };
-        if !mode.exits_allowed() {
-            Self::note_tick(state, status);
-            return poll;
-        }
         let strategy_id = Self::ledger_strategy_id(substrategy);
-        // Active position supervision:
+        // Active position supervision runs even when entries are paused,
+        // reduce-only, retired by a breaker, or explicitly Off. Expiry and
+        // pin-risk exits are safety actions, not strategy entries.
         // 1. Unwinds options parity perpetual hedges upon option expiration (eliminating naked delta).
         // 2. Early-unwinds packages (box spread, jelly roll, convexity) when >= 88% edge is realized
         //    or when within 2h of expiration to bypass Deribit delivery fees & pin risk.
@@ -934,6 +1298,10 @@ impl OptionsBotExecutor {
             return poll;
         };
         status.open_positions = open;
+        if retired_on_breaker || !mode.exits_allowed() {
+            Self::note_tick(state, status);
+            return poll;
+        }
         // Flat-book retire — mirrors the radar bot: a reduce_only mode with
         // nothing left to drain drops the persisted config to off.
         if mode == BotMode::ReduceOnly && open == 0 {
@@ -1246,10 +1614,16 @@ pub fn spawn_volatility_surface_worker(
                     Ok(summaries) => {
                         let vol_cache = state.vol_surface.clone();
                         let ccy_str = ccy.to_string();
+                        let store = state.state_store.clone();
+                        let env_str = state.env().as_str().to_string();
                         // Run parsing and SABR calibrations in spawn_blocking to keep async reactor responsive
                         let _ = tokio::task::spawn_blocking(move || {
                             let now_ms = chrono::Utc::now().timestamp_millis();
                             let mut ingested_count = 0usize;
+                            let mut variance_quotes: HashMap<
+                                String,
+                                (f64, Vec<arbitrageur_math::variance_swap::DiscreteOptionQuote>),
+                            > = HashMap::new();
 
                             for summary in summaries {
                                 // Extract spot / estimated delivery price if present
@@ -1288,6 +1662,41 @@ pub fn spawn_volatility_surface_worker(
                                 let Some(forward_price) = forward_opt else {
                                     continue;
                                 };
+                                let is_call = parts
+                                    .get(3)
+                                    .is_some_and(|kind| kind.eq_ignore_ascii_case("C"));
+                                if (is_call && strike >= forward_price)
+                                    || (!is_call && strike < forward_price)
+                                {
+                                    let quote = match (
+                                        summary.bid.and_then(|v| v.to_string().parse::<f64>().ok()),
+                                        summary.ask.and_then(|v| v.to_string().parse::<f64>().ok()),
+                                    ) {
+                                        (Some(bid), Some(ask))
+                                            if bid.is_finite()
+                                                && ask.is_finite()
+                                                && bid >= 0.0
+                                                && ask >= bid =>
+                                        {
+                                            Some(
+                                                arbitrageur_math::variance_swap::DiscreteOptionQuote::new(
+                                                    strike,
+                                                    bid * forward_price,
+                                                    ask * forward_price,
+                                                    is_call,
+                                                ),
+                                            )
+                                        }
+                                        _ => None,
+                                    };
+                                    if let Some(quote) = quote {
+                                        let entry = variance_quotes
+                                            .entry(expiry_str.to_string())
+                                            .or_insert_with(|| (forward_price, Vec::new()));
+                                        entry.0 = forward_price;
+                                        entry.1.push(quote);
+                                    }
+                                }
 
                                 // Mark IV is given in percent (e.g. 53.58 -> 0.5358)
                                 if let Some(iv_dec) = summary.mark_iv {
@@ -1311,6 +1720,81 @@ pub fn spawn_volatility_surface_worker(
 
                             // Prune expired slices
                             vol_cache.prune_expired(now_ms);
+
+                            let replicator =
+                                arbitrageur_math::variance_swap::VarianceSwapReplicator::default();
+                            let realized_vol = realized_vol_30d(&store, &ccy_str, &env_str);
+                            for (expiry, (forward, quotes)) in variance_quotes {
+                                if quotes.len() < 3 {
+                                    continue;
+                                }
+                                let slice_svi = {
+                                    vol_cache
+                                        .slices
+                                        .read()
+                                        .get(&ccy_str.to_ascii_uppercase())
+                                        .and_then(|slices| slices.get(&expiry))
+                                        .cloned()
+                                        .and_then(|slice| fit_svi_slice(&slice))
+                                }
+                                .map(|svi| {
+                                    arbitrageur_math::variance_swap::SviParameters::new(
+                                        svi.a, svi.b, svi.rho, svi.m, svi.sigma,
+                                    )
+                                });
+                                let Some(tenor) =
+                                    arbitrageur_risk::delta_guard::parse_expiry_tenor_years(
+                                        &expiry, now_ms,
+                                    )
+                                else {
+                                    continue;
+                                };
+                                let variance_strike = if let Some(svi) = slice_svi.as_ref() {
+                                    replicator.replicate_variance_strike_svi_tails(
+                                        forward,
+                                        tenor,
+                                        quotes.clone(),
+                                        svi,
+                                    )
+                                } else {
+                                    replicator.replicate_variance_strike(
+                                        forward, tenor, quotes,
+                                    )
+                                };
+                                let Some(variance_strike) = variance_strike else {
+                                    continue;
+                                };
+                                let prefix = format!("variance_swap.{ccy_str}.{expiry}");
+                                let _ = store.kv_set(
+                                    &format!("{prefix}.variance_strike"),
+                                    &variance_strike.to_string(),
+                                );
+                                if let Some(realized_vol) = realized_vol {
+                                    let vrp =
+                                        replicator.compute_vrp(variance_strike, realized_vol);
+                                    let _ = store.kv_set(
+                                        &format!("{prefix}.realized_vol_30d"),
+                                        &realized_vol.to_string(),
+                                    );
+                                    let _ = store
+                                        .kv_set(&format!("{prefix}.vrp_vol_pts"), &vrp.to_string());
+                                    tracing::info!(
+                                        "variance telemetry {ccy_str}/{expiry}: synthetic variance strike {:.6}, RV30 {:.4}, VRP {:+.4} vol pts",
+                                        variance_strike,
+                                        realized_vol,
+                                        vrp
+                                    );
+                                } else {
+                                    tracing::info!(
+                                        "variance telemetry {ccy_str}/{expiry}: synthetic variance strike {:.6} (RV unavailable)",
+                                        variance_strike
+                                    );
+                                }
+                                let _ = store.kv_set(
+                                    &format!("{prefix}.updated_at_ms"),
+                                    &now_ms.to_string(),
+                                );
+                            }
 
                             if ingested_count > 0 {
                                 tracing::trace!(

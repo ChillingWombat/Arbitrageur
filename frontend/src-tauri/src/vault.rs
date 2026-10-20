@@ -20,7 +20,7 @@ type HmacSha256 = Hmac<Sha256>;
 const VAULT_MAGIC: &[u8; 8] = b"ARBVLT2\0";
 const SALT_LEN: usize = 16;
 const NONCE_LEN: usize = 12;
-const MIN_PASSWORD_CHARS: usize = 6;
+const MIN_PASSWORD_CHARS: usize = 12;
 
 #[derive(Clone, Serialize, Deserialize, Default)]
 pub struct ExchangeCredentials {
@@ -111,6 +111,10 @@ pub struct VaultData {
     /// extra encryption strength for the file.
     #[serde(default)]
     pub mfa_totp_secret: Option<String>,
+    /// Last consumed TOTP step. Persisted in the encrypted payload so the
+    /// same 30-second code cannot be replayed after restart.
+    #[serde(default)]
+    pub mfa_last_accepted_step: Option<u64>,
 }
 
 impl std::fmt::Debug for VaultData {
@@ -481,13 +485,14 @@ impl SecureVault {
             );
         }
         if password.chars().count() < MIN_PASSWORD_CHARS {
-            anyhow::bail!("Password must be at least 6 characters long");
+            anyhow::bail!("Password must be at least {MIN_PASSWORD_CHARS} characters long");
         }
 
         let empty_data = VaultData {
             credentials: Vec::new(),
             updated_at: Utc::now(),
             mfa_totp_secret: None,
+            mfa_last_accepted_step: None,
         };
         let mut salt = [0u8; SALT_LEN];
         rand::thread_rng().fill_bytes(&mut salt);
@@ -526,10 +531,27 @@ impl SecureVault {
                     "Two-factor authentication is enabled — enter the 6-digit code from your authenticator app"
                 )
             })?;
-            if !crate::totp::verify(&secret, code, crate::totp::unix_now()) {
+            let now = crate::totp::unix_now();
+            if !crate::totp::verify_after_step(&secret, code, now, data.mfa_last_accepted_step) {
                 anyhow::bail!("Invalid authentication code");
             }
+            let step = crate::totp::accepted_step_for(&secret, code, now)
+                .ok_or_else(|| anyhow::anyhow!("Invalid authentication code"))?;
+            let mut updated = data.clone();
+            updated.mfa_last_accepted_step = Some(step);
+            let encrypted = Self::encrypt_v2(&updated, &key, &salt)?;
+            Self::write_file_atomic(&self.storage_path, &encrypted)?;
+            return self.admit_unlocked_without_totp(updated, key, salt);
         }
+        self.admit_unlocked_without_totp(data, key, salt)
+    }
+
+    fn admit_unlocked_without_totp(
+        &mut self,
+        data: VaultData,
+        key: Zeroizing<[u8; 32]>,
+        salt: [u8; SALT_LEN],
+    ) -> anyhow::Result<()> {
         self.is_unlocked = true;
         self.auto_locked = false;
         self.unlocked_until = Some(Utc::now() + chrono::Duration::minutes(15));
@@ -670,7 +692,7 @@ impl SecureVault {
             .unlock(current, totp_code)
             .map_err(|e| anyhow::anyhow!("{e}"))?;
         if new_password.chars().count() < MIN_PASSWORD_CHARS {
-            anyhow::bail!("New password must be at least 6 characters long");
+            anyhow::bail!("New password must be at least {MIN_PASSWORD_CHARS} characters long");
         }
 
         let data = self
@@ -729,17 +751,32 @@ impl SecureVault {
     /// vault; `Ok(false)` is a wrong code, an error means no secret is
     /// enrolled or it is corrupted. The secret never leaves the module.
     pub fn verify_mfa_code(&mut self, code: &str) -> anyhow::Result<bool> {
-        let data = self.get_data()?;
+        let data = self.get_data()?.clone();
         let Some(secret_b32) = data.mfa_totp_secret.as_deref() else {
             anyhow::bail!("Two-factor authentication is not enrolled");
         };
         let secret = crate::totp::decode_secret_base32(secret_b32)
             .map_err(|e| anyhow::anyhow!("vault MFA secret decode failed: {e}"))?;
-        Ok(crate::totp::verify(
-            &secret,
-            code.trim(),
-            crate::totp::unix_now(),
-        ))
+        let now = crate::totp::unix_now();
+        let Some(step) = crate::totp::accepted_step_for(&secret, code.trim(), now) else {
+            return Ok(false);
+        };
+        if data.mfa_last_accepted_step.is_some_and(|last| step <= last) {
+            return Ok(false);
+        }
+        let mut updated = data;
+        updated.mfa_last_accepted_step = Some(step);
+        let key = self
+            .encryption_key
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("Vault is locked"))?;
+        let salt = self
+            .kdf_salt
+            .ok_or_else(|| anyhow::anyhow!("Vault encryption metadata is missing"))?;
+        let encrypted = Self::encrypt_v2(&updated, key, &salt)?;
+        Self::write_file_atomic(&self.storage_path, &encrypted)?;
+        self.decrypted_cache = Some(updated);
+        Ok(true)
     }
 
     /// Enroll (or replace) the TOTP secret and persist. The secret is
@@ -1216,9 +1253,12 @@ mod tests {
         assert!(!vault.is_initialized());
 
         let err = vault.initialize("short").unwrap_err();
-        assert!(err.to_string().contains("at least 6 characters"));
+        assert!(
+            err.to_string().contains("at least 12 characters"),
+            "got: {err}"
+        );
 
-        assert!(vault.initialize("valid6").is_ok());
+        assert!(vault.initialize("valid-password").is_ok());
         let err = vault.initialize("another-long-password").unwrap_err();
         assert!(err.to_string().contains("already initialized"));
 
@@ -1226,18 +1266,18 @@ mod tests {
     }
 
     #[test]
-    fn test_vault_accepts_six_character_passwords_without_composition_rules() {
+    fn test_vault_requires_twelve_characters_without_composition_rules() {
         let (dir, file) = temp_vault_path("too_short");
         let mut vault = SecureVault::new_with_path(file);
         let err = vault.initialize("abcde").unwrap_err();
-        assert!(err.to_string().contains("at least 6 characters"));
+        assert!(err.to_string().contains("at least 12 characters"));
         let _ = fs::remove_dir_all(dir);
 
         for (kind, password) in [
-            ("letters", "abcdef"),
-            ("numbers", "123456"),
-            ("symbols", "!@#$%^"),
-            ("mixed", "a1!b2@"),
+            ("letters", "abcdefghijkl"),
+            ("numbers", "123456789012"),
+            ("symbols", "!@#$%^&*()_+"),
+            ("mixed", "a1!b2@c3#d4$"),
             ("longer", "abcdefghijkl"),
         ] {
             let (dir, file) = temp_vault_path(kind);
@@ -1418,6 +1458,7 @@ mod tests {
             }],
             updated_at: Utc::now(),
             mfa_totp_secret: None,
+            mfa_last_accepted_step: None,
         };
         let plaintext = serde_json::to_vec(&legacy_data).unwrap();
         let mut salt = [0u8; SALT_LEN];

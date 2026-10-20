@@ -32,6 +32,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tauri::State;
 
+/// Production funding entry floors. Tests exercise these same values; a
+/// `cfg(test)` override made CI structurally unable to catch a bad live knob.
+pub(crate) const FUNDING_DEFAULT_MIN_APR_PCT: f64 = 18.0;
+pub(crate) const FUNDING_DEFAULT_MAX_ENTRY_SPREAD_BPS: f64 = 8.0;
+
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct FundingOpportunityDto {
     pub id: String,
@@ -625,16 +630,7 @@ pub(crate) fn funding_min_apr(state: &AppEngineState) -> f64 {
         .get("funding")
         .map(|p| p.funding_min_apr_pct)
         .filter(|v| v.is_finite() && *v >= 0.0)
-        .unwrap_or({
-            #[cfg(test)]
-            {
-                15.0
-            }
-            #[cfg(not(test))]
-            {
-                18.0
-            }
-        })
+        .unwrap_or(FUNDING_DEFAULT_MIN_APR_PCT)
 }
 
 /// Round-trip taker-fee estimate for a funding pair from per-leg effective
@@ -2407,16 +2403,7 @@ pub async fn execute_funding_carry_impl(
         .get("funding")
         .map(|p| p.funding_max_entry_spread_bps)
         .filter(|v| v.is_finite() && *v > 0.0)
-        .unwrap_or({
-            #[cfg(test)]
-            {
-                50.0
-            }
-            #[cfg(not(test))]
-            {
-                8.0
-            }
-        });
+        .unwrap_or(FUNDING_DEFAULT_MAX_ENTRY_SPREAD_BPS);
     // Favorable entry cross (short_vwap >= long_vwap) is positive edge (adverse cross cost = 0.0 bps).
     // Adverse entry cross (long_vwap > short_vwap) is entry cross friction.
     let entry_spread_bps =
@@ -4736,7 +4723,7 @@ mod tests {
             std::env::temp_dir().join(format!("arbitrageur_fy_{tag}_{}", rand::random::<u64>()));
         let state = AppEngineState::new_with_vault_path(dir.join("vault.enc"));
         state.set_environment(crate::state::TradingEnvironment::Live);
-        crate::accounts::initialize_vault_impl("test password", &state).expect("init vault");
+        crate::accounts::initialize_vault_impl("test-password-123", &state).expect("init vault");
         {
             let mut s = state.settings.write();
             s.binance_enabled = true;
@@ -4796,13 +4783,14 @@ mod tests {
         state.market_data_hub.update_orderbook(short.book(sym));
 
         // Warm YU cache: Binance YU ask 3% (long pays), Hyperliquid YU bid
-        // 15% (short receives) → ~12% locked APR over a 30d maturity.
+        // 23% (short receives). After the four-leg fee/gas haircut this
+        // clears the production 18% entry floor over the 30d maturity.
         let maturity = Utc::now().timestamp() + 30 * 86_400;
         *state.boros_yu_cache.lock() = Some(crate::state::BorosYuCache {
             fetched_at: std::time::Instant::now(),
             markets: Arc::new(vec![
                 yu_mkt(11, "Binance", "BTC", maturity, 0.029, 0.030),
-                yu_mkt(22, "Hyperliquid", "BTC", maturity, 0.200, 0.201),
+                yu_mkt(22, "Hyperliquid", "BTC", maturity, 0.230, 0.231),
             ]),
             gas_usd: 0.10,
         });

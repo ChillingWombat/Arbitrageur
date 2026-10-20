@@ -320,7 +320,7 @@ pub fn confirm_mfa_enrollment_impl(
         .lock()
         .clone()
         .ok_or("No MFA enrollment in progress — start setup first")?;
-    if !crate::totp::verify(&pending, code, crate::totp::unix_now()) {
+    if !crate::totp::verify_for_scope(&pending, code, crate::totp::unix_now(), "mfa-enrollment") {
         return Err("Invalid authentication code — check your authenticator and retry".into());
     }
     let status = {
@@ -1118,26 +1118,20 @@ pub fn save_evm_wallet_impl(
         return Err("Vault is locked. Please unlock before saving credentials.".into());
     }
 
-    // Preferred custody: write the key into the Stronghold snapshot and
-    // store only the sentinel in vault records — the raw bytes never
-    // persist. Falls back to vault storage (legacy behavior) when no
-    // stronghold is loaded or the write fails; `key_storage` reports
-    // which path ran so the UI can show honest custody status.
-    let key_storage = match state.evm_stronghold.read().as_ref() {
-        Some(sh) => match sh.store_key(evm_key_bytes(private_key)?) {
-            Ok(()) => "stronghold",
-            Err(e) => {
-                tracing::warn!("stronghold key store failed ({e}) — falling back to vault record");
-                "vault"
-            }
-        },
-        None => "vault",
-    };
-    let stored_key = if key_storage == "stronghold" {
-        crate::stronghold::EVM_STRONGHOLD_KEY_REF.to_string()
-    } else {
-        private_key.trim().to_string()
-    };
+    // New EVM keys are non-exportably held in Stronghold. A missing or
+    // failed snapshot write must fail closed: the old fallback persisted the
+    // raw key in the vault record, defeating the custody contract.
+    let key_storage = "stronghold";
+    {
+        let stronghold = state.evm_stronghold.read();
+        let sh = stronghold.as_ref().ok_or_else(|| {
+            "EVM Stronghold is not loaded — unlock the vault and retry; refusing to persist a raw private key"
+                .to_string()
+        })?;
+        sh.store_key(evm_key_bytes(private_key)?)
+            .map_err(|e| format!("EVM Stronghold key store failed: {e}"))?;
+    }
+    let stored_key = crate::stronghold::EVM_STRONGHOLD_KEY_REF.to_string();
 
     let mut keyed = Vec::new();
     let mut address_only = Vec::new();

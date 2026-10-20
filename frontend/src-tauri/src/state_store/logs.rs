@@ -41,6 +41,30 @@ impl StateStore {
         Ok(n)
     }
 
+    /// Largest durable cycle suffix present in either id-bearing ledger.
+    /// The execution log is row-capped, so `COUNT(*)` is not a safe boot
+    /// floor; the ids themselves preserve the monotonic cycle namespace.
+    pub fn max_durable_sim_step(&self) -> anyhow::Result<usize> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id FROM execution_log
+             UNION ALL
+             SELECT id FROM cycle_lots",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        let mut max_step = 0usize;
+        for row in rows {
+            let id = row?;
+            let Some(suffix) = id.rsplit('-').next() else {
+                continue;
+            };
+            if let Ok(step) = suffix.parse::<usize>() {
+                max_step = max_step.max(step);
+            }
+        }
+        Ok(max_step)
+    }
+
     /// Newest-first execution-log rows (survives restarts — the monitor no
     /// longer starts empty).
     pub fn load_execution_logs(&self, limit: i64) -> anyhow::Result<Vec<ExecutionLogEntry>> {
