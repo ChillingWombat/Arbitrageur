@@ -1170,7 +1170,10 @@ impl DeribitAdapter {
             .get("instrument_name")
             .and_then(|s| s.as_str())
             .ok_or_else(|| anyhow::anyhow!("Deribit order response missing instrument_name"))?;
-        if !venue_name.eq_ignore_ascii_case(&order.symbol) {
+        let expected_instrument = resolve_deribit_instrument(&order.symbol);
+        if !venue_name.eq_ignore_ascii_case(&order.symbol)
+            && !venue_name.eq_ignore_ascii_case(&expected_instrument)
+        {
             anyhow::bail!(
                 "Deribit order instrument '{venue_name}' does not match requested '{}'",
                 order.symbol
