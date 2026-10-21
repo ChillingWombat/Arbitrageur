@@ -1,4 +1,4 @@
-# Arbitrageur
+# Arbitrageur (In Development)
 
 Arbitrageur is an experimental cross-market arbitrage engine and desktop terminal written in Rust with a Tauri v2 / React frontend. It scans order books and funding rates across decentralized exchanges, centralized platforms, and automated market makers to identify price dislocations and carry opportunities.
 
