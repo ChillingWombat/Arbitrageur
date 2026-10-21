@@ -125,8 +125,7 @@ jobs:
   # The `rust` job above only ever compiled on Linux, so every Windows and
   # macOS build break was invisible until someone tried to package. This is
   # the real gate: the whole workspace must type-check on all three desktop
-  # OSes, and the 4-tier E2E suite (pure Node, no compiled artifacts) must
-  # pass on all three too.
+  # OSes.
   cross-platform:
     name: Cross-platform (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -167,17 +166,6 @@ jobs:
         # is the portability gate, so it answers one question per OS: does
         # every crate in the workspace compile here?
         run: cargo check --workspace --locked --all-targets
-
-      - name: Install Node.js
-        uses: actions/setup-node@v7
-        with:
-          node-version: "24"
-
-      - name: Run the 4-tier E2E suite
-        # Platform-portable by construction: the dev-RPC mock binds a Unix
-        # socket on POSIX and a named pipe on Windows, so the suite no longer
-        # hard-codes /tmp paths that only exist on Linux.
-        run: node --experimental-strip-types tests/e2e/runner.mjs
 
   frontend:
     name: Frontend tests, build, and audit

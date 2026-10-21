@@ -1,11 +1,14 @@
 name: release
 
-# Tag-triggered release pipeline (review §M-9): pushing a `v*` tag builds
+# Tag-triggered release pipeline (review §M-9): pushing a version tag builds
 # the desktop app as a real installer on every supported desktop OS, the
 # headless CLI, and the digest-pinned Lighter signer sidecar; packages them
 # with SHA-256 checksums and a CycloneDX SBOM; and publishes a GitHub
 # release. All inputs are pinned (toolchain, --locked deps, actions) so the
 # artifacts are reproducible by re-running the job.
+#
+# The tag must match the workspace version. The project starts its release
+# line at v0.1.0; tags such as v2.5.0 are rejected while Cargo.toml says 0.1.0.
 #
 # Cross-platform scope: the desktop matrix runs on Linux, Windows and macOS
 # because `bundle.active` is on and `bundle.targets` is "all" — each host
@@ -28,8 +31,35 @@ env:
   LIGHTER_SIGNER_SHA256: "8cb2fbcadab0b9b3fed4a524998b825818b677fcf9c49bc1f18b4ca02a233753"
 
 jobs:
+  validate-version:
+    name: Validate release version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Require tag to match workspace version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version="$(awk '
+            /^\[workspace\.package\]/ { in_package = 1; next }
+            in_package && /^version = / {
+              gsub(/"/, "", $3)
+              print $3
+              exit
+            }
+          ' Cargo.toml)"
+          test -n "$version"
+          if [[ "$TAG" != "v$version" ]]; then
+            echo "::error::release tag $TAG does not match workspace version v$version"
+            exit 1
+          fi
+
   desktop:
     name: Desktop installer (${{ matrix.asset_name }})
+    needs: validate-version
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -118,6 +148,7 @@ jobs:
 
   headless:
     name: Headless CLI + ops tree (linux-x86_64)
+    needs: validate-version
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -161,6 +192,7 @@ jobs:
 
   sbom:
     name: CycloneDX SBOM
+    needs: validate-version
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -189,7 +221,7 @@ jobs:
 
   publish:
     name: Publish GitHub release
-    needs: [desktop, headless, sbom]
+    needs: [validate-version, desktop, headless, sbom]
     runs-on: ubuntu-latest
     defaults:
       run:

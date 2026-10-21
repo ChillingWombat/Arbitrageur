@@ -97,8 +97,8 @@ double-dispatch every order.
 CARGO_TARGET_DIR=target-win CARGO_PROFILE_DEV_DEBUG=0 cargo test -p arbitrageur-desktop -j 1
 ```
 
-The `stronghold` rekey test alone runs seven Argon2 derivations (minutes); it
-is not hung, see `docs/DIAGNOSIS_2026-10-17.md` §8.12.
+The `stronghold` rekey test alone runs seven Argon2 derivations and can take
+minutes; it is not hung.
 
 For a quick smoke pass, filter to the state and stronghold suites (~4 min,
 dominated by the rekey test):

@@ -11,6 +11,7 @@ The project is in early development. While core mathematical models, market data
 Arbitrageur is a trading and research tool under active development. Keep several practical constraints in mind:
 
 - **Early development**: Many features are still being tested, refined, or refactored. Treat every execution path as experimental.
+- **Pre-1.0 versioning**: Package metadata is currently `0.1.0`. Release tags must match the workspace version, and the first published release is `v0.1.0`.
 - **Fail-closed design**: The engine does not generate synthetic order books, fake balances, or simulated quotes if credentials or network feeds are missing. If an endpoint is unreachable, the system stops and reports an error instead of guessing.
 - **Dual-environment isolation**: The engine separates `testnet` and `live` environments. Testnet modes submit real orders against exchange demo endpoints (such as Hyperliquid testnet, Lighter testnet, Binance testnet, OKX demo mode, or Alpaca paper). Venues without public sandbox environments are excluded from testnet rather than simulated locally.
 - **Live execution gate**: Live order submission requires an explicit toggle to Live Mode, an unlocked credential vault, valid live API keys, and an adapter that supports both order submission and order status polling (`fetch_order`). An automated reconciliation supervisor monitors working orders every 5 seconds to track fills and cancellations.
@@ -98,9 +99,8 @@ You will need:
 
 ### Supported platforms
 
-The workspace compiles and the test suites run on **Linux, macOS and Windows**
-— CI enforces this with a `cross-platform` matrix that builds every crate and
-runs the 4-tier E2E suite on all three.
+CI compile-checks every crate on **Linux, macOS and Windows**, and runs the
+Rust and frontend test suites on Linux.
 
 Per-platform system dependencies (only needed to build the Tauri webview):
 
@@ -160,9 +160,6 @@ cargo test -p arbitrageur-desktop
 
 # Run exchange adapter tests
 cargo test -p arbitrageur-exchanges
-
-# Run the 4-tier E2E suite (portable: Unix socket on POSIX, named pipe on Windows)
-node --experimental-strip-types tests/e2e/runner.mjs
 
 # Check code formatting and run clippy
 cargo fmt --check

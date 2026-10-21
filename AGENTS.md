@@ -93,17 +93,6 @@
   `exchange_accounts` row means the adapter binds no credentials: the
   venue is silently unreadable, not even flagged.
 
-## Subagent State Persistence & Post-Restart Recovery
-
-- Subagents and multi-agent coordinators maintain active progress on disk in
-  `.agents/subagents_manifest.json` and `.agents/teamwork/*/progress.md`.
-- On server restart or Antigravity app reload (`[Notice] All your subagents...`):
-  1. Inspect `manage_subagents` list and run `python3 scripts/resume_subagents.py`.
-  2. Send revival messages via `send_message` with current milestone status so
-     subagents resume seamlessly without restarting completed milestones.
-  3. Re-schedule background monitoring crons (`schedule`).
-  4. Never spawn duplicate subagents for milestones already in progress or completed.
-
 ## Verification
 
 - Frontend tests: `cd frontend && npm test` (node --test + scripts/test-components.mjs). NOT vitest.

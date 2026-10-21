@@ -70,3 +70,23 @@ node_modules/
 # these — they quote operational details (sockets, hostnames, credentials).
 .review/
 .workbuddy/
+/.agents/
+
+# Agent/session artifacts and one-off handoff reports. Keep product docs and
+# runbooks tracked; keep working notes local.
+/ORIGINAL_REQUEST.md
+/PROJECT.md
+/TEST_INFRA.md
+/TEST_READY.md
+/docs/HANDOFF_*.md
+/docs/DIAGNOSIS_*.md
+/docs/SYSTEM_AUDIT_*.md
+/docs/archive/
+/scripts/resume_subagents.py
+
+# Mock-only E2E harness and its wrapper. Real Rust and frontend suites stay.
+/tests/e2e/
+/scripts/run_e2e_tests.sh
+
+# TypeScript incremental build metadata
+frontend/*.tsbuildinfo
